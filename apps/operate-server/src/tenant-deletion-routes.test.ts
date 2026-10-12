@@ -9,6 +9,7 @@ import {
   TENANT_DELETE_REFUSED_OPERATION,
   TENANT_TOMBSTONES_READ_OPERATION,
   buildTenantDeletionRoutes,
+  lifecycleReceipt,
   newTombstoneId,
   tombstoneReceipt,
   type DeletionOutcomeLike,
@@ -23,6 +24,27 @@ const APPROVER = "22222222-2222-2222-2222-222222222222";
 const AT = "2026-10-03T13:00:00.000Z";
 const TOMB = "tomb_aaaabbbbccccdddd";
 const HASH = "f".repeat(64);
+
+/** A v4 declaration: typed per-entity relations, so it names the schema they are in (ADR-0351). */
+const RECORD_STORAGE: NonNullable<StoredTombstoneLike["record"]["recordStorage"]> = {
+  model: "typed_tables",
+  schema: "clinic",
+  relationCount: 54,
+};
+
+/**
+ * Everything beyond the digests a v4 receipt's holder needs to recompute `contentManifestSha256`.
+ *
+ * A named list rather than five loose assertions, because the receipt has fallen behind the signed
+ * bytes at every previous tag and each time it was one field nobody had written down.
+ */
+const V4_RECEIPT_FIELDS = [
+  "proofVersion",
+  "capabilityDeclaration",
+  "retainedObligations",
+  "retainedDataReference",
+  "recordStorage",
+] as const;
 
 function principal(over: Partial<ResolvedPrincipal> = {}): ResolvedPrincipal {
   return {
@@ -67,6 +89,32 @@ const OK_OUTCOME: DeletionOutcomeLike = {
     rowCount: 26,
     storageBytes: 65536,
     alreadyAbsent: false,
+  },
+  // The second performed subsystem (ADR-0329): the tenant's rows in the platform's own shared
+  // `meta` tables. Reported separately rather than summed into `erased`, because the two are
+  // different claims over different scopes and the tombstone carries them as two attestations.
+  erasedSharedTables: {
+    schema: "meta",
+    tables: ["meta.operate_entity_records", "meta.events"],
+    rowCount: 8,
+    storageBytes: 4096,
+    examinedTables: ["meta.operate_entity_records", "meta.events", "meta.operate_sequences"],
+    retainedTables: ["meta.audit_log", "meta.tenant_tombstones", "meta.invoices"],
+    // ADR-0330: what is lawfully still there, and why. No count — a figure on the retained side
+    // could be read as part of the erasure.
+    statutoryRetained: {
+      obligations: ["tax_records_7y"],
+      dataReference: "meta.invoices; meta.tenant_credits",
+    },
+  },
+  // `transitionLegal: false` is the honest value here and not a broken fixture: this route deletes
+  // straight from `active`, and `active -> deleted` is not in `TENANT_LIFECYCLE_TRANSITIONS` —
+  // ADR-0334 moved the tenant to `pending_deletion` on the asynchronous route's verify only.
+  lifecycleEvent: {
+    id: "9c1d2e3f-4a5b-4c6d-8e7f-0a1b2c3d4e5f",
+    fromState: "active",
+    toState: "deleted",
+    transitionLegal: false,
   },
 };
 
@@ -192,7 +240,9 @@ describe("DeleteTenantInputSchema", () => {
   it("defaults the kind and the optional lists", () => {
     const parsed = DeleteTenantInputSchema.parse(BODY);
     expect(parsed.kind).toBe("tenant_deletion");
-    expect(parsed.requiredSubsystems).toEqual([]);
+    // The field is gone from the body: a remote caller cannot narrow the proof's reach, and an
+    // omitted field cannot make it cover nothing (ADR-0328).
+    expect("requiredSubsystems" in parsed).toBe(false);
     expect(parsed.attestations).toEqual([]);
   });
 
@@ -204,6 +254,65 @@ describe("DeleteTenantInputSchema", () => {
   it("accepts only the two kinds a tenant-scoped delete can produce", () => {
     expect([...DELETABLE_TOMBSTONE_KINDS]).toEqual(["tenant_deletion", "data_subject_erasure"]);
     expect(DeleteTenantInputSchema.safeParse({ ...BODY, kind: "scheduled_purge" }).success).toBe(false);
+  });
+
+  /**
+   * Attestations are parsed by the contract, not by a loose mirror of it (ADR-0329).
+   *
+   * The mirror took `subsystem: z.string().min(1)` and `outcome: z.string().min(1)`, so a typo
+   * reached `assembleTombstone` and came back as a refusal naming a subsystem that does not exist —
+   * a bad request reading as a platform bug. It fails closed either way; what changes is who is
+   * told, and what they can do about it.
+   */
+  const attested = (over: Record<string, unknown>): Record<string, unknown> => ({
+    ...BODY,
+    attestations: [
+      {
+        subsystem: "shared_tables",
+        outcome: "erased",
+        attestedBy: "system:deletion",
+        attestedAt: "2026-10-05T00:00:00.000Z",
+        ...over,
+      },
+    ],
+  });
+
+  it("refuses a misspelled subsystem at the edge rather than at the assembler", () => {
+    expect(DeleteTenantInputSchema.safeParse(attested({ subsystem: "objekt_storage" })).success).toBe(
+      false,
+    );
+  });
+
+  it("refuses a misspelled outcome, which used to read as a missing attestation", () => {
+    // `erazed` is not in `ATTESTATION_OUTCOMES`, so the subsystem would have been in scope and
+    // unsatisfied — indistinguishable from nobody attesting at all.
+    expect(DeleteTenantInputSchema.safeParse(attested({ outcome: "erazed" })).success).toBe(false);
+  });
+
+  it("refuses an `erased` attestation that reports nothing it destroyed", () => {
+    // The loose mirror accepted this, and it is the one shape ADR-0317 cares about most: an
+    // `erased` outcome with no figures is a claim with nothing behind it.
+    expect(DeleteTenantInputSchema.safeParse(attested({})).success).toBe(false);
+  });
+
+  it("accepts a well-formed attestation for a real subsystem", () => {
+    const parsed = DeleteTenantInputSchema.parse(
+      attested({ scope: { tables: ["meta.operate_entity_records"], rowCount: 9, storageBytes: 128 } }),
+    );
+    expect(parsed.attestations[0]?.subsystem).toBe("shared_tables");
+    expect(parsed.attestations[0]?.outcome).toBe("erased");
+  });
+
+  it("still refuses an unknown key inside an attestation", () => {
+    expect(DeleteTenantInputSchema.safeParse(attested({ rowCount: 9 })).success).toBe(false);
+  });
+
+  it("accepts a `nothing_to_erase` attestation with no figures, which is its whole point", () => {
+    const parsed = DeleteTenantInputSchema.parse(attested({ outcome: "nothing_to_erase" }));
+    expect(parsed.attestations[0]?.outcome).toBe("nothing_to_erase");
+    // ADR-0317's rule in the other direction: a `nothing_to_erase` that *could* carry figures
+    // would smuggle numbers into the proof.
+    expect(parsed.attestations[0]?.scope).toBeUndefined();
   });
 });
 
@@ -340,10 +449,57 @@ describe("the delete route", () => {
       operation: TENANT_DELETED_OPERATION,
       tombstoneId: TOMB,
       chainEntryHash: HASH,
-      rowCount: 26,
+      // 26 schema rows **plus** 8 shared-table rows (ADR-0329). The audit row has one figure and it
+      // means "rows this deletion destroyed", so reporting only the schema half understated it by
+      // every tenant-scoped row in the platform's own tables. The per-subsystem breakdown is in the
+      // tombstone's attestations, where a claim about which subsystem destroyed what belongs.
+      rowCount: 34,
       tenantRetired: true,
       approvedBy: APPROVER,
     });
+  });
+
+  it("returns both erasures separately, never summed, in the receipt", async () => {
+    const h = harness();
+    const res = await call(h.ctx, DELETE, { parsedBody: BODY });
+    expect(res.status).toBe(200);
+    const body = res.body as {
+      readonly erased: { readonly rowCount: number; readonly schema: string };
+      readonly erasedSharedTables: {
+        readonly rowCount: number;
+        readonly schema: string;
+        readonly retainedTables: readonly string[];
+      };
+    };
+    // Two scopes, two figures. A single total would make the receipt unable to say which erasure a
+    // number came from, which is the thing composing a scope from per-subsystem reports exists for.
+    expect(body.erased).toMatchObject({ schema: "t_abc", rowCount: 26 });
+    expect(body.erasedSharedTables).toMatchObject({ schema: "meta", rowCount: 8 });
+    // And the retention set is visible, because a reader of an Article 17 receipt needs to know
+    // what was deliberately left in place as much as what was destroyed.
+    expect(body.erasedSharedTables.retainedTables).toContain("meta.tenant_tombstones");
+  });
+
+  it("names what is lawfully retained, with no figure beside it", async () => {
+    // ADR-0330. This is the sentence an operator sends: everything was destroyed except these
+    // rows, held under this obligation. A count on the retained side could be read as part of the
+    // erasure, which is ADR-0317's subject, so there is deliberately no field for one.
+    const h = harness();
+    const res = await call(h.ctx, DELETE, { parsedBody: BODY });
+    const body = res.body as {
+      readonly erasedSharedTables: {
+        readonly statutoryRetained: {
+          readonly obligations: readonly string[];
+          readonly dataReference: string;
+        } | null;
+      };
+    };
+    expect(body.erasedSharedTables.statutoryRetained?.obligations).toEqual(["tax_records_7y"]);
+    expect(body.erasedSharedTables.statutoryRetained?.dataReference).toContain("meta.invoices");
+    expect(Object.keys(body.erasedSharedTables.statutoryRetained ?? {})).toEqual([
+      "obligations",
+      "dataReference",
+    ]);
   });
 
   it("does not fail the request when the audit record cannot be written", async () => {
@@ -415,5 +571,117 @@ describe("tombstoneReceipt", () => {
   it("includes the retention prose when something was lawfully kept", () => {
     const receipt = tombstoneReceipt(storedOf({ retainedReason: "retained under tax_records_7y" }));
     expect(receipt["retainedReason"]).toContain("tax_records_7y");
+  });
+
+  it("names the proof version, defaulting to v1 rather than inferring one", () => {
+    // Read, never inferred from whether a claim is attached: an inference would read a *deleted*
+    // declaration as an older record, the tamper that covers its own tracks (ADR-0329).
+    expect(tombstoneReceipt(storedOf())["proofVersion"]).toBe("v1");
+    expect(tombstoneReceipt(storedOf({ proofVersion: "v3" }))["proofVersion"]).toBe("v3");
+  });
+
+  it("carries what a caller needs to recompute the digest itself", () => {
+    // ADR-0320's whole argument for a receipt is that a bare "deleted" would be ADR-0317's defect in
+    // response form. Without these a holder cannot reconstruct the bytes, so the digests in the
+    // receipt are unverifiable figures rather than a proof — which regressed at v2, got one field
+    // worse at v3, and would have at v4 without `recordStorage`. Asserted as the **whole** set and
+    // from a named list, because each regression was one field nobody listed.
+    const receipt = tombstoneReceipt(
+      storedOf({
+        proofVersion: "v4",
+        capabilityDeclaration: { tenant_schema: "erases", shared_tables: "erases" },
+        retainedObligations: ["tax_records_7y"],
+        retainedDataReference: "meta.invoices, meta.tenant_credits",
+        recordStorage: RECORD_STORAGE,
+      }),
+    );
+    for (const key of V4_RECEIPT_FIELDS) expect(receipt, key).toHaveProperty(key);
+    expect(receipt["proofVersion"]).toBe("v4");
+    expect(receipt["capabilityDeclaration"]).toMatchObject({ shared_tables: "erases" });
+    expect(receipt["retainedObligations"]).toEqual(["tax_records_7y"]);
+    expect(receipt["retainedDataReference"]).toContain("meta.invoices");
+    expect(receipt["recordStorage"]).toEqual(RECORD_STORAGE);
+  });
+
+  it("omits recordStorage entirely when the record carries none", () => {
+    // Absent, not null: a v1/v2/v3 record's bytes do not cover a record-storage declaration, and a
+    // `null` would be a key a holder could try to hash — the inference ADR-0329 refused, which reads
+    // a *deleted* declaration as an older record.
+    expect(tombstoneReceipt(storedOf())).not.toHaveProperty("recordStorage");
+  });
+
+  it("emits recordStorage when the count is zero, which is the claim v4 exists to make", () => {
+    // A column store serving a manifest that declares no entity: legitimate where every tenant
+    // activates its own manifest, and the signature of the wrong pack having loaded otherwise. A key
+    // present only for a non-zero count would hide exactly that case.
+    const receipt = tombstoneReceipt(
+      storedOf({
+        proofVersion: "v4",
+        recordStorage: { model: "typed_tables", schema: "public", relationCount: 0 },
+      }),
+    );
+    expect(receipt).toHaveProperty("recordStorage");
+    expect(receipt["recordStorage"]).toEqual({
+      model: "typed_tables",
+      schema: "public",
+      relationCount: 0,
+    });
+  });
+
+  it("emits an EMPTY obligation list, because that is the signed claim that nothing was kept", () => {
+    // The one distinction v3 exists to make. Omitting the key on `[]` would put the pre-v3
+    // "cannot say" back into the response.
+    const receipt = tombstoneReceipt(storedOf({ proofVersion: "v3", retainedObligations: [] }));
+    expect(receipt).toHaveProperty("retainedObligations");
+    expect(receipt["retainedObligations"]).toEqual([]);
+  });
+});
+
+describe("the lifecycle receipt", () => {
+  it("carries the recorded transition on the 200, beside tenantRetired", async () => {
+    const h = harness();
+    const res = await call(h.ctx, DELETE, { parsedBody: BODY });
+    expect(res.status).toBe(200);
+    expect(res.body["lifecycleEvent"]).toEqual({
+      recorded: true,
+      id: "9c1d2e3f-4a5b-4c6d-8e7f-0a1b2c3d4e5f",
+      fromState: "active",
+      toState: "deleted",
+      // Reported, never enforced: this route deletes straight from `active`, and the flag is how a
+      // reader learns the gap instead of the record being refused or silently recorded as fine.
+      transitionLegal: false,
+    });
+  });
+
+  it("says a trail was not recorded rather than omitting the field", async () => {
+    const h = harness({}, { outcome: { ...OK_OUTCOME, lifecycleEvent: null } as DeletionOutcomeLike });
+    const res = await call(h.ctx, DELETE, { parsedBody: BODY });
+    expect(res.status).toBe(200);
+    const receipt = res.body["lifecycleEvent"] as Record<string, unknown>;
+    // The distinction the table exists to make: an absent trail has to be *stated*, because a
+    // missing key reads identically to a response written before the field existed.
+    expect(receipt["recorded"]).toBe(false);
+    expect(String(receipt["detail"])).toContain("no tenant lifecycle trail");
+  });
+
+  it("the deletion still succeeds when no trail was written", async () => {
+    const h = harness({}, { outcome: { ...OK_OUTCOME, lifecycleEvent: null } as DeletionOutcomeLike });
+    const res = await call(h.ctx, DELETE, { parsedBody: BODY });
+    // The tombstone is the proof; the trail is the index to it. One missing does not unmake the other.
+    expect(res.body["deleted"]).toBe(true);
+    expect((res.body["tombstone"] as Record<string, unknown>)["tombstoneId"]).toBe(TOMB);
+  });
+
+  it("lifecycleReceipt always answers with a recorded flag", () => {
+    expect(lifecycleReceipt(null)["recorded"]).toBe(false);
+    expect(
+      lifecycleReceipt({ id: "x", fromState: "pending_deletion", toState: "deleted", transitionLegal: true }),
+    ).toEqual({
+      recorded: true,
+      id: "x",
+      fromState: "pending_deletion",
+      toState: "deleted",
+      transitionLegal: true,
+    });
   });
 });

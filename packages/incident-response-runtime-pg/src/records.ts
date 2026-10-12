@@ -196,3 +196,46 @@ export function rowToIncident(row: Record<string, unknown>): StoredIncident {
 function maybe(key: string, value: string | null): Record<string, string> {
   return value === null ? {} : { [key]: value };
 }
+
+/**
+ * The timeline is append-only, enforced before any SQL (ADR-0289).
+ *
+ * Lives here rather than in `persisting-engine.ts`, where it started, because it now has **two**
+ * callers and the other one is the store. `PersistentIncidentEngine` imports the store, so putting
+ * a shared guard in the engine would have made the dependency circular — and ADR-0327 recorded the
+ * consequence of not sharing it: `appendPagedNote` writes a timeline entry directly and was the one
+ * writer the check did not cover (ADR-0328).
+ */
+export class IncidentTimelineRewriteError extends Error {
+  constructor(readonly incidentId: string) {
+    super(
+      `a mutation of incident '${incidentId}' altered timeline entries that were already ` +
+        "recorded; the timeline is append-only",
+    );
+    this.name = "IncidentTimelineRewriteError";
+  }
+}
+
+/**
+ * Refuses a candidate record whose timeline is not an extension of the stored one.
+ *
+ * Compared by serialised entry rather than by length alone, because the defect worth catching is an
+ * *edit* — a record whose timeline is the same length but whose third entry now says something
+ * else. A CHECK constraint cannot express this, and the column is JSONB, so this is the only place
+ * it can be enforced before the row is written.
+ *
+ * `JSON.stringify` is key-order sensitive, so this is too. That is safe only because the candidate
+ * is always built by spreading the record `rowToIncident` just returned — one source, one key
+ * order — and it is the reason a caller must go through the executor rather than constructing an
+ * entry from scratch.
+ */
+export function assertAppendOnly(before: IncidentRecord, after: IncidentRecord): void {
+  if (after.timeline.length < before.timeline.length) {
+    throw new IncidentTimelineRewriteError(before.id);
+  }
+  for (let i = 0; i < before.timeline.length; i++) {
+    if (JSON.stringify(before.timeline[i]) !== JSON.stringify(after.timeline[i])) {
+      throw new IncidentTimelineRewriteError(before.id);
+    }
+  }
+}

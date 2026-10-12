@@ -91,9 +91,14 @@ export function buildDrReadinessLifecycle(
   const drillLimit = opts.drillLimit ?? 500;
 
   async function assessOnce(): Promise<DrReadinessReport> {
+    // The scope is named, which it could not be before: these two reads took a limit alone, so as
+    // the table's owner — who bypasses RLS — they returned every tenant's history and
+    // `assessDrReadiness` scored this deployment's DR readiness off other tenants' drills and
+    // failovers. `config.tenantId` was already here; the stores simply had nowhere to receive it.
+    const scope = config.tenantId ?? null;
     const [failoverRows, drillRows] = await Promise.all([
-      persistent.failoverStore.listRecent(failoverLimit),
-      persistent.drillStore.listRecent(drillLimit),
+      persistent.failoverStore.listRecent(scope, failoverLimit),
+      persistent.drillStore.listRecent(scope, drillLimit),
     ]);
     const input: DrReadinessInput = {
       ...config.input,

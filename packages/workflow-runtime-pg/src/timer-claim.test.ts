@@ -24,7 +24,9 @@ function mockConnection(
 describe("claimDueTimers", () => {
   const timerRow = {
     timer_id: "wft_tim00001",
-    instance_id: "00000000-0000-4000-8000-000000000123",
+    // `meta.workflow_instances.instance_id`, joined in — the engine resolves by this TEXT id, and
+    // handing back the timer row's UUID made every claim a silent no-op.
+    instance_id: "wfi_inst0001",
     tenant_id: TENANT,
     timer_name: "approval_deadline",
     fire_at: "2026-05-17T11:59:00.000Z",
@@ -56,6 +58,20 @@ describe("claimDueTimers", () => {
       timerName: "approval_deadline",
       transitionToTrigger: "escalate",
     });
+  });
+
+  it("joins meta.workflow_instances so the claimed id is the one the engine resolves", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const conn = mockConnection([timerRow], capture);
+    const [c] = await claimDueTimers(conn, { workerId: "w", now: NOW });
+    expect(capture[0]!.sql).toContain("meta.workflow_instances i");
+    expect(capture[0]!.sql).toContain("i.id = t.instance_id");
+    // `i.instance_id`, never `t.instance_id`: the timer row's column is the instances table's UUID
+    // primary key, and `WorkflowInstanceIdResolver` matches the TEXT `instance_id` instead.
+    expect(capture[0]!.sql).toContain("RETURNING t.timer_id, i.instance_id");
+    expect(capture[0]!.sql).not.toContain("t.instance_id, t.tenant_id");
+    expect(c?.instanceId).toBe("wfi_inst0001");
+    expect(c?.instanceId).toMatch(/^wfi_[a-z0-9]{8,40}$/);
   });
 
   it("returns an empty batch when nothing is due (another worker took them / SKIP LOCKED)", async () => {

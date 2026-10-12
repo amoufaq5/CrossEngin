@@ -5,7 +5,14 @@ import { z } from "zod";
 export const MANIFEST_PROPOSAL_STATUSES = ["draft", "active", "archived"] as const;
 export type ManifestProposalStatus = (typeof MANIFEST_PROPOSAL_STATUSES)[number];
 
-const MANIFEST_PROPOSAL_SOURCES = ["ai", "manual"] as const;
+/**
+ * Exported, not private, because this module owns `meta.operate_tenant_manifests` and the record it
+ * stores — so this is the domain that column's CHECK answers to, and a declaration has to be able
+ * to name it (ADR-0354). While it was private, `ai-design-routes.ts` had a second spelling of the
+ * same two members and `VALUE_SET_DOMAINS` could only ref *that*, which is a declaration naming a
+ * constant no writer binds.
+ */
+export const MANIFEST_PROPOSAL_SOURCES = ["ai", "manual"] as const;
 export type ManifestProposalSource = (typeof MANIFEST_PROPOSAL_SOURCES)[number];
 
 export const TenantManifestRecordSchema = z

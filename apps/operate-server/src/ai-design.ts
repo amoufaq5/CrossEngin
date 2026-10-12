@@ -1,6 +1,7 @@
 import {
   StreamCostMeter,
   admitRequestCost,
+  DESIGN_SHAPE_RETRIABILITY,
   classifyDesignOutput,
   reconcileRequestCost,
   type DesignOutputShape,
@@ -424,6 +425,18 @@ export async function designManifest(opts: {
    * only the caller's monthly budget is consulted, between requests.
    */
   maxRequestDollars?: number;
+  /**
+   * The estimator's learned correction for this tenant, carried across restarts (ADR-0330).
+   *
+   * ADR-0311 made `reconcileRequestCost` feed the worst observed ratio back so the estimator stops
+   * being optimistic, and left it in process memory — so a restart forgot it, in the direction that
+   * *admits* requests it had learned to delay. Supplying it seeds the run; `onInflationObserved`
+   * carries each reading back out to wherever it is kept.
+   *
+   * Optional, and 1 when absent, which is the pre-ADR-0330 behaviour exactly.
+   */
+  inflation?: number;
+  onInflationObserved?: (ratio: number) => void | Promise<void>;
   onProgress?: DesignProgressListener;
 }): Promise<DesignResult> {
   const providerLabel = opts.providerLabel ?? null;
@@ -501,8 +514,10 @@ export async function designManifest(opts: {
   let usage: DesignUsage | null = null;
   // Raised whenever a settled request cost more than it was estimated to, so the next
   // attempt in this run is priced against what this model actually does rather than
-  // against the same optimistic guess.
-  let inflation = 1;
+  // against the same optimistic guess. Seeded from the caller (ADR-0330), because a restart
+  // otherwise forgets the correction in the direction that admits a request it had learned to
+  // delay. Never below 1: a factor under 1 would *deflate* an estimate that feeds a ceiling.
+  let inflation = Math.max(1, opts.inflation ?? 1);
   let sealed = false;
 
   while (attempts < maxAttempts && !sealed) {
@@ -564,6 +579,12 @@ export async function designManifest(opts: {
       const admission = admitRequestCost(ceiling, {
         pricing,
         promptChars,
+        // The script-aware reading beside the character count (ADR-0330), which takes the greater
+        // of the two — so supplying the text can only ever raise the figure. This is the half of
+        // ADR-0311's CJK note that reaches production: `.length` under-counts an ideographic
+        // prompt by more than 4x, and under-counting is the direction that *admits* a request the
+        // ceiling exists to refuse.
+        promptText: request.messages.map((m) => m.content),
         maxOutputTokens: maxTokens,
         inflation,
       });
@@ -658,8 +679,20 @@ export async function designManifest(opts: {
         estimatedDollars,
         actualDollars: turnCost,
       });
-      if (verdict.kind !== "within_estimate" && verdict.ratio !== undefined) {
-        inflation = Math.max(inflation, verdict.ratio);
+      if (verdict.ratio !== undefined) {
+        if (verdict.kind !== "within_estimate") {
+          inflation = Math.max(inflation, verdict.ratio);
+        }
+        // Reported for **every** verdict including `within_estimate`, because that arm is the only
+        // observation that can *relax* a stored high-water mark. Reporting only the bad ones would
+        // make the mark rise forever and pin a tenant pessimistically on one outlier (ADR-0330).
+        try {
+          await opts.onInflationObserved?.(verdict.ratio);
+        } catch (err) {
+          // A failed observation costs a correction, never the design. The next settled request
+          // re-derives the same ratio, so this is delayed rather than lost.
+          console.warn("[ai-design] could not record the cost ratio", err);
+        }
       }
       // An actual cost over the cap means the estimator does not model this model, so stop
       // after this attempt. The attempt itself is still read out below: the money is spent,
@@ -689,6 +722,15 @@ export async function designManifest(opts: {
       // object — but `not_a_manifest` is the honest reading if that ever stops holding.
       const kind = designFailureForShape(classified.shape) ?? "not_a_manifest";
       record(kind, [classified.detail], text.length, classified.shape, classified.wrapper);
+      // ADR-0330. This loop used to `continue` on **every** non-manifest shape, which is the blind
+      // retry ADR-0311 warned about: an `array_not_object` is the model answering a *different
+      // question*, and asking again collects the same wrong answer at the cost of another paid
+      // call. `DESIGN_SHAPE_RETRIABILITY` draws the line on "did the model understand the
+      // question" rather than on "will it recur", so a broken-syntax failure is retried and a
+      // confident answer to something else is not.
+      if (DESIGN_SHAPE_RETRIABILITY[classified.shape] === "wrong_question") {
+        break;
+      }
       messages.push({ role: "assistant", content: truncate(text, MAX_ASSISTANT_ECHO_CHARS) });
       messages.push({
         role: "user",

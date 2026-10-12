@@ -350,3 +350,58 @@ describe("PostgresAuditReadStore.getById", () => {
     expect(surface).toEqual(["constructor", "getById", "list", "read", "table"]);
   });
 });
+
+/**
+ * Platform-scope rows in the trail (ADR-0331).
+ *
+ * The defect to avoid here is the opposite of the one the feature closes: making the column
+ * nullable must not hand a tenant rows that are not theirs. The read path was already written so
+ * that it cannot — `tenant_id = $1` never matches NULL, and the isolation policy does not either —
+ * and these assertions are what keeps that true if either half is ever rewritten.
+ */
+describe("PostgresAuditReadStore — platform-scope rows", () => {
+  it("does not return a platform row to a tenant-scoped read", async () => {
+    const db = fakeAuditDb();
+    db.seed();
+    db.seed({ id: ENTRY_2, tenant_id: null, entity: "incident", operation: "platform.page_undelivered" });
+    const store = new PostgresAuditReadStore(db.conn);
+    const page = await store.list({ scope: { kind: "tenant", tenantId: TENANT_A } });
+    expect(page.data.map((d) => d.entry.id)).toEqual([ENTRY_1]);
+  });
+
+  it("does not let a tenant reach a platform row by naming its id", async () => {
+    const db = fakeAuditDb();
+    db.seed({ id: ENTRY_2, tenant_id: null, entity: "incident" });
+    const store = new PostgresAuditReadStore(db.conn);
+    const found = await store.getById(ENTRY_2, { kind: "tenant", tenantId: TENANT_A });
+    expect(found).toBeNull();
+  });
+
+  it("returns platform rows to the cross-tenant grant, with a null tenantId", async () => {
+    const db = fakeAuditDb();
+    db.seed();
+    db.seed({ id: ENTRY_2, tenant_id: null, entity: "incident" });
+    const store = new PostgresAuditReadStore(db.conn);
+    const page = await store.list({ scope: { kind: "all" } });
+    expect(page.data.map((d) => d.entry.tenantId).sort()).toEqual([TENANT_A, null]);
+  });
+
+  it("parses a platform row rather than refusing the page it is on", async () => {
+    // The page read refuses wholesale on an unparseable row, so a null `tenant_id` that the entry
+    // schema rejected would have taken every row beside it down with it.
+    const db = fakeAuditDb();
+    db.seed({ id: ENTRY_2, tenant_id: null, entity: "incident" });
+    db.seed({ id: ENTRY_3 });
+    const store = new PostgresAuditReadStore(db.conn);
+    const page = await store.list({ scope: { kind: "all" } });
+    expect(page.data).toHaveLength(2);
+  });
+
+  it("keeps a platform row's chain coordinates", async () => {
+    const db = fakeAuditDb();
+    db.seed({ id: ENTRY_2, tenant_id: null, chain_sequence_number: 4, chain_entry_hash: "a".repeat(64) });
+    const store = new PostgresAuditReadStore(db.conn);
+    const page = await store.list({ scope: { kind: "all" } });
+    expect(page.data[0]?.anchor).toEqual({ sequenceNumber: 4, entryHash: "a".repeat(64) });
+  });
+});

@@ -162,12 +162,15 @@ function parseRows(rows: readonly Record<string, unknown>[]): readonly Notificat
  *
  * INVARIANT — the read/write asymmetry: reads match
  * `(tenant_id = $1 OR tenant_id IS NULL)`, because a platform-wide row
- * legitimately belongs to no tenant and is visible to everyone (the table's RLS
- * policy says exactly that). Writes are always `tenant_id = $1` — this store
- * never authors a platform row, so a tenant can neither publish a template for
- * everyone nor overwrite the operator's default. Every method still runs inside
- * `withTenantContext`, which binds `app.current_tenant_id` for the transaction,
- * so RLS confines the read half regardless of what the predicate says.
+ * legitimately belongs to no tenant and is visible to everyone — which the
+ * table's `SELECT`-scoped platform read policy says, and which needs no grant.
+ * Writes are always `tenant_id = $1` — this store never authors a platform row,
+ * so a tenant can neither publish a template for everyone nor overwrite the
+ * operator's default, and since the policy split the database refuses it as
+ * well: the platform write arms are `INSERT`- and `UPDATE`-scoped on
+ * `app.platform_config_write`, which nothing here claims. Every method still
+ * runs inside `withTenantContext`, which binds `app.current_tenant_id` for the
+ * transaction, so RLS confines the read half regardless of the predicate.
  */
 export class PostgresTemplateStore {
   private readonly conn: PgConnection;

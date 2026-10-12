@@ -29,22 +29,34 @@ import {
 } from "@crossengin/views";
 import type { SearchManifest } from "@crossengin/search";
 import { BUILT_IN_TRAIT_FIELDS } from "../ddl/built-in-traits.js";
-import { resolvedFieldNames } from "../ddl/resolution.js";
+import { resolvedFieldNames, resolvedFields } from "../ddl/resolution.js";
 import { WorkflowValidationError } from "../workflow/errors.js";
 import { validateWorkflow } from "../workflow/validate.js";
 import { ManifestValidationError } from "./errors.js";
 import type { Manifest } from "./types.js";
 
 export function validateManifest(manifest: Manifest): void {
-  const { entityNames, fieldsByEntity } = validateEntitiesTraitsRelations(manifest);
+  const { entityNames, fieldsByEntity, requiredFieldsByEntity } =
+    validateEntitiesTraitsRelations(manifest);
   const rolesMap = validateRoles(manifest);
-  const { entityTransitions, entityStates } = validateWorkflows(manifest, entityNames);
-  validatePermissions(manifest, entityNames, fieldsByEntity, rolesMap, entityTransitions);
+  const { entityTransitions, entityStates } = validateWorkflows(
+    manifest,
+    entityNames,
+    fieldsByEntity,
+  );
+  validatePermissions(
+    manifest,
+    entityNames,
+    fieldsByEntity,
+    requiredFieldsByEntity,
+    rolesMap,
+    entityTransitions,
+  );
   validateIntegrations(manifest);
   validateJobs(manifest, rolesMap);
   validateFiles(manifest);
-  const reportIds = validateReports(manifest, entityNames);
-  const dashboardIds = validateDashboards(manifest, reportIds);
+  const reportIds = validateReports(manifest, entityNames, rolesMap);
+  const dashboardIds = validateDashboards(manifest, reportIds, rolesMap);
   validateViews(manifest, {
     entityNames,
     fieldsByEntity,
@@ -94,15 +106,46 @@ export function manifestClassifiedFields(manifest: Manifest): readonly Classifie
   return out;
 }
 
+/**
+ * A `phi`/`regulated` field requires its entity to carry the `auditable` trait.
+ *
+ * Asked over `resolvedFields` and **not** `entity.fields`, because the narrow read made the whole
+ * invariant bypassable by moving the declaration one level out: the identical field was *refused*
+ * on `entity.fields` and *accepted* on a trait, with the served table carrying the same column
+ * either way. A validation rule whose predicate is narrower than the artifact it constrains is not
+ * a rule, it is a spelling convention.
+ *
+ * The path and the remedy differ by where the field is declared, which is why the two loops are
+ * written out rather than merged. An own field's path indexes `fields[j]` and its remedy is local.
+ * A trait's field has no index in this entity at all, so the path names the trait, and the remedy
+ * carries a warning the own-field case does not need: a trait is shared, so dropping the
+ * classification there changes every entity that carries it, and adding `auditable` to *this*
+ * entity is the change whose blast radius is one entity.
+ */
 function validateClassifications(manifest: Manifest): void {
+  const traits = manifest.traits ?? [];
   for (const [i, entity] of (manifest.entities ?? []).entries()) {
     const isAuditable = (entity.traits ?? []).includes(AUDITABLE_TRAIT);
+    if (isAuditable) continue;
+    const own = new Set(entity.fields.map((f) => f.name));
     for (const [j, field] of entity.fields.entries()) {
       if (field.classification === undefined) continue;
-      if (requiresAuditTrail(field.classification) && !isAuditable) {
+      if (requiresAuditTrail(field.classification)) {
         throw new ManifestValidationError(
           `entities[${i}].fields[${j}].classification`,
           `field '${entity.name}.${field.name}' is classified '${field.classification}', which requires the entity to carry the 'auditable' trait`,
+        );
+      }
+    }
+    for (const field of resolvedFields(entity, traits)) {
+      if (field.classification === undefined || own.has(field.name)) continue;
+      if (requiresAuditTrail(field.classification)) {
+        throw new ManifestValidationError(
+          `entities[${i}].traits`,
+          `field '${entity.name}.${field.name}' arrives from a trait and is classified ` +
+            `'${field.classification}', which requires the entity to carry the 'auditable' trait; ` +
+            `add 'auditable' to this entity's traits, or drop the classification from the trait — ` +
+            `which changes every entity carrying it`,
         );
       }
     }
@@ -112,6 +155,11 @@ function validateClassifications(manifest: Manifest): void {
 interface EntityIndex {
   readonly entityNames: ReadonlySet<string>;
   readonly fieldsByEntity: FieldsByEntity;
+  /**
+   * The resolved fields a create must supply. Separate from `fieldsByEntity` rather than widening
+   * it, because only one rule needs it and a map of names is what every other caller wants.
+   */
+  readonly requiredFieldsByEntity: FieldsByEntity;
 }
 
 function validateEntitiesTraitsRelations(manifest: Manifest): EntityIndex {
@@ -163,8 +211,19 @@ function validateEntitiesTraitsRelations(manifest: Manifest): EntityIndex {
 
   // Only now that every trait an entity names is known to exist can its fields be resolved.
   const fieldsByEntity = new Map<string, ReadonlySet<string>>();
+  const requiredFieldsByEntity = new Map<string, ReadonlySet<string>>();
   for (const entity of entities) {
     fieldsByEntity.set(entity.name, resolvedFieldNames(entity, traits));
+    // Through `resolvedFields`, so a `required` field contributed by a **trait** is in scope. A
+    // classified trait field is exactly what ADR-0338 had to reach for the same reason.
+    requiredFieldsByEntity.set(
+      entity.name,
+      new Set(
+        resolvedFields(entity, traits)
+          .filter((f) => f.required === true)
+          .map((f) => f.name),
+      ),
+    );
   }
 
   for (const [i, entity] of entities.entries()) {
@@ -185,6 +244,46 @@ function validateEntitiesTraitsRelations(manifest: Manifest): EntityIndex {
           `traits[${i}].fields[${j}].type.target`,
           `trait field reference targets unknown entity '${field.type.target}'`,
         );
+      }
+    }
+  }
+
+  // A `unique: {scope: [...]}` whose scope names a field the entity does not resolve to.
+  //
+  // Over `resolvedFields` and deliberately **not** over `entity.fields`: a unique field can arrive
+  // from a trait, and so can the field a scope names, and a rule reading the raw list while the
+  // emitter resolves traits is a divergence this repo keeps finding. The error names the entity
+  // because a field name may be declared on several.
+  //
+  // A validation error and not a boot refusal, on ADR-0348's split: the dischargeability of an ABAC
+  // obligation is a property of the *deployment*, while this is a property of the manifest alone —
+  // so it is decidable by a pack author, by `crossengin validate`, by the pack's own test suite and
+  // by the reviewer approving what the Architect designed, and a rule checkable earlier should be.
+  for (const [i, entity] of entities.entries()) {
+    for (const field of resolvedFields(entity, traits)) {
+      const hint = field.unique;
+      if (hint === undefined || typeof hint === "boolean") continue;
+      const fields = fieldsByEntity.get(entity.name);
+      if (fields === undefined) continue;
+      for (const [k, scopeField] of hint.scope.entries()) {
+        if (!fields.has(scopeField)) {
+          throw new ManifestValidationError(
+            `entities[${i}].fields.${field.name}.unique.scope[${k}]`,
+            `unique scope on '${entity.name}.${field.name}' names '${scopeField}', which is not a ` +
+              `field of '${entity.name}'; a scope naming a field that does not exist is served as ` +
+              `a constraint no store can emit`,
+          );
+        }
+        if (scopeField === field.name) {
+          // Self-scoping degenerates to the unscoped form, so it is not *wrong* — it is a
+          // declaration that does not say what its author thinks, which is the same class the rule
+          // above catches and the same remedy (`unique: true`).
+          throw new ManifestValidationError(
+            `entities[${i}].fields.${field.name}.unique.scope[${k}]`,
+            `unique scope on '${entity.name}.${field.name}' names the field itself; that is the ` +
+              `unscoped form, which is spelled 'unique: true'`,
+          );
+        }
       }
     }
   }
@@ -233,7 +332,7 @@ function validateEntitiesTraitsRelations(manifest: Manifest): EntityIndex {
     }
   }
 
-  return { entityNames, fieldsByEntity };
+  return { entityNames, fieldsByEntity, requiredFieldsByEntity };
 }
 
 function validateRoles(manifest: Manifest): Map<string, RoleDefinition> {
@@ -277,7 +376,11 @@ interface WorkflowIndex {
   readonly entityStates: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
-function validateWorkflows(manifest: Manifest, entityNames: ReadonlySet<string>): WorkflowIndex {
+function validateWorkflows(
+  manifest: Manifest,
+  entityNames: ReadonlySet<string>,
+  fieldsByEntity: FieldsByEntity,
+): WorkflowIndex {
   const workflows = manifest.workflows ?? {};
   const entityTransitions = new Map<string, Set<string>>();
   const entityStates = new Map<string, Set<string>>();
@@ -297,6 +400,28 @@ function validateWorkflows(manifest: Manifest, entityNames: ReadonlySet<string>)
         throw new ManifestValidationError(
           `workflows.${name}.entity`,
           `workflow references unknown entity '${workflow.entity}'`,
+        );
+      }
+
+      // The state field has to be a field of the entity, and until now nothing said so: its whole
+      // declaration was `z.string().min(1)`, so a lifecycle could name a column that does not
+      // exist and the manifest cross-validated. One live member, and the damage was not in the
+      // workflow at all but in the **list surface**: `withLifecycleStateFilter` adds the state
+      // field to `filterableFields` unconditionally, so a phantom name became a filter the stores
+      // answer with *opposite* wrong answers — the column store has no column for it and drops the
+      // predicate (every row), the document store compares `document ->> 'state'` and gets NULL
+      // (no rows). Measured on resolved `erp-construction`, whose `WorkOrder` replaces core's with
+      // one whose field is `status` while core's `work_order_lifecycle` still names `state`.
+      //
+      // Checked against `fieldsByEntity`, which is `resolvedFields` + `id`, so a state field
+      // contributed by a **trait** is accepted — the served table has a column for it.
+      const fields = fieldsByEntity.get(workflow.entity);
+      if (fields !== undefined && !fields.has(workflow.stateField)) {
+        throw new ManifestValidationError(
+          `workflows.${name}.stateField`,
+          `workflow lifecycle state field '${workflow.stateField}' is not a field of entity ` +
+            `'${workflow.entity}'; a state field that does not exist is served as a filterable ` +
+            `column no store can answer`,
         );
       }
 
@@ -321,6 +446,7 @@ function validatePermissions(
   manifest: Manifest,
   entityNames: ReadonlySet<string>,
   fieldsByEntity: FieldsByEntity,
+  requiredFieldsByEntity: FieldsByEntity,
   rolesMap: ReadonlyMap<string, RoleDefinition>,
   entityTransitions: ReadonlyMap<string, ReadonlySet<string>>,
 ): void {
@@ -365,6 +491,7 @@ function validatePermissions(
 
     if (entityPerms.fields) {
       const allFieldNames = fieldsByEntity.get(entityName) ?? new Set<string>();
+      const requiredFields = requiredFieldsByEntity.get(entityName) ?? new Set<string>();
       const fieldPerms: Record<string, FieldPermission> = entityPerms.fields;
       for (const [fieldName, fieldPerm] of Object.entries(fieldPerms)) {
         if (!allFieldNames.has(fieldName)) {
@@ -373,15 +500,17 @@ function validatePermissions(
             `field-level permission for unknown field '${fieldName}' on entity '${entityName}'`,
           );
         }
-        if (fieldPerm.read) {
-          checkGrant(`permissions.${entityName}.fields.${fieldName}.read.roles`, fieldPerm.read);
+        for (const arm of FIELD_GRANT_ARMS) {
+          const grant = fieldPerm[arm];
+          if (grant) checkGrant(`permissions.${entityName}.fields.${fieldName}.${arm}.roles`, grant);
         }
-        if (fieldPerm.update) {
-          checkGrant(
-            `permissions.${entityName}.fields.${fieldName}.update.roles`,
-            fieldPerm.update,
-          );
-        }
+        checkFieldGrantCoherence({
+          entityName,
+          fieldName,
+          fieldPerm,
+          entityPerms,
+          required: requiredFields.has(fieldName),
+        });
       }
     }
   }
@@ -459,16 +588,32 @@ function validateFiles(manifest: Manifest): void {
   }
 }
 
+/**
+ * A report names an entity that exists and grants roles that exist.
+ *
+ * The role check is the addition, and the gap it closes is the same shape as `validateViews`': a
+ * report's `permissions` is an `RbacGrant` whose role names were checked by nothing, so a manifest
+ * granting a report to `ghost_report_role` validated cleanly. A view's were checked; a report's and
+ * a dashboard's were not, which made "a declaration is validated" true of one surface and false of
+ * two that look identical from the manifest.
+ *
+ * It is a validation error and not a boot refusal on ADR-0348's split: whether a role exists is a
+ * property of the manifest alone, so it is decidable by a pack author, by `crossengin validate`,
+ * and by the reviewer approving what the Architect designed. Vacuous today — no pack declares a
+ * report at all — which is exactly when it costs nothing to add.
+ *
+ * The former `reportIds.has(key)` duplicate check is gone rather than kept: `reports` is a
+ * `z.record`, so `Object.entries` cannot yield one key twice and the condition was unreachable. A
+ * check that cannot fire reads as coverage it does not provide.
+ */
 function validateReports(
   manifest: Manifest,
   entityNames: ReadonlySet<string>,
+  rolesMap: ReadonlyMap<string, RoleDefinition>,
 ): Set<string> {
   const reports: Record<string, ReportDeclaration> = manifest.reports ?? {};
   const reportIds = new Set<string>();
   for (const [key, report] of Object.entries(reports)) {
-    if (reportIds.has(key)) {
-      throw new ManifestValidationError(`reports.${key}`, `duplicate report id '${key}'`);
-    }
     reportIds.add(key);
     if (!entityNames.has(report.entity)) {
       throw new ManifestValidationError(
@@ -476,24 +621,36 @@ function validateReports(
         `report entity '${report.entity}' is not declared in manifest.entities`,
       );
     }
+    for (const roleName of report.permissions?.roles ?? []) {
+      if (!rolesMap.has(roleName)) {
+        throw new ManifestValidationError(
+          `reports.${key}.permissions.roles`,
+          `report grants role '${roleName}' which is not declared in manifest.roles`,
+        );
+      }
+    }
   }
   return reportIds;
 }
 
+/** `validateReports`' rule for the surface beside it; same split, same vacuity, same reason. */
 function validateDashboards(
   manifest: Manifest,
   reportIds: ReadonlySet<string>,
+  rolesMap: ReadonlyMap<string, RoleDefinition>,
 ): Set<string> {
   const dashboards: Record<string, DashboardDeclaration> = manifest.dashboards ?? {};
   const ids = new Set<string>();
   for (const [key, dashboard] of Object.entries(dashboards)) {
-    if (ids.has(key)) {
-      throw new ManifestValidationError(
-        `dashboards.${key}`,
-        `duplicate dashboard id '${key}'`,
-      );
-    }
     ids.add(key);
+    for (const roleName of dashboard.permissions?.roles ?? []) {
+      if (!rolesMap.has(roleName)) {
+        throw new ManifestValidationError(
+          `dashboards.${key}.permissions.roles`,
+          `dashboard grants role '${roleName}' which is not declared in manifest.roles`,
+        );
+      }
+    }
     for (const referenced of widgetReferencedReports(dashboard)) {
       if (!reportIds.has(referenced)) {
         throw new ManifestValidationError(
@@ -587,9 +744,18 @@ function validateViews(manifest: Manifest, ctx: ViewContext): void {
       }
     }
 
-    // A view may override the entity's permissions with its own role list; `manifest.permissions`
-    // grants are checked against manifest.roles and these were not, so a view could grant a role
-    // that does not exist — which fails closed at serve time and looks like a missing grant.
+    // A view may declare its own role list instead of inheriting the entity's permissions, and
+    // those names are checked here because `manifest.permissions` grants are.
+    //
+    // This comment used to add "which fails closed at serve time and looks like a missing grant",
+    // and that was false in the direction that made the gap look handled: **nothing reads a view's
+    // `permissions` at serve time**. `listConfigForEntity` is the only serve-time reader of
+    // `manifest.views` and takes `columns`, `sort` and `pageSize` from it; every authorization
+    // decision reads `manifest.permissions[entity]`. So an undeclared role does not fail closed —
+    // the view is presented per the entity's grants, which is strictly *wider* than what it
+    // declares. The check is still worth keeping (a typo'd role is a manifest defect whether or not
+    // anything serves it today), but what it buys is a correct declaration and not an enforced one.
+    // `surveyViewPermissionOverrides` in `apps/operate-server` reports the inertness at boot.
     for (const roleName of viewReferencedRoles(view)) {
       if (!rolesMap.has(roleName)) {
         throw new ManifestValidationError(
@@ -632,5 +798,104 @@ function validateSearch(
         );
       }
     }
+  }
+}
+
+/**
+ * The three arms a field grant can carry, in the order a reader meets them. A loop over this rather
+ * than three `if`s so a fourth arm is one line here and not three places to remember.
+ */
+const FIELD_GRANT_ARMS = ["read", "update", "create"] as const;
+
+interface FieldGrantCheck {
+  readonly entityName: string;
+  readonly fieldName: string;
+  readonly fieldPerm: FieldPermission;
+  readonly entityPerms: EntityPermissions;
+  readonly required: boolean;
+}
+
+/**
+ * Whether a per-field grant can mean what it says, given the entity grants beside it.
+ *
+ * Until this existed, a field grant was checked for two things — the field exists, every role is
+ * declared — and the three ways it can be *incoherent* were all reachable. Each of the three was a
+ * live defect rather than a hypothetical, and the sharpest one shipped: `erp-government` declared
+ * `Citizen.national_id` (`required`) with `update: ["gov_admin"]` while the entity's `create` grant
+ * named `case_worker` too, so from ADR-0339 — which made an explicit grant authoritative with no
+ * flag — `case_worker` could not create a Citizen at all. `POST /v1/citizens` answered 403
+ * `explicit_update_grant` for a role the manifest plainly intends to register citizens.
+ *
+ * These are **validation errors and not boot refusals**, which is the opposite of where ADR-0340
+ * put its ABAC obligation check, and for a stated reason: an obligation is refused at boot because
+ * whether a deployment can discharge it is a property of the *deployment*, while these three are
+ * properties of the manifest alone and so are decidable the moment it is written — by a pack author,
+ * by `crossengin validate`, and by the reviewer who approves what the Architect designed. A rule
+ * that can be checked earlier should be.
+ */
+function checkFieldGrantCoherence(input: FieldGrantCheck): void {
+  const { entityName, fieldName, fieldPerm, entityPerms, required } = input;
+  const at = `permissions.${entityName}.fields.${fieldName}`;
+
+  // R3, first, because the other two read as puzzling when the cause is simply a role that cannot
+  // reach the record at all. A field grant wider than its entity grant is not dangerous — it is
+  // inert — but it is always a mistake, and it reads as a grant that works.
+  for (const arm of FIELD_GRANT_ARMS) {
+    const grant = fieldPerm[arm];
+    if (grant === undefined) continue;
+    const entityGrant = entityPerms[arm];
+    if (entityGrant === undefined) continue;
+    const entityRoles = new Set(entityGrant.roles);
+    const unreachable = grant.roles.filter((r) => !entityRoles.has(r));
+    if (unreachable.length > 0) {
+      throw new ManifestValidationError(
+        `${at}.${arm}.roles`,
+        `grants ${arm} on '${fieldName}' to ${unreachable.map((r) => `'${r}'`).join(", ")}, ` +
+          `which the entity's own ${arm} grant does not name — so the grant reaches a role that ` +
+          `cannot reach the record and silently does nothing`,
+      );
+    }
+  }
+
+  // R2 — and `read` absent is **not** a pass. An absent read grant means the field falls to the
+  // classification default, which under `--classified-write-mask` withholds it from every
+  // unprivileged role, so an explicit `update` beside it is the same blind overwrite with the
+  // withholding expressed one level away.
+  const update = fieldPerm.update;
+  if (update !== undefined) {
+    const readable = new Set(fieldPerm.read?.roles ?? []);
+    const blind = update.roles.filter((r) => !readable.has(r));
+    if (blind.length > 0) {
+      throw new ManifestValidationError(
+        `${at}.update.roles`,
+        `lets ${blind.map((r) => `'${r}'`).join(", ")} change '${fieldName}' without reading it` +
+          (fieldPerm.read === undefined
+            ? ", because no read grant is declared beside it"
+            : ", which the read grant does not name") +
+          ` — a blind overwrite destroys a value the writer cannot see. Declare the same role on ` +
+          `read, or move it to the 'create' arm, which is deliberately not constrained this way ` +
+          `because a principal supplying a value already knows it`,
+      );
+    }
+  }
+
+  // R1, last, because its remedy ("add a create arm") only makes sense once the first two hold.
+  // The *effective* create grant, so a field that omits the arm is judged on the `update` list it
+  // falls back to — which is exactly how the shipped `Citizen.national_id` defect arose.
+  if (!required) return;
+  const entityCreate = entityPerms.create;
+  if (entityCreate === undefined) return;
+  const effectiveCreate = fieldPerm.create ?? fieldPerm.update;
+  if (effectiveCreate === undefined) return;
+  const permitted = new Set(effectiveCreate.roles);
+  const blocked = entityCreate.roles.filter((r) => !permitted.has(r));
+  if (blocked.length > 0) {
+    throw new ManifestValidationError(
+      `${at}.${fieldPerm.create !== undefined ? "create" : "update"}.roles`,
+      `makes '${entityName}' uncreatable by ${blocked.map((r) => `'${r}'`).join(", ")}: ` +
+        `'${fieldName}' is required, so a create must supply it, and those roles hold the ` +
+        `entity's create grant while this grant refuses them the field. Name them here — the ` +
+        `'create' arm can admit them without widening who may change the value afterwards`,
+    );
   }
 }

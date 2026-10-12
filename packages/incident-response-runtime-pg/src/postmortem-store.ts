@@ -215,6 +215,25 @@ const REVISION_GUARD_PARAM = POSTMORTEM_COLUMN_NAMES.length + 1;
  * `drafting` postmortem, both save, and without a guard the second's write silently discards the
  * first's lessons and action items. Every write states the revision it read, and a zero-row update
  * raises `PostmortemRevisionConflictError` so the losing editor is told rather than ignored.
+ *
+ * **Nothing constructs this store, and the reason is an ordering one rather than a judgement that
+ * the record does not matter.** It is load-bearing: `IncidentRecordSchema` refuses `closed` for any
+ * severity whose profile sets `postmortemRequired` — sev1 and sev2, which is every grade the three
+ * escalators declare at — unless `postmortemId` is set. So this store is a **prerequisite of
+ * closing an incident**, and the two have to land together:
+ *
+ *  - a write route here *without* an incident-close route mints a postmortem no incident can point
+ *    at, because the only thing that sets `postmortem_id` is `IncidentExecutor.attachPostmortem`
+ *    and nothing in `operate-server` reaches it — ADR-0335's dangling `ftr_…` ids in a new table;
+ *  - an incident-close route *without* this one gives an operator a sev1 they can triage and
+ *    mitigate and resolve and then never close, failing the refinement above on the last step.
+ *
+ * Which is why the gap is not three stores but one missing surface: `meta.incidents` has no human
+ * arm in the deployed binary at all. Every field here is prose a person writes — root cause,
+ * detection, response, lessons learned — and publishing needs two reviewers with the author
+ * excluded, so the surface that fills it is an authoring UI, not a JSON POST.
+ * `packages/incident-response-runtime-pg/src/lifecycle-prerequisites.test.ts` pins the coupling so
+ * a close route added later fails loudly here rather than at the first sev1.
  */
 export class PostgresPostmortemStore {
   private readonly conn: PgConnection;

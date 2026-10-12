@@ -1,6 +1,10 @@
 import {
   AccessReviewCampaignSchema,
+  AccessReviewDecisionSchema,
+  AccessReviewItemSchema,
   type AccessReviewCampaign,
+  type AccessReviewDecision,
+  type AccessReviewItem,
   type CampaignScope,
   type PrincipalUnderReview,
   type ReviewerAssignment,
@@ -99,3 +103,67 @@ export const makeGrant = (
   lastUsedAt: "2025-12-20T00:00:00.000Z",
   ...overrides,
 });
+
+export const makeItem = (
+  overrides: Partial<AccessReviewItem> = {},
+): AccessReviewItem =>
+  AccessReviewItemSchema.parse({
+    id: "ari_00000001",
+    campaignId: "arc_00000001",
+    tenantId: UUID.tenant,
+    principalId: UUID.principalA,
+    principalType: "user",
+    principalLabel: "alice@example.com",
+    grantKind: "role",
+    grantId: "grant-role-admin",
+    grantLabel: "admin role",
+    grantAttributes: {},
+    grantedAt: "2024-01-01T00:00:00.000Z",
+    grantedBy: UUID.creator,
+    lastUsedAt: "2025-12-20T00:00:00.000Z",
+    riskLevel: "high",
+    status: "pending",
+    currentReviewer: null,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    openedForReviewAt: null,
+    decidedAt: null,
+    decisionId: null,
+    autoRevokedAt: null,
+    autoRevokeReason: null,
+    dueAt: "2026-01-10T00:00:00.000Z",
+    ...overrides,
+  });
+
+export const makeDecision = (
+  overrides: Partial<AccessReviewDecision> = {},
+): AccessReviewDecision =>
+  AccessReviewDecisionSchema.parse({
+    id: "ard_00000001",
+    itemId: "ari_00000001",
+    campaignId: "arc_00000001",
+    tenantId: UUID.tenant,
+    decidedByUserId: UUID.reviewer,
+    decidedAt: "2026-01-09T00:00:00.000Z",
+    kind: "keep",
+    reason: "role_appropriate",
+    comment: "Still required.",
+    timeBoundExtendUntil: null,
+    modifiedGrantAttributes: null,
+    attestation: {
+      kind: "click_through_acknowledgement",
+      attestedAt: "2026-01-09T00:00:00.000Z",
+      attestedByUserId: UUID.reviewer,
+      signatureSha256: null,
+      signingKeyFingerprint: null,
+      coAttestingUserId: null,
+      coAttestedAt: null,
+      ipAddress: "127.0.0.1",
+      userAgent: "crossengin-access-reviews-runtime",
+    },
+    supersedesDecisionId: null,
+    relatedExceptionId: null,
+    appliedAt: null,
+    applicationFailedAt: null,
+    applicationFailureReason: null,
+    ...overrides,
+  });

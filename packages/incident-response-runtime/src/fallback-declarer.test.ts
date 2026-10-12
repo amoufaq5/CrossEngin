@@ -54,23 +54,25 @@ function storedRecord(id: string, over: Record<string, unknown> = {}): IncidentR
 /**
  * A declarer that records every call, written out by hand.
  *
- * Test files are not typechecked in this repo, so a double that stops satisfying `IncidentDeclarer`
- * fails at runtime — and the wrapper's whole job is to catch a failing `declare`, which is exactly
- * where such a failure would be swallowed. Every test below therefore asserts a recorded *call*
- * (`declared`, `lookups`, `closedOut`) rather than that nothing threw.
+ * The wrapper's whole job is to catch a failing `declare`, which is exactly where a double that
+ * silently stopped doing anything would be swallowed. Every test below therefore asserts a recorded
+ * *call* (`declared`, `lookups`, `byIdLookups`, `closedOut`) rather than that nothing threw.
  */
 function fakeDeclarer(
   opts: {
     readonly failDeclare?: boolean;
     readonly failFindOpen?: boolean;
+    readonly failFindById?: boolean;
     readonly failCloseOut?: boolean;
     readonly closeOutAs?: IncidentCloseOut;
     readonly firstSequence?: number;
     readonly open?: ReadonlyMap<string, IncidentRecord>;
+    readonly byId?: ReadonlyMap<string, IncidentRecord>;
   } = {},
 ) {
   const declared: IncidentRecord[] = [];
   const lookups: string[] = [];
+  const byIdLookups: string[] = [];
   const closedOut: { readonly incidentId: string; readonly reason: string }[] = [];
   let seq = (opts.firstSequence ?? 1) - 1;
   const declarer: IncidentDeclarer = {
@@ -102,6 +104,13 @@ function fakeDeclarer(
       if (opts.failFindOpen === true) throw new Error("store unavailable");
       return opts.open?.get(autoDeclaredFor) ?? null;
     },
+    findById: async (incidentId: string): Promise<IncidentRecord | null> => {
+      byIdLookups.push(incidentId);
+      if (opts.failFindById === true) throw new Error("store unavailable");
+      return (
+        opts.byId?.get(incidentId) ?? declared.find((record) => record.id === incidentId) ?? null
+      );
+    },
     closeOut: async (
       incidentId: string,
       input: IncidentCloseOutInput,
@@ -111,7 +120,21 @@ function fakeDeclarer(
       return opts.closeOutAs ?? "cancelled";
     },
   };
-  return { declared, lookups, closedOut, declarer };
+  return { declared, lookups, byIdLookups, closedOut, declarer };
+}
+
+/** The same double with `findById` left off, which the optional method must still satisfy. */
+function fakeDeclarerWithoutFindById(): {
+  readonly byIdLookups: readonly string[];
+  readonly declarer: IncidentDeclarer;
+} {
+  const inner = fakeDeclarer();
+  const declarer: IncidentDeclarer = {
+    declare: async (req) => await inner.declarer.declare(req),
+    findOpen: async (key) => await inner.declarer.findOpen(key),
+    closeOut: async (id, input) => await inner.declarer.closeOut(id, input),
+  };
+  return { byIdLookups: inner.byIdLookups, declarer };
 }
 
 const CLOSE_OUT: IncidentCloseOutInput = {
@@ -388,6 +411,160 @@ describe("FallbackIncidentDeclarer — findOpen", () => {
     });
     await expect(d.findOpen("availability:api.read")).rejects.toThrow();
     expect(errors).toEqual([]);
+  });
+});
+
+describe("FallbackIncidentDeclarer — findById", () => {
+  it("asks the primary with the id it was given, and returns its record", async () => {
+    const primary = fakeDeclarer();
+    const d = new FallbackIncidentDeclarer({ primary: primary.declarer });
+    const record = await d.declare(request());
+    expect((await d.findById(record.id))?.id).toBe(record.id);
+    expect(primary.byIdLookups).toEqual([record.id]);
+  });
+
+  it("carries the grade back, which is the only thing a resolve can route on", async () => {
+    const primary = fakeDeclarer();
+    const d = new FallbackIncidentDeclarer({ primary: primary.declarer });
+    const record = await d.declare(request({ severity: "sev1" }));
+    expect((await d.findById(record.id))?.severity).toBe("sev1");
+  });
+
+  it("answers null when neither declarer holds the id", async () => {
+    const primary = fakeDeclarer();
+    const fallback = fakeDeclarer();
+    const d = new FallbackIncidentDeclarer({
+      primary: primary.declarer,
+      fallback: fallback.declarer,
+    });
+    expect(await d.findById("INC-2026-0099")).toBeNull();
+    expect(primary.byIdLookups).toEqual(["INC-2026-0099"]);
+  });
+
+  it("answers for an id it adopted rather than declared, which only the primary can know", async () => {
+    const adopted = storedRecord("INC-2026-0042", { severity: "sev2" });
+    const primary = fakeDeclarer({ byId: new Map([["INC-2026-0042", adopted]]) });
+    const d = new FallbackIncidentDeclarer({ primary: primary.declarer });
+    expect((await d.findById("INC-2026-0042"))?.severity).toBe("sev2");
+  });
+
+  it("never looks a fallback-minted id up in the store", async () => {
+    // The id came from a counter and may name a *different* stored incident; reading that row would
+    // hand the caller somebody else's severity, which is the mis-routed resolve this exists to stop.
+    const primary = fakeDeclarer({ failDeclare: true });
+    const fallback = fakeDeclarer({ firstSequence: 900 });
+    const d = new FallbackIncidentDeclarer({
+      primary: primary.declarer,
+      fallback: fallback.declarer,
+      onPrimaryFailure: () => undefined,
+    });
+    const record = await d.declare(request());
+    expect((await d.findById(record.id))?.id).toBe("INC-2026-0900");
+    expect(primary.byIdLookups).toEqual([]);
+    expect(fallback.byIdLookups).toEqual([record.id]);
+  });
+
+  it("resolves a fallback-minted grade through the default counting fallback", async () => {
+    const primary = fakeDeclarer({ failDeclare: true });
+    const d = new FallbackIncidentDeclarer({
+      primary: primary.declarer,
+      clock: clock(),
+      onPrimaryFailure: () => undefined,
+    });
+    const record = await d.declare(request({ severity: "sev1" }));
+    expect(d.servedBy(record.id)).toBe("fallback");
+    expect((await d.findById(record.id))?.severity).toBe("sev1");
+  });
+
+  it("reports a primary failure through the sink and still answers from the fallback", async () => {
+    const errors: unknown[] = [];
+    const inner = fakeDeclarer({ firstSequence: 900 });
+    const fallback = inner.declarer;
+    const primary = fakeDeclarer({ failDeclare: true, failFindById: true });
+    const d = new FallbackIncidentDeclarer({
+      primary: primary.declarer,
+      fallback,
+      onPrimaryFailure: (err) => errors.push(err),
+    });
+    const record = await d.declare(request());
+    // Declared through the fallback, so the origin already routes it there; make the primary the
+    // one asked by forgetting the origin the only way a caller can — closing the episode out.
+    await d.closeOut(record.id, CLOSE_OUT);
+    expect(d.servedBy(record.id)).toBe("unknown");
+    expect((await d.findById(record.id))?.id).toBe(record.id);
+    expect(primary.byIdLookups).toEqual([record.id]);
+    expect(errors.map((e) => (e as Error).message)).toEqual([
+      "store unavailable",
+      "store unavailable",
+    ]);
+  });
+
+  it("does not propagate a primary failure, because a recovery must not become an error", async () => {
+    const primary = fakeDeclarer({ failFindById: true });
+    const fallback = fakeDeclarer();
+    const d = new FallbackIncidentDeclarer({
+      primary: primary.declarer,
+      fallback: fallback.declarer,
+      onPrimaryFailure: () => undefined,
+    });
+    expect(await d.findById("INC-2026-0042")).toBeNull();
+    expect(primary.byIdLookups).toEqual(["INC-2026-0042"]);
+    expect(fallback.byIdLookups).toEqual(["INC-2026-0042"]);
+  });
+
+  it("swallows a primary failure even with no sink configured", async () => {
+    const primary = fakeDeclarer({ failFindById: true });
+    const d = new FallbackIncidentDeclarer({ primary: primary.declarer, clock: clock() });
+    expect(await d.findById("INC-2026-0042")).toBeNull();
+  });
+
+  it("falls through to the fallback when the primary answers null", async () => {
+    // No stored row holds the id, so a fallback record for it cannot be shadowing a different
+    // incident — the one hazard of a colliding counter id.
+    const minted = storedRecord("INC-2026-0001", { severity: "sev1" });
+    const primary = fakeDeclarer();
+    const fallback = fakeDeclarer({ byId: new Map([["INC-2026-0001", minted]]) });
+    const d = new FallbackIncidentDeclarer({
+      primary: primary.declarer,
+      fallback: fallback.declarer,
+    });
+    expect((await d.findById("INC-2026-0001"))?.severity).toBe("sev1");
+    expect(primary.byIdLookups).toEqual(["INC-2026-0001"]);
+  });
+
+  it("asks the fallback when the primary does not implement findById at all", async () => {
+    const minted = storedRecord("INC-2026-0001");
+    const primary = fakeDeclarerWithoutFindById();
+    const fallback = fakeDeclarer({ byId: new Map([["INC-2026-0001", minted]]) });
+    const d = new FallbackIncidentDeclarer({
+      primary: primary.declarer,
+      fallback: fallback.declarer,
+    });
+    expect((await d.findById("INC-2026-0001"))?.id).toBe("INC-2026-0001");
+    expect(fallback.byIdLookups).toEqual(["INC-2026-0001"]);
+  });
+
+  it("answers null when a fallback-minted id's fallback cannot answer either", async () => {
+    const primary = fakeDeclarer({ failDeclare: true });
+    const fallback = fakeDeclarerWithoutFindById();
+    const d = new FallbackIncidentDeclarer({
+      primary: primary.declarer,
+      fallback: fallback.declarer,
+      onPrimaryFailure: () => undefined,
+    });
+    const record = await d.declare(request());
+    expect(d.servedBy(record.id)).toBe("fallback");
+    expect(await d.findById(record.id)).toBeNull();
+  });
+
+  it("invents nothing when neither declarer implements findById", async () => {
+    const primary = fakeDeclarerWithoutFindById();
+    const fallback = fakeDeclarerWithoutFindById();
+    const d = new FallbackIncidentDeclarer({
+      primary: primary.declarer,
+      fallback: fallback.declarer,
+    });
+    expect(await d.findById("INC-2026-0001")).toBeNull();
   });
 });
 

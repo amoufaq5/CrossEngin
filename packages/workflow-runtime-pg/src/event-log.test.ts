@@ -152,6 +152,76 @@ describe("PostgresEventLog.listByInstance", () => {
     expect((events[0]?.payload as Record<string, unknown>)["definitionId"]).toBe("wfd_x");
   });
 
+  // The case every offline fake in this repo could not produce, and so the reason the defect lived:
+  // node-postgres returns `occurred_at` as a `Date`, and a `WorkflowEvent.occurredAt` holding one
+  // put a `Date` into every timestamp the projection derives from an event.
+  it("renders a Date occurred_at as ISO text, keeping its milliseconds", async () => {
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.workflow_events")) {
+        return {
+          rows: [
+            {
+              event_id: "wfe_event0001",
+              tenant_id: TENANT,
+              sequence_number: 0,
+              kind: "instance_started",
+              occurred_at: new Date("2026-05-16T12:00:00.456Z"),
+              actor_principal_id: null,
+              actor_system_id: null,
+              previous_state: null,
+              new_state: null,
+              activity_id: null,
+              signal_id: null,
+              timer_id: null,
+              child_instance_id: null,
+              variable_name: null,
+              payload: {},
+              correlation_id: null,
+              causation_event_id: null,
+              instance_text_id: "wfi_inst0001",
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const resolver = new WorkflowInstanceIdResolver(conn);
+    resolver.register("wfi_inst0001", INSTANCE_UUID);
+    const log = new PostgresEventLog({ conn, instanceResolver: resolver });
+    const events = await log.listByInstance("wfi_inst0001");
+    expect(typeof events[0]?.occurredAt).toBe("string");
+    expect(events[0]?.occurredAt).toBe("2026-05-16T12:00:00.456Z");
+  });
+
+  it("refuses a row whose NOT NULL occurred_at is absent", async () => {
+    const conn = mockConnection((sql) => {
+      if (sql.includes("FROM meta.workflow_events")) {
+        return {
+          rows: [
+            {
+              event_id: "wfe_event0001",
+              tenant_id: TENANT,
+              sequence_number: 0,
+              kind: "instance_started",
+              occurred_at: null,
+              payload: {},
+              instance_text_id: "wfi_inst0001",
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const resolver = new WorkflowInstanceIdResolver(conn);
+    resolver.register("wfi_inst0001", INSTANCE_UUID);
+    const log = new PostgresEventLog({ conn, instanceResolver: resolver });
+    await expect(log.listByInstance("wfi_inst0001")).rejects.toThrow(
+      /missing required timestamp: occurred_at/,
+    );
+  });
+
   it("parses JSON-string payloads from libpq", async () => {
     const conn = mockConnection((sql) => {
       if (sql.includes("FROM meta.workflow_events")) {

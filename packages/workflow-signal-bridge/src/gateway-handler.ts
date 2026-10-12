@@ -62,7 +62,7 @@ export function createSignalBridgeHandler(
         ok: isBridgeSuccess(outcome),
         outcome: outcome.kind,
         reason: outcome.reason,
-        signalId: outcome.signalId,
+        deliveries: outcome.deliveries,
         matchedInstanceIds: outcome.matchedInstanceIds,
         deduplicated: outcome.deduplicated,
       },

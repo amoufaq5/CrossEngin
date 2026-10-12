@@ -1,5 +1,33 @@
 import type { ColumnReference, TableDefinition } from "./types.js";
 
+/**
+ * The reference a **tenant data** table's `tenant_id` carries. `ON DELETE CASCADE` is right there:
+ * it is belt-and-braces beside `eraseSharedTablesWithin`'s explicit per-table delete, and a row of a
+ * tenant's own data has no meaning once the tenant is gone.
+ *
+ * It is **wrong for the platform's record of what happened to that tenant**, and until ADR-0335 it
+ * was on 15 of the 16 tables `PLATFORM_RECORD_TABLES` protects. The erasure skips those 16 by name —
+ * the tombstone, the deletion request, the chain and its checkpoints, the audit log and its
+ * verdicts, the lifecycle events, the compliance attestations, the certification reports, the public
+ * key registry, the six access-review tables — and then ADR-0316's ordering retires the
+ * `meta.tenants` row *after* the erasure commits, and the cascade destroyed 15 of them anyway.
+ *
+ * The two consequences that make this load-bearing rather than tidy:
+ *
+ * - **`forensic_chain_entries` cascaded**, so the entry a tombstone's `chainSequenceNumber` and
+ *   `anchorHash` name was deleted by the retirement. `verifyStoredEvidence`'s `unwitnessed` defect —
+ *   which ADR-0324 declares a paging `sev1` for — was therefore true of **every** Article 17 proof
+ *   this platform has ever produced, the moment anything asked the chain rather than the column.
+ * - **`audit_log` cascaded**, and `tenant-deletion-routes.ts` retires the row and *then* records, so
+ *   the `platform.tenant_deleted` row could not be inserted at all. `record()` routes that to
+ *   `onRecordError` and the route still answers 200.
+ *
+ * `meta.tenant_tombstones` was the one exception, and it is the precedent: ADR-0318 removed its
+ * reference for exactly this reason and wrote down why. The other 15 now match it. Dropping the
+ * reference gives up the guarantee that `tenant_id` names a live tenant — which is the point, since
+ * a record of a deleted tenant must outlive it; the column keeps its type and nullability, so
+ * nothing else about these tables moves.
+ */
 const TENANT_FK: ColumnReference = {
   schema: "meta",
   table: "tenants",
@@ -12,6 +40,29 @@ const USER_FK: ColumnReference = {
   table: "users",
   column: "id",
   onDelete: "RESTRICT",
+};
+
+/**
+ * The reference the three columns that are *about* a user keep, and the only `ON DELETE` right for
+ * them (ADR-0335).
+ *
+ * `USER_FK`'s `RESTRICT` is correct for a **historical actor** — which is why ADR-0318 and ADR-0321
+ * removed it from `tenant_tombstones.executed_by` and `gdpr_deletion_requests.verified_by` rather
+ * than softening it: a person must not become undeletable *because a record names them*. It is wrong
+ * for a row that is a **derived fact about** a user. A read state, a read-through watermark and a
+ * pending digest have no meaning without the person they are for, so `RESTRICT` there would say a
+ * user cannot be removed because they once opened a notification.
+ *
+ * Latent today — retirement is `status = 'deleted'` and nothing issues a `DELETE`, which the 44
+ * remaining `RESTRICT` references force — so this is the declaration a per-subject erasure will need
+ * rather than a behaviour change now. `ON DELETE` is reconcilable in one step (ADR-0291 replaces a
+ * changed `ON DELETE`), so it is cheap now and expensive later.
+ */
+const USER_OWNED_FK: ColumnReference = {
+  schema: "meta",
+  table: "users",
+  column: "id",
+  onDelete: "CASCADE",
 };
 
 /**
@@ -43,11 +94,29 @@ export const META_TENANTS: TableDefinition = {
     },
     { name: "name", type: "TEXT", notNull: true },
     {
+      // `pending_deletion` joined the four since ADR-0334, and it is the one state the deployment
+      // was missing rather than a fifth for symmetry. `tenant-lifecycle` declared a seven-state
+      // lifecycle that nothing in the workspace read, with `READ_ONLY_STATES` and `blocksWrites`
+      // already naming the policy; this column's four values were what could actually be stored, so
+      // three of those seven were unreachable. Two were billing facts duplicated onto the tenant
+      // (`past_due` is a subscription status with its own transition map, `trial` a plan tier) and
+      // are gone from the contract. This one is a real tenant state with a real consequence:
+      // ADR-0321 made the Article 17 erasure asynchronous because a large tenant outlasts an HTTP
+      // request, and ADR-0316's ordering retires the row only *after* the erasure commits — so a
+      // tenant whose deletion was verified and queued sat `active` and went on accepting writes
+      // into data that was about to be destroyed. It is also the `fromState` `deletion_grace` and
+      // `appeal_window` name, and it is already in `READ_ONLY_STATES`.
+      //
+      // Widening a CHECK is not a tightening and cannot fail against existing rows, but
+      // `planSchemaReconciliation` cannot tell the two apart (ADR-0330), so this lands as
+      // `constraint_needs_validation` with the SQL on any populated deployment and is applied by
+      // hand there. That cost is ADR-0329's, unchanged, and is the open end this exercises.
       name: "status",
       type: "TEXT",
       notNull: true,
       default: "'active'",
-      check: "status IN ('active', 'suspended', 'archived', 'deleted')",
+      check:
+        "status IN ('active', 'suspended', 'archived', 'pending_deletion', 'deleted')",
     },
     {
       name: "tier",
@@ -122,6 +191,57 @@ export const META_USERS: TableDefinition = {
     { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "last_login_at", type: "TIMESTAMPTZ" },
+    {
+      // What `POST /v1/auth/token` verifies a password against. Nullable, and the null means *this
+      // user has no password*, which is not the same fact as a password nobody has matched — a
+      // provisioned user holds no credential until one is set, and the two must stay
+      // distinguishable (ADR-0331). It is also what keeps `provision`'s two literal INSERTs valid:
+      // a `notNull` column with no default would fail `missing_required_column` against both.
+      //
+      // Deliberately NOT the house `<name>_sha256 CHAR(64)` digest shape, because a password hash
+      // must carry the parameters it was produced under or it cannot be verified after they change,
+      // and a bare sha256 of a password is not a password hash at all. The parameters live *in* the
+      // string rather than in sibling columns, so there is one spelling of which KDF produced this
+      // value instead of a column that can disagree with the bytes beside it.
+      //
+      // A regex and not a value set: `check-admission.ts` classifies `~` as `pattern`, so this
+      // needs no `pg-value-set-domains.ts` declaration, while an `algorithm` column would have
+      // needed one for a fact this string already states.
+      name: "credential_hash",
+      type: "TEXT",
+      check:
+        "credential_hash IS NULL OR credential_hash ~" +
+        " '^scrypt\\$[0-9]+\\$[0-9]+\\$[0-9]+\\$[0-9a-f]{32}\\$[0-9a-f]{128}$'",
+    },
+    {
+      // When the password was last set. Read by nothing yet; it is the only record that would let
+      // an access review ask how old a credential is, which is the question `last_login_at`
+      // answers for sessions and nothing answers for secrets.
+      name: "credential_updated_at",
+      type: "TIMESTAMPTZ",
+    },
+    {
+      // Consecutive failed verifications since the last success. `NOT NULL DEFAULT 0` so both
+      // `provision` INSERTs stay complete and so an existing row backfills without a decision —
+      // and because *absent* and *zero* are the same fact here, unlike `credential_hash` above.
+      //
+      // Advanced in one UPDATE rather than read-modify-write: the losing side of that race is the
+      // one that *admits* an attempt, which is `meta.notification_fax_observations`' reasoning
+      // (ADR-0332) about a counter whose whole job is to stop something.
+      name: "credential_failed_attempts",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "credential_failed_attempts >= 0",
+    },
+    {
+      // Set when the attempt counter crosses the deployment's threshold; a login is refused while
+      // it is in the future. Nullable, and null means *not locked* — there is no sentinel date,
+      // because a past timestamp and a null would then both mean unlocked and only one of them
+      // would record that a lock ever happened.
+      name: "credential_locked_until",
+      type: "TIMESTAMPTZ",
+    },
   ],
   primaryKey: ["id"],
   indexes: [{ name: "idx_users_status", columns: ["status"] }],
@@ -312,7 +432,21 @@ export const META_AUDIT_LOG: TableDefinition = {
   name: "audit_log",
   columns: [
     { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
-    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    // NULL is **platform scope**: a fact about the deployment rather than about one tenant.
+    //
+    // Three escalation paths produce them and not one can honestly name a tenant — an SLO surface
+    // is not a tenant, the platform forensic chain has none, and a sweep that walks every tenant's
+    // proofs is about the walk rather than about a row. So each of them wrote **nothing at all**:
+    // the row was structurally impossible, which is why ADR-0327 had to put the page on the
+    // incident's timeline instead and why "it cannot be recorded" was stated as a constraint in
+    // four places rather than fixed in one.
+    //
+    // There is **no foreign key**, and the line that used to sit here said the opposite. It read
+    // "the foreign key stays: a NULL satisfies it" — written when ADR-0331 made the column nullable
+    // and left standing when ADR-0335 removed `TENANT_FK` from every table in the deletion path, so
+    // for two increments the comment directly above the column contradicted the comment on it.
+    // The removal is the load-bearing fact: the cascade destroyed the record of the deletion.
+    { name: "tenant_id", type: "UUID" },  // platform record: deliberately no TENANT_FK (ADR-0335) — the cascade destroyed the record of the deletion; see TENANT_FK's note
     { name: "occurred_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "actor", type: "JSONB", notNull: true },
     { name: "operation", type: "TEXT", notNull: true },
@@ -361,6 +495,28 @@ export const META_AUDIT_LOG: TableDefinition = {
         command: "SELECT",
         using: "current_setting('app.platform_audit', true) = 'on'",
       },
+      {
+        // The only route to a platform-scope row, and every part of it is load-bearing.
+        //
+        // **Its own GUC**, because `app.platform_audit` above is the cross-tenant *read* grant:
+        // reusing it would let a reader of the trail forge an entry claiming a page was delivered.
+        // That is precisely the failure ADR-0313 split one policy into two to prevent, arriving
+        // from the other direction — and the population that holds the read grant is the one whose
+        // own conduct these rows record.
+        //
+        // **`INSERT`-scoped**, because an INSERT policy carries only `WITH CHECK` and so is
+        // structurally incapable of serving as an `UPDATE`'s or `DELETE`'s `USING`. The table stays
+        // append-only at the policy as well as in `PostgresAuditEmitter`.
+        //
+        // **`tenant_id IS NULL` inside the check**, so holding this elevation buys no access to any
+        // *tenant's* chain: the isolation policy remains the only route to a tenant row and it
+        // still demands that tenant's context. All eight directions were verified live as a
+        // non-owner role, including the two that matter most — a read elevation cannot insert, and
+        // this write elevation cannot reach a tenant.
+        name: "audit_log_platform_audit_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_audit_write', true) = 'on'",
+      },
     ],
   },
 };
@@ -370,7 +526,7 @@ export const META_COMPLIANCE_ATTESTATIONS: TableDefinition = {
   name: "compliance_attestations",
   columns: [
     { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
-    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "tenant_id", type: "UUID", notNull: true },  // platform record: deliberately no TENANT_FK (ADR-0335) — the cascade destroyed the record of the deletion; see TENANT_FK's note
     { name: "pack_id", type: "TEXT", notNull: true },
     { name: "pack_version", type: "TEXT", notNull: true },
     { name: "attestation_id", type: "TEXT", notNull: true },
@@ -548,6 +704,12 @@ export const META_JOB_RUNS: TableDefinition = {
     },
     { name: "run_id", type: "UUID", notNull: true },
     { name: "trigger", type: "JSONB", notNull: true },
+    // `started_at` is the queue's **visibility** column and not a start time, which the name does
+    // not say (ADR-0355): the enqueuer writes the cron tick, `claimDueJobs` filters
+    // `started_at <= now` and orders by it, and a retry pushes it *forward* to `now + backoff` — a
+    // future instant relative to any start. Nothing records when a handler actually began;
+    // `duration_ms` comes from an in-process `execStart`, and the tick is preserved under its own
+    // name inside `trigger`. `idx_job_runs_due` on `(status, started_at)` is the due reading.
     { name: "started_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "completed_at", type: "TIMESTAMPTZ" },
     { name: "duration_ms", type: "INTEGER", check: "duration_ms IS NULL OR duration_ms >= 0" },
@@ -1184,7 +1346,32 @@ export const META_TENANT_CREDITS: TableDefinition = {
     },
     { name: "reason", type: "TEXT", notNull: true },
     { name: "expires_at", type: "TIMESTAMPTZ" },
-    { name: "issued_by", type: "UUID", notNull: true, references: USER_FK },
+    {
+      /**
+       * TEXT and unreferenced, structured rather than free text — ADR-0318's fix for
+       * `tenant_tombstones.executed_by`, applied to the table ADR-0330 found carrying the same
+       * defect.
+       *
+       * It referenced `meta.users` with `ON DELETE RESTRICT`, which makes a user undeletable
+       * *because* a credit names them as its issuer. That is latent rather than live today — this
+       * table has no writer, and `meta.users` has no `tenant_id` so a tenant deletion does not
+       * reach it — but ADR-0330 made `meta.tenant_credits` a **statutorily retained** table, so the
+       * row now deliberately outlives the deletion that would otherwise have taken it. A retention
+       * that makes a person undeletable is the defect ADR-0318 removed from a proof, and keeping it
+       * here would mean the obligation to retain a credit note silently became an obligation to
+       * retain its issuer.
+       *
+       * Structured so the rule stays checkable: an `sla_credit` raised by a breach handler has no
+       * human in it at all, while a `manual_adjustment` must name one — and free text would let
+       * `system:slo` satisfy that. The same `user:` / `system:` / `provider:` vocabulary
+       * `notification_suppressions.applied_by` uses (ADR-0302), one spelling for one idea.
+       */
+      name: "issued_by",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "issued_by ~ '^(user:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|system:[a-z][a-z0-9_-]{0,62}|provider:[a-z][a-z0-9_-]{0,62})$'",
+    },
     { name: "issued_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "applied_to_invoice_ids", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
   ],
@@ -1192,6 +1379,10 @@ export const META_TENANT_CREDITS: TableDefinition = {
   indexes: [
     { name: "idx_tenant_credits_tenant_remaining", columns: ["tenant_id", "remaining_cents"] },
     { name: "idx_tenant_credits_kind", columns: ["kind"] },
+    // Kept although its reader is gone: it existed to make `ON DELETE RESTRICT` cheap on the
+    // `meta.users` reference ADR-0331 removed. The same call ADR-0296 made for six others —
+    // dropping it from the catalog would have it reported as undeclared on every drift check
+    // until somebody dropped it from every database.
     { name: "idx_tenant_credits_issued_by", columns: ["issued_by"] },
   ],
   rls: {
@@ -1444,8 +1635,23 @@ export const META_FEATURE_FLAGS: TableDefinition = {
         // platform-chain tamper verdict is the last thing to broadcast. Same nullable column, opposite
         // intent, so opposite policy.
         name: "feature_flags_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "feature_flags_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "feature_flags_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+      },
+      {
+        name: "feature_flags_platform_update",
+        command: "UPDATE",
+        using: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
       },
     ],
   },
@@ -1460,15 +1666,21 @@ export const META_DEPLOYMENTS: TableDefinition = {
       name: "app_kind",
       type: "TEXT",
       notNull: true,
+      // These four CHECKs were authored independently of `DeploymentRecordSchema`, which is the only
+      // record this table stores, and four of its seven enum fields emitted values these constraints
+      // refused (ADR-0353): `app_kind` differed on 6 of 9 members by hyphen-versus-underscore,
+      // `target` was *entirely disjoint*, and `environment` and `strategy` differed by one each way.
+      // So the drift was neither a subset nor a superset in any of the four, which is why no nesting
+      // test could see it. They now spell what `@crossengin/deploy` declares.
       check:
-        "app_kind IN ('web', 'marketing', 'docs_site', 'ops', 'cdc_shipper', 'hl7_listener', 'virus_scanner', 'gpu_inference', 'mobile_shell')",
+        "app_kind IN ('web', 'marketing', 'docs-site', 'ops', 'cdc-shipper', 'hl7-listener', 'virus-scanner', 'gpu-inference', 'mobile-shell')",
     },
     { name: "app_id", type: "TEXT", notNull: true },
     {
       name: "environment",
       type: "TEXT",
       notNull: true,
-      check: "environment IN ('preview', 'staging', 'production', 'sandbox')",
+      check: "environment IN ('local', 'preview', 'staging', 'production')",
     },
     {
       name: "region",
@@ -1482,14 +1694,13 @@ export const META_DEPLOYMENTS: TableDefinition = {
       type: "TEXT",
       notNull: true,
       check:
-        "target IN ('vercel_edge', 'vercel_node', 'fly_machine', 'fly_gpu', 'supabase_functions', 'cloudflare_worker', 'appstore_connect', 'play_console', 'helm_release', 'docs_pages')",
+        "target IN ('vercel', 'fly_machines', 'supabase', 'cloudflare', 'typesense_cloud', 'inngest_cloud', 'clickhouse_cloud', 'ghcr', 'app_store', 'play_store')",
     },
     {
       name: "strategy",
       type: "TEXT",
       notNull: true,
-      check:
-        "strategy IN ('rolling', 'blue_green', 'canary', 'recreate')",
+      check: "strategy IN ('atomic', 'rolling', 'blue_green', 'canary')",
     },
     {
       name: "version",
@@ -2241,7 +2452,16 @@ export const META_PACK_INSTALLATIONS: TableDefinition = {
     { name: "config", type: "JSONB", notNull: true, default: "'{}'::jsonb" },
     { name: "permission_grants", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
     { name: "requested_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
-    { name: "requested_by", type: "UUID", notNull: true, references: USER_FK },
+    {
+      /**
+       * TEXT and unreferenced: this records **who did a thing**, which is history and must outlive the actor (ADR-0335). `update_policy` admits `patch_auto` / `minor_auto` / `track_latest`, so an **automatic** update
+     * installs with no requester at all. The same table already has `installed_by` / `uninstalled_by`
+     * nullable for that reason; this one is NOT NULL and could not express it.
+       */
+      name: "requested_by",
+      type: "TEXT",
+      notNull: true,
+    },
     { name: "installed_at", type: "TIMESTAMPTZ" },
     { name: "installed_by", type: "UUID", references: USER_FK },
     { name: "last_updated_at", type: "TIMESTAMPTZ" },
@@ -3189,7 +3409,17 @@ export const META_COST_ATTRIBUTION: TableDefinition = {
     policies: [
       {
         name: "cost_attribution_tenant_isolation",
-        using: "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "cost_attribution_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "cost_attribution_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -3257,7 +3487,23 @@ export const META_COST_BUDGETS: TableDefinition = {
     policies: [
       {
         name: "cost_budgets_tenant_isolation",
-        using: "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "cost_budgets_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "cost_budgets_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+      },
+      {
+        name: "cost_budgets_platform_update",
+        command: "UPDATE",
+        using: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
       },
     ],
   },
@@ -3426,7 +3672,7 @@ export const META_TENANT_LIFECYCLE_EVENTS: TableDefinition = {
   name: "tenant_lifecycle_events",
   columns: [
     { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
-    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "tenant_id", type: "UUID", notNull: true },  // platform record: deliberately no TENANT_FK (ADR-0335) — the cascade destroyed the record of the deletion; see TENANT_FK's note
     {
       name: "action",
       type: "TEXT",
@@ -3439,14 +3685,17 @@ export const META_TENANT_LIFECYCLE_EVENTS: TableDefinition = {
       type: "TEXT",
       notNull: true,
       check:
-        "from_state IN ('trial', 'active', 'past_due', 'suspended', 'archived', 'pending_deletion', 'deleted')",
+        // Five, not the seven ADR-0334 narrowed the enum from — this table was missed. `trial` is
+        // a plan tier and `past_due` is a *subscription* status with its own transition map, so the
+        // CHECK accepted two rows the contract refuses (ADR-0289's class).
+        "from_state IN ('active', 'suspended', 'archived', 'pending_deletion', 'deleted')",
     },
     {
       name: "to_state",
       type: "TEXT",
       notNull: true,
       check:
-        "to_state IN ('trial', 'active', 'past_due', 'suspended', 'archived', 'pending_deletion', 'deleted')",
+        "to_state IN ('active', 'suspended', 'archived', 'pending_deletion', 'deleted')",
     },
     {
       name: "trigger",
@@ -3456,7 +3705,18 @@ export const META_TENANT_LIFECYCLE_EVENTS: TableDefinition = {
         "trigger IN ('customer_request', 'billing_failure', 'compliance_directive', 'abuse_report', 'security_incident', 'scheduled_policy', 'platform_admin', 'support_escalation')",
     },
     { name: "occurred_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
-    { name: "actor_user_id", type: "UUID", references: USER_FK },
+    /**
+     * TEXT and unreferenced — the third instance of a conclusion this repo has reached twice already
+     * (ADR-0318 for the tombstone's actors, ADR-0321 for `verified_by`). `USER_FK` is `ON DELETE
+     * RESTRICT` into `meta.users`, which **nothing wrote**, so no event naming a human could be
+     * inserted in any deployment: measured as `Key (actor_user_id)=(…) is not present in table
+     * "users"` against `count(*) = 0`. And `LifecycleEvent.actorUserId` is `z.string().min(1)` free
+     * text, so a non-UUID actor failed at the bind with `invalid input syntax for type uuid`.
+     *
+     * Because `execute_deletion` must carry four-eyes approval by contract, the one transition that
+     * matters most was unwritable on both counts at once.
+     */
+    { name: "actor_user_id", type: "TEXT" },
     { name: "actor_system_id", type: "TEXT" },
     { name: "reason", type: "TEXT", notNull: true },
     { name: "customer_notified_at", type: "TIMESTAMPTZ" },
@@ -3473,7 +3733,9 @@ export const META_TENANT_LIFECYCLE_EVENTS: TableDefinition = {
       notNull: true,
       default: "false",
     },
-    { name: "approved_by_user_id", type: "UUID", references: USER_FK },
+    // TEXT and unreferenced: see `actor_user_id`. An approver must not become undeletable
+    // *because* they approved the request to delete somebody.
+    { name: "approved_by_user_id", type: "TEXT" },
     { name: "approved_at", type: "TIMESTAMPTZ" },
     { name: "related_incident_id", type: "TEXT" },
     { name: "notes", type: "TEXT" },
@@ -3496,6 +3758,24 @@ export const META_TENANT_LIFECYCLE_EVENTS: TableDefinition = {
         name: "tenant_lifecycle_events_isolation",
         using: TENANT_ISOLATION_USING,
       },
+      {
+        // ADR-0318's argument in the table it applies to most directly: a lifecycle trail is read
+        // *because* the subject no longer exists, so isolation alone served it only for the readers
+        // who do not need it. Verified as a non-owner after a real deletion: the isolation-only read
+        // answered **0 events** and the elevated read answered the full record.
+        //
+        // `SELECT`-scoped and split off rather than ORed into the isolation policy, for ADR-0313's
+        // reason: on an `ALL`-scope policy the `USING` also serves as the `WITH CHECK`, so a
+        // combined form would let a cross-tenant *reader* forge a transition — in the one table that
+        // is the platform's only record that a tenant ever existed.
+        //
+        // Gated on the flag and **not** on `tenant_id IS NULL`, following
+        // `meta.audit_integrity_verdicts`' read arm (ADR-0333): `tenant_id` is NOT NULL here, so a
+        // null-scope arm would match no row at all.
+        name: "tenant_lifecycle_events_platform_audit_read",
+        command: "SELECT",
+        using: "current_setting('app.platform_audit', true) = 'on'",
+      },
     ],
   },
 };
@@ -3505,7 +3785,19 @@ export const META_GDPR_DELETION_REQUESTS: TableDefinition = {
   name: "gdpr_deletion_requests",
   columns: [
     { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
-    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    /**
+     * The contract's own id, free text — `dreq_…` as this platform writes them. Separate from the
+     * surrogate `id` because `TombstoneRecord.relatedDeletionRequestId` is free text too, and a
+     * tombstone has to be able to name the request that caused it (ADR-0321).
+     */
+    {
+      name: "request_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "gdpr_deletion_requests_request_id_key" },
+      check: "request_id ~ '^dreq_[A-Za-z0-9_-]{8,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", notNull: true },  // platform record: deliberately no TENANT_FK (ADR-0335) — the cascade destroyed the record of the deletion; see TENANT_FK's note
     { name: "subject_identifier", type: "TEXT", notNull: true },
     {
       name: "legal_basis",
@@ -3531,7 +3823,12 @@ export const META_GDPR_DELETION_REQUESTS: TableDefinition = {
         "verification_method IS NULL OR verification_method IN ('email_link', 'phone_otp', 'in_app_re_authentication', 'government_id_check', 'in_person')",
     },
     { name: "verified_at", type: "TIMESTAMPTZ" },
-    { name: "verified_by", type: "UUID", references: USER_FK },
+    /**
+     * TEXT and unreferenced, for the reason ADR-0318 gave for the tombstone's actors: a deletion
+     * erases the tenant's users, and `ON DELETE RESTRICT` would have made the verifier undeletable
+     * *because they verified the request to delete them*. The contract has it as free text.
+     */
+    { name: "verified_by", type: "TEXT" },
     { name: "in_progress_at", type: "TIMESTAMPTZ" },
     { name: "completed_at", type: "TIMESTAMPTZ" },
     {
@@ -3556,12 +3853,28 @@ export const META_GDPR_DELETION_REQUESTS: TableDefinition = {
       default: "'[]'::jsonb",
     },
     { name: "notes", type: "TEXT" },
+    /**
+     * The tombstone that completed this request. Without it a `completed` request names no proof:
+     * `completion_sha256` commits to one but a digest is not a lookup key, so the record of the
+     * deletion and the record of the request for it could not be joined (ADR-0321).
+     */
+    {
+      name: "tombstone_id",
+      type: "TEXT",
+      check: "tombstone_id IS NULL OR tombstone_id ~ '^tomb_[A-Za-z0-9_-]{12,40}$'",
+    },
   ],
   primaryKey: ["id"],
   indexes: [
     {
       name: "idx_gdpr_deletion_tenant_status",
       columns: ["tenant_id", "status"],
+    },
+    /** The scheduler's claim query: find `verified` requests whose deadline is nearest. */
+    {
+      name: "idx_gdpr_deletion_due",
+      columns: ["status", "deadline_at"],
+      where: "status = 'verified'",
     },
     { name: "idx_gdpr_deletion_deadline", columns: ["deadline_at"] },
     { name: "idx_gdpr_deletion_legal_basis", columns: ["legal_basis"] },
@@ -3573,6 +3886,15 @@ export const META_GDPR_DELETION_REQUESTS: TableDefinition = {
       {
         name: "gdpr_deletion_requests_isolation",
         using: TENANT_ISOLATION_USING,
+      },
+      {
+        // Same reasoning as the tombstone's (ADR-0318): a completed request outlives the tenant it
+        // was about, so isolation alone makes it unreadable by the only people who then need it —
+        // and a regulator asking "was this request honoured?" is exactly that reader. SELECT-only, so
+        // the elevation cannot forge a request or mark one completed.
+        name: "gdpr_deletion_requests_platform_audit_read",
+        command: "SELECT",
+        using: "current_setting('app.platform_audit', true) = 'on'",
       },
     ],
   },
@@ -3744,6 +4066,52 @@ export const META_TENANT_TOMBSTONES: TableDefinition = {
     { name: "invalidation_of_prior_tombstone_id", type: "TEXT" },
     /** The per-subsystem reports the scope was composed from (ADR-0317), so the claim keeps its evidence. */
     { name: "attestations", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    /**
+     * Which domain tag the content manifest was hashed under (ADR-0329).
+     *
+     * `NOT NULL DEFAULT 'v1'` and not nullable, because the version is what a verifier *selects the
+     * hash function by*: a NULL would make "which bytes does this digest commit to" unanswerable,
+     * and every row written before this column existed was genuinely v1. Reading it back explicitly
+     * rather than inferring it from whether `capability_declaration` is populated is the point — an
+     * inference would read a declaration somebody *deleted* as an older record, a tamper that
+     * covers its own tracks.
+     */
+    {
+      name: "proof_version",
+      type: "TEXT",
+      notNull: true,
+      default: "'v1'",
+      check: "proof_version IN ('v1', 'v2', 'v3', 'v4')",
+    },
+    /**
+     * The deployment's capability declaration, inside the v2 signed bytes (ADR-0329).
+     *
+     * Nullable, and paired with the column above by the contract rather than by a CHECK: v2 must
+     * carry it and v1 must not. A cross-column CHECK would be a fourth layer, but adding one to a
+     * populated table is manual (ADR-0299) and the schema refuses both mixtures already.
+     */
+    { name: "capability_declaration", type: "JSONB" },
+    /**
+     * The obligations keeping data back, inside the v3 signed bytes (ADR-0331).
+     *
+     * Nullable with **no default**, which is the whole decision. NULL means "this record's bytes do
+     * not cover a retention claim", which is true of every v1 and v2 row; `'[]'::jsonb` is the v3
+     * claim that nothing was lawfully kept. A `DEFAULT '[]'::jsonb` would make every pre-v3 row
+     * read back as a signed empty claim — ADR-0328's "a default is applied to silence" — and since
+     * the contract pairs the field with the version, those rows would then fail to parse at all.
+     */
+    { name: "retained_obligations", type: "JSONB" },
+    /**
+     * Where this deployment kept the tenant's own records, inside the v4 signed bytes (ADR-0351).
+     *
+     * Nullable with **no default**, which is `retained_obligations`' decision for a sharper reason.
+     * NULL means "this record's bytes do not cover a record-storage declaration", true of every v1,
+     * v2 and v3 row. There is no honest default to give the others: the shape's three models are all
+     * *claims*, and `{"model":"document_rows",…}` would assert that the deployment had no typed
+     * relations — precisely the assertion ADR-0350's gap made unavailable, written onto rows whose
+     * digests never covered it, and then refused by the contract's version pairing anyway.
+     */
+    { name: "record_storage", type: "JSONB" },
     /** The chain entry this record was anchored by, written in the same transaction (ADR-0286). */
     {
       name: "chain_entry_hash",
@@ -3769,6 +4137,17 @@ export const META_TENANT_TOMBSTONES: TableDefinition = {
     { name: "idx_tenant_tombstones_deleted_at", columns: ["deleted_at"] },
     { name: "idx_tenant_tombstones_executed_by", columns: ["executed_by"] },
     { name: "idx_tenant_tombstones_approved_by", columns: ["approved_by"] },
+    // The question every reconciliation pass asks: "does a tombstone name this request?" ADR-0322
+    // made that the conclusive evidence a deletion committed, and ADR-0321's `related_deletion_
+    // request_id` is where the answer lives — so `findForRequest` runs on every stranded request on
+    // every scheduler tick, and ran as a sequential scan. Partial, because the column is NULL for
+    // every tombstone the synchronous route of ADR-0320 writes and those rows can never match a
+    // lookup by request id: indexing them would be pure bloat on the one table that only grows.
+    {
+      name: "idx_tenant_tombstones_related_request",
+      columns: ["related_deletion_request_id"],
+      where: "related_deletion_request_id IS NOT NULL",
+    },
   ],
   rls: {
     enabled: true,
@@ -4969,8 +5348,23 @@ export const META_SSO_PROVIDERS: TableDefinition = {
     policies: [
       {
         name: "sso_providers_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "sso_providers_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "sso_providers_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+      },
+      {
+        name: "sso_providers_platform_update",
+        command: "UPDATE",
+        using: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
       },
     ],
   },
@@ -5307,7 +5701,16 @@ export const META_NOTIFICATION_TEMPLATES: TableDefinition = {
       check: "body_size_bytes >= 1",
     },
     { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
-    { name: "created_by", type: "UUID", notNull: true, references: USER_FK },
+    {
+      /**
+       * TEXT and unreferenced: this records **who did a thing**, which is history and must outlive the actor (ADR-0335). A platform-seeded template has no author and a tenant's has one, and both must be storable. The
+     * four-eyes rule is string inequality (`created_by <> $actor` as an UPDATE predicate, ADR-0313)
+     * and needs no reference.
+       */
+      name: "created_by",
+      type: "TEXT",
+      notNull: true,
+    },
     { name: "approved_at", type: "TIMESTAMPTZ" },
     { name: "approved_by", type: "UUID", references: USER_FK },
     { name: "deprecated_at", type: "TIMESTAMPTZ" },
@@ -5335,8 +5738,23 @@ export const META_NOTIFICATION_TEMPLATES: TableDefinition = {
     policies: [
       {
         name: "notification_templates_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "notification_templates_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "notification_templates_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+      },
+      {
+        name: "notification_templates_platform_update",
+        command: "UPDATE",
+        using: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
       },
     ],
   },
@@ -5780,7 +6198,16 @@ export const META_NOTIFICATION_DIGESTS: TableDefinition = {
       check: "digest_id ~ '^dgst_[A-Za-z0-9_-]{8,40}$'",
     },
     { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
-    { name: "user_id", type: "UUID", notNull: true, references: USER_FK },
+    {
+      /**
+       * Keeps its reference, under CASCADE: this names **whose thing this is**, a live relation whose integrity is the point (ADR-0335). A digest is a pending batch **for** one recipient, and `digest-store.ts` takes its `userId` from
+     * `PostgresRecipientResolver` — a real membership — so the parent exists by construction.
+       */
+      name: "user_id",
+      type: "UUID",
+      notNull: true,
+      references: USER_OWNED_FK,
+    },
     {
       name: "channel",
       type: "TEXT",
@@ -5864,7 +6291,7 @@ export const META_ACCESS_REVIEW_TEMPLATES: TableDefinition = {
       unique: { constraintName: "access_review_templates_template_id_key" },
       check: "template_id ~ '^art_[a-z0-9]{8,32}$'",
     },
-    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    { name: "tenant_id", type: "UUID" },  // platform record: deliberately no TENANT_FK (ADR-0335) — the cascade destroyed the record of the deletion; see TENANT_FK's note
     {
       name: "template_key",
       type: "TEXT",
@@ -5961,8 +6388,23 @@ export const META_ACCESS_REVIEW_TEMPLATES: TableDefinition = {
     policies: [
       {
         name: "access_review_templates_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "access_review_templates_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "access_review_templates_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+      },
+      {
+        name: "access_review_templates_platform_update",
+        command: "UPDATE",
+        using: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
       },
     ],
   },
@@ -5980,7 +6422,7 @@ export const META_ACCESS_REVIEW_CAMPAIGNS: TableDefinition = {
       unique: { constraintName: "access_review_campaigns_campaign_id_key" },
       check: "campaign_id ~ '^arc_[a-z0-9]{8,32}$'",
     },
-    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "tenant_id", type: "UUID", notNull: true },  // platform record: deliberately no TENANT_FK (ADR-0335) — the cascade destroyed the record of the deletion; see TENANT_FK's note
     { name: "label", type: "TEXT", notNull: true },
     { name: "description", type: "TEXT", notNull: true },
     {
@@ -6025,7 +6467,15 @@ export const META_ACCESS_REVIEW_CAMPAIGNS: TableDefinition = {
     },
     { name: "remediation_deadline_at", type: "TIMESTAMPTZ" },
     { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
-    { name: "created_by", type: "UUID", notNull: true, references: USER_FK },
+    {
+      /**
+       * TEXT and unreferenced: this records **who did a thing**, which is history and must outlive the actor (ADR-0335). Comes from `--access-reviews-config`, a file: the *deployment* created the campaign. It is also
+     * SOC 2 evidence, so it has to outlive whoever is named.
+       */
+      name: "created_by",
+      type: "TEXT",
+      notNull: true,
+    },
     { name: "started_at", type: "TIMESTAMPTZ" },
     { name: "completed_at", type: "TIMESTAMPTZ" },
     { name: "archived_at", type: "TIMESTAMPTZ" },
@@ -6127,7 +6577,7 @@ export const META_ACCESS_REVIEW_ITEMS: TableDefinition = {
         onDelete: "CASCADE",
       },
     },
-    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "tenant_id", type: "UUID", notNull: true },  // platform record: deliberately no TENANT_FK (ADR-0335) — the cascade destroyed the record of the deletion; see TENANT_FK's note
     { name: "principal_id", type: "UUID", notNull: true },
     {
       name: "principal_type",
@@ -6267,8 +6717,17 @@ export const META_ACCESS_REVIEW_DECISIONS: TableDefinition = {
         onDelete: "RESTRICT",
       },
     },
-    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
-    { name: "decided_by_user_id", type: "UUID", notNull: true, references: USER_FK },
+    { name: "tenant_id", type: "UUID", notNull: true },  // platform record: deliberately no TENANT_FK (ADR-0335) — the cascade destroyed the record of the deletion; see TENANT_FK's note
+    {
+      /**
+       * TEXT and unreferenced: this records **who did a thing**, which is history and must outlive the actor (ADR-0335). The forcing case is in the contract: `reason: "no_response_auto_default"` is a decision with no
+     * human decider, which `auto_revoke_policy` produces. And an attestation is what a framework
+     * audits, so `RESTRICT` made a departing reviewer undeletable *because they attested*.
+       */
+      name: "decided_by_user_id",
+      type: "TEXT",
+      notNull: true,
+    },
     { name: "decided_at", type: "TIMESTAMPTZ", notNull: true },
     {
       name: "kind",
@@ -6388,7 +6847,7 @@ export const META_ACCESS_REVIEW_EXCEPTIONS: TableDefinition = {
         onDelete: "RESTRICT",
       },
     },
-    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "tenant_id", type: "UUID", notNull: true },  // platform record: deliberately no TENANT_FK (ADR-0335) — the cascade destroyed the record of the deletion; see TENANT_FK's note
     {
       name: "status",
       type: "TEXT",
@@ -6493,7 +6952,7 @@ export const META_ACCESS_REVIEW_EVIDENCE: TableDefinition = {
       unique: { constraintName: "access_review_evidence_evidence_id_key" },
       check: "evidence_id ~ '^arv_[a-z0-9]{8,32}$'",
     },
-    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "tenant_id", type: "UUID", notNull: true },  // platform record: deliberately no TENANT_FK (ADR-0335) — the cascade destroyed the record of the deletion; see TENANT_FK's note
     {
       name: "framework",
       type: "TEXT",
@@ -6573,7 +7032,14 @@ export const META_ACCESS_REVIEW_EVIDENCE: TableDefinition = {
     { name: "rejected_at", type: "TIMESTAMPTZ" },
     { name: "rejected_reason", type: "TEXT" },
     { name: "storage_uri", type: "TEXT" },
-    { name: "created_by", type: "UUID", notNull: true, references: USER_FK },
+    /**
+     * TEXT and unreferenced (ADR-0335). The tenth `NOT NULL USER_FK` with a live writer, found by
+     * giving this table one: a sealed evidence pack outlives its reviewer, so `ON DELETE RESTRICT`
+     * made a departed employee undeletable *because they compiled the pack recording their
+     * departure* — ADR-0318's complaint, and a framework audits the attestation precisely because it
+     * is history.
+     */
+    { name: "created_by", type: "TEXT", notNull: true },
     { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
   ],
   primaryKey: ["id"],
@@ -6636,8 +7102,16 @@ export const META_WORKFLOW_DEFINITIONS: TableDefinition = {
       check:
         "status IN ('draft', 'in_review', 'published', 'deprecated', 'retired')",
     },
-    { name: "states", type: "JSONB", notNull: true },
-    { name: "transitions", type: "JSONB", notNull: true },
+    // The contract's cardinality floors, in the database. A `states: '[]'` row was accepted live
+    // and then re-parse-failed on read — an ADR-0289 finding the table could simply have refused.
+    // Cheap to declare now that ADR-0330 compares a column-level CHECK rather than ignoring it.
+    { name: "states", type: "JSONB", notNull: true, check: "jsonb_array_length(states) BETWEEN 2 AND 200" },
+    {
+      name: "transitions",
+      type: "JSONB",
+      notNull: true,
+      check: "jsonb_array_length(transitions) BETWEEN 1 AND 500",
+    },
     { name: "variables", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
     { name: "timers", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
     { name: "signals", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
@@ -6661,9 +7135,39 @@ export const META_WORKFLOW_DEFINITIONS: TableDefinition = {
       check: "timeout_seconds BETWEEN 60 AND 31536000",
     },
     { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
-    { name: "created_by", type: "UUID", notNull: true, references: USER_FK },
+    {
+      /**
+       * TEXT and unreferenced: this records **who did a thing**, which is history and must outlive
+       * the actor (ADR-0335). ADR-0331 ruled out compiling definitions from a manifest partly
+       * because `createdBy` plus `publishedBy !== createdBy` "would have needed two fabricated
+       * constants differing from each other" — so the repo had already observed that a non-person
+       * author is the normal case.
+       */
+      name: "created_by",
+      type: "TEXT",
+      notNull: true,
+    },
     { name: "published_at", type: "TIMESTAMPTZ" },
-    { name: "published_by", type: "UUID", references: USER_FK },
+    {
+      /**
+       * TEXT **because `created_by` is**, and this is the half that was nearly shipped wrong.
+       *
+       * `workflow_definitions_four_eyes_check` is `published_by <> created_by`, and Postgres has no
+       * `uuid <> text` operator — so leaving this a UUID made the `CREATE TABLE` raise
+       * `operator does not exist` and took the **entire bootstrap** with it (statement #0 of 609).
+       * Every offline test passed: `meta-schema.test.ts` asserts the emitted SQL as *text*, and a
+       * string containing a comparison between two types it cannot evaluate is a perfectly
+       * well-formed string. Found by applying it to a real cluster, which is why that step is not
+       * optional (CLAUDE.md).
+       *
+       * So the rule, now enforced by `crossColumnTypeDisagreements` in the test suite: **both sides
+       * of a cross-column comparison are one type, or the constraint is not a constraint.** The
+       * reference goes for `created_by`'s reason as well — a `RESTRICT` into `meta.users` would make
+       * a person undeletable *because* they published a workflow.
+       */
+      name: "published_by",
+      type: "TEXT",
+    },
     { name: "deprecated_at", type: "TIMESTAMPTZ" },
     { name: "superseded_by_definition_id", type: "TEXT" },
     {
@@ -6680,6 +7184,28 @@ export const META_WORKFLOW_DEFINITIONS: TableDefinition = {
       columns: ["tenant_id", "definition_key", "version"],
     },
   ],
+  // The three rules the contract enforced in `superRefine` and the table did not. Each was proved
+  // live by inserting the row it should refuse, before it was declared here.
+  constraints: [
+    {
+      kind: "check",
+      name: "workflow_definitions_four_eyes_check",
+      // A published row where the author approved their own definition was accepted. Cross-column,
+      // so it can only live at the table level.
+      expression: "published_by IS NULL OR published_by <> created_by",
+    },
+    {
+      kind: "check",
+      name: "workflow_definitions_published_fields_check",
+      expression:
+        "status <> 'published' OR (published_at IS NOT NULL AND published_by IS NOT NULL)",
+    },
+    {
+      kind: "check",
+      name: "workflow_definitions_deprecated_fields_check",
+      expression: "status <> 'deprecated' OR deprecated_at IS NOT NULL",
+    },
+  ],
   indexes: [
     {
       name: "idx_workflow_definitions_tenant_key",
@@ -6688,14 +7214,44 @@ export const META_WORKFLOW_DEFINITIONS: TableDefinition = {
     { name: "idx_workflow_definitions_status", columns: ["status"] },
     { name: "idx_workflow_definitions_created_by", columns: ["created_by"] },
     { name: "idx_workflow_definitions_published_by", columns: ["published_by"] },
+    {
+      // Two **platform-wide** rows could claim one `(definition_key, version)`, because the unique
+      // constraint above leads with the nullable `tenant_id` and Postgres treats NULLs as distinct.
+      // `resolveChildDefinition` filters published rows by key, version-sorts and takes `[0]`, so
+      // two rows both claiming `checkout 1.0.0` resolved to whichever the map iteration reached
+      // first. Verified live: the pair was accepted platform-wide and refused tenant-scoped.
+      //
+      // A partial unique index rather than `UNIQUE NULLS NOT DISTINCT`, which the DDL vocabulary
+      // has no spelling for (ADR-0302's rule); `tenant_id IS NULL` is IMMUTABLE, so Postgres
+      // accepts it as an index predicate.
+      name: "idx_workflow_definitions_platform_key_version",
+      columns: ["definition_key", "version"],
+      unique: true,
+      where: "tenant_id IS NULL",
+    },
   ],
   rls: {
     enabled: true,
     policies: [
       {
         name: "workflow_definitions_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "workflow_definitions_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "workflow_definitions_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+      },
+      {
+        name: "workflow_definitions_platform_update",
+        command: "UPDATE",
+        using: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
       },
     ],
   },
@@ -6789,6 +7345,44 @@ export const META_WORKFLOW_INSTANCES: TableDefinition = {
     { name: "awaiting_activity_ids", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
     { name: "awaiting_signal_names", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
     { name: "awaiting_timer_names", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    /**
+     * The cancellation fence and what it recorded (ADR-0329's instance cancellation).
+     *
+     * `cancellation_requested_at` **is** the fence, so NULL has to stay available to mean "not
+     * requested" — a `DEFAULT now()` would fence every instance at birth. There is deliberately no
+     * new instance *status*: `status` carries a CHECK, so unlike an event kind a new value is not
+     * an additive change, and the fence being a field is ADR-0315's shape.
+     *
+     * `cancellation_requested_by` is TEXT and **not** a `meta.users` reference: the value is a
+     * user's uuid *or* a system slug, because a scheduled-timeout cancellation has no human in it
+     * — ADR-0318's `tenant_tombstones.executed_by` lesson in a second table.
+     *
+     * `cancellation_disposition` is nullable because an instance nobody asked to cancel has no
+     * disposition, and a `NOT NULL DEFAULT` would make one of the two the reading of silence —
+     * exactly what the contract refused by giving the field no `z.default()`. No cross-column
+     * CHECK ties it to the fence: the projection sets it NULL when a stored event's disposition is
+     * unreadable *while* the fence is set, so `requested_at IS NULL OR disposition IS NOT NULL`
+     * would reject a legitimately-unreadable row.
+     *
+     * `cancellation_signalled_activity_ids` is `NOT NULL DEFAULT '[]'`, matching its three
+     * `awaiting_*` siblings: "nothing was signalled" and "we do not know what was signalled" are
+     * different facts, and a nullable column collapses them (ADR-0317).
+     */
+    { name: "cancellation_requested_at", type: "TIMESTAMPTZ" },
+    { name: "cancellation_requested_by", type: "TEXT" },
+    {
+      name: "cancellation_disposition",
+      type: "TEXT",
+      // Inline, and compared since ADR-0330. Satisfied by NULL in Postgres, which is what makes a
+      // nullable column with a value CHECK coherent.
+      check: "cancellation_disposition IN ('compensate', 'abandon')",
+    },
+    {
+      name: "cancellation_signalled_activity_ids",
+      type: "JSONB",
+      notNull: true,
+      default: "'[]'::jsonb",
+    },
   ],
   primaryKey: ["id"],
   indexes: [
@@ -7052,8 +7646,18 @@ export const META_WORKFLOW_SIGNALS: TableDefinition = {
   primaryKey: ["id"],
   uniqueConstraints: [
     {
+      // `instance_id` is the fourth column because **one delivery per instance is the natural
+      // key**: `WorkflowSignal.instanceId` is singular and `matchSignalToInstance` returns one id,
+      // so a submit correlating to N instances is N signals carrying one idempotency key — which
+      // the three-column form refuses outright on the *second* row. Measured live: the fan-out
+      // threw `SignalIdempotencyConflict` and one of the two deliveries was lost.
+      //
+      // Submit-level dedup is unharmed, because `(tenant_id, signal_name, idempotency_key)` is the
+      // **prefix** of this index and that is what `PostgresSignalDeduplicator` reads. The fourth
+      // column leaves the constraint as the per-delivery race guard it should always have been.
+      // NULLs stay DISTINCT in Postgres, so keyless signals remain as unconstrained as before.
       name: "workflow_signals_tenant_name_idempotency_key",
-      columns: ["tenant_id", "signal_name", "idempotency_key"],
+      columns: ["tenant_id", "signal_name", "idempotency_key", "instance_id"],
     },
   ],
   indexes: [
@@ -7219,8 +7823,15 @@ export const META_WORKFLOW_EVENTS: TableDefinition = {
       name: "kind",
       type: "TEXT",
       notNull: true,
+      // `instance_cancellation_requested` and `activity_cancelled` are ADR-0329's two new kinds.
+      // Inline again, and safely so since ADR-0330: a column-level `check` expression **is**
+      // compared now — the probe's `conkey` tells the reconciler which name Postgres chose, so the
+      // difference is planned on an empty table and reported with its SQL on a populated one.
+      // ADR-0329 had to lift this one constraint to a named table-level form precisely because a
+      // column-level expression was never compared, which would have made widening it an invisible
+      // migration; that workaround is no longer needed and the catalog is uniform again.
       check:
-        "kind IN ('instance_started', 'instance_completed', 'instance_failed', 'instance_cancelled', 'instance_suspended', 'instance_resumed', 'state_transitioned', 'activity_scheduled', 'activity_started', 'activity_completed', 'activity_failed', 'activity_timed_out', 'activity_compensated', 'signal_received', 'signal_consumed', 'timer_scheduled', 'timer_fired', 'timer_cancelled', 'variable_updated', 'compensation_started', 'compensation_step_completed', 'compensation_completed', 'manual_action_taken', 'child_workflow_spawned', 'child_workflow_completed')",
+        "kind IN ('instance_started', 'instance_completed', 'instance_failed', 'instance_cancelled', 'instance_cancellation_requested', 'instance_suspended', 'instance_resumed', 'state_transitioned', 'activity_scheduled', 'activity_started', 'activity_completed', 'activity_failed', 'activity_timed_out', 'activity_cancelled', 'activity_compensated', 'signal_received', 'signal_consumed', 'timer_scheduled', 'timer_fired', 'timer_cancelled', 'variable_updated', 'compensation_started', 'compensation_step_completed', 'compensation_completed', 'manual_action_taken', 'child_workflow_spawned', 'child_workflow_completed')",
     },
     { name: "occurred_at", type: "TIMESTAMPTZ", notNull: true },
     { name: "actor_principal_id", type: "UUID", references: USER_FK },
@@ -7371,8 +7982,23 @@ export const META_LINEAGE_NODES: TableDefinition = {
     policies: [
       {
         name: "lineage_nodes_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "lineage_nodes_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "lineage_nodes_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
+      },
+      {
+        name: "lineage_nodes_platform_update",
+        command: "UPDATE",
+        using: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -7491,8 +8117,17 @@ export const META_LINEAGE_EDGES: TableDefinition = {
     policies: [
       {
         name: "lineage_edges_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "lineage_edges_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "lineage_edges_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -7602,8 +8237,17 @@ export const META_PROVENANCE_RECORDS: TableDefinition = {
     policies: [
       {
         name: "provenance_records_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "provenance_records_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "provenance_records_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -8011,8 +8655,23 @@ export const META_RATE_LIMIT_POLICIES: TableDefinition = {
     policies: [
       {
         name: "rate_limit_policies_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "rate_limit_policies_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "rate_limit_policies_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+      },
+      {
+        name: "rate_limit_policies_platform_update",
+        command: "UPDATE",
+        using: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
       },
     ],
   },
@@ -8087,8 +8746,17 @@ export const META_QUOTA_DEFINITIONS: TableDefinition = {
     policies: [
       {
         name: "quota_definitions_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "quota_definitions_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "quota_definitions_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
       },
     ],
   },
@@ -8195,34 +8863,71 @@ export const META_RATE_LIMIT_DECISIONS: TableDefinition = {
       check: "decision_id ~ '^rld_[a-z0-9]{8,40}$'",
     },
     { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    /**
+     * The `rlp_` identifier of the policy whose terms were applied, **declared** by the deployment
+     * rather than referenced into `meta.rate_limit_policies` (ADR-0335).
+     *
+     * It was `UUID REFERENCES meta.rate_limit_policies(id) ON DELETE RESTRICT`, which has had
+     * exactly one writable value since Phase 1 — NULL — because that table has never held a row. So
+     * `api-gateway-pg`'s checker hardcoded both columns to NULL and a persisted decision could never
+     * name the policy it applied. ADR-0334 left open whether the fix is a store or a declaration;
+     * four facts in this repository answer it, none of them an opinion:
+     *
+     * - `RouteDefinition.rateLimitPolicyId` already exists as `^rlp_` TEXT, at ~20 construction
+     *   sites, read by nothing. Which policy governs a route is a property of the route, and a route
+     *   is compiled.
+     * - **This catalog already spells a policy reference as TEXT almost everywhere.**
+     *   `meta.gateway_routes.rate_limit_policy_id` — the one table persisting *which policy governs
+     *   this route* — is TEXT with a `^rlp_` check and no foreign key, as are
+     *   `meta.throttle_events` (for both ids), `meta.autoscaling_events` and `meta.backup_records`.
+     *   Only this table and `meta.rate_limit_exceptions` used the surrogate.
+     * - A policy *store* could not write a row today: `created_by` is NOT NULL into `meta.users`,
+     *   and `status = 'active'` demands `activatedBy !== createdBy` — two fabricated distinct UUIDs,
+     *   which is ADR-0331's refused argument one notch more absolute.
+     * - The limit itself was a constructor argument on a class nothing constructed, so a stored
+     *   limit would have been a second copy of a number with no first copy.
+     *
+     * TEXT also keeps the *other* future open: if policies are ever authored into
+     * `meta.rate_limit_policies`, a decision row still only needs the identifier, which is stable
+     * across both. The UUID surrogate foreclosed the declared answer and was empty in the authored
+     * one. `quota_definition_id` is **dropped** rather than re-typed, because unlike a policy it has
+     * no declaration site anywhere — no route, manifest or contract field carries an `rlq_` id — so
+     * TEXT would be the same hole in a different type.
+     */
     {
       name: "policy_id",
-      type: "UUID",
-      references: {
-        schema: "meta",
-        table: "rate_limit_policies",
-        column: "id",
-        onDelete: "RESTRICT",
-      },
-    },
-    {
-      name: "quota_definition_id",
-      type: "UUID",
-      references: {
-        schema: "meta",
-        table: "quota_definitions",
-        column: "id",
-        onDelete: "RESTRICT",
-      },
+      type: "TEXT",
+      check: "policy_id IS NULL OR policy_id ~ '^rlp_[a-z0-9]{8,40}$'",
     },
     { name: "scope_key", type: "TEXT", notNull: true },
-    { name: "principal_id", type: "UUID", references: USER_FK },
+    /**
+     * TEXT and unreferenced (ADR-0335), for ADR-0318's and ADR-0321's reason plus one this table
+     * adds: `USER_FK` is `ON DELETE RESTRICT` into `meta.users`, and **a principal is very often not
+     * a `meta.users` row at all**. `subjectToUuid` derives an id from the IdP's subject at request
+     * time, so for every JWT principal the reference was unsatisfiable by construction, not merely
+     * by `meta.users` being empty. Measured live as a non-owner with the registry empty:
+     *
+     *   ERROR:  insert or update on table "rate_limit_decisions" violates foreign key constraint
+     *           "rate_limit_decisions_principal_id_fkey"
+     *   DETAIL:  Key is not present in table "users".
+     *
+     * And that rejection escaped the whole gateway: `GatewayRuntime.handleRequest` runs its 17
+     * stages with no try/catch, so one resolvable principal took down **every** request rather than
+     * losing one audit row.
+     */
+    { name: "principal_id", type: "TEXT" },
     {
       name: "api_key_prefix",
       type: "TEXT",
       check:
         "api_key_prefix IS NULL OR api_key_prefix ~ '^ce_(live|test)_[A-Za-z0-9]{8}$'",
     },
+    // `route` holds the route's **operationId**, which its sibling
+    // `meta.gateway_pipeline_executions.route_operation_id` says outright and this name does not
+    // (ADR-0355). It is not a path and cannot be: `RouteDefinition` carries `pathSegments` of
+    // literal/parameter/wildcard objects, the only consumer of that array compiles them to a
+    // `RegExp`, and no path renderer exists in the workspace — so a `per_route` policy written as
+    // `/v1/invoices/*` could never match a stored `invoice.list`.
     { name: "route", type: "TEXT" },
     { name: "decided_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     {
@@ -8271,10 +8976,7 @@ export const META_RATE_LIMIT_DECISIONS: TableDefinition = {
       name: "idx_rate_limit_decisions_policy",
       columns: ["policy_id"],
     },
-    {
-      name: "idx_rate_limit_decisions_quota_definition",
-      columns: ["quota_definition_id"],
-    },
+
     {
       name: "idx_rate_limit_decisions_outcome",
       columns: ["outcome"],
@@ -8293,8 +8995,17 @@ export const META_RATE_LIMIT_DECISIONS: TableDefinition = {
     policies: [
       {
         name: "rate_limit_decisions_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "rate_limit_decisions_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "rate_limit_decisions_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -8403,8 +9114,23 @@ export const META_RATE_LIMIT_EXCEPTIONS: TableDefinition = {
     policies: [
       {
         name: "rate_limit_exceptions_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "rate_limit_exceptions_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "rate_limit_exceptions_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+      },
+      {
+        name: "rate_limit_exceptions_platform_update",
+        command: "UPDATE",
+        using: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
       },
     ],
   },
@@ -8478,8 +9204,17 @@ export const META_THROTTLE_EVENTS: TableDefinition = {
     policies: [
       {
         name: "throttle_events_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "throttle_events_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "throttle_events_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -8552,7 +9287,16 @@ export const META_GATEWAY_ROUTES: TableDefinition = {
         "response_schema_sha256 IS NULL OR response_schema_sha256 ~ '^[0-9a-f]{64}$'",
     },
     { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
-    { name: "created_by", type: "UUID", notNull: true, references: USER_FK },
+    {
+      /**
+       * TEXT and unreferenced: this records **who did a thing**, which is history and must outlive the actor (ADR-0335). The strongest of the six: a route is registered by the *process* at boot, and
+     * `upsert(route, createdByUserId)` has exactly one caller in the workspace — its own test. There
+     * is no person in this story at any point.
+       */
+      name: "created_by",
+      type: "TEXT",
+      notNull: true,
+    },
   ],
   primaryKey: ["id"],
   uniqueConstraints: [
@@ -8611,7 +9355,22 @@ export const META_GATEWAY_IDEMPOTENCY_RECORDS: TableDefinition = {
       notNull: true,
       check: "request_hash_sha256 ~ '^[0-9a-f]{64}$'",
     },
-    { name: "principal_id", type: "UUID", references: USER_FK },
+    /**
+     * TEXT and unreferenced (ADR-0335), for ADR-0318's and ADR-0321's reason plus one this table
+     * adds: `USER_FK` is `ON DELETE RESTRICT` into `meta.users`, and **a principal is very often not
+     * a `meta.users` row at all**. `subjectToUuid` derives an id from the IdP's subject at request
+     * time, so for every JWT principal the reference was unsatisfiable by construction, not merely
+     * by `meta.users` being empty. Measured live as a non-owner with the registry empty:
+     *
+     *   ERROR:  insert or update on table "rate_limit_decisions" violates foreign key constraint
+     *           "rate_limit_decisions_principal_id_fkey"
+     *   DETAIL:  Key is not present in table "users".
+     *
+     * And that rejection escaped the whole gateway: `GatewayRuntime.handleRequest` runs its 17
+     * stages with no try/catch, so one resolvable principal took down **every** request rather than
+     * losing one audit row.
+     */
+    { name: "principal_id", type: "TEXT" },
     { name: "received_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "expires_at", type: "TIMESTAMPTZ", notNull: true },
     {
@@ -8729,7 +9488,22 @@ export const META_GATEWAY_PIPELINE_EXECUTIONS: TableDefinition = {
       check:
         "idempotency_outcome IS NULL OR idempotency_outcome IN ('no_key_required', 'no_key_provided', 'first_seen', 'replay_hit_match', 'replay_hit_mismatch', 'replay_in_progress', 'replay_expired', 'replay_not_allowed_for_method')",
     },
-    { name: "principal_id", type: "UUID", references: USER_FK },
+    /**
+     * TEXT and unreferenced (ADR-0335), for ADR-0318's and ADR-0321's reason plus one this table
+     * adds: `USER_FK` is `ON DELETE RESTRICT` into `meta.users`, and **a principal is very often not
+     * a `meta.users` row at all**. `subjectToUuid` derives an id from the IdP's subject at request
+     * time, so for every JWT principal the reference was unsatisfiable by construction, not merely
+     * by `meta.users` being empty. Measured live as a non-owner with the registry empty:
+     *
+     *   ERROR:  insert or update on table "rate_limit_decisions" violates foreign key constraint
+     *           "rate_limit_decisions_principal_id_fkey"
+     *   DETAIL:  Key is not present in table "users".
+     *
+     * And that rejection escaped the whole gateway: `GatewayRuntime.handleRequest` runs its 17
+     * stages with no try/catch, so one resolvable principal took down **every** request rather than
+     * losing one audit row.
+     */
+    { name: "principal_id", type: "TEXT" },
     { name: "route_operation_id", type: "TEXT" },
     {
       name: "resolved_api_version",
@@ -8782,8 +9556,17 @@ export const META_GATEWAY_PIPELINE_EXECUTIONS: TableDefinition = {
     policies: [
       {
         name: "gateway_pipeline_executions_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "gateway_pipeline_executions_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "gateway_pipeline_executions_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -8804,14 +9587,29 @@ export const META_FEATURE_FLAG_TARGETING_RULES: TableDefinition = {
       check: "rule_id ~ '^ftr_[a-z0-9]{8,40}$'",
     },
     { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    /**
+     * The flag's **contract** id (`ff_…`), referencing `meta.feature_flags.flag_id` (ADR-0335).
+     *
+     * It was `UUID REFERENCES meta.feature_flags(id)` — the surrogate key — while
+     * `TargetingRule.flagId` is `^ff_[a-z0-9]{8,32}$`, so the only value any store could supply was
+     * rejected at the bind:
+     *
+     *   ERROR:  invalid input syntax for type uuid: "ff_checkout1"
+     *
+     * ADR-0289's class, and the **third** instance in this table family: `records.ts` had already
+     * named the fix for the sibling kill-switch table and nobody carried it across. The reference
+     * points at `flag_id` rather than `id` because that is the column a rule's author holds, and the
+     * unique constraint ADR-0300 added to it is what makes it referenceable.
+     */
     {
       name: "flag_id",
-      type: "UUID",
+      type: "TEXT",
       notNull: true,
+      check: "flag_id ~ '^ff_[a-z0-9]{8,32}$'",
       references: {
         schema: "meta",
         table: "feature_flags",
-        column: "id",
+        column: "flag_id",
         onDelete: "CASCADE",
       },
     },
@@ -8833,7 +9631,12 @@ export const META_FEATURE_FLAG_TARGETING_RULES: TableDefinition = {
     { name: "is_exclusion", type: "BOOLEAN", notNull: true, default: "false" },
     { name: "description", type: "TEXT" },
     { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
-    { name: "created_by", type: "UUID", notNull: true, references: USER_FK },
+    // TEXT and unreferenced (ADR-0335): the same class as the columns Lane A's census named. With
+    // the type above fixed by hand, this was the very next refusal —
+    //   DETAIL: Key (created_by)=(…) is not present in table "users".
+    // — and the sibling column `armed_by_user_id` on the kill-switch table had already been made
+    // UUID-with-no-reference for exactly this reason.
+    { name: "created_by", type: "TEXT", notNull: true },
   ],
   primaryKey: ["id"],
   indexes: [
@@ -8855,8 +9658,17 @@ export const META_FEATURE_FLAG_TARGETING_RULES: TableDefinition = {
     policies: [
       {
         name: "feature_flag_targeting_rules_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "feature_flag_targeting_rules_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "feature_flag_targeting_rules_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
       },
     ],
   },
@@ -8968,8 +9780,23 @@ export const META_FEATURE_FLAG_KILL_SWITCHES: TableDefinition = {
     policies: [
       {
         name: "feature_flag_kill_switches_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "feature_flag_kill_switches_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "feature_flag_kill_switches_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+      },
+      {
+        name: "feature_flag_kill_switches_platform_update",
+        command: "UPDATE",
+        using: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
       },
     ],
   },
@@ -9067,8 +9894,17 @@ export const META_FEATURE_FLAG_EVALUATIONS: TableDefinition = {
     policies: [
       {
         name: "feature_flag_evaluations_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "feature_flag_evaluations_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "feature_flag_evaluations_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -9172,8 +10008,17 @@ export const META_FEATURE_FLAG_CHANGES: TableDefinition = {
     policies: [
       {
         name: "feature_flag_changes_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "feature_flag_changes_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "feature_flag_changes_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -9192,7 +10037,7 @@ export const META_CRYPTO_KEYS: TableDefinition = {
       check:
         "key_id ~ '^key_(hmac-sha256|ed25519)_[0-9A-HJKMNP-TV-Z]{26}$'",
     },
-    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    { name: "tenant_id", type: "UUID" },  // platform record: deliberately no TENANT_FK (ADR-0335) — the cascade destroyed the record of the deletion; see TENANT_FK's note
     {
       name: "algorithm",
       type: "TEXT",
@@ -9258,8 +10103,23 @@ export const META_CRYPTO_KEYS: TableDefinition = {
     policies: [
       {
         name: "crypto_keys_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "crypto_keys_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "crypto_keys_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_key_write', true) = 'on'",
+      },
+      {
+        name: "crypto_keys_platform_update",
+        command: "UPDATE",
+        using: "tenant_id IS NULL AND current_setting('app.platform_key_write', true) = 'on'",
+        check: "tenant_id IS NULL AND current_setting('app.platform_key_write', true) = 'on'",
       },
     ],
   },
@@ -9324,8 +10184,17 @@ export const META_CRYPTO_AUDIT: TableDefinition = {
     policies: [
       {
         name: "crypto_audit_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "crypto_audit_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "crypto_audit_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -9592,6 +10461,48 @@ export const META_ARCHITECT_TENANT_COST: TableDefinition = {
   },
 };
 
+/**
+ * The learned correction to the AI cost estimator, per tenant (ADR-0330).
+ *
+ * **Its own table and not columns on `architect_tenant_cost`**, which is keyed
+ * `(tenant_id, period_key)` — a figure stored there resets at every month boundary, which is the
+ * forgetting ADR-0311 left open on a monthly cadence instead of a per-restart one. What this
+ * measures is a tenant's prompt mix, which has nothing to do with a billing period.
+ *
+ * `inflation >= 1` is load-bearing rather than decorative: a factor below 1 would *deflate* the
+ * estimate, and the estimate feeds a ceiling. `worst_observed` is kept beside the live factor
+ * un-relaxed, because once the factor has relaxed "never saw anything bad" and "saw 40x and has
+ * been re-measured since" are otherwise the same number. No indexes: the primary key is the only
+ * access path either statement uses.
+ */
+export const META_ARCHITECT_ESTIMATE_INFLATION: TableDefinition = {
+  schema: "meta",
+  name: "architect_estimate_inflation",
+  columns: [
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "inflation", type: "NUMERIC(12,6)", notNull: true, default: "1", check: "inflation >= 1" },
+    {
+      name: "worst_observed",
+      type: "NUMERIC(12,6)",
+      notNull: true,
+      default: "1",
+      check: "worst_observed >= 1",
+    },
+    { name: "observations", type: "BIGINT", notNull: true, default: "0", check: "observations >= 0" },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["tenant_id"],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "architect_estimate_inflation_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
 export const META_SLO_EVALUATIONS: TableDefinition = {
   schema: "meta",
   name: "slo_evaluations",
@@ -9635,8 +10546,17 @@ export const META_SLO_EVALUATIONS: TableDefinition = {
     policies: [
       {
         name: "slo_evaluations_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "slo_evaluations_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "slo_evaluations_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -9725,8 +10645,17 @@ export const META_SLO_ENFORCEMENT_ACTIONS: TableDefinition = {
     policies: [
       {
         name: "slo_enforcement_actions_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "slo_enforcement_actions_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "slo_enforcement_actions_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -9781,8 +10710,17 @@ export const META_SLO_LATENCY_EVALUATIONS: TableDefinition = {
     policies: [
       {
         name: "slo_latency_evaluations_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "slo_latency_evaluations_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "slo_latency_evaluations_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -9979,8 +10917,23 @@ export const META_DR_FAILOVER_EXECUTIONS: TableDefinition = {
     policies: [
       {
         name: "dr_failover_executions_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "dr_failover_executions_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "dr_failover_executions_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
+      },
+      {
+        name: "dr_failover_executions_platform_update",
+        command: "UPDATE",
+        using: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -10021,8 +10974,32 @@ export const META_DR_DRILL_EXECUTIONS: TableDefinition = {
     policies: [
       {
         name: "dr_drill_executions_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "dr_drill_executions_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "dr_drill_executions_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
+      },
+      // ADR-0332 classified this table append-only by reading its store, which was INSERT-only —
+      // the exact mistake it said it had avoided for `dr_failover_executions` by following the
+      // contract's state machine instead. `DrillExecutor.recordDrillResult` amends an existing
+      // record under the same id, so the record is mutable in the same way a failover's is; the
+      // absent `DRILL_TRANSITIONS` map does not make it immutable, it only leaves which amendments
+      // are legal to the store. Measured as a non-owner before this arm existed: the platform-scope
+      // upsert raised `new row violates row-level security policy (USING expression)`, so a drill
+      // result for the readiness default (`tenantId: null`) could be written once and never
+      // completed.
+      {
+        name: "dr_drill_executions_platform_update",
+        command: "UPDATE",
+        using: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -10063,8 +11040,17 @@ export const META_DR_READINESS_SNAPSHOTS: TableDefinition = {
     policies: [
       {
         name: "dr_readiness_snapshots_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "dr_readiness_snapshots_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "dr_readiness_snapshots_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -10131,7 +11117,7 @@ export const META_CERTIFICATION_REPORTS: TableDefinition = {
       unique: { constraintName: "certification_reports_report_id_key" },
       check: "report_id ~ '^cert_[a-z0-9]{8,40}$'",
     },
-    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    { name: "tenant_id", type: "UUID" },  // platform record: deliberately no TENANT_FK (ADR-0335) — the cascade destroyed the record of the deletion; see TENANT_FK's note
     {
       name: "framework",
       type: "TEXT",
@@ -10164,8 +11150,17 @@ export const META_CERTIFICATION_REPORTS: TableDefinition = {
     policies: [
       {
         name: "certification_reports_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "certification_reports_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "certification_reports_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -10176,7 +11171,7 @@ export const META_FORENSIC_CHAIN_ENTRIES: TableDefinition = {
   name: "forensic_chain_entries",
   columns: [
     { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
-    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    { name: "tenant_id", type: "UUID" },  // platform record: deliberately no TENANT_FK (ADR-0335) — the cascade destroyed the record of the deletion; see TENANT_FK's note
     { name: "sequence_number", type: "BIGINT", notNull: true, check: "sequence_number >= 0" },
     {
       name: "kind",
@@ -10215,9 +11210,32 @@ export const META_FORENSIC_CHAIN_ENTRIES: TableDefinition = {
     enabled: true,
     policies: [
       {
-        name: "forensic_chain_entries_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        // Three policies rather than one, for ADR-0313's reason arriving on a second table. The
+        // combined `tenant_id IS NULL OR tenant_id = <guc>` was `ALL`-scope, and on an `ALL` policy
+        // the `USING` expression *also* serves as the `WITH CHECK` — so `tenant_id IS NULL` satisfied
+        // it unconditionally and **a tenant session could append to the platform chain**. Verified
+        // live as a non-owner role under a tenant's context: `INSERT 0 1`, and the next verification
+        // reported `integrity BROKEN, signatures INVALID`. Poisoning rather than forgery, but a
+        // tenant could make the platform chain read compromised on demand — which is the alarm this
+        // whole stack exists to raise.
+        name: "forensic_chain_entries_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        // The platform arm, read-only. Anyone may *read* the platform chain — an integrity pass
+        // needs to — and a `SELECT` policy carries no `WITH CHECK`, so reading cannot become writing.
+        name: "forensic_chain_entries_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        // And the write, on the same grant `meta.audit_log` uses: the chain anchors that trail, so
+        // appending to one and appending to the other are one privilege, and a second flag would be
+        // two things to configure for it. `PostgresChainLogStore`/`PostgresChainCheckpointStore` set
+        // it per platform append, transaction-locally.
+        name: "forensic_chain_entries_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_audit_write', true) = 'on'",
       },
     ],
   },
@@ -10228,7 +11246,7 @@ export const META_FORENSIC_CHAIN_CHECKPOINTS: TableDefinition = {
   name: "forensic_chain_checkpoints",
   columns: [
     { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
-    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    { name: "tenant_id", type: "UUID" },  // platform record: deliberately no TENANT_FK (ADR-0335) — the cascade destroyed the record of the deletion; see TENANT_FK's note
     { name: "sequence_number", type: "BIGINT", notNull: true, check: "sequence_number >= 0" },
     { name: "root_hash", type: "CHAR(64)", notNull: true, check: "root_hash ~ '^[0-9a-f]{64}$'" },
     { name: "checkpointed_at", type: "TIMESTAMPTZ", notNull: true },
@@ -10257,9 +11275,32 @@ export const META_FORENSIC_CHAIN_CHECKPOINTS: TableDefinition = {
     enabled: true,
     policies: [
       {
-        name: "forensic_chain_checkpoints_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        // Three policies rather than one, for ADR-0313's reason arriving on a second table. The
+        // combined `tenant_id IS NULL OR tenant_id = <guc>` was `ALL`-scope, and on an `ALL` policy
+        // the `USING` expression *also* serves as the `WITH CHECK` — so `tenant_id IS NULL` satisfied
+        // it unconditionally and **a tenant session could append to the platform chain**. Verified
+        // live as a non-owner role under a tenant's context: `INSERT 0 1`, and the next verification
+        // reported `integrity BROKEN, signatures INVALID`. Poisoning rather than forgery, but a
+        // tenant could make the platform chain read compromised on demand — which is the alarm this
+        // whole stack exists to raise.
+        name: "forensic_chain_checkpoints_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        // The platform arm, read-only. Anyone may *read* the platform chain — an integrity pass
+        // needs to — and a `SELECT` policy carries no `WITH CHECK`, so reading cannot become writing.
+        name: "forensic_chain_checkpoints_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        // And the write, on the same grant `meta.audit_log` uses: the chain anchors that trail, so
+        // appending to one and appending to the other are one privilege, and a second flag would be
+        // two things to configure for it. `PostgresChainLogStore`/`PostgresChainCheckpointStore` set
+        // it per platform append, transaction-locally.
+        name: "forensic_chain_checkpoints_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_audit_write', true) = 'on'",
       },
     ],
   },
@@ -10468,7 +11509,7 @@ export const META_AUDIT_INTEGRITY_VERDICTS: TableDefinition = {
       unique: { constraintName: "audit_integrity_verdicts_verdict_id_key" },
       check: "verdict_id ~ '^aiv_[a-z0-9]{8,40}$'",
     },
-    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    { name: "tenant_id", type: "UUID" },  // platform record: deliberately no TENANT_FK (ADR-0335) — the cascade destroyed the record of the deletion; see TENANT_FK's note
     {
       name: "verdict",
       type: "TEXT",
@@ -10546,18 +11587,66 @@ export const META_AUDIT_INTEGRITY_VERDICTS: TableDefinition = {
     enabled: true,
     policies: [
       {
+        // The name is kept although it no longer describes the policy — `feature_flags_tenant_or
+        // _platform`'s situation exactly, and for its reason: `planSchemaReconciliation` refuses to
+        // drop a policy (dropping one loosens access, and `allowLoosening` reaches foreign keys
+        // only), so a *renamed* policy needs a hand-run `DROP` in every deployment while a narrowed
+        // predicate under the same name is one `replace_policy` statement. Measured live from the
+        // shipped catalog: 1 replace + 2 creates, 0 unreconciled, applied 3/3, re-plan clean. There
+        // is no `renamedFrom` for a policy.
+        //
+        // Isolation stays `ALL`-scope rather than narrowing to the 29-table shape, and that is not
+        // a shortcut: a tenant-scope verdict is written under that tenant's context, and the write
+        // grants are `PUBLIC`-scoped settings, so a write arm not ANDed with `tenant_id IS NULL`
+        // would be a cross-tenant insert route for any session able to call `set_config`.
+        //
+        // `NULLIF(…, '')` is still load-bearing with the platform read moved out: a
+        // transaction-local `set_config` leaves the GUC *defined* at `''` once the transaction
+        // ends, and `''::UUID` raises, so a pooled connection that has served a tenant would fail
+        // here without the guard.
         name: "audit_integrity_verdicts_tenant_or_platform_audit",
-        // `NULLIF(…, '')` rather than the shared `TENANT_ISOLATION_USING`, and the reason is
-        // measured: a transaction-local `set_config` leaves the custom GUC *defined* in the session
-        // after the transaction ends, holding `''` rather than reverting to NULL. So on a pooled
-        // connection that previously served a tenant, `current_setting(…, true)::UUID` is
-        // `''::UUID`, which raises — and Postgres does not guarantee short-circuit evaluation of
-        // `OR`, so putting the flag first would not save it. That is precisely the platform-audit
-        // path, which sets no tenant: without the NULLIF, reading platform verdicts fails on any
-        // reused connection. With it, the comparison is NULL and the row is simply filtered out.
-        using:
-          "tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID" +
-          " OR current_setting('app.platform_audit', true) = 'on'",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        // ADR-0313's split, finally applied to the table ADR-0313 named and did not reach. Until
+        // this, the isolation policy above ORed the read flag into its `USING` — and on an
+        // `ALL`-scope policy the `USING` expression also serves as the `WITH CHECK`, so a session
+        // holding only the cross-tenant **read** grant could insert a forged `verified` verdict at
+        // any scope, flip a stored `compromised` one to `verified`, or delete it outright. Observed
+        // live as a non-owner across a 90-case matrix: twelve successful forgeries from a read
+        // grant (insert, update and delete at two tenant scopes and platform scope), all refused
+        // afterwards.
+        //
+        // The read stays gated on the flag rather than becoming the 29-table `tenant_id IS NULL`
+        // arm, because a platform-chain tamper verdict is the one row that must not be visible to
+        // every tenant's gateway. Same nullable column as `feature_flags`, opposite intent, so
+        // opposite policy.
+        name: "audit_integrity_verdicts_platform_audit_read",
+        command: "SELECT",
+        using: "current_setting('app.platform_audit', true) = 'on'",
+      },
+      {
+        // The only route to a platform-scope verdict, on the **record** grant and deliberately not
+        // on `app.platform_audit_write` — ADR-0332's sharpest rule read in the direction it has to
+        // be read here: a grant over the record must not reach the thing that validates the record.
+        // `audit` appends to `meta.audit_log` and the two chain tables; a verdict is the recorded
+        // claim that those appends verify, and it names the chain entry it was committed to, so one
+        // grant carrying both would let the appender certify its own appends and make the lie
+        // self-consistent. The same argument put `meta.crypto_audit` on `record` rather than `key`,
+        // and this table is already in `PLATFORM_RECORD_TABLES`.
+        //
+        // No fifth grant: the verdict writer anchors every verdict in the chain, so it holds
+        // `audit` necessarily, and a grant never held alone is a declaration with nobody to make it.
+        //
+        // `INSERT`-scoped with no `UPDATE` arm, because `verdict_id` is `aiv_` + the sha256 of the
+        // canonical report: changing any field yields a *different row*, so there is no stable
+        // handle to aim an `UPDATE` at, and an in-place edit would be ADR-0323's `scope_tampered`
+        // in the one table whose purpose is to be checkable against the chain. `DELETE` is
+        // reachable by no policy, which matters more here than on the other 31 — deleting a
+        // `compromised` verdict leaves no mismatch for anything to detect.
+        name: "audit_integrity_verdicts_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -10583,15 +11672,43 @@ export const META_NOTIFICATION_READ_STATES: TableDefinition = {
       check: "read_state_id ~ '^nrs_[A-Za-z0-9_-]{8,40}$'",
     },
     { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
-    { name: "user_id", type: "UUID", notNull: true, references: USER_FK },
     {
-      name: "dispatch_id",
+      /**
+       * Keeps its reference, under CASCADE: this names **whose thing this is**, a live relation whose integrity is the point (ADR-0335). The row *means* "this person saw this notice", so a dangling id is unattributable. ADR-0331
+     * decided this direction already — it refused non-user principals rather than relaxing the
+     * column — and that answer presumes the row, which is the gap ADR-0335 closes.
+       */
+      name: "user_id",
       type: "UUID",
       notNull: true,
+      references: USER_OWNED_FK,
+    },
+    {
+      // TEXT and referencing `notification_dispatches.dispatch_id`, not UUID referencing its `id`.
+      //
+      // Declared UUID and never written, this table had drifted behind its own contract in the way
+      // ADR-0300 found for `meta.feature_flags` and ADR-0318 for `meta.tenant_tombstones` — and in
+      // the same way, nothing noticed because nothing had ever tried to write a row.
+      // `NotificationReadState.dispatchId` is `disp_[A-Za-z0-9_-]{8,40}`, which cannot be stored in
+      // a UUID column at all, so the first `INSERT` would have failed on a schema that looked
+      // correct.
+      //
+      // The dispatch's `dispatch_id` is the right target rather than its surrogate `id`: it is the
+      // identifier the contract carries and it is unique-constrained, so it is a valid foreign key
+      // target. Translating `disp_…` to a UUID in the store instead would put a join in front of
+      // every write and turn a missing dispatch into a lookup miss rather than a constraint
+      // violation — a worse failure, and a second spelling of the same identity to keep in step.
+      name: "dispatch_id",
+      type: "TEXT",
+      notNull: true,
+      check: "dispatch_id ~ '^disp_[A-Za-z0-9_-]{8,40}$'",
       references: {
         schema: "meta",
         table: "notification_dispatches",
-        column: "id",
+        column: "dispatch_id",
+        // CASCADE, because a read state has no meaning without the notice it is about. The
+        // alternative would keep a row asserting that somebody read something that no longer
+        // exists.
         onDelete: "CASCADE",
       },
     },
@@ -10637,7 +11754,16 @@ export const META_NOTIFICATION_READ_WATERMARKS: TableDefinition = {
   columns: [
     { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
     { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
-    { name: "user_id", type: "UUID", notNull: true, references: USER_FK },
+    {
+      /**
+       * Keeps its reference, under CASCADE: this names **whose thing this is**, a live relation whose integrity is the point (ADR-0335). The same row per viewer rather than per notice. Two API keys sharing a placeholder id would
+     * share a watermark, which ADR-0331 named as worse than the 503 it caused.
+       */
+      name: "user_id",
+      type: "UUID",
+      notNull: true,
+      references: USER_OWNED_FK,
+    },
     { name: "read_through_at", type: "TIMESTAMPTZ", notNull: true },
     { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     {
@@ -10741,6 +11867,166 @@ export const META_NOTIFICATION_USER_QUIET_HOURS: TableDefinition = {
     enabled: true,
     policies: [
       { name: "notification_user_quiet_hours_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
+/**
+ * The consecutive-`fax` count ADR-0310 left open and ADR-0329 named the shape of.
+ *
+ * One row per (tenant, number), **not** an append-only log: what a threshold needs is the *current
+ * run*, and a log would make "consecutive" a query rather than a column — and would grow without
+ * bound for a fact its own next observation supersedes.
+ *
+ * A single `AnsweredBy=fax` is a detector's guess from a few hundred milliseconds of audio and must
+ * never produce a suppression (ADR-0302's rule that a safety record never widens on an inference).
+ * A *run* of them inside a window, with no answered call between, is what a threshold can be
+ * crossed by — and the row is the evidence an operator reads before trusting the block.
+ */
+export const META_NOTIFICATION_FAX_OBSERVATIONS: TableDefinition = {
+  schema: "meta",
+  name: "notification_fax_observations",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    // Normalised by `normalizeRecipientAddress` before it gets here, so this key and the
+    // suppression the run eventually justifies are derived from one string (ADR-0302).
+    { name: "recipient_address", type: "TEXT", notNull: true },
+    // `> 0`, because a run of zero *is* an absent row: a reset deletes rather than zeroing, since
+    // the two would otherwise be two spellings of one fact.
+    { name: "consecutive_count", type: "INTEGER", notNull: true, check: "consecutive_count > 0" },
+    { name: "first_observed_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "last_observed_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    // The `CallSid` the run last advanced on — the counter's only dedup key. Twilio retries a
+    // callback that did not answer 2xx, and unlike a suppression (whose id commits to its content)
+    // nothing about a count is naturally idempotent, so one call's retries would have walked a
+    // number to the threshold on their own.
+    { name: "last_call_sid", type: "TEXT" },
+    // Which branch the last observation took. Stored rather than derived in `RETURNING`, because
+    // `RETURNING` sees the *new* row while all four branches are statements about the old one.
+    {
+      name: "last_disposition",
+      type: "TEXT",
+      notNull: true,
+      check: "last_disposition IN ('started', 'advanced', 'restarted', 'duplicate')",
+    },
+    // When a run first crossed a configured threshold. `COALESCE`-stamped so a run that keeps
+    // growing past it does not walk this forward — the row has to be able to say when the block
+    // began, not when it was last reconfirmed.
+    { name: "suppressed_at", type: "TIMESTAMPTZ" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    // Total rather than predicated: the counter's `ON CONFLICT (tenant_id, recipient_address)`
+    // needs exactly this arbiter, and there is only ever one run per number.
+    {
+      name: "notification_fax_observations_tenant_address_key",
+      columns: ["tenant_id", "recipient_address"],
+      unique: true,
+    },
+    { name: "idx_notification_fax_observations_suppressed", columns: ["suppressed_at"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "notification_fax_observations_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
+/**
+ * The wrapped per-tenant data key for at-rest column encryption (ADR-0347).
+ *
+ * ADR-0338 derives that key — `HKDF(COLUMN_ENCRYPTION_SECRET, salt = tenantId, info = …)` — and
+ * stores nothing, which is why it cannot be **destroyed**: the key exists wherever the deployment
+ * secret does, so an Article 17 erasure that drops a tenant's schema leaves every backup's
+ * ciphertext recoverable forever. This table is the half that makes destruction expressible: the key
+ * is generated at random, wrapped under a KEK derived from the same deployment secret, and the
+ * wrapped bytes are the only copy.
+ *
+ * **What destroying a row buys, stated precisely, because ADR-0338 overclaimed it.** It is not
+ * "unrecoverable including from backups": the wrapped key and the ciphertext share this database, so
+ * one backup holds both. It is a **bounded deletion horizon** — after the row is gone the data is
+ * recoverable only from backups taken before that moment, and only until those expire — where a
+ * derived key gives no horizon at all. That bound is the deployment's backup retention, and a KEK
+ * held outside the backup set (a KMS, `KEY_MANAGEMENT_KINDS`' `customer-managed-byok`) is what would
+ * remove it.
+ *
+ * `tenant_id` is **NOT NULL** and there is deliberately no platform arm: a data key is always one
+ * tenant's, so `tenant_id IS NULL` would match nothing and ADR-0332's split would be three policies
+ * where one is the whole truth. The isolation policy alone is therefore not the permissive shape
+ * that sweep was about — there is no platform row to forge.
+ *
+ * It **cascades with the tenant**, which is the opposite of `PLATFORM_RECORD_TABLES`' rule and for
+ * the same reason read the other way: a table whose purpose is to outlive the tenant must not
+ * cascade, and this one's purpose is to *not* outlive it. The erasure deletes the row by name first
+ * (it carries `tenant_id`, so `eraseSharedTablesWithin` reaches it), so the cascade is a second
+ * fence rather than the mechanism.
+ */
+export const META_TENANT_DATA_KEYS: TableDefinition = {
+  schema: "meta",
+  name: "tenant_data_keys",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    /** The DEK's own generation. A rekey mints the next one; `1` is the first envelope key. */
+    {
+      name: "generation",
+      type: "INTEGER",
+      notNull: true,
+      default: "1",
+      check: "generation >= 1",
+    },
+    /**
+     * `aeadSeal(kek, dek, dataKeyWrapAad(tenantId, generation))` — `nonce || ciphertext || tag`.
+     * The AAD binds the wrap to this row's tenant and generation, so a row copied between tenants
+     * fails to unwrap and `tenant_id` is not the only thing keeping them apart.
+     */
+    { name: "wrapped_key", type: "BYTEA", notNull: true },
+    /**
+     * Which KEK generation wrapped it. Recorded rather than assumed because a KEK rotation re-wraps
+     * every DEK without re-encrypting a single column — the envelope's unambiguous win — and a
+     * row's own answer is what makes that rotation checkable mid-flight.
+     */
+    {
+      name: "kek_generation",
+      type: "INTEGER",
+      notNull: true,
+      check: "kek_generation >= 1",
+    },
+    /**
+     * Where the key came from, which is what decides whether destroying the row destroys anything.
+     *
+     * `random` is `generateDataKey()` and has no derivation path, so the row is the only copy.
+     * `seeded_from_derived` is ADR-0338's derived key stored as-is, which keeps a tenant's existing
+     * ciphertext readable through the switch and is **not shreddable** — the key is still
+     * recomputable from the deployment secret. The distinction is a column and not an inference
+     * because the shreddability claim is read off it, and a claim inferred from the key's bytes
+     * would be unanswerable.
+     */
+    {
+      name: "provenance",
+      type: "TEXT",
+      notNull: true,
+      check: "provenance IN ('random', 'seeded_from_derived')",
+    },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "tenant_data_keys_tenant_generation_key",
+      columns: ["tenant_id", "generation"],
+    },
+  ],
+  indexes: [{ name: "idx_tenant_data_keys_tenant", columns: ["tenant_id"] }],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "tenant_data_keys_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
     ],
   },
 };
@@ -10866,6 +12152,7 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_ARCHITECT_TOOL_INVOCATIONS,
   META_ARCHITECT_PROPOSALS,
   META_ARCHITECT_TENANT_COST,
+  META_ARCHITECT_ESTIMATE_INFLATION,
   META_SLO_EVALUATIONS,
   META_SLO_ENFORCEMENT_ACTIONS,
   META_SLO_LATENCY_EVALUATIONS,
@@ -10889,4 +12176,6 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_NOTIFICATION_READ_STATES,
   META_NOTIFICATION_READ_WATERMARKS,
   META_NOTIFICATION_USER_QUIET_HOURS,
+  META_NOTIFICATION_FAX_OBSERVATIONS,
+  META_TENANT_DATA_KEYS,
 ];

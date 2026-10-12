@@ -1,10 +1,10 @@
 # ADR index
 
-315 records. Generated from the ADR files themselves — regenerate rather than
+356 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 236  **Proposed:** 79
+- **Accepted:** 277  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -327,3 +327,44 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0318](0318-a-tombstone-outlives-what-it-describes.md) | A tombstone outlives what it describes, and the chain witnesses it | — | Accepted | 2026-10-03 |
 | [0319](0319-the-deletion-and-its-proof-commit-together.md) | The deletion and its proof commit together | — | Accepted | 2026-10-03 |
 | [0320](0320-the-deletion-flow-is-reachable.md) | The deletion flow is reachable, and the response is the receipt | — | Accepted | 2026-10-03 |
+| [0321](0321-the-deletion-request-is-the-handle.md) | The deletion request is the handle, and a scheduler does the work | — | Accepted | 2026-10-03 |
+| [0322](0322-a-stranded-deletion-is-reconciled-from-evidence.md) | A stranded deletion is reconciled from evidence, and an absence is not evidence | — | Accepted | 2026-10-03 |
+| [0323](0323-evidence-must-verify-before-it-is-evidence.md) | Evidence must verify before it is evidence, and the chain cannot see a scope tamper | — | Accepted | 2026-10-03 |
+| [0324](0324-a-finding-the-chain-cannot-raise-gets-an-incident.md) | A finding the chain cannot raise gets an incident | — | Accepted | 2026-10-03 |
+| [0325](0325-a-page-is-delivered-or-loudly-undelivered.md) | A page is delivered, or it is loudly undelivered | — | Accepted | 2026-10-03 |
+| [0326](0326-a-page-that-closes-itself.md) | A page that closes itself, retries itself, and leaves a record | — | Accepted | 2026-10-03 |
+| [0327](0327-the-record-a-page-leaves-and-the-proofs-nobody-read.md) | The record a page leaves, and the proofs nobody was reading | — | Accepted | 2026-10-04 |
+| [0328](0328-a-proof-nobody-asked-for-and-an-alarm-nobody-raised.md) | A proof nobody asked for, and an alarm nobody raised | — | Accepted | 2026-10-05 |
+| [0329](0329-the-erasure-nobody-performed-and-the-proof-that-could-not-say.md) | The erasure nobody performed, and the proof that could not say | — | Accepted | 2026-10-05 |
+| [0330](0330-the-constraint-nobody-compared-and-the-correction-nobody-kept.md) | The constraint nobody compared, and the correction nobody kept | — | Accepted | 2026-10-05 |
+| [0331](0331-the-row-that-could-not-exist-and-the-type-that-lied.md) | The row that could not exist, and the type that lied | — | Accepted | 2026-10-05 |
+| [0332](0332-the-defects-that-were-silences.md) | The defects that were silences | — | Accepted | 2026-10-05 |
+| [0333](0333-the-stores-that-could-not-write-and-the-workers-nobody-started.md) | The stores that could not write, and the workers nobody started | — | Accepted | 2026-10-05 |
+| [0334](0334-the-column-nobody-read-and-the-work-nobody-drove.md) | The column nobody read, and the work nobody drove | — | Accepted | 2026-10-05 |
+| [0335](0335-the-record-nobody-could-write.md) | The record nobody could write | — | Accepted | 2026-10-06 |
+| [0336](0336-the-store-nobody-constructed.md) | The store nobody constructed | — | Accepted | 2026-10-06 |
+| [0337](0337-the-detector-nobody-ran.md) | The detector nobody ran, and the key nobody could set | — | Accepted | 2026-10-06 |
+| [0338](0338-the-key-nobody-set.md) | the key nobody set, and the write that handed it back | — | Accepted | 2026-10-06 |
+| [0339](0339-the-mask-nobody-applied.md) | the mask nobody applied, and the grant nobody could make | — | Accepted | 2026-10-06 |
+| [0340](0340-the-obligation-nobody-discharged.md) | The obligation nobody discharged | — | Accepted | 2026-10-06 |
+| [0341](0341-the-attribute-nobody-read.md) | The attribute nobody read | — | Accepted | 2026-10-06 |
+| [0342](0342-the-record-nobody-could-ask-about.md) | The record nobody could ask about | — | Accepted | 2026-10-07 |
+| [0343](0343-the-refusal-that-was-a-wiring-problem.md) | The refusal that was a wiring problem | — | Accepted | 2026-10-07 |
+| [0344](0344-the-seam-that-asked-one-question.md) | The seam that could only be asked one question | — | Accepted | 2026-10-07 |
+| [0345](0345-the-denial-that-is-not-a-refusal.md) | The denial that is not a refusal | — | Accepted | 2026-10-07 |
+| [0346](0346-the-opaque-cursor-that-was-not.md) | The opaque cursor that was not | — | Accepted | 2026-10-07 |
+| [0347](0347-the-key-that-could-not-be-destroyed.md) | The key that could not be destroyed | — | Accepted | 2026-10-07 |
+| [0348](0348-the-grant-that-answered-two-questions.md) | The grant that answered two questions | — | Accepted | 2026-10-07 |
+| [0349](0349-the-rotation-that-had-no-scope.md) | The rotation that had no scope | — | Accepted | 2026-10-08 |
+| [0350](0350-the-erasure-that-reached-the-wrong-schema.md) | The erasure that reached the wrong schema | — | Accepted | 2026-10-09 |
+| [0351](0351-the-silence-that-two-deployments-shared.md) | The silence that two deployments shared | — | Accepted | 2026-10-09 |
+| [0352](0352-the-probe-that-was-one-instance-of-a-class.md) | The probe that was one instance of a class | — | Accepted | 2026-10-09 |
+| [0353](0353-the-table-that-could-not-accept-its-own-record.md) | The table that could not accept its own record | — | Accepted | 2026-10-09 |
+| [0354](0354-a-declaration-adjudicated-by-reading.md) | A declaration adjudicated by reading, and a writer that reads differently | — | Accepted | 2026-10-10 |
+| [0355](0355-the-name-that-was-the-only-signal.md) | The name that was the only signal | — | Accepted | 2026-10-10 |
+| [0356](0356-the-other-direction-the-value-moves.md) | The other direction the value moves | — | Accepted | 2026-10-10 |
+| [0357](0357-a-claim-the-deployment-does-not-make.md) | A claim the deployment does not make | — | Accepted | 2026-10-11 |
+| [0358](0358-a-perimeter-nothing-enforced.md) | A perimeter the deployment asserted and nothing enforced | — | Accepted | 2026-10-11 |
+| [0359](0359-a-surface-that-cannot-be-served.md) | A surface that cannot be served is ignored rather than refused | — | Accepted | 2026-10-12 |
+| [0360](0360-a-declaration-read-by-nobody-at-either-end.md) | A declaration read by nobody at either end | — | Accepted | 2026-10-12 |
+| [0361](0361-a-reader-whose-aperture-is-narrower-than-the-writers.md) | A reader whose aperture is narrower than the writer's | — | Accepted | 2026-10-12 |

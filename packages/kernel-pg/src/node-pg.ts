@@ -1,6 +1,8 @@
 import pg from "pg";
 
 import {
+  sslModeRequiresTls,
+  sslModeValidatesCertificate,
   type ConnectionFactory,
   type PgConfig,
   type PgConnection,
@@ -63,11 +65,24 @@ function wrapClient(client: PgPoolClient): PgConnection {
 }
 
 export function createNodePgConnection(config: PgConfig): PgConnection {
+  // Two of the three judgements here were spellings of maps in `connection.ts`, and both are read
+  // from them now rather than restated as mode-name comparisons — which is where those two
+  // predicates came from: a judgement written here *and* there can disagree about one mode with
+  // nothing noticing, and here it gates what node asks of its TLS stack while there it gates what
+  // an operator is told at boot.
+  //
+  //   - *must there be TLS at all* → `sslModeRequiresTls`, the complement of `plaintext_possible`.
+  //   - *is the peer checked* → `sslModeValidatesCertificate`, `verify-full` and nothing else.
+  //
+  // The one mode comparison that stays is `disable`, and it has to: `disable`, `allow` and `prefer`
+  // share one assurance (the channel may be plaintext) and differ only in *who declines* — so
+  // `disable` passes `ssl: false` and the other two pass nothing and let the server decide, which
+  // is the one distinction the assurance deliberately does not carry.
   const sslOption =
     config.ssl === "disable"
       ? false
-      : config.ssl === "require" || config.ssl === "verify-ca" || config.ssl === "verify-full"
-        ? { rejectUnauthorized: config.ssl === "verify-full" }
+      : sslModeRequiresTls(config.ssl)
+        ? { rejectUnauthorized: sslModeValidatesCertificate(config.ssl) }
         : undefined;
   const pool = new Pool({
     host: config.host,

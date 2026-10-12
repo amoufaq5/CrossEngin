@@ -6,6 +6,7 @@ import {
   forbidden,
   gatewayTimeout,
   idempotencyMismatch,
+  internalServerError,
   methodNotAllowed,
   notFound,
   serviceUnavailable,
@@ -117,6 +118,45 @@ describe("serviceUnavailable + gatewayTimeout", () => {
   });
 });
 
+describe("internalServerError", () => {
+  it("returns 500 with the internal-server-error problem type", () => {
+    const env = internalServerError({ reason: "the request could not be completed" });
+    expect(env.response.status).toBe(500);
+    expect(env.body.status).toBe(500);
+    expect(env.body.type).toContain("internal-server-error");
+    expect(env.body.title).toBe("Internal server error");
+  });
+
+  it("is a distinct type and status from gatewayTimeout, which it replaced on the throw path", () => {
+    const five = internalServerError({ reason: "x" });
+    const timeout = gatewayTimeout({ reason: "x" });
+    expect(five.body.type).not.toBe(timeout.body.type);
+    expect(five.response.status).not.toBe(timeout.response.status);
+  });
+
+  it("threads the correlationId, which is the caller's only handle on this path", () => {
+    const env = internalServerError({ reason: "x", correlationId: "corr-abc" });
+    expect(env.body.correlationId).toBe("corr-abc");
+  });
+
+  it("omits correlationId entirely when none was supplied", () => {
+    // Not the empty string: `x-correlation-id` is client-supplied, so absent must stay absent
+    // rather than becoming a field whose value says nothing.
+    expect(internalServerError({ reason: "x" }).body.correlationId).toBeUndefined();
+  });
+
+  it("serves application/problem+json like every other helper", () => {
+    const env = internalServerError({ reason: "x" });
+    expect(env.response.headers["content-type"]).toBe("application/problem+json");
+  });
+
+  it("produces a schema-valid body with no extensions", () => {
+    const env = internalServerError({ reason: "x" });
+    expect(env.body.extensions).toEqual({});
+    expect(ProblemDetailsResponseSchema.parse(env.body)).toEqual(env.body);
+  });
+});
+
 describe("sunsetEndpoint", () => {
   it("returns 410 + sunset header + sunsetAt extension", () => {
     const env = sunsetEndpoint({
@@ -161,6 +201,7 @@ describe("schema validation", () => {
       unprocessableEntity({ reason: "x" }),
       tooManyRequests({ retryAfterSeconds: 30 }),
       tooManyRequests({ retryAfterSeconds: 60, quotaExceeded: true }),
+      internalServerError({ reason: "x" }),
       serviceUnavailable({ reason: "x" }),
       gatewayTimeout({ reason: "x" }),
       sunsetEndpoint({ sunsetAt: "2027-01-01T00:00:00.000Z" }),

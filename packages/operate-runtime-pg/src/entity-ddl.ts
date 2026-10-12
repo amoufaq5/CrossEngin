@@ -46,6 +46,136 @@ function trigramIndexName(table: string, column: string): string {
   return name.length <= MAX_IDENTIFIER_LEN ? name : name.slice(0, MAX_IDENTIFIER_LEN);
 }
 
+export function uniqueIndexName(table: string, column: string): string {
+  const name = `${table}_${column}_uniq`;
+  return name.length <= MAX_IDENTIFIER_LEN ? name : name.slice(0, MAX_IDENTIFIER_LEN);
+}
+
+/**
+ * Index name → the field it enforces, for every unique index this plan emits.
+ *
+ * Postgres reports a `23505` with the **constraint name** and nothing else usable, so resolving it
+ * back to a field means asking the thing that generated the name. Derived from the same function
+ * the DDL uses rather than parsed out of the name, because `uniqueIndexName` truncates at 63
+ * characters and a parser would have to guess where the column started.
+ */
+export function uniqueIndexFields(plan: EntityTablePlan): ReadonlyMap<string, string> {
+  return new Map(
+    enforceableUniqueColumns(plan).map(
+      (c) => [uniqueIndexName(plan.table, c.column), c.field] as const,
+    ),
+  );
+}
+
+/** The columns of this plan whose declared uniqueness this emitter will enforce. */
+function enforceableUniqueColumns(plan: EntityTablePlan): readonly ColumnMapping[] {
+  return plan.columns.filter((c) => c.uniqueScope !== null && !c.encryptAtRest);
+}
+
+/**
+ * Why a field's declared `unique` gets no constraint.
+ *
+ * A total map, because the whole defect was that the declaration had **two** readers in the
+ * workspace and neither emitted anything: `kernel`'s `ddl/diff.ts` reads it only to *throw* when it
+ * changes, and `ui-schema.ts` copies it onto the `UiSchema` — where `unique` occurs exactly once in
+ * the whole `apps/operate-web` tree, as a type declaration, and no component reads it. So the
+ * declaration was authored, validated, hashed into `manifestHash`, serialized to every client and
+ * read by nobody at either end; "the UI said the field was unique" would at least have been a
+ * promise. A reason here is a statement that the guarantee is *withheld*, which something has to be
+ * able to report.
+ */
+export const UNIQUE_WITHHELD_REASONS = {
+  /**
+   * The column holds pgcrypto ciphertext. `pgp_sym_encrypt` is **non-deterministic**, so two rows
+   * with the same plaintext encrypt to different bytes and a UNIQUE over them never fires —
+   * verified live: both rows insert. Emitting it would be worse than emitting nothing, because an
+   * operator reading `\d` would see a constraint that cannot do its job.
+   */
+  encrypted_at_rest:
+    "the column holds pgcrypto ciphertext and pgp_sym_encrypt is non-deterministic, so a UNIQUE over it never fires",
+  /**
+   * The deployment serves this entity from the JSONB document store, which cannot carry the
+   * guarantee **at all** — not pending wiring, but by shape. Every entity's records share one
+   * catalogued table whose only UNIQUE is `(tenant_id, entity, record_id)`; `PostgresEntityStore`
+   * has no `ensureSchema`, so there is no DDL seam; and enforcing a *field* would need a partial
+   * unique expression index per (entity, field), which `META_TABLES` cannot declare because the
+   * catalog cannot know a manifest and which `diffSchema` would then report as undeclared drift on
+   * every check forever. `pg-unreachable-stores.ts` keeps *blocked by ordering* and *blocked by
+   * shape* apart for exactly this reason: calling both "unwired" sends the next person to write the
+   * thing that cannot be written honestly.
+   *
+   * Emitted by the boot survey rather than by this module, which only ever plans column tables — so
+   * the member is here, where the vocabulary is, and has no producer in this file.
+   */
+  document_store:
+    "the JSONB document store shares one table across every entity and has no DDL seam, so a per-field UNIQUE cannot be declared there",
+} as const;
+export type UniqueWithheldReason = keyof typeof UNIQUE_WITHHELD_REASONS;
+
+/** One field whose declared uniqueness this emitter will not enforce, and why. */
+export interface UniqueWithheld {
+  readonly entity: string;
+  readonly field: string;
+  readonly reason: UniqueWithheldReason;
+}
+
+/**
+ * Every column of this plan whose `unique: true` cannot be enforced, with its reason.
+ *
+ * Separate from the DDL so a caller can *report* it — the boot survey names the pairs, which is
+ * the only honest answer when the declaration comes from a builtin pack's entity and an operator
+ * cannot edit it.
+ */
+export function uniqueWithheldFor(plan: EntityTablePlan): readonly UniqueWithheld[] {
+  return plan.columns
+    .filter((c) => c.uniqueScope !== null && c.encryptAtRest)
+    .map((c) => ({ entity: plan.entity, field: c.field, reason: "encrypted_at_rest" as const }));
+}
+
+/**
+ * `CREATE UNIQUE INDEX` per column declaring `unique`, scoped by tenant and by the field's own
+ * declared scope.
+ *
+ * **`(tenant_id, …)` and never `(col)` alone**, which is the whole of why this could not be an
+ * inline `UNIQUE` in the `CREATE TABLE` and copied from the field: these tables are multi-tenant
+ * with a `(tenant_id, id)` primary key, so a bare `UNIQUE (col)` would make one tenant's
+ * `employee_number` collide with another's — a cross-tenant coupling, which is the one thing the
+ * isolation model exists to prevent. The uniqueness a pack means by `unique: true` is uniqueness
+ * *within a tenant*, and `unique: {scope: [...]}` narrows it further, within the tenant.
+ *
+ * Tenant **first** in the column list, before the declared scope: a multi-column index serves a
+ * prefix of its own columns, so leading with `tenant_id` makes the index useful to the
+ * tenant-filtered lookups every read here issues, where leading with the scope would leave it
+ * serving a cross-tenant prefix no query ever asks for.
+ *
+ * An **index** rather than a table constraint, and separately from `CREATE TABLE`, because
+ * `ensureSchema` re-runs on every boot and a `CREATE TABLE IF NOT EXISTS` no-ops on an existing
+ * table — so an inline constraint would be applied to tables created from this manifest and silently
+ * skipped for every table an earlier manifest created, which is `emitAddColumnDdl`'s reason one
+ * constraint over.
+ *
+ * **These statements can fail, and that is why they are returned separately.** Adding a unique
+ * index to a populated table with duplicates raises `23505`, and no amount of `IF NOT EXISTS`
+ * helps — the condition is in the data, not in the catalog. `kernel-pg`'s reconciler draws exactly
+ * this line (*"every step in the plan is expected to succeed; anything whose outcome depends on
+ * existing data is reported with the SQL instead"*), so the caller runs these last and reports a
+ * failure rather than taking the deployment down over rows it cannot deduplicate.
+ */
+export function emitUniqueIndexDdl(plan: EntityTablePlan): readonly string[] {
+  const qualified = qualifyTable(plan.schema, plan.table);
+  return enforceableUniqueColumns(plan).map((c) => {
+    // `uniqueScope` is non-null for everything this returns; the columns are already resolved by
+    // `columnPlanForEntity`, which refuses an unresolvable scope rather than emitting a narrower
+    // constraint than the manifest declares.
+    const scope = c.uniqueScope ?? [];
+    const cols = ["tenant_id", ...scope, c.column].map(quoteIdent).join(", ");
+    return (
+      `CREATE UNIQUE INDEX IF NOT EXISTS ${quoteIdent(uniqueIndexName(plan.table, c.column))}` +
+      ` ON ${qualified} (${cols});`
+    );
+  });
+}
+
 /**
  * Emits an additive `ADD COLUMN IF NOT EXISTS` per planned column, so a table created by an
  * earlier version of the manifest gains the fields a later one added. Without it
@@ -73,10 +203,58 @@ export function emitAddColumnDdl(plan: EntityTablePlan): string[] {
  * other entity the emitter supplies them here. Either way the table has exactly one of each
  * — the plan wins, since a planned column is also readable, filterable and sortable.
  */
+/**
+ * The clock every system timestamp is stamped from: `now()` **truncated to the millisecond**.
+ *
+ * Not decoration, and not a style choice. The wire form of a `datetime` is millisecond-resolution
+ * by construction — node-postgres builds a JS `Date` from a `TIMESTAMPTZ`, and a `Date` holds
+ * milliseconds — so `isoInstant` truncates, and a column holding microseconds serves a value that
+ * is **not the value stored**. The keyset cursor is rendered from the served value, so the seek
+ * predicate then compares a truncated instant against an untruncated column, and a row at
+ * `10:00:00.000100` satisfies `occurred > '10:00:00.000Z'` *after having been served*.
+ *
+ * Measured live, before this: a six-row table seeded at 100-microsecond spacing, walked with
+ * `limit 2`, returned `us-0 us-1 us-1 us-2 us-1 us-2 us-1 us-2 …` and **did not terminate** — the
+ * cursor never advanced past the second row. One page answered correctly; every paged walk looped.
+ * `created_at` and `updated_at` are exactly the columns this reaches, since the `auditable` trait
+ * gives them to nearly every entity and `now()` is microsecond-resolution.
+ *
+ * Fixed here, at the write, rather than by truncating in the `ORDER BY`: `date_trunc(text,
+ * timestamptz)` is **STABLE** (measured, `pg_proc.provolatile = 's'`, because its unit argument may
+ * be timezone-dependent), so truncating in the query would make the sort unindexable on every page
+ * to compensate for a precision the serving contract never carried. Storing what the contract can
+ * hold is the fix one level up.
+ */
+const MILLISECOND_NOW = "date_trunc('milliseconds', now())";
+
 const SYSTEM_TIMESTAMPS: readonly { readonly name: string; readonly sql: string }[] = [
-  { name: "created_at", sql: "TIMESTAMPTZ NOT NULL DEFAULT now()" },
-  { name: "updated_at", sql: "TIMESTAMPTZ NOT NULL DEFAULT now()" },
+  { name: "created_at", sql: `TIMESTAMPTZ NOT NULL DEFAULT ${MILLISECOND_NOW}` },
+  { name: "updated_at", sql: `TIMESTAMPTZ NOT NULL DEFAULT ${MILLISECOND_NOW}` },
 ];
+
+/**
+ * `ALTER COLUMN … SET DEFAULT` for both system timestamps.
+ *
+ * `CREATE TABLE IF NOT EXISTS` is a no-op on a table an earlier manifest created, so a deployment
+ * provisioned before {@link MILLISECOND_NOW} would keep stamping microseconds forever — the same
+ * trap `emitAddColumnDdl` exists for. A default change touches no existing row (ADR-0291 plans one
+ * on a populated table for exactly that reason) and is idempotent, so it runs on every
+ * `ensureSchema`.
+ *
+ * It does **not** rewrite rows already stamped at microsecond resolution; those keep paginating
+ * wrongly until backfilled. The detection query is exact and cheap:
+ * `SELECT count(*) FROM <table> WHERE created_at <> date_trunc('milliseconds', created_at)`.
+ */
+export function emitTimestampPrecisionDdl(plan: EntityTablePlan): string[] {
+  const qualified = qualifyTable(plan.schema, plan.table);
+  return SYSTEM_TIMESTAMPS.map(
+    (t) =>
+      `ALTER TABLE ${qualified} ALTER COLUMN ${quoteIdent(t.name)} SET DEFAULT ${MILLISECOND_NOW};`,
+  );
+}
+
+/** The millisecond-truncated clock, for the `updated_at` stamp an UPDATE writes. */
+export const MILLISECOND_NOW_SQL = MILLISECOND_NOW;
 
 /** `<type>[ NOT NULL][ DEFAULT <sql>]` for one planned column. */
 function columnType(c: ColumnMapping): string {
@@ -122,6 +300,9 @@ export function emitEntityTableDdl(plan: EntityTablePlan): string[] {
     // gained a field would leave the column missing and the very next statement (its
     // trigram index) would fail.
     ...emitAddColumnDdl(plan),
+    // After the ADD COLUMNs, because on an `auditable` entity the timestamps are *planned* columns
+    // and a table created by an earlier manifest may not hold them yet.
+    ...emitTimestampPrecisionDdl(plan),
     `CREATE INDEX IF NOT EXISTS ${quoteIdent(indexNm)} ON ${qualified} (${quoteIdent("tenant_id")});`,
     `ALTER TABLE ${qualified} ENABLE ROW LEVEL SECURITY;`,
     `DROP POLICY IF EXISTS ${quoteIdent(policyName)} ON ${qualified};`,

@@ -1,7 +1,9 @@
-import type {
-  AccessReviewCampaign,
-  AccessReviewDecision,
-  AccessReviewItem,
+import {
+  AccessReviewEvidenceSchema,
+  type AccessReviewCampaign,
+  type AccessReviewDecision,
+  type AccessReviewEvidence,
+  type AccessReviewItem,
 } from "@crossengin/access-reviews";
 
 type Timestampish = string | Date | null | undefined;
@@ -210,4 +212,114 @@ export function rowToDecision(row: DecisionRow): AccessReviewDecision {
     applicationFailedAt: toIso(row.application_failed_at),
     applicationFailureReason: row.application_failure_reason,
   };
+}
+
+/**
+ * One `meta.access_review_evidence` row as node-postgres hands it back.
+ *
+ * The rate columns are typed `unknown` rather than `number` on purpose: they are `NUMERIC(5, 4)`,
+ * and node-postgres returns `NUMERIC` as a **string** (ADR-0331's measurement). Typing them `number`
+ * would make the type system assert something false and hide the parse this mapper has to do — the
+ * same lie `compareInstanceProjection` was telling about `TIMESTAMPTZ` before ADR-0330 found it.
+ */
+export interface EvidenceRow {
+  readonly evidence_id: string;
+  readonly tenant_id: string;
+  readonly framework: AccessReviewEvidence["framework"];
+  readonly period_start_at: Timestampish;
+  readonly period_end_at: Timestampish;
+  readonly campaign_ids: unknown;
+  readonly control_mappings: unknown;
+  readonly total_items_across_campaigns: unknown;
+  readonly completion_rate: unknown;
+  readonly keep_rate: unknown;
+  readonly revoke_rate: unknown;
+  readonly auto_revoke_rate: unknown;
+  readonly exception_rate: unknown;
+  readonly strong_attestation_rate: unknown;
+  readonly overdue_rate: unknown;
+  readonly status: AccessReviewEvidence["status"];
+  readonly compiled_at: Timestampish;
+  readonly sealed_at: Timestampish;
+  readonly sealed_sha256: string | null;
+  readonly submitted_at: Timestampish;
+  readonly submitted_to_auditor_id: string | null;
+  readonly accepted_at: Timestampish;
+  readonly rejected_at: Timestampish;
+  readonly rejected_reason: string | null;
+  readonly storage_uri: string | null;
+  readonly created_by: string;
+  readonly created_at: Timestampish;
+}
+
+/** A `NUMERIC` column as a JS number, refusing rather than yielding `NaN`. */
+export function requireNumeric(value: unknown, field: string): number {
+  // `Number(null)` and `Number("")` are both `0`, so a finiteness check alone would turn an
+  // unreadable rate column into a **0% completion rate** — a figure that fails the control rather
+  // than a value nobody can read. Caught by this module's own test, which is the second time the
+  // same two-line coercion has been wrong in this increment.
+  const n =
+    value === null || value === undefined || value === ""
+      ? Number.NaN
+      : typeof value === "number"
+        ? value
+        : Number(value);
+  if (!Number.isFinite(n)) {
+    throw new Error(`row column ${field} is not a finite number: ${JSON.stringify(value)}`);
+  }
+  return n;
+}
+
+function requireStringArray(value: unknown, field: string): string[] {
+  const raw = typeof value === "string" ? (JSON.parse(value) as unknown) : value;
+  if (!Array.isArray(raw) || !raw.every((v): v is string => typeof v === "string")) {
+    throw new Error(`row column ${field} is not a string array`);
+  }
+  return [...raw];
+}
+
+/**
+ * Re-parses a stored evidence row through `AccessReviewEvidenceSchema`.
+ *
+ * Through the real schema rather than a loose mirror plus a cast (ADR-0329's rule): the row's
+ * status↔required-field pairing — a `sealed` pack carrying `sealedAt` + `sealedSha256` +
+ * `storageUri` — is a `superRefine`, not a CHECK, so a row edited into a shape the contract forbids
+ * is only caught here.
+ */
+export function rowToEvidence(row: EvidenceRow): AccessReviewEvidence {
+  return AccessReviewEvidenceSchema.parse({
+    id: row.evidence_id,
+    tenantId: row.tenant_id,
+    framework: row.framework,
+    periodStartAt: requireIso(row.period_start_at, "period_start_at"),
+    periodEndAt: requireIso(row.period_end_at, "period_end_at"),
+    campaignIds: requireStringArray(row.campaign_ids, "campaign_ids"),
+    controlMappings: requireStringArray(row.control_mappings, "control_mappings"),
+    totalItemsAcrossCampaigns: requireNumeric(
+      row.total_items_across_campaigns,
+      "total_items_across_campaigns",
+    ),
+    completionRate: requireNumeric(row.completion_rate, "completion_rate"),
+    keepRate: requireNumeric(row.keep_rate, "keep_rate"),
+    revokeRate: requireNumeric(row.revoke_rate, "revoke_rate"),
+    autoRevokeRate: requireNumeric(row.auto_revoke_rate, "auto_revoke_rate"),
+    exceptionRate: requireNumeric(row.exception_rate, "exception_rate"),
+    strongAttestationRate: requireNumeric(
+      row.strong_attestation_rate,
+      "strong_attestation_rate",
+    ),
+    overdueRate: requireNumeric(row.overdue_rate, "overdue_rate"),
+    status: row.status,
+    compiledAt: toIso(row.compiled_at),
+    sealedAt: toIso(row.sealed_at),
+    sealedSha256: row.sealed_sha256,
+    submittedAt: toIso(row.submitted_at),
+    submittedToAuditorId: row.submitted_to_auditor_id,
+    acceptedAt: toIso(row.accepted_at),
+    rejectedAt: toIso(row.rejected_at),
+    rejectedReason: row.rejected_reason,
+    storageUri: row.storage_uri,
+    createdBy: row.created_by,
+    createdAt: requireIso(row.created_at, "created_at"),
+  });
 }

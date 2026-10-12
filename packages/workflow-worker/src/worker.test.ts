@@ -123,4 +123,57 @@ describe("WorkflowTimerWorker loop", () => {
     await worker.stop(); // never started → no-op
     expect(worker.isRunning).toBe(false);
   });
+  it("stop() releases the rest of the in-flight batch instead of firing it", async () => {
+    const released: string[] = [];
+    const processed: string[] = [];
+    const skipped: string[] = [];
+    let firstStarted!: () => void;
+    const started = new Promise<void>((r) => (firstStarted = r));
+    let finishFirst!: () => void;
+    const held = new Promise<void>((r) => (finishFirst = r));
+    const worker = new WorkflowTimerWorker({
+      workerId: "w",
+      claimer: {
+        claim: async () => [timer("a"), timer("b"), timer("c")],
+        release: async ({ timerId }) => void released.push(timerId),
+      },
+      processor: {
+        process: async (t) => {
+          processed.push(t.timerId);
+          if (t.timerId === "a") {
+            firstStarted();
+            await held; // the fire is in flight while the stop lands
+          }
+        },
+      },
+      idlePollMs: 0,
+      activePollMs: 0,
+      now: () => new Date("2026-01-01T00:00:00.000Z"),
+      sleep: async () => undefined,
+      onSkipped: (t, reason) => void skipped.push(`${t.timerId}:${reason}`),
+    });
+    worker.start();
+    await started;
+    const stopping = worker.stop();
+    finishFirst();
+    await stopping;
+    // The item already in flight is awaited; the two that had not started are handed back, so
+    // another replica re-claims them at once rather than waiting out the lease.
+    expect(processed).toEqual(["a"]);
+    expect(skipped).toEqual(["b:worker_stopping", "c:worker_stopping"]);
+    expect(released).toEqual(["b", "c"]);
+  });
+
+  it("runOnce() on a worker that was never started is not fenced", async () => {
+    const processed: string[] = [];
+    const worker = new WorkflowTimerWorker({
+      workerId: "w",
+      claimer: { claim: async () => [timer("a")], release: async () => undefined },
+      processor: { process: async (t) => void processed.push(t.timerId) },
+      sleep: async () => undefined,
+    });
+    const result = await worker.runOnce();
+    expect(result.skipped).toEqual([]);
+    expect(processed).toEqual(["a"]);
+  });
 });

@@ -35,6 +35,119 @@ describe("validateManifest — data classification", () => {
     expect(() => validateManifest(m)).toThrow(/auditable/);
   });
 
+  // The whole invariant was bypassable by moving the declaration one level out: the identical
+  // field was refused on `entity.fields` and accepted on a trait, while the served table carried
+  // the same column either way. A validation rule whose predicate is narrower than the artifact it
+  // constrains is a spelling convention, not a rule.
+  it("rejects a phi field a TRAIT contributes to a non-auditable entity", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMetaC,
+      traits: [
+        {
+          name: "clinical",
+          fields: [{ name: "value_text", type: { kind: "long_text" }, classification: "phi" }],
+        },
+      ],
+      entities: [
+        { name: "Observation", traits: ["clinical"], fields: [{ name: "label", type: { kind: "text" } }] },
+      ],
+    };
+    expect(() => validateManifest(m)).toThrow(/auditable/);
+  });
+
+  it("names the trait path and both remedies, because a trait is shared and this entity is not", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMetaC,
+      traits: [
+        {
+          name: "clinical",
+          fields: [{ name: "mrn", type: { kind: "text", maxLength: 32 }, classification: "regulated" }],
+        },
+      ],
+      entities: [
+        { name: "Chart", traits: ["clinical"], fields: [{ name: "label", type: { kind: "text" } }] },
+      ],
+    };
+    try {
+      validateManifest(m);
+      throw new Error("expected a refusal");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ManifestValidationError);
+      const e = err as ManifestValidationError;
+      expect(e.path).toBe("entities[0].traits");
+      // Ordered, so a message that merely contains the words in another arrangement fails.
+      expect(e.message).toMatch(
+        /'Chart\.mrn' arrives from a trait.*'regulated'.*add 'auditable'.*or drop the classification from the trait.*changes every entity carrying it/s,
+      );
+    }
+  });
+
+  it("accepts a trait-contributed phi field once the entity carries 'auditable'", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMetaC,
+      traits: [
+        {
+          name: "clinical",
+          fields: [{ name: "value_text", type: { kind: "long_text" }, classification: "phi" }],
+        },
+      ],
+      entities: [
+        {
+          name: "Observation",
+          traits: ["clinical", "auditable"],
+          fields: [{ name: "label", type: { kind: "text" } }],
+        },
+      ],
+    };
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  it("allows a trait-contributed pii field on a non-auditable entity, as for an own field", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMetaC,
+      traits: [
+        {
+          name: "contact_bearing",
+          fields: [{ name: "personal_email", type: { kind: "email" }, classification: "pii" }],
+        },
+      ],
+      entities: [
+        { name: "Contact", traits: ["contact_bearing"], fields: [{ name: "label", type: { kind: "text" } }] },
+      ],
+    };
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  // The own-field arm must still win for an own field, so the two loops cannot be collapsed into
+  // the trait one: the path and the remedy differ by where the declaration is.
+  it("still reports an own field at its fields[] index rather than at the trait path", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMetaC,
+      traits: [{ name: "clinical", fields: [{ name: "note", type: { kind: "long_text" } }] }],
+      entities: [
+        {
+          name: "Observation",
+          traits: ["clinical"],
+          fields: [
+            { name: "label", type: { kind: "text" } },
+            { name: "value_text", type: { kind: "long_text" }, classification: "phi" },
+          ],
+        },
+      ],
+    };
+    try {
+      validateManifest(m);
+      throw new Error("expected a refusal");
+    } catch (err) {
+      expect((err as ManifestValidationError).path).toBe("entities[0].fields[1].classification");
+    }
+  });
+
   it("allows a pii field on a non-auditable entity (no audit requirement)", () => {
     const m: Manifest = {
       manifestVersion: "1.0",
@@ -119,6 +232,98 @@ describe("validateManifest — entities", () => {
       ],
     };
     expect(() => validateManifest(m)).toThrow(/Patient/);
+  });
+});
+
+describe("validateManifest — a unique scope", () => {
+  // `UniqueHintSchema` is `boolean | {scope: string[]}` and has been since it was written, while
+  // nothing read either form until now. These rules are validation errors and not boot refusals on
+  // ADR-0348's split: both are properties of the manifest alone, so they are decidable by a pack
+  // author, by `crossengin validate`, by the pack's own suite and by the reviewer approving what
+  // the Architect designed — and a rule checkable earlier should be.
+  const scoped = (scope: readonly string[], extra: readonly string[] = []): Manifest => ({
+    manifestVersion: "1.0",
+    meta: baseMeta,
+    entities: [
+      {
+        name: "Employee",
+        fields: [
+          ...extra.map((n) => ({ name: n, type: { kind: "text" } }) as const),
+          { name: "staff_no", type: { kind: "text" }, unique: { scope: [...scope] } },
+        ],
+      },
+    ],
+  });
+
+  it("accepts a scope naming a sibling field", () => {
+    expect(() => validateManifest(scoped(["dept"], ["dept"]))).not.toThrow();
+  });
+
+  it("accepts the unscoped boolean form", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [
+        { name: "Employee", fields: [{ name: "staff_no", type: { kind: "text" }, unique: true }] },
+      ],
+    };
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  it("throws on a scope naming a field the entity does not have", () => {
+    expect(() => validateManifest(scoped(["dept"]))).toThrow(ManifestValidationError);
+    expect(() => validateManifest(scoped(["dept"]))).toThrow(/'dept'/);
+  });
+
+  it("names the entity in the refusal, because a field name may be declared on several", () => {
+    expect(() => validateManifest(scoped(["dept"]))).toThrow(/Employee\.staff_no/);
+  });
+
+  it("throws on a scope naming the field itself", () => {
+    // Self-scoping degenerates to the unscoped form, so it is not wrong so much as a declaration
+    // that does not say what its author thinks — the same class as the rule above, same remedy.
+    expect(() => validateManifest(scoped(["staff_no"]))).toThrow(/unique: true/);
+  });
+
+  it("accepts a scope naming a TRAIT-supplied field", () => {
+    // Over `resolvedFields`, not `entity.fields`: a unique field and the field its scope names can
+    // both arrive from a trait, and a rule reading the raw list while the emitter resolves traits
+    // is a divergence this repo keeps finding.
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [
+        {
+          name: "Visit",
+          traits: ["auditable"],
+          fields: [{ name: "ref", type: { kind: "text" }, unique: { scope: ["created_by"] } }],
+        },
+      ],
+    };
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  it("checks a unique field CONTRIBUTED by a trait", () => {
+    // The negative control for the sentence above: if the rule read `entity.fields` this manifest
+    // would pass, because the only declaration is on the trait.
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      traits: [
+        {
+          name: "coded",
+          fields: [{ name: "code", type: { kind: "text" }, unique: { scope: ["nope"] } }],
+        },
+      ],
+      entities: [
+        {
+          name: "Thing",
+          traits: ["coded"],
+          fields: [{ name: "label", type: { kind: "text" } }],
+        },
+      ],
+    };
+    expect(() => validateManifest(m)).toThrow(/'nope'/);
   });
 });
 
@@ -358,7 +563,13 @@ describe("validateManifest — permissions", () => {
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+        {
+          name: "Prescription",
+          fields: [
+            { name: "qty", type: { kind: "integer" } },
+            { name: "status", type: { kind: "text" } },
+          ],
+        },
       ],
       roles: baseRoles,
       permissions: {
@@ -376,7 +587,13 @@ describe("validateManifest — permissions", () => {
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+        {
+          name: "Prescription",
+          fields: [
+            { name: "qty", type: { kind: "integer" } },
+            { name: "status", type: { kind: "text" } },
+          ],
+        },
       ],
       roles: baseRoles,
       permissions: {
@@ -391,7 +608,13 @@ describe("validateManifest — permissions", () => {
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+        {
+          name: "Prescription",
+          fields: [
+            { name: "qty", type: { kind: "integer" } },
+            { name: "status", type: { kind: "text" } },
+          ],
+        },
       ],
       roles: baseRoles,
       permissions: {
@@ -406,7 +629,13 @@ describe("validateManifest — permissions", () => {
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+        {
+          name: "Prescription",
+          fields: [
+            { name: "qty", type: { kind: "integer" } },
+            { name: "status", type: { kind: "text" } },
+          ],
+        },
       ],
       workflows: {
         lifecycle: {
@@ -433,7 +662,13 @@ describe("validateManifest — permissions", () => {
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+        {
+          name: "Prescription",
+          fields: [
+            { name: "qty", type: { kind: "integer" } },
+            { name: "status", type: { kind: "text" } },
+          ],
+        },
       ],
       roles: baseRoles,
       permissions: {
@@ -471,7 +706,13 @@ describe("validateManifest — permissions", () => {
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+        {
+          name: "Prescription",
+          fields: [
+            { name: "qty", type: { kind: "integer" } },
+            { name: "status", type: { kind: "text" } },
+          ],
+        },
       ],
       roles: baseRoles,
       permissions: {
@@ -490,7 +731,13 @@ describe("validateManifest — workflows", () => {
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+        {
+          name: "Prescription",
+          fields: [
+            { name: "qty", type: { kind: "integer" } },
+            { name: "status", type: { kind: "text" } },
+          ],
+        },
       ],
       workflows: {
         lifecycle: {
@@ -527,7 +774,13 @@ describe("validateManifest — workflows", () => {
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+        {
+          name: "Prescription",
+          fields: [
+            { name: "qty", type: { kind: "integer" } },
+            { name: "status", type: { kind: "text" } },
+          ],
+        },
       ],
       workflows: {
         lifecycle: {
@@ -548,7 +801,13 @@ describe("validateManifest — workflows", () => {
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+        {
+          name: "Prescription",
+          fields: [
+            { name: "qty", type: { kind: "integer" } },
+            { name: "status", type: { kind: "text" } },
+          ],
+        },
       ],
       workflows: {
         lifecycle: {
@@ -569,7 +828,13 @@ describe("validateManifest — workflows", () => {
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+        {
+          name: "Prescription",
+          fields: [
+            { name: "qty", type: { kind: "integer" } },
+            { name: "status", type: { kind: "text" } },
+          ],
+        },
       ],
       workflows: {
         lifecycle: {
@@ -598,7 +863,13 @@ describe("validateManifest — workflows", () => {
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+        {
+          name: "Prescription",
+          fields: [
+            { name: "qty", type: { kind: "integer" } },
+            { name: "status", type: { kind: "text" } },
+          ],
+        },
       ],
       workflows: {
         lifecycle: {
@@ -612,6 +883,85 @@ describe("validateManifest — workflows", () => {
       },
     };
     expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  // The state field has to exist, and until this check it did not have to: `stateField` was
+  // `z.string().min(1)` and the only test on an `entityLifecycle` was that its *entity* resolves.
+  // One live member, in `erp-construction`, whose `WorkOrder` replaced core's with one whose column
+  // is `status` while core's inherited lifecycle still named `state` — and the damage landed on the
+  // list surface, where `withLifecycleStateFilter` turns the state field into a filterable column
+  // unconditionally.
+  it("throws when a lifecycle names a state field the entity does not have", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [
+        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+      ],
+      workflows: {
+        lifecycle: {
+          kind: "entityLifecycle",
+          entity: "Prescription",
+          stateField: "state",
+          states: [{ name: "pending" }, { name: "done", category: "terminal" }],
+          initialState: "pending",
+          transitions: [{ name: "complete", from: "pending", to: "done" }],
+        },
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(/state field 'state' is not a field of entity/);
+  });
+
+  it("accepts a state field contributed by a trait", () => {
+    // Through `fieldsByEntity`, which is `resolvedFields` + `id` — so a trait-supplied state field
+    // is accepted, because the served table really does have a column for it. A name check against
+    // `entity.fields` alone would have refused this.
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      traits: [
+        { name: "stateful", fields: [{ name: "state", type: { kind: "text" } }] },
+      ],
+      entities: [
+        {
+          name: "Prescription",
+          traits: ["stateful"],
+          fields: [{ name: "qty", type: { kind: "integer" } }],
+        },
+      ],
+      workflows: {
+        lifecycle: {
+          kind: "entityLifecycle",
+          entity: "Prescription",
+          stateField: "state",
+          states: [{ name: "pending" }, { name: "done", category: "terminal" }],
+          initialState: "pending",
+          transitions: [{ name: "complete", from: "pending", to: "done" }],
+        },
+      },
+    };
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  it("does not reach the state-field check for an unknown entity", () => {
+    // Ordering: the entity check fires first, so an operator is told the entity does not exist
+    // rather than being told its state field is missing — which would be true and useless.
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [{ name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] }],
+      workflows: {
+        lifecycle: {
+          kind: "entityLifecycle",
+          entity: "Ghost",
+          stateField: "state",
+          states: [{ name: "pending" }, { name: "done", category: "terminal" }],
+          initialState: "pending",
+          transitions: [{ name: "complete", from: "pending", to: "done" }],
+        },
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(/references unknown entity 'Ghost'/);
   });
 });
 
@@ -860,7 +1210,10 @@ describe("validateManifest — jobs", () => {
 describe("validateManifest — reports + dashboards", () => {
   const entityFixture = {
     name: "Prescription",
-    fields: [{ name: "qty", type: { kind: "integer" as const } }],
+    fields: [
+      { name: "qty", type: { kind: "integer" as const } },
+      { name: "status", type: { kind: "text" as const } },
+    ],
   };
 
   it("accepts a manifest with valid reports + dashboards", () => {
@@ -936,7 +1289,10 @@ describe("validateManifest — reports + dashboards", () => {
 describe("validateManifest — views", () => {
   const entityFixture = {
     name: "Prescription",
-    fields: [{ name: "qty", type: { kind: "integer" as const } }],
+    fields: [
+      { name: "qty", type: { kind: "integer" as const } },
+      { name: "status", type: { kind: "text" as const } },
+    ],
   };
 
   it("accepts a list view referencing a record view + workflow transition", () => {
@@ -1457,5 +1813,118 @@ describe("validateManifest — search", () => {
     expect(() => validateManifest(m)).toThrow(
       /facet 'unknown_facet' has no matching root field/,
     );
+  });
+});
+
+describe("validateManifest — per-field grant coherence", () => {
+  // The three ways a field grant can be incoherent with the entity grants beside it. Each was
+  // reachable before this check existed and one of them *shipped*: `erp-government` declared
+  // `Citizen.national_id` (required, regulated) with `update: ["gov_admin"]` while the entity's
+  // `create` grant also named `case_worker`, so from ADR-0339 — which made an explicit grant
+  // authoritative with no flag — `POST /v1/citizens` as `case_worker` answered 403
+  // `explicit_update_grant`. Reproduced live before the fix.
+  const citizen = (fields: Record<string, unknown>): Manifest =>
+    ({
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      roles: {
+        admin: { name: "admin" },
+        clerk: { name: "clerk" },
+        viewer: { name: "viewer" },
+      },
+      entities: [
+        {
+          name: "Citizen",
+          traits: ["auditable"],
+          fields: [
+            { name: "ref", type: { kind: "text" }, required: true },
+            {
+              name: "national_id",
+              type: { kind: "text" },
+              required: true,
+              classification: "regulated",
+            },
+            { name: "note", type: { kind: "text" }, classification: "pii" },
+          ],
+        },
+      ],
+      permissions: {
+        Citizen: {
+          read: { roles: ["admin", "clerk", "viewer"] },
+          create: { roles: ["admin", "clerk"] },
+          update: { roles: ["admin", "clerk"] },
+          fields,
+        },
+      },
+    }) as Manifest;
+
+  it("refuses a required field whose write grant excludes a role holding the entity's create", () => {
+    expect(() =>
+      validateManifest(
+        citizen({
+          national_id: { read: { roles: ["admin", "clerk"] }, update: { roles: ["admin"] } },
+        }),
+      ),
+    ).toThrow(/makes 'Citizen' uncreatable by 'clerk'/);
+  });
+
+  it("accepts that same grant once a create arm admits the creating role", () => {
+    // The read and update lists are **unchanged** — only the third arm is added. That is the whole
+    // point of the arm: a clerk may register a citizen without being able to change a national id
+    // afterwards, which one list could not express.
+    expect(() =>
+      validateManifest(
+        citizen({
+          national_id: {
+            read: { roles: ["admin", "clerk"] },
+            update: { roles: ["admin"] },
+            create: { roles: ["admin", "clerk"] },
+          },
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it("refuses an update grant naming a role the read grant does not", () => {
+    expect(() =>
+      validateManifest(
+        citizen({ note: { read: { roles: ["admin"] }, update: { roles: ["admin", "clerk"] } } }),
+      ),
+    ).toThrow(/lets 'clerk' change 'note' without reading it, which the read grant does not name/);
+  });
+
+  it("refuses an update grant with no read grant beside it, and says which case it is", () => {
+    // An absent read grant is not a pass: the field falls to the classification default, which
+    // withholds it from every unprivileged role, so this is the same blind overwrite expressed one
+    // level away. The two messages differ because the remedies differ.
+    expect(() => validateManifest(citizen({ note: { update: { roles: ["clerk"] } } }))).toThrow(
+      /because no read grant is declared beside it/,
+    );
+  });
+
+  it("does not constrain create against read, because supplying a value is not reading one", () => {
+    // The asymmetry that earns the third arm. A principal typing in a value already knows it, so
+    // writing it discloses nothing; changing a value you cannot read destroys one you cannot see.
+    expect(() =>
+      validateManifest(
+        citizen({ note: { read: { roles: ["admin"] }, create: { roles: ["admin", "clerk"] } } }),
+      ),
+    ).not.toThrow();
+  });
+
+  it("refuses a field grant naming a role the matching entity grant does not", () => {
+    // Checked first of the three, because the other two read as puzzling when the cause is a role
+    // that cannot reach the record at all. Inert rather than dangerous — and it reads as working.
+    expect(() =>
+      validateManifest(
+        citizen({ note: { read: { roles: ["admin"] }, create: { roles: ["admin", "viewer"] } } }),
+      ),
+    ).toThrow(/the entity's own create grant does not name/);
+  });
+
+  it("checks all three arms for declared roles, not only read and update", () => {
+    expect(() =>
+      validateManifest(citizen({ note: { create: { roles: ["nobody"] } } })),
+    ).toThrow(/grants role 'nobody' which is not declared in manifest.roles/);
   });
 });

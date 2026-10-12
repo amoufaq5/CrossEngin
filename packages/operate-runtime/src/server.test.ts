@@ -124,11 +124,13 @@ describe("operate-server — manifest served end-to-end through the gateway", ()
     expect(asCashier.execution.routeOperationId).toBe("product.list");
     const cashierRows = bodyOf(asCashier.response.bodyBytes)["data"] as Array<Record<string, unknown>>;
     expect(cashierRows[0]).not.toHaveProperty("unit_cost");
-    expect(cashierRows[0]).toMatchObject({ sku: "SKU-1", unit_price: 2 });
+    // `unit_price` is `decimal(12, 2)`, so it leaves the gateway as its canonical wire string —
+    // padded to the declared scale — whatever the seeding write happened to put in the store.
+    expect(cashierRows[0]).toMatchObject({ sku: "SKU-1", unit_price: "2.00" });
 
     const asManager = await server.runtime.handleRequest(getReq("/v1/products", "key-manager"));
     const managerRows = bodyOf(asManager.response.bodyBytes)["data"] as Array<Record<string, unknown>>;
-    expect(managerRows[0]).toHaveProperty("unit_cost", 1.1);
+    expect(managerRows[0]).toHaveProperty("unit_cost", "1.10");
   });
 
   it("serves a single record read via the manifest-derived route, redacted per caller", async () => {

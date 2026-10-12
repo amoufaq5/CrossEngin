@@ -276,7 +276,63 @@ export const computeStableBucket = (
   return hash % 10_000;
 };
 
+/**
+ * Evaluation order, and it is a **total** order rather than merely an ascending one.
+ *
+ * `priority` is `BETWEEN 0 AND 1000` and carries no uniqueness, so two rules on one flag can tie —
+ * and the tiebreak used to be whatever order the caller handed them in. For a sort that only
+ * *displays* rules that is harmless; for `chooseTargetingRule`, which stops at the first match, a
+ * tie means **the served value depends on the order the rules arrived in**: two rules at priority 10
+ * serving different variants answer differently depending on the query plan that fetched them, the
+ * page they fell on, or which replica asked. `id` is the one column with a table-wide unique
+ * constraint, so appending it is what makes the order total — ADR-0327's reason for keyseting
+ * `scanAll` on `tombstone_id` rather than on a `deleted_at` that can tie.
+ *
+ * It is arbitrary *and* deterministic, and only the second half is load-bearing: an operator who
+ * wants a specific order between two rules expresses it with distinct priorities, which is what the
+ * column is for. `PostgresTargetingRuleStore` issues `ORDER BY priority, rule_id` so the database
+ * and this function agree rather than the sort having to repair the read.
+ */
 export const sortRulesByPriority = (
   rules: readonly TargetingRule[],
 ): readonly TargetingRule[] =>
-  [...rules].sort((a, b) => a.priority - b.priority);
+  [...rules].sort((a, b) =>
+    a.priority !== b.priority ? a.priority - b.priority : a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
+  );
+
+/** The first rule that matched, and whether matching it *withholds* the flag. */
+export interface TargetingDecision {
+  readonly matched: TargetingRule | null;
+  readonly excluded: boolean;
+}
+
+/**
+ * The first rule that matches, in `sortRulesByPriority` order — the composition that was missing.
+ *
+ * `evaluateTargetingCondition` answers for one condition and `sortRulesByPriority` puts a list in
+ * order; nothing joined them, so every would-be caller had to re-decide **first match or every
+ * match**, and the two answers differ for every flag with more than one rule. Writing it down once
+ * is what makes order behaviour rather than presentation, which is in turn why the store has to
+ * preserve it.
+ *
+ * First match wins, which is `chooseTransition`'s shape and the reason ADR-0331 had to preserve
+ * array order in a workflow definition's digest. `isExclusion` is reported rather than skipped: an
+ * exclusion rule that matches is the answer — the flag is **withheld** — and a caller that filtered
+ * exclusions out before calling would turn the one rule kind that denies into one that does nothing.
+ * `evaluations.ts` has a reason for that outcome (`exclusion_rule_hit`) and it is terminal.
+ *
+ * A `custom_predicate` condition always answers false here, because nothing in this workspace
+ * evaluates a predicate string; a rule of that kind is therefore inert rather than wrong, and it is
+ * the caller's survey — not this function — that should notice one is declared.
+ */
+export const chooseTargetingRule = (
+  rules: readonly TargetingRule[],
+  context: TargetingContext,
+  segmentResolver?: (segmentId: string) => Segment | null,
+): TargetingDecision => {
+  for (const rule of sortRulesByPriority(rules)) {
+    if (!evaluateTargetingCondition(rule.condition, context, segmentResolver)) continue;
+    return { matched: rule, excluded: rule.isExclusion };
+  }
+  return { matched: null, excluded: false };
+};

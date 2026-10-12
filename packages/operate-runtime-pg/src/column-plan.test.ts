@@ -10,6 +10,7 @@ import {
   plansRequirePgcrypto,
   referencedEntities,
   relationDeleteIndex,
+  UndecidedColumnTypeError,
   topologicalEntityOrder,
 } from "./column-plan.js";
 
@@ -268,5 +269,71 @@ describe("plansRequirePgcrypto", () => {
 
   it("is false for no plans at all", () => {
     expect(plansRequirePgcrypto(new Map())).toBe(false);
+  });
+});
+
+describe("columnPlanForEntity — a field type with no decided wire type", () => {
+  // The `duration` decision, pinned. The candidates were an ISO-8601 duration string, an integer
+  // count of seconds, or refusal, and all three were measured on PostgreSQL 16.13:
+  //   * seconds is lossy — `interval '1 mon'` has no fixed second count;
+  //   * an ISO string is lossless and is not an ordering key (`PT2H` sorts before `PT10M`), and
+  //     `interval_in` is STABLE, so a guarded cast would be unindexable and `IntervalStyle`-
+  //     dependent — two replicas would order the same rows differently;
+  //   * `interval 'P1M' = interval 'P30D'` is **true**, so `interval` is not even a total order on
+  //     the wire values, and the output spelling is a session GUC as well.
+  // See `UNDECIDED_SQL_TYPES` for the full argument and for what would unblock it (a `duration`
+  // declared with a unit, compiling to `BIGINT` — a kernel change, not a store change).
+  const SPAN: Entity = { name: "Span", fields: [{ name: "elapsed", type: { kind: "duration" } }] };
+
+  it("refuses rather than guessing a wire form", () => {
+    expect(() => columnPlanForEntity(SPAN, { schema: "app" })).toThrow(UndecidedColumnTypeError);
+  });
+
+  it("refuses before any column is planned, so no table is provisioned for it", () => {
+    // At plan time rather than at the first read: the earlier refusal fired from `readColumn`, so a
+    // manifest declaring a `duration` provisioned a table, served every other field, and failed on
+    // the first page of the one entity that had it.
+    let caught: UndecidedColumnTypeError | null = null;
+    try {
+      columnPlanForEntity(SPAN, { schema: "app" });
+    } catch (e) {
+      caught = e as UndecidedColumnTypeError;
+    }
+    expect(caught?.entity).toBe("Span");
+    expect(caught?.field).toBe("elapsed");
+    expect(caught?.sqlType).toBe("INTERVAL");
+    expect(caught?.message).toContain("Span.elapsed");
+  });
+
+  it("refuses an array of them, reading the element type", () => {
+    const spans: Entity = {
+      name: "Span",
+      fields: [{ name: "elapsed", type: { kind: "array", element: { kind: "duration" } } }],
+    };
+    expect(() => columnPlanForEntity(spans, { schema: "app" })).toThrow(/INTERVAL/);
+  });
+
+  it("refuses a duration a trait supplies, not only one the entity declares", () => {
+    // `resolvedFields` is where trait fields arrive, and the loop runs over its output — so a trait
+    // cannot smuggle one past the refusal, which is the same reason the column plan reads trait
+    // fields in the first place.
+    const trait = { name: "timed", fields: [{ name: "took", type: { kind: "duration" } }] };
+    const entity: Entity = { name: "Job", fields: [{ name: "name", type: { kind: "text" } }], traits: ["timed"] };
+    expect(() =>
+      columnPlanForEntity(entity, { schema: "app", traits: [trait] as never }),
+    ).toThrow(UndecidedColumnTypeError);
+  });
+
+  it("plans every other field kind without complaint", () => {
+    const ok: Entity = {
+      name: "Evt",
+      fields: [
+        { name: "occurred", type: { kind: "datetime" } },
+        { name: "day", type: { kind: "date" } },
+        { name: "clock", type: { kind: "time" } },
+      ],
+    };
+    const plan = columnPlanForEntity(ok, { schema: "app" });
+    expect(plan.columns.map((c) => c.sqlType)).toEqual(["TIMESTAMPTZ", "DATE", "TIME"]);
   });
 });

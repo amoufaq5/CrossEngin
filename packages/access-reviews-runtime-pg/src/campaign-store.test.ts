@@ -105,7 +105,10 @@ describe("PostgresAccessReviewCampaignStore reads", () => {
     const store = new PostgresAccessReviewCampaignStore(conn);
     const c = await store.getByCampaignId(UUIDS.tenant, "arc_00000001");
     expect(c?.id).toBe("arc_00000001");
-    expect(conn.find("WHERE campaign_id = $1")?.params).toEqual(["arc_00000001"]);
+    expect(conn.find("WHERE c.campaign_id = $1")?.params).toEqual([
+      "arc_00000001",
+      UUIDS.tenant,
+    ]);
   });
 
   it("getByCampaignId returns null when absent", async () => {
@@ -121,6 +124,8 @@ describe("PostgresAccessReviewCampaignStore reads", () => {
     const store = new PostgresAccessReviewCampaignStore(conn);
     const list = await store.listByTenant(UUIDS.tenant);
     expect(list).toHaveLength(1);
-    expect(conn.find("ORDER BY created_at")).toBeDefined();
+    expect(conn.find("ORDER BY c.created_at")).toBeDefined();
+    // The predicate beside RLS: without it this read was global as the table's owner.
+    expect(conn.find("c.tenant_id = $1")?.params).toEqual([UUIDS.tenant]);
   });
 });

@@ -32,6 +32,13 @@ export interface UiFieldSchema {
   /** The server fills this field on create when absent (a default) — so a client form need not
    * demand it even if it is `required`. */
   readonly defaulted?: boolean;
+  /**
+   * A `decimal` field's declaration. Its presence is how a client knows the field travels as a
+   * **canonical decimal string** rather than a JSON number: `input` stays `"number"` because the
+   * right control is still a numeric one (and `scale` gives it a `step`), but a form that coerces
+   * with `Number()` before posting would throw away the precision the wire type exists to keep.
+   */
+  readonly decimal?: { readonly precision: number; readonly scale: number };
 }
 
 export interface UiTransitionSchema {
@@ -173,6 +180,9 @@ function uiField(field: Field): UiFieldSchema {
   }
   if (field.type.kind === "reference") {
     return { ...base, referenceTarget: field.type.target };
+  }
+  if (field.type.kind === "decimal") {
+    return { ...base, decimal: { precision: field.type.precision, scale: field.type.scale } };
   }
   return base;
 }

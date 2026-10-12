@@ -55,8 +55,29 @@ function fixtureDefinition(): WorkflowDefinition {
       },
     ],
     variables: [],
-    timers: [],
-    signals: [],
+    // Declared for the same reason as the signal below: a timer's `kind` lives only on its
+    // `TimerDefinition`, so a timer the definition does not declare cannot be persisted.
+    timers: [
+      {
+        name: "deadline",
+        kind: "relative_after",
+        relativeSeconds: 86_400,
+        absoluteTimestampVariable: null,
+        cronExpression: null,
+        timezone: "UTC",
+      },
+    ],
+    // Declared, because `WorkflowDefinitionSchema` refuses a `signal_received` transition naming an
+    // undeclared signal — and because the declaration is where the delivery guarantee lives.
+    signals: [
+      {
+        name: "approve",
+        correlationVariable: "poNumber",
+        payloadSchemaSha256: null,
+        deliveryGuarantee: "at_least_once",
+        idempotencyKey: null,
+      },
+    ],
     initialState: "draft",
     compensationStrategy: "no_compensation",
     timeoutSeconds: 86_400,
@@ -95,6 +116,29 @@ function startedEvent(): WorkflowEvent {
       variables: { amount: 250 },
       timeoutAt: "2026-05-17T12:00:00.000Z",
     },
+    correlationId: null,
+    causationEventId: null,
+  };
+}
+
+function signalReceivedEvent(): WorkflowEvent {
+  return {
+    id: "wfe_event0002",
+    instanceId: "wfi_inst0001",
+    tenantId: TENANT,
+    sequenceNumber: 1,
+    kind: "signal_received",
+    occurredAt: "2026-05-16T12:00:01.000Z",
+    actorPrincipalId: null,
+    actorSystemId: "inbox-webhook",
+    previousState: null,
+    newState: null,
+    activityId: null,
+    signalId: "wfs_sig00001",
+    timerId: null,
+    childInstanceId: null,
+    variableName: null,
+    payload: { signalName: "approve", correlationKey: "po-1", idempotencyKey: "evt-1" },
     correlationId: null,
     causationEventId: null,
   };
@@ -216,7 +260,9 @@ describe("ProjectingEventLog.append — subsequent events", () => {
       timerId: null,
       childInstanceId: null,
       variableName: null,
-      payload: { kind: "http_call", definitionActivityKey: "charge" },
+      // `maxAttempts` as the engine records it: a retry ceiling is a decision the definition made,
+      // and `activity-provenance.ts` refuses rather than assuming one attempt.
+      payload: { kind: "http_call", definitionActivityKey: "charge", maxAttempts: 3 },
       correlationId: null,
       causationEventId: null,
     });
@@ -231,31 +277,41 @@ describe("ProjectingEventLog.append — subsequent events", () => {
     const { projecting, capture } = buildSuite();
     await projecting.append(startedEvent());
     capture.length = 0;
-    await projecting.append({
-      id: "wfe_event0002",
-      instanceId: "wfi_inst0001",
-      tenantId: TENANT,
-      sequenceNumber: 1,
-      kind: "signal_received",
-      occurredAt: "2026-05-16T12:00:01.000Z",
-      actorPrincipalId: null,
-      actorSystemId: "engine",
-      previousState: null,
-      newState: null,
-      activityId: null,
-      signalId: "wfs_sig00001",
-      timerId: null,
-      childInstanceId: null,
-      variableName: null,
-      payload: { signalName: "approve", correlationKey: "po-1" },
-      correlationId: null,
-      causationEventId: null,
-    });
+    await projecting.append(signalReceivedEvent());
     const signalInsert = capture.find((c) =>
       c.sql.includes("INSERT INTO meta.workflow_signals"),
     );
     expect(signalInsert).toBeDefined();
     expect(signalInsert?.params?.[0]).toBe("wfs_sig00001");
+    // The two NOT NULL columns with no default: without them the INSERT could never commit, which
+    // is why every submitSignal against a real database threw.
+    expect(signalInsert?.params?.[5]).toBe("at_least_once");
+    expect(signalInsert?.params?.[7]).toBe("inbox-webhook");
+    // And the column the table's unique index is on, which nothing had ever bound.
+    expect(signalInsert?.params?.[6]).toBe("evt-1");
+  });
+
+  it("refuses a signal whose definition is not in the map", async () => {
+    const { projecting, capture } = buildSuite({ definitions: new Map() });
+    await projecting.append(startedEvent());
+    capture.length = 0;
+    await expect(projecting.append(signalReceivedEvent())).rejects.toThrow(
+      /definition_unavailable/,
+    );
+    expect(capture.some((c) => c.sql.includes("INSERT INTO meta.workflow_signals"))).toBe(
+      false,
+    );
+  });
+
+  it("refuses a signal the definition does not declare", async () => {
+    const undeclared = { ...fixtureDefinition(), signals: [] };
+    const { projecting } = buildSuite({
+      definitions: new Map([[undeclared.id, undeclared]]),
+    });
+    await projecting.append(startedEvent());
+    await expect(projecting.append(signalReceivedEvent())).rejects.toThrow(
+      /signal_undeclared/,
+    );
   });
 
   it("persists timer projections on timer_scheduled", async () => {

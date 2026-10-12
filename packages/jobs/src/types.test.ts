@@ -338,3 +338,63 @@ describe("constants", () => {
     }
   });
 });
+
+describe("JobTriggerSchema refuses a schedule it cannot serve", () => {
+  const scheduled = (cron: string, timezone?: string): unknown => ({
+    kind: "scheduled",
+    cron,
+    ...(timezone !== undefined ? { timezone } : {}),
+  });
+
+  it("accepts what the seven shipped packs declare", () => {
+    for (const cron of ["0 * * * *", "0 5 * * *", "0 6 * * *", "0 7 * * *"]) {
+      expect(JobTriggerSchema.safeParse(scheduled(cron, "UTC")).success, cron).toBe(true);
+    }
+  });
+
+  it("refuses an unresolvable timezone, naming the field", () => {
+    // Before this it fell through to UTC in silence: a month-end close declared in Asia/Tokyo ran
+    // nine hours early, every month, with nothing anywhere to look at.
+    const result = JobTriggerSchema.safeParse(scheduled("0 0 * * *", "Erope/London"));
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected a refusal");
+    expect(result.error.issues[0]?.path).toEqual(["timezone"]);
+    expect(result.error.issues[0]?.message).toContain("not resolvable");
+  });
+
+  it("refuses a cron that can never match a real date, naming the field", () => {
+    const result = JobTriggerSchema.safeParse(scheduled("0 0 30 2 *"));
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected a refusal");
+    expect(result.error.issues[0]?.path).toEqual(["cron"]);
+    expect(result.error.issues[0]?.message).toContain("never match");
+  });
+
+  it("accepts 29 February, which does fire", () => {
+    expect(JobTriggerSchema.safeParse(scheduled("0 0 29 2 *", "UTC")).success).toBe(true);
+  });
+
+  it("accepts an absent timezone, which means UTC", () => {
+    expect(JobTriggerSchema.safeParse(scheduled("0 0 * * *")).success).toBe(true);
+  });
+
+  it("still refuses a malformed expression through the expression schema", () => {
+    expect(JobTriggerSchema.safeParse(scheduled("not a cron")).success).toBe(false);
+  });
+
+  it("leaves every other trigger kind untouched", () => {
+    expect(JobTriggerSchema.safeParse({ kind: "event", eventName: "invoice.posted" }).success).toBe(true);
+    expect(JobTriggerSchema.safeParse({ kind: "userInvoked", action: "recalc" }).success).toBe(true);
+    expect(JobTriggerSchema.safeParse({ kind: "cdc", table: "t", operation: "any" }).success).toBe(true);
+  });
+
+  it("keeps the discriminated union's narrowing, which a ZodEffects member would have destroyed", () => {
+    // Found while writing this: passing a `.superRefine()`d member to `z.discriminatedUnion` does
+    // not error at the union — it degrades every reader's `trigger.kind` to `unknown`. Hence the
+    // refinement living on the union instead.
+    const parsed = JobTriggerSchema.parse(scheduled("0 0 * * *", "UTC"));
+    expect(parsed.kind).toBe("scheduled");
+    if (parsed.kind !== "scheduled") throw new Error("narrowing lost");
+    expect(parsed.cron).toBe("0 0 * * *");
+  });
+});

@@ -34,12 +34,33 @@ function formatDate(iso: string, fmt: UiFormatting): string {
   }
 }
 
+/**
+ * Whether `n` still names the decimal `text` exactly. `String(n)` alone is too strict — a
+ * canonical wire decimal is padded to its declared scale, so `"10.00"` renders as `"10"` while
+ * being the same number — so the comparison is made at the text's own scale.
+ */
+function roundTripsExactly(text: string, n: number): boolean {
+  const point = text.indexOf(".");
+  const scale = point < 0 ? 0 : text.length - point - 1;
+  // `toFixed` only accepts 0-100; past that, treat the value as one a double cannot name.
+  if (scale > 100) return false;
+  return n.toFixed(scale) === text;
+}
+
 export function formatCell(value: unknown, kind?: string): string {
   if (value === null || value === undefined) return "—";
   const fmt = getActiveFormatting();
   if (kind === "money") {
     const n = typeof value === "number" ? value : Number(value);
     if (!Number.isFinite(n)) return String(value);
+    // A decimal arrives as a canonical string and may carry more digits than a double holds, so
+    // grouping it would print a figure that is not the stored one — `99999999999999.99` groups as
+    // `99,999,999,999,999.98`, a cent out. When the round trip is not exact the raw value is shown
+    // instead: harder to read, but a money column that quietly displays the wrong figure is the
+    // thing the wire type exists to prevent.
+    if (typeof value === "string" && !roundTripsExactly(value, n)) {
+      return fmt.currency ? `${value} ${fmt.currency}` : value;
+    }
     const grouped = groupNumber(n, fmt);
     return fmt.currency ? `${grouped} ${fmt.currency}` : grouped;
   }

@@ -23,7 +23,8 @@ function mockConnection(
 
 const activityRow = {
   activity_id: "wfa_act00001",
-  instance_id: "00000000-0000-4000-8000-000000000123",
+  // `meta.workflow_instances.instance_id`, joined in — see `ClaimedActivity.instanceId`.
+  instance_id: "wfi_inst0001",
   tenant_id: TENANT,
   definition_activity_key: "charge_card",
   kind: "integration_call",
@@ -50,7 +51,7 @@ describe("claimDueActivities", () => {
     expect(params).toEqual([NOW, 8, "worker-A", "2026-05-17T12:00:30.000Z"]);
     expect(claimed[0]).toEqual({
       activityId: "wfa_act00001",
-      instanceId: "00000000-0000-4000-8000-000000000123",
+      instanceId: "wfi_inst0001",
       tenantId: TENANT,
       definitionActivityKey: "charge_card",
       kind: "integration_call",
@@ -58,6 +59,20 @@ describe("claimDueActivities", () => {
       maxAttempts: 5,
       claimExpiresAt: "2026-05-17T12:00:30.000Z",
     });
+  });
+
+  it("joins meta.workflow_instances so the claimed id is the one the engine resolves", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const [c] = await claimDueActivities(mockConnection([activityRow], capture), {
+      workerId: "w",
+      now: NOW,
+    });
+    expect(capture[0]!.sql).toContain("meta.workflow_instances i");
+    expect(capture[0]!.sql).toContain("i.id = a.instance_id");
+    // `i.instance_id`, never `a.instance_id`: `executeScheduledActivity` resolves the TEXT id, so
+    // handing back the activity row's UUID ran the handler for no instance at all.
+    expect(capture[0]!.sql).toContain("RETURNING a.activity_id, i.instance_id");
+    expect(c?.instanceId).toMatch(/^wfi_[a-z0-9]{8,40}$/);
   });
 
   it("returns an empty batch when nothing is due", async () => {

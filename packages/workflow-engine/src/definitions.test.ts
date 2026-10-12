@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ACTION_KINDS,
+  DEAD_SCHEDULE_TIMER_PARAMETERS,
   COMPENSATION_STRATEGIES,
   DEFINITION_STATUSES,
   DEFINITION_TRANSITIONS,
@@ -358,5 +359,197 @@ describe("validTransitionsFrom", () => {
   });
   it("returns 0 transitions from terminal state", () => {
     expect(validTransitionsFrom(baseDefinition, "approved")).toHaveLength(0);
+  });
+});
+
+/**
+ * The references a definition makes into **itself**, and which of them the schema checks.
+ *
+ * The line: *a reference whose declaration site exists in this document is checked; one whose
+ * declaration site lives in another document, or does not exist in the contract at all, is not.*
+ * `timer_fired` triggers and `variable_equals` guards were already on the checked side; a
+ * `schedule_timer` action's `timerName` was not — so a definition scheduling `wait` while declaring
+ * `waiting` was accepted at publication and refused at the first fire, in a record that is
+ * **immutable** and so can only be fixed by republishing a new version.
+ */
+describe("WorkflowDefinitionSchema — self-references", () => {
+  function withActions(
+    actions: readonly { readonly kind: string; readonly parameters: Record<string, unknown> }[],
+    over: Partial<WorkflowDefinition> = {},
+  ): unknown {
+    return {
+      ...baseDefinition,
+      states: baseDefinition.states.map((s) =>
+        s.name === "manager_review" ? { ...s, onEntryActions: actions } : s,
+      ),
+      ...over,
+    };
+  }
+
+  const declaredTimer = {
+    name: "waiting",
+    kind: "relative_after" as const,
+    relativeSeconds: 60,
+    absoluteTimestampVariable: null,
+    cronExpression: null,
+    timezone: "UTC",
+  };
+
+  it("accepts a schedule_timer naming a declared timer", () => {
+    const r = WorkflowDefinitionSchema.safeParse(
+      withActions([{ kind: "schedule_timer", parameters: { timerName: "waiting" } }], {
+        timers: [declaredTimer],
+      }),
+    );
+    expect(r.success).toBe(true);
+  });
+
+  it("refuses a schedule_timer naming an undeclared timer", () => {
+    const r = WorkflowDefinitionSchema.safeParse(
+      withActions([{ kind: "schedule_timer", parameters: { timerName: "wait" } }], {
+        timers: [declaredTimer],
+      }),
+    );
+    expect(r.success).toBe(false);
+    expect(JSON.stringify(r.error?.issues)).toContain("undeclared timer wait");
+  });
+
+  it("refuses an undeclared timer from a transition's pre- and post-actions too", () => {
+    for (const key of ["preTransitionActions", "postTransitionActions"] as const) {
+      const r = WorkflowDefinitionSchema.safeParse({
+        ...baseDefinition,
+        timers: [declaredTimer],
+        transitions: baseDefinition.transitions.map((t) =>
+          t.name === "approve"
+            ? { ...t, [key]: [{ kind: "schedule_timer", parameters: { timerName: "wait" } }] }
+            : t,
+        ),
+      });
+      expect(r.success, key).toBe(false);
+      expect(JSON.stringify(r.error?.issues)).toContain(key);
+    }
+  });
+
+  it("refuses a cancel_timer naming an undeclared timer — the same hole, one action over", () => {
+    const r = WorkflowDefinitionSchema.safeParse(
+      withActions([{ kind: "cancel_timer", parameters: { timerName: "wait" } }], {
+        timers: [declaredTimer],
+      }),
+    );
+    expect(r.success).toBe(false);
+    expect(JSON.stringify(r.error?.issues)).toContain("undeclared timer wait");
+  });
+
+  it("refuses every dead schedule parameter, naming it", () => {
+    for (const dead of DEAD_SCHEDULE_TIMER_PARAMETERS) {
+      const r = WorkflowDefinitionSchema.safeParse(
+        withActions([{ kind: "schedule_timer", parameters: { timerName: "waiting", [dead]: 600 } }], {
+          timers: [declaredTimer],
+        }),
+      );
+      expect(r.success, dead).toBe(false);
+      expect(JSON.stringify(r.error?.issues)).toContain(dead);
+    }
+  });
+
+  it("refuses a set_variable writing an undeclared variable", () => {
+    const r = WorkflowDefinitionSchema.safeParse(
+      withActions([{ kind: "set_variable", parameters: { variableName: "not_declared" } }]),
+    );
+    expect(r.success).toBe(false);
+    expect(JSON.stringify(r.error?.issues)).toContain("undeclared variable not_declared");
+  });
+
+  it("accepts a set_variable writing a declared one", () => {
+    const r = WorkflowDefinitionSchema.safeParse(
+      withActions([{ kind: "set_variable", parameters: { variableName: "amount_cents" } }]),
+    );
+    expect(r.success).toBe(true);
+  });
+
+  it("leaves activityKey and childDefinitionKey unchecked, because neither has a declaration site here", () => {
+    const r = WorkflowDefinitionSchema.safeParse(
+      withActions([{ kind: "schedule_activity", parameters: { activityKey: "nothing_declares_this" } }]),
+    );
+    expect(r.success).toBe(true);
+  });
+});
+
+describe("WorkflowDefinitionSchema — timers this deployment could not schedule", () => {
+  function withTimer(over: Record<string, unknown>): unknown {
+    return {
+      ...baseDefinition,
+      timers: [
+        {
+          name: "waiting",
+          kind: "relative_after",
+          relativeSeconds: 60,
+          absoluteTimestampVariable: null,
+          cronExpression: null,
+          timezone: "UTC",
+          ...over,
+        },
+      ],
+    };
+  }
+
+  it("refuses a business_hours timer, naming the digest cost of declaring one properly", () => {
+    const r = WorkflowDefinitionSchema.safeParse(
+      withTimer({ kind: "business_hours", relativeSeconds: null }),
+    );
+    expect(r.success).toBe(false);
+    expect(JSON.stringify(r.error?.issues)).toContain("definitionContentSha256");
+  });
+
+  it("refuses an unresolvable timezone, which would evaluate silently in UTC", () => {
+    const r = WorkflowDefinitionSchema.safeParse(withTimer({ timezone: "Erope/London" }));
+    expect(r.success).toBe(false);
+    expect(JSON.stringify(r.error?.issues)).toContain("not an IANA zone");
+  });
+
+  it("accepts a real IANA zone, including a half-hour offset", () => {
+    for (const timezone of ["UTC", "Asia/Kolkata", "Australia/Lord_Howe", "America/New_York"]) {
+      expect(WorkflowDefinitionSchema.safeParse(withTimer({ timezone })).success, timezone).toBe(true);
+    }
+  });
+
+  it("refuses an unparsable cronExpression", () => {
+    const r = WorkflowDefinitionSchema.safeParse(
+      withTimer({ kind: "cron_schedule", relativeSeconds: null, cronExpression: "0 99 * * *" }),
+    );
+    expect(r.success).toBe(false);
+    expect(JSON.stringify(r.error?.issues)).toContain("unparsable cronExpression");
+  });
+
+  it("accepts a 5-field and a 6-field cronExpression", () => {
+    for (const cronExpression of ["0 2 * * *", "*/30 * * * * *", "0 0 13 * 5"]) {
+      const r = WorkflowDefinitionSchema.safeParse(
+        withTimer({ kind: "cron_schedule", relativeSeconds: null, cronExpression }),
+      );
+      expect(r.success, cronExpression).toBe(true);
+    }
+  });
+
+  it("refuses an absolute_at timer reading an undeclared variable", () => {
+    const r = WorkflowDefinitionSchema.safeParse(
+      withTimer({
+        kind: "absolute_at",
+        relativeSeconds: null,
+        absoluteTimestampVariable: "due_at",
+      }),
+    );
+    expect(r.success).toBe(false);
+    expect(JSON.stringify(r.error?.issues)).toContain("undeclared variable due_at");
+  });
+
+  it("accepts an absolute_at timer reading a declared one", () => {
+    const r = WorkflowDefinitionSchema.safeParse(
+      withTimer({
+        kind: "absolute_at",
+        relativeSeconds: null,
+        absoluteTimestampVariable: "amount_cents",
+      }),
+    );
+    expect(r.success).toBe(true);
   });
 });

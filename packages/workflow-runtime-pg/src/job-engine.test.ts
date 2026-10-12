@@ -1,12 +1,16 @@
+import { DeadLetterReasonSchema } from "@crossengin/jobs";
+import { META_DEAD_LETTER_JOBS } from "@crossengin/kernel/bootstrap";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import { describe, expect, it } from "vitest";
 
 import {
+  JOB_DEAD_LETTER_REASONS,
   JobHandlerRegistry,
   PostgresJobRunEngine,
   type JobHandler,
   type JobHandlerContext,
 } from "./job-engine.js";
+import { insertColumnList, missingRequiredColumns } from "./required-columns.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const RUN = "00000000-0000-4000-8000-0000000009a1";
@@ -129,7 +133,13 @@ describe("PostgresJobRunEngine.executeJobRun", () => {
 
     const result = await engine.executeJobRun(RUN, TENANT);
 
-    expect(result).toEqual({ runId: RUN, executed: true, disposition: "dead-lettered", attempts: 3 });
+    expect(result).toEqual({
+      runId: RUN,
+      executed: true,
+      disposition: "dead-lettered",
+      attempts: 3,
+      deadLetter: "recorded",
+    });
     const update = calls[1]!;
     expect(update.params?.[2]).toBe("dead-lettered");
   });
@@ -207,7 +217,13 @@ describe("PostgresJobRunEngine.executeJobRun", () => {
 
     const result = await engine.executeJobRun(RUN, TENANT);
 
-    expect(result).toEqual({ runId: RUN, executed: true, disposition: "failed", attempts: 1 });
+    expect(result).toEqual({
+      runId: RUN,
+      executed: true,
+      disposition: "failed",
+      attempts: 1,
+      deadLetter: "recorded",
+    });
     expect(calls[1]!.params?.[2]).toBe("failed");
   });
 
@@ -422,5 +438,318 @@ describe("PostgresJobRunEngine — cancellation", () => {
       disposition: "not_claimable",
       attempts: 1,
     });
+  });
+});
+
+/**
+ * A connection that distinguishes the finalize `UPDATE` from the dead-letter `INSERT`, so each can
+ * be scripted independently — the two commit separately and their failure modes are different.
+ */
+function deadLetterConnection(opts: {
+  readonly readRows: readonly Record<string, unknown>[];
+  readonly calls: Call[];
+  readonly updateRowCount?: number;
+  readonly insertRowCount?: number;
+  readonly insertThrows?: boolean;
+}): PgConnection {
+  return {
+    query: (async (sql: string, params?: readonly unknown[]): Promise<PgQueryResult> => {
+      opts.calls.push({ sql, params });
+      if (/^\s*SELECT/i.test(sql)) return { rows: opts.readRows, rowCount: opts.readRows.length };
+      if (/INSERT INTO\s+\w+\.dead_letter_jobs/i.test(sql)) {
+        if (opts.insertThrows === true) throw new Error("dead_letter_jobs is unreachable");
+        return { rows: [], rowCount: opts.insertRowCount ?? 1 };
+      }
+      return { rows: [], rowCount: opts.updateRowCount ?? 1 };
+    }) as PgConnection["query"],
+    transaction: (async () => undefined) as unknown as PgConnection["transaction"],
+    withAdvisoryLock: (async () => undefined) as unknown as PgConnection["withAdvisoryLock"],
+    close: (async () => undefined) as PgConnection["close"],
+  };
+}
+
+function deadLetterCall(calls: readonly Call[]): Call {
+  const found = calls.find((c) => /INSERT INTO\s+\w+\.dead_letter_jobs/i.test(c.sql));
+  if (found === undefined) throw new Error("no dead_letter_jobs INSERT was issued");
+  return found;
+}
+
+const failing = (retryable: boolean): JobHandler => async () => ({
+  status: "failed",
+  error: { code: "smtp_down", message: "relay refused" },
+  retryable,
+});
+
+describe("JOB_DEAD_LETTER_REASONS", () => {
+  it("is total over the two terminal failure dispositions and uses only declared reasons", () => {
+    expect(Object.keys(JOB_DEAD_LETTER_REASONS).sort()).toEqual(["dead-lettered", "failed"]);
+    for (const reason of Object.values(JOB_DEAD_LETTER_REASONS)) {
+      expect(DeadLetterReasonSchema.parse(reason)).toBe(reason);
+    }
+  });
+
+  it("maps the exhausted-retry path and the permanent path apart", () => {
+    expect(JOB_DEAD_LETTER_REASONS["dead-lettered"]).toBe("max-retries-exceeded");
+    expect(JOB_DEAD_LETTER_REASONS.failed).toBe("permanent-error");
+  });
+
+  it("is frozen", () => {
+    expect(Object.isFrozen(JOB_DEAD_LETTER_REASONS)).toBe(true);
+  });
+});
+
+describe("PostgresJobRunEngine dead-letter rows", () => {
+  it("names every NOT NULL column of meta.dead_letter_jobs that has no default", async () => {
+    // The assertion ADR-0333 added per store: computed from META_TABLES rather than restated, so a
+    // column added to the catalog fails here instead of throwing on the first real row.
+    const calls: Call[] = [];
+    const registry = new JobHandlerRegistry().register("overdue-invoice-reminder", {
+      handler: failing(true),
+      maxAttempts: 1,
+    });
+    const engine = new PostgresJobRunEngine(
+      deadLetterConnection({ readRows: [runRow({ attempts: 1 })], calls }),
+      registry,
+      { now: FIXED_NOW },
+    );
+    await engine.executeJobRun(RUN, TENANT);
+    const insert = deadLetterCall(calls);
+    expect(missingRequiredColumns(META_DEAD_LETTER_JOBS, insert.sql)).toEqual([]);
+    // And the bound parameters number exactly as many as the columns named.
+    expect(insert.params).toHaveLength(insertColumnList(insert.sql).length);
+  });
+
+  it("records a dead letter with the max-retries reason and the run's attempt count", async () => {
+    const calls: Call[] = [];
+    const registry = new JobHandlerRegistry().register("overdue-invoice-reminder", {
+      handler: failing(true),
+      maxAttempts: 3,
+    });
+    const engine = new PostgresJobRunEngine(
+      deadLetterConnection({ readRows: [runRow({ attempts: 3 })], calls }),
+      registry,
+      { now: FIXED_NOW },
+    );
+    const result = await engine.executeJobRun(RUN, TENANT);
+    expect(result.deadLetter).toBe("recorded");
+    const insert = deadLetterCall(calls);
+    expect(insert.params?.[0]).toBe(TENANT);
+    expect(insert.params?.[1]).toBe("overdue-invoice-reminder");
+    expect(insert.params?.[2]).toBe(RUN);
+    expect(insert.params?.[3]).toBe("max-retries-exceeded");
+    expect(insert.params?.[4]).toBe(3);
+  });
+
+  it("records a non-retryable failure as permanent-error", async () => {
+    const calls: Call[] = [];
+    const registry = new JobHandlerRegistry().register("overdue-invoice-reminder", {
+      handler: failing(false),
+      maxAttempts: 5,
+    });
+    const engine = new PostgresJobRunEngine(
+      deadLetterConnection({ readRows: [runRow({ attempts: 1 })], calls }),
+      registry,
+      { now: FIXED_NOW },
+    );
+    await engine.executeJobRun(RUN, TENANT);
+    expect(deadLetterCall(calls).params?.[3]).toBe("permanent-error");
+  });
+
+  it("writes a finalError that satisfies DeadLetterRecord's shape", async () => {
+    const calls: Call[] = [];
+    const registry = new JobHandlerRegistry().register("overdue-invoice-reminder", {
+      handler: failing(true),
+      maxAttempts: 1,
+    });
+    const engine = new PostgresJobRunEngine(
+      deadLetterConnection({ readRows: [runRow({ attempts: 1 })], calls }),
+      registry,
+      { now: FIXED_NOW },
+    );
+    await engine.executeJobRun(RUN, TENANT);
+    const finalError: unknown = JSON.parse(String(deadLetterCall(calls).params?.[5]));
+    expect(finalError).toMatchObject({ kind: "retryable", message: "relay refused", code: "smtp_down" });
+  });
+
+  it("falls back to the error code when the handler gave no message, since message must be non-empty", async () => {
+    const calls: Call[] = [];
+    const registry = new JobHandlerRegistry().register("overdue-invoice-reminder", {
+      handler: async () => ({ status: "failed" as const, error: { code: "bad_input" } }),
+    });
+    const engine = new PostgresJobRunEngine(
+      deadLetterConnection({ readRows: [runRow()], calls }),
+      registry,
+      { now: FIXED_NOW },
+    );
+    await engine.executeJobRun(RUN, TENANT);
+    const finalError = JSON.parse(String(deadLetterCall(calls).params?.[5])) as { message: string };
+    expect(finalError.message).toBe("bad_input");
+  });
+
+  it("carries the run's redacted input onto the dead letter", async () => {
+    const calls: Call[] = [];
+    const registry = new JobHandlerRegistry().register("overdue-invoice-reminder", {
+      handler: failing(false),
+    });
+    const engine = new PostgresJobRunEngine(
+      deadLetterConnection({ readRows: [runRow({ input_redacted: { since: "2026-01-01" } })], calls }),
+      registry,
+      { now: FIXED_NOW },
+    );
+    await engine.executeJobRun(RUN, TENANT);
+    expect(JSON.parse(String(deadLetterCall(calls).params?.[6]))).toEqual({ since: "2026-01-01" });
+  });
+
+  it("suppresses the row for a swallow-and-log declaration, and says so", async () => {
+    const calls: Call[] = [];
+    const registry = new JobHandlerRegistry().register("overdue-invoice-reminder", {
+      handler: failing(false),
+      onFailure: { strategy: "swallow-and-log" },
+    });
+    const engine = new PostgresJobRunEngine(
+      deadLetterConnection({ readRows: [runRow()], calls }),
+      registry,
+      { now: FIXED_NOW },
+    );
+    const result = await engine.executeJobRun(RUN, TENANT);
+    expect(result.deadLetter).toBe("suppressed");
+    expect(calls.some((c) => /dead_letter_jobs/i.test(c.sql))).toBe(false);
+  });
+
+  it("records for every other strategy, and for an absent one", async () => {
+    for (const onFailure of [
+      { strategy: "dead-letter" as const },
+      { strategy: "alert-and-dead-letter" as const, alertChannel: "ops" },
+      { strategy: "escalate" as const },
+      undefined,
+    ]) {
+      const calls: Call[] = [];
+      const registry = new JobHandlerRegistry().register("overdue-invoice-reminder", {
+        handler: failing(false),
+        ...(onFailure !== undefined ? { onFailure } : {}),
+      });
+      const engine = new PostgresJobRunEngine(
+        deadLetterConnection({ readRows: [runRow()], calls }),
+        registry,
+        { now: FIXED_NOW },
+      );
+      expect((await engine.executeJobRun(RUN, TENANT)).deadLetter).toBe("recorded");
+    }
+  });
+
+  it("reports already_recorded when the (tenant, run) unique constraint absorbs the insert", async () => {
+    const calls: Call[] = [];
+    const registry = new JobHandlerRegistry().register("overdue-invoice-reminder", {
+      handler: failing(false),
+    });
+    const engine = new PostgresJobRunEngine(
+      deadLetterConnection({ readRows: [runRow()], calls, insertRowCount: 0 }),
+      registry,
+      { now: FIXED_NOW },
+    );
+    const result = await engine.executeJobRun(RUN, TENANT);
+    expect(result.deadLetter).toBe("already_recorded");
+    expect(result.disposition).toBe("failed");
+    expect(deadLetterCall(calls).sql).toContain("ON CONFLICT (tenant_id, run_id) DO NOTHING");
+  });
+
+  it("reports a failed write and does not throw, because the terminal status has committed", async () => {
+    const calls: Call[] = [];
+    const seen: unknown[] = [];
+    const registry = new JobHandlerRegistry().register("overdue-invoice-reminder", {
+      handler: failing(false),
+    });
+    const engine = new PostgresJobRunEngine(
+      deadLetterConnection({ readRows: [runRow()], calls, insertThrows: true }),
+      registry,
+      { now: FIXED_NOW, onDeadLetterError: (err, detail) => seen.push([detail.runId, String(err)]) },
+    );
+    const result = await engine.executeJobRun(RUN, TENANT);
+    expect(result.disposition).toBe("failed");
+    expect(result.deadLetter).toBe("failed");
+    expect(seen).toHaveLength(1);
+  });
+
+  it("writes no dead letter when the finalize lost its guard — another worker settled the run", async () => {
+    const calls: Call[] = [];
+    const registry = new JobHandlerRegistry().register("overdue-invoice-reminder", {
+      handler: failing(false),
+    });
+    const engine = new PostgresJobRunEngine(
+      deadLetterConnection({ readRows: [runRow()], calls, updateRowCount: 0 }),
+      registry,
+      { now: FIXED_NOW },
+    );
+    const result = await engine.executeJobRun(RUN, TENANT);
+    expect(result.disposition).toBe("not_claimable");
+    expect(result.deadLetter).toBeUndefined();
+    expect(calls.some((c) => /dead_letter_jobs/i.test(c.sql))).toBe(false);
+  });
+
+  it("records a handler_not_found run as a dead letter, since nothing can execute it", async () => {
+    const calls: Call[] = [];
+    const engine = new PostgresJobRunEngine(
+      deadLetterConnection({ readRows: [runRow({ attempts: 2 })], calls }),
+      new JobHandlerRegistry(),
+      { now: FIXED_NOW },
+    );
+    const result = await engine.executeJobRun(RUN, TENANT);
+    expect(result.disposition).toBe("failed");
+    expect(result.deadLetter).toBe("recorded");
+    const insert = deadLetterCall(calls);
+    expect(insert.params?.[3]).toBe("permanent-error");
+    expect(insert.params?.[4]).toBe(2);
+    expect(JSON.parse(String(insert.params?.[5]))).toMatchObject({ code: "handler_not_found" });
+  });
+
+  it("writes no dead letter on a completed run", async () => {
+    const calls: Call[] = [];
+    const registry = new JobHandlerRegistry().register("overdue-invoice-reminder", {
+      handler: async () => ({ status: "completed" as const }),
+    });
+    const engine = new PostgresJobRunEngine(
+      deadLetterConnection({ readRows: [runRow()], calls }),
+      registry,
+      { now: FIXED_NOW },
+    );
+    const result = await engine.executeJobRun(RUN, TENANT);
+    expect(result.disposition).toBe("completed");
+    expect(result.deadLetter).toBeUndefined();
+    expect(calls.some((c) => /dead_letter_jobs/i.test(c.sql))).toBe(false);
+  });
+
+  it("writes no dead letter on a scheduled retry — the run is not terminal", async () => {
+    const calls: Call[] = [];
+    const registry = new JobHandlerRegistry().register("overdue-invoice-reminder", {
+      handler: failing(true),
+      maxAttempts: 5,
+    });
+    const engine = new PostgresJobRunEngine(
+      deadLetterConnection({ readRows: [runRow({ attempts: 1 })], calls }),
+      registry,
+      { now: FIXED_NOW },
+    );
+    const result = await engine.executeJobRun(RUN, TENANT);
+    expect(result.disposition).toBe("retry_scheduled");
+    expect(result.deadLetter).toBeUndefined();
+    expect(calls.some((c) => /dead_letter_jobs/i.test(c.sql))).toBe(false);
+  });
+
+  it("writes no dead letter on a cancellation — cancelled is not a failure", async () => {
+    const calls: Call[] = [];
+    const registry = new JobHandlerRegistry().register("overdue-invoice-reminder", {
+      handler: failing(false),
+    });
+    const engine = new PostgresJobRunEngine(
+      deadLetterConnection({
+        readRows: [runRow({ cancel_requested_at: "2026-05-17T11:59:00.000Z" })],
+        calls,
+      }),
+      registry,
+      { now: FIXED_NOW },
+    );
+    const result = await engine.executeJobRun(RUN, TENANT);
+    expect(result.disposition).toBe("cancelled");
+    expect(calls.some((c) => /dead_letter_jobs/i.test(c.sql))).toBe(false);
   });
 });

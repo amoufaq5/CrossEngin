@@ -3,7 +3,7 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 
 import { CampaignUuidResolver } from "./id-mapping.js";
 import { rowToCampaign, type CampaignRow } from "./records.js";
-import { withTenantContext } from "./tenant-context.js";
+import { tenantScopePredicate, withTenantContext } from "./tenant-context.js";
 
 const SCHEMA = "meta";
 const TABLE = "access_review_campaigns";
@@ -105,24 +105,35 @@ export class PostgresAccessReviewCampaignStore {
     });
   }
 
+  /**
+   * `campaign_id` is table-wide unique, so without the predicate this was a *global* point lookup:
+   * as the owner, asking tenant A for `arc_…` returned tenant B's campaign, and the `tenantId`
+   * argument bought nothing but the GUC.
+   */
   async getByCampaignId(
     tenantId: string,
     campaignId: string,
   ): Promise<AccessReviewCampaign | null> {
     return withTenantContext(this.conn, tenantId, async (tx) => {
       const result = await tx.query<CampaignRow>(
-        `SELECT ${SELECT_COLUMNS} FROM ${SCHEMA}.${TABLE} WHERE campaign_id = $1 LIMIT 1`,
-        [campaignId],
+        `SELECT ${SELECT_COLUMNS} FROM ${SCHEMA}.${TABLE} c
+          WHERE c.campaign_id = $1 AND ${tenantScopePredicate("c", 2)}
+          LIMIT 1`,
+        [campaignId, tenantId],
       );
       const row = result.rows[0];
       return row === undefined ? null : rowToCampaign(row);
     });
   }
 
+  /** The name said one tenant and the statement had no `WHERE` clause at all. */
   async listByTenant(tenantId: string): Promise<readonly AccessReviewCampaign[]> {
     return withTenantContext(this.conn, tenantId, async (tx) => {
       const result = await tx.query<CampaignRow>(
-        `SELECT ${SELECT_COLUMNS} FROM ${SCHEMA}.${TABLE} ORDER BY created_at ASC, campaign_id ASC`,
+        `SELECT ${SELECT_COLUMNS} FROM ${SCHEMA}.${TABLE} c
+          WHERE ${tenantScopePredicate("c", 1)}
+          ORDER BY c.created_at ASC, c.campaign_id ASC`,
+        [tenantId],
       );
       return result.rows.map(rowToCampaign);
     });

@@ -1,5 +1,5 @@
-import { processTimerBatch, type BatchResult } from "./batch.js";
-import type { TimerClaimer, TimerProcessor } from "./types.js";
+import { processTimerBatch, type BatchResult, type BatchSkipReason } from "./batch.js";
+import type { ClaimedTimer, TimerClaimer, TimerProcessor } from "./types.js";
 
 export interface WorkflowTimerWorkerOptions {
   /** Stable id recorded on claimed rows; distinct per process for lease ownership + observability. */
@@ -20,6 +20,8 @@ export interface WorkflowTimerWorkerOptions {
   readonly onError?: (err: unknown) => void;
   /** Notified with each completed batch result (metrics / logging). */
   readonly onBatch?: (result: BatchResult) => void;
+  /** Notified for each claimed timer handed back instead of fired (shutdown). */
+  readonly onSkipped?: (timer: ClaimedTimer, reason: BatchSkipReason) => void;
 }
 
 function defaultSleep(ms: number): Promise<void> {
@@ -49,8 +51,14 @@ export class WorkflowTimerWorker {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly onError: ((err: unknown) => void) | undefined;
   private readonly onBatch: ((result: BatchResult) => void) | undefined;
+  private readonly onSkipped: ((timer: ClaimedTimer, reason: BatchSkipReason) => void) | undefined;
 
   private running = false;
+  /**
+   * Distinct from `running`: it gates the *batch*, not the loop, and stays false for a direct
+   * `runOnce()` so a caller driving single cycles is not told the worker is shutting down.
+   */
+  private stopping = false;
   private loop: Promise<void> | null = null;
 
   constructor(opts: WorkflowTimerWorkerOptions) {
@@ -65,16 +73,25 @@ export class WorkflowTimerWorker {
     this.sleep = opts.sleep ?? defaultSleep;
     this.onError = opts.onError;
     this.onBatch = opts.onBatch;
+    this.onSkipped = opts.onSkipped;
   }
 
   /** Runs a single poll cycle (claim → process → release-failures) and returns its result. */
   async runOnce(): Promise<BatchResult> {
-    return processTimerBatch(this.claimer, this.processor, {
-      workerId: this.workerId,
-      now: this.now().toISOString(),
-      limit: this.batchLimit,
-      leaseMs: this.leaseMs,
-    });
+    return processTimerBatch(
+      this.claimer,
+      this.processor,
+      {
+        workerId: this.workerId,
+        now: this.now().toISOString(),
+        limit: this.batchLimit,
+        leaseMs: this.leaseMs,
+      },
+      {
+        ...(this.onSkipped !== undefined ? { onSkipped: this.onSkipped } : {}),
+        shouldContinue: () => !this.stopping,
+      },
+    );
   }
 
   get isRunning(): boolean {
@@ -84,6 +101,7 @@ export class WorkflowTimerWorker {
   /** Starts the poll loop (idempotent). Returns immediately; use `stop()` to await a clean halt. */
   start(): void {
     if (this.running) return;
+    this.stopping = false;
     this.running = true;
     this.loop = (async () => {
       while (this.running) {
@@ -100,8 +118,13 @@ export class WorkflowTimerWorker {
     })();
   }
 
-  /** Signals the loop to stop and awaits the in-flight cycle. */
+  /**
+   * Signals the loop to stop and awaits the in-flight cycle. The in-flight *batch* stops too: its
+   * remaining claims are released rather than fired, so a shutdown hands them straight back to the
+   * fleet instead of leaving them leased to a process that is going away.
+   */
   async stop(): Promise<void> {
+    this.stopping = true;
     this.running = false;
     const loop = this.loop;
     this.loop = null;

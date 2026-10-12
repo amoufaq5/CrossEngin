@@ -15,9 +15,21 @@ export interface AuditESignature {
   readonly signedAt: string;
 }
 
+/**
+ * Whose audit trail an entry belongs to: a tenant, or the platform itself.
+ *
+ * `null` is **platform scope** — a fact about the deployment rather than about one tenant's data.
+ * Three escalation paths produce them and none can honestly name a tenant: an SLO surface is not a
+ * tenant, the platform forensic chain has none, and a sweep that walks every tenant's proofs is
+ * about the walk and not about a row. Before this existed each of those wrote nothing at all, and
+ * the alternative — borrowing a tenant — files one scope's record under another's RLS confinement.
+ */
+export type AuditScope = TenantId | null;
+
 export interface AuditLogEntry {
   readonly id: string;
-  readonly tenantId: TenantId;
+  /** The tenant this record belongs to, or `null` for a platform-scope one. See {@link AuditScope}. */
+  readonly tenantId: AuditScope;
   readonly occurredAt: string;
   readonly actor: AuditActor;
   readonly operation: string;
@@ -74,11 +86,23 @@ function canonicalInstant(value: string): string {
  * keys (JSONB loses order), normalized instants (TIMESTAMPTZ loses the written offset), and
  * absent-vs-null collapsed to absent for the three optional fields (a `NULL` column reads
  * back as an omitted key).
+ *
+ * **`tenantId` becoming nullable did not move these bytes, and that is load-bearing.** Every
+ * stored `chain_entry_hash` in every deployment commits to this payload, so a change to the
+ * rendering of an entry that *has* a tenant would stop every existing anchor verifying — the
+ * v1→v2 domain-tag situation ADR-0329 had to create for the tombstone content manifest. A
+ * tenant-scoped entry still renders `"tenantId":"<uuid>"` at the same sorted position; only the
+ * platform-scope entries this change makes possible render `"tenantId":null`, and no stored digest
+ * commits to bytes that did not exist. Two pre-change digests are pinned in the tests, computed
+ * from the published `dist/` before the type was widened.
  */
 export function canonicalAuditEntryPayload(entry: AuditLogEntry): string {
   return canonicalJson({
     id: entry.id,
-    tenantId: entry.tenantId,
+    // `?? null` so an `undefined` handed over by an untyped caller renders as platform scope
+    // rather than *dropping the key* — `canonicalJson` filters `undefined`, and bytes with no
+    // `tenantId` at all would be a third rendering nothing verifies against.
+    tenantId: entry.tenantId ?? null,
     occurredAt: canonicalInstant(entry.occurredAt),
     actor: {
       kind: entry.actor.kind,

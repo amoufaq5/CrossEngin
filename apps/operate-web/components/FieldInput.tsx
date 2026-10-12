@@ -6,6 +6,11 @@ import type { UiFieldSchema, UiSchema } from "@/lib/schema";
 const INPUT_BASE =
   "w-full rounded-lg border px-3 py-2 text-sm outline-none transition disabled:bg-surface-soft disabled:text-ink-faint";
 
+/** The smallest increment a field of this scale can hold: scale 2 -> "0.01", scale 0 -> "1". */
+function stepForScale(scale: number): string {
+  return scale <= 0 ? "1" : `0.${"0".repeat(scale - 1)}1`;
+}
+
 export function FieldInput({
   field,
   value,
@@ -96,6 +101,10 @@ export function FieldInput({
             ? "email"
             : "text";
 
+  // A `number` input's implicit step is 1, which makes a legitimate `10.25` read as invalid. A
+  // decimal field declares its scale, so the step is derived from the declaration, not guessed.
+  const step = field.decimal === undefined ? undefined : stepForScale(field.decimal.scale);
+
   return (
     <input
       type={htmlType}
@@ -103,6 +112,7 @@ export function FieldInput({
       value={String(value ?? "")}
       disabled={ro}
       {...a11y}
+      step={step}
       placeholder={field.input === "reference" ? `${field.referenceTarget ?? ""} id` : undefined}
       onChange={(e) => onChange(e.target.value)}
     />

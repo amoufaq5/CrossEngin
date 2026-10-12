@@ -23,6 +23,23 @@ export const AccessReviewsConfigSchema = z
     campaigns: z.array(AccessReviewCampaignSchema).min(1),
     grants: z.array(LiveGrantSchema).default([]),
     principals: z.array(PrincipalUnderReviewSchema).default([]),
+    /**
+     * Close a campaign once every item is resolved, and seal its evidence pack.
+     *
+     * Default **on**, because off is the status quo and the status quo is broken: nothing in the
+     * workspace moved a campaign to `completed`, so a review started once, auto-revoked, and then
+     * sat `in_progress` for ever — which left `planNextOccurrence` unable to plan a recurrence and
+     * `meta.access_review_evidence` with no writer, so `access.periodic_review` scored
+     * `not_assessed` in every certification report ever produced. The close refuses while any item
+     * is unresolved, so turning it on cannot cut a review short.
+     */
+    closeCompletedCampaigns: z.boolean().default(true),
+    /**
+     * Where a sealed pack's bundle bytes live. Omitted, the pack's `storageUri` names the
+     * re-derivation from `access_review_items` + `access_review_decisions` instead of a blob that
+     * does not exist — see `evidenceBundleUri`.
+     */
+    evidenceStorageUriPrefix: z.string().min(1).max(400).optional(),
   })
   .strict();
 export type AccessReviewsConfig = z.infer<typeof AccessReviewsConfigSchema>;
@@ -52,6 +69,10 @@ export interface AccessReviewTickReport {
   readonly startedCampaigns: readonly string[];
   readonly generatedItems: number;
   readonly autoRevocations: readonly string[];
+  /** Campaigns moved to `completed` on this tick. */
+  readonly closedCampaigns: readonly string[];
+  /** Evidence packs sealed on this tick, by `arv_` id. */
+  readonly sealedEvidence: readonly string[];
 }
 
 const DEFAULT_SCHEDULER: IntervalScheduler = {
@@ -73,6 +94,12 @@ export interface AccessReviewsLifecycleOptions {
   readonly runtime?: PersistentAccessReviewRuntime;
   /** Where a started campaign's grants come from. Defaults to the config's static grants/principals. */
   readonly grantSource?: LiveGrantSource;
+  /**
+   * A close that happened and whose pack could not be sealed. Reported rather than thrown, so one
+   * campaign's unsealable pack does not stop the other campaigns' tick — and the next tick retries
+   * it through `ensureSealedEvidenceForCampaign`.
+   */
+  readonly onEvidenceError?: (err: unknown) => void;
 }
 
 /**
@@ -124,6 +151,8 @@ export class AccessReviewCampaignScheduler {
     const now = (this.opts.clock ?? (() => new Date()))();
     const startedCampaigns: string[] = [];
     const autoRevocations: string[] = [];
+    const closedCampaigns: string[] = [];
+    const sealedEvidence: string[] = [];
     let generatedItems = 0;
 
     for (const configCampaign of this.config.campaigns) {
@@ -148,6 +177,43 @@ export class AccessReviewCampaignScheduler {
         const items = await this.runtime.itemStore.listByCampaign(current.tenantId, current.id);
         const decisions = await this.runtime.planAutoRevocations(items, current, now);
         for (const decision of decisions) autoRevocations.push(decision.id);
+        // Re-read, because the auto-revocations just resolved items this list is stale about: the
+        // whole point of the close is that it only fires when nothing is outstanding.
+        const settled = await this.runtime.itemStore.listByCampaign(current.tenantId, current.id);
+        if (
+          this.config.closeCompletedCampaigns &&
+          this.runtime.runtime.isCampaignCompletable(current, settled)
+        ) {
+          const outcome = await this.runtime.closeCampaign({
+            campaign: current,
+            createdBy: this.config.systemActorUserId,
+            now,
+            ...(this.config.evidenceStorageUriPrefix !== undefined
+              ? { storageUri: `${this.config.evidenceStorageUriPrefix}${current.id}` }
+              : {}),
+            ...(this.opts.onEvidenceError !== undefined
+              ? { onSealError: this.opts.onEvidenceError }
+              : {}),
+          });
+          closedCampaigns.push(outcome.campaign.id);
+          if (outcome.evidence !== null) sealedEvidence.push(outcome.evidence.id);
+        }
+      } else if (current.status === "completed" && this.config.closeCompletedCampaigns) {
+        // The retry: a close whose seal failed leaves a `completed` campaign with no sealed pack,
+        // and nothing else would ever look at it again.
+        try {
+          const ensured = await this.runtime.ensureSealedEvidenceForCampaign({
+            campaign: current,
+            createdBy: this.config.systemActorUserId,
+            now,
+            ...(this.config.evidenceStorageUriPrefix !== undefined
+              ? { storageUri: `${this.config.evidenceStorageUriPrefix}${current.id}` }
+              : {}),
+          });
+          if (ensured.outcome === "sealed") sealedEvidence.push(ensured.evidence.id);
+        } catch (err) {
+          this.opts.onEvidenceError?.(err);
+        }
       }
     }
 
@@ -156,6 +222,8 @@ export class AccessReviewCampaignScheduler {
       startedCampaigns,
       generatedItems,
       autoRevocations,
+      closedCampaigns,
+      sealedEvidence,
     };
   }
 

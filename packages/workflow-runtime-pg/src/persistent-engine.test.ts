@@ -46,7 +46,17 @@ function fixtureDefinition(): WorkflowDefinition {
     ],
     variables: [],
     timers: [],
-    signals: [],
+    // Declared, as `WorkflowDefinitionSchema` requires of any `signal_received` trigger — and as
+    // `meta.workflow_signals.delivery_guarantee` requires of anything that persists one.
+    signals: [
+      {
+        name: "approve",
+        correlationVariable: "poNumber",
+        payloadSchemaSha256: null,
+        deliveryGuarantee: "at_least_once",
+        idempotencyKey: null,
+      },
+    ],
     initialState: "draft",
     compensationStrategy: "no_compensation",
     timeoutSeconds: 86_400,

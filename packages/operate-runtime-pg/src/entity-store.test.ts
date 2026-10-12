@@ -1,5 +1,5 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
-import type { EntityRecord } from "@crossengin/operate-runtime";
+import { ListSurfaceUnserveable, type EntityRecord, type ListValueType } from "@crossengin/operate-runtime";
 import { describe, expect, it } from "vitest";
 
 import { PostgresEntityStore } from "./entity-store.js";
@@ -204,9 +204,13 @@ describe("PostgresEntityStore — configuration", () => {
 function capturePg(rows: EntityRecord[]): {
   conn: PgConnection;
   last: { sql: string; params: readonly unknown[] };
+  /** Every statement, for a case asserting that something was NOT issued. */
+  calls: Array<{ sql: string; params: readonly unknown[] }>;
 } {
   const last = { sql: "", params: [] as readonly unknown[] };
+  const calls: Array<{ sql: string; params: readonly unknown[] }> = [];
   const query = (async (sql: string, params?: readonly unknown[]) => {
+    calls.push({ sql, params: params ?? [] });
     if (sql.includes("set_config")) return { rows: [], rowCount: 0 };
     last.sql = sql;
     last.params = params ?? [];
@@ -218,7 +222,7 @@ function capturePg(rows: EntityRecord[]): {
     withAdvisoryLock: (async <T>(_k: bigint, fn: () => Promise<T>) => fn()) as PgConnection["withAdvisoryLock"],
     close: (async () => undefined) as PgConnection["close"],
   };
-  return { conn, last };
+  return { conn, last, calls };
 }
 
 interface LinkRow {
@@ -402,7 +406,7 @@ describe("PostgresEntityStore.listPage — pushdown", () => {
       sort: [{ field: "name", direction: "desc" }],
       filters: [],
     });
-    expect(last.sql).toContain("ORDER BY document ->> 'name' DESC, record_id ASC");
+    expect(last.sql).toContain("ORDER BY document ->> 'name' DESC NULLS LAST, record_id ASC");
     expect(last.sql).toContain("LIMIT $3");
     expect(last.sql).not.toContain("OFFSET");
     expect(last.params).toEqual([TENANT, "Product", 3]);
@@ -431,18 +435,145 @@ describe("PostgresEntityStore.listPage — pushdown", () => {
     expect(last.params).toEqual([TENANT, "Product", "active", 11]);
   });
 
-  it("ignores a filter/sort field that isn't a safe identifier", async () => {
+  it("refuses a filter/sort field that isn't a safe identifier, and interpolates nothing", async () => {
+    // The interpolation guard is unchanged and still the thing that matters — neither word reaches
+    // any SQL. What changed is that the surface is no longer *dropped*: the old assertion was
+    // `last.params` equalling the base parameters, i.e. a statement issued with the filter gone,
+    // which answers with every row of the entity.
+    const { conn, calls } = capturePg([]);
+    const store = new PostgresEntityStore(conn);
+    const err = await store
+      .listPage(TENANT, "Product", {
+        limit: 10,
+        cursor: null,
+        sort: [{ field: "name; DROP", direction: "asc" }],
+        filters: [{ field: "x'; DELETE", value: "v" }],
+      })
+      .then(
+        () => null,
+        (e: unknown) => e as ListSurfaceUnserveable,
+      );
+    expect(err).toBeInstanceOf(ListSurfaceUnserveable);
+    // The filter alone; the unsafe sort name degrades, and the interpolation guard is what keeps
+    // it out of the SQL either way.
+    expect(err!.surfaces.map((x) => x.reason)).toEqual(["unsafe_field_name"]);
+    for (const c of calls) {
+      expect(c.sql).not.toContain("DROP");
+      expect(c.sql).not.toContain("DELETE");
+    }
+  });
+
+  it("serves a filter on a field the entity does not declare, which is a real JSON path", async () => {
+    // The document store's arm, and deliberately NOT a refusal: `document ->> 'nope'` is a valid
+    // path over a real document that yields NULL, so the predicate is honest and matches nothing.
+    // That is the opposite of what the column store answers for the same request — it has no
+    // column at all — and the disagreement is why the kernel now refuses a manifest that declares
+    // a surface over a field no entity has.
     const { conn, last } = capturePg([]);
     const store = new PostgresEntityStore(conn);
     await store.listPage(TENANT, "Product", {
       limit: 10,
       cursor: null,
-      sort: [{ field: "name; DROP", direction: "asc" }],
-      filters: [{ field: "x'; DELETE", value: "v" }],
+      sort: [],
+      filters: [{ field: "nope", value: "v" }],
     });
-    expect(last.sql).not.toContain("DROP");
-    expect(last.sql).not.toContain("DELETE");
+    expect(last.sql).toContain("document ->> 'nope'");
+    expect(last.params).toEqual([TENANT, "Product", "v", 11]);
+  });
+});
+
+describe("PostgresEntityStore.listPage — declared numeric fields", () => {
+  /** What `withListValueTypes` attaches from a manifest declaring `price` a `decimal`. */
+  const numeric = new Map<string, ListValueType>([["price", "numeric"]]);
+
+  it("orders a declared numeric field through a guarded cast, NULLS LAST", async () => {
+    const { conn, last } = capturePg([]);
+    const store = new PostgresEntityStore(conn);
+    await store.listPage(TENANT, "Product", {
+      limit: 10,
+      cursor: null,
+      sort: [{ field: "price", direction: "asc" }],
+      filters: [],
+      valueTypes: numeric,
+    });
+    expect(last.sql).toContain("ORDER BY (CASE WHEN length(document ->> 'price')");
+    expect(last.sql).toContain("THEN (document ->> 'price')::numeric ELSE NULL END) ASC NULLS LAST");
+    // the cast is guarded, not bare: one row holding 'n/a' must not fail every page of the entity
+    expect(last.sql).not.toContain("ORDER BY (document ->> 'price')::numeric");
+  });
+
+  it("keeps the text ORDER BY for a field the manifest does not declare numeric", async () => {
+    const { conn, last } = capturePg([]);
+    const store = new PostgresEntityStore(conn);
+    await store.listPage(TENANT, "Product", {
+      limit: 10,
+      cursor: null,
+      sort: [{ field: "name", direction: "asc" }],
+      filters: [],
+      valueTypes: numeric,
+    });
+    expect(last.sql).toContain("ORDER BY document ->> 'name' ASC NULLS LAST, record_id ASC");
+    expect(last.sql).not.toContain("CASE WHEN");
+  });
+
+  it("falls back to a text comparison with no declared types at all", async () => {
+    // A store used without a manifest — an admin query, a test — behaves exactly as before.
+    const { conn, last } = capturePg([]);
+    const store = new PostgresEntityStore(conn);
+    await store.listPage(TENANT, "Product", {
+      limit: 10,
+      cursor: null,
+      sort: [{ field: "price", direction: "asc" }],
+      filters: [],
+    });
+    expect(last.sql).toContain("ORDER BY document ->> 'price' ASC NULLS LAST, record_id ASC");
+  });
+
+  it("binds a numeric filter with a numeric cast", async () => {
+    const { conn, last } = capturePg([]);
+    const store = new PostgresEntityStore(conn);
+    await store.listPage(TENANT, "Product", {
+      limit: 10,
+      cursor: null,
+      sort: [],
+      filters: [{ field: "price", op: "gte", value: "0.5" }],
+      valueTypes: numeric,
+    });
+    expect(last.sql).toContain("$3::numeric");
+    expect(last.params).toEqual([TENANT, "Product", "0.5", 11]);
+  });
+
+  it("answers a non-numeric comparand with a constant instead of a value that would raise", async () => {
+    const { conn, last } = capturePg([]);
+    const store = new PostgresEntityStore(conn);
+    await store.listPage(TENANT, "Product", {
+      limit: 10,
+      cursor: null,
+      sort: [],
+      filters: [{ field: "price", op: "eq", value: "n/a" }],
+      valueTypes: numeric,
+    });
+    expect(last.sql).toContain("AND FALSE");
     expect(last.params).toEqual([TENANT, "Product", 11]);
+  });
+
+  it("keeps the guarded expression away from the field name interpolation guard", async () => {
+    // The numeric path builds three copies of `document ->> 'field'`, so the identifier check has
+    // to hold for all of them — and the name now REFUSES rather than being dropped, so the three
+    // copies are never built at all. The guard is still what this pins: no statement contains it.
+    const { conn, calls } = capturePg([]);
+    const store = new PostgresEntityStore(conn);
+    // A sort-only unsafe name degrades rather than refusing, so the statement IS issued — and the
+    // guard is what this pins: none of it reaches any SQL.
+    await store.listPage(TENANT, "Product", {
+      limit: 10,
+      cursor: null,
+      sort: [{ field: "price'; DROP TABLE x; --", direction: "asc" }],
+      filters: [],
+      valueTypes: new Map<string, ListValueType>([["price'; DROP TABLE x; --", "numeric"]]),
+    });
+    for (const c of calls) expect(c.sql).not.toContain("DROP");
+    expect(calls.some((c) => c.sql.includes("ORDER BY record_id ASC"))).toBe(true);
   });
 });
 
@@ -562,5 +693,68 @@ describe("PostgresEntityStore.pruneDanglingLinks", () => {
     const result = await store.pruneDanglingLinks(OTHER_TENANT, "Product", "Tag");
     expect(result).toEqual({ pruned: 0, kept: 0 });
     expect(remainingLinks()).toHaveLength(1);
+  });
+});
+
+describe("PostgresEntityStore.listPage — declared datetime fields", () => {
+  const typed = new Map<string, ListValueType>([["occurred", "timestamptz"]]);
+
+  it("compares a datetime through the guarded instant cast, not byte-wise", async () => {
+    const cap = capturePg([]);
+    await new PostgresEntityStore(cap.conn).listPage(TENANT, "Evt", {
+      limit: 5,
+      cursor: null,
+      sort: [{ field: "occurred", direction: "asc" }],
+      filters: [],
+      valueTypes: typed,
+    });
+    const sql = cap.last.sql;
+    // The spellings a document can hold are not all the canonical one: a legacy
+    // `2026-01-31T19:00:00+09:00` is the same instant as `2026-01-31T10:00:00.000Z` and sorts nine
+    // hours away from it as text. Measured live over eight rows, this store placed such a row five
+    // positions from where `ColumnMappedEntityStore` placed it.
+    expect(sql).toContain("::timestamptz");
+    expect(sql).toContain("make_date(");
+    expect(sql).toContain("ASC NULLS LAST");
+  });
+
+  it("binds a filter value as an instant and folds an uncomparable one to a constant", async () => {
+    const cap = capturePg([]);
+    const store = new PostgresEntityStore(cap.conn);
+    await store.listPage(TENANT, "Evt", {
+      limit: 5,
+      cursor: null,
+      sort: [],
+      filters: [{ field: "occurred", op: "gt", value: "2026-01-31T00:00:00.000Z" }],
+      valueTypes: typed,
+    });
+    expect(cap.last.sql).toContain("> $3::timestamptz");
+    await store.listPage(TENANT, "Evt", {
+      limit: 5,
+      cursor: null,
+      sort: [],
+      filters: [{ field: "occurred", op: "gt", value: "soon" }],
+      valueTypes: typed,
+    });
+    // `'soon'::timestamptz` raises, and no instant compares to a word, so `gt` matches nothing.
+    // Binding it would answer 500 for a query that should answer an empty page.
+    expect(cap.last.sql).toContain("FALSE");
+    expect(cap.last.params).not.toContain("soon");
+  });
+
+  it("leaves a date and a time field comparing as text", async () => {
+    const cap = capturePg([]);
+    await new PostgresEntityStore(cap.conn).listPage(TENANT, "Evt", {
+      limit: 5,
+      cursor: null,
+      sort: [{ field: "day", direction: "asc" }],
+      filters: [],
+      valueTypes: new Map<string, ListValueType>([["day", "text"]]),
+    });
+    // `YYYY-MM-DD` is fixed-width and zero-padded, so byte order *is* chronological, and `date_in`
+    // is STABLE — a cast would be unindexable and `DateStyle`-dependent (`'01/02/2026'::date` is
+    // January 2nd under MDY and February 1st under DMY, measured) for no ordering gain.
+    expect(cap.last.sql).not.toContain("::date");
+    expect(cap.last.sql).toContain("ORDER BY document ->> 'day' ASC NULLS LAST");
   });
 });

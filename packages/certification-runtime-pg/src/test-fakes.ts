@@ -46,6 +46,33 @@ export function compliantEvidence(at = FIXTURE_TIME): ControlEvidence[] {
  * In-memory fake of the platform-wide `meta.certification_reports` table,
  * enough to round-trip the store's INSERT / SELECT paths offline.
  */
+const INCLUSIVE_SCOPE_RE = /\(\s*tenant_id\s*=\s*\$(\d+)\s+OR\s+tenant_id IS NULL\s*\)/;
+const STRICT_SCOPE_RE = /tenant_id\s*=\s*\$(\d+)/;
+
+/**
+ * Whether a row's `tenant_id` satisfies the scope predicate `sql` carries.
+ *
+ * The inclusive form is tested first because it *contains* the strict form as a substring, so
+ * reading it as the strict one would drop the platform rows the OR exists to keep. A `SELECT` with
+ * no scope predicate at all throws: a fake that matched everything is how an unscoped read passed
+ * its tests for as long as it did.
+ */
+export function scopeMatches(
+  sql: string,
+  params: readonly unknown[],
+  rowTenantId: unknown,
+): boolean {
+  const inclusive = INCLUSIVE_SCOPE_RE.exec(sql);
+  if (inclusive !== null) {
+    const bound = params[Number(inclusive[1]) - 1] ?? null;
+    return rowTenantId === bound || rowTenantId === null;
+  }
+  if (/tenant_id IS NULL/.test(sql)) return rowTenantId === null;
+  const strict = STRICT_SCOPE_RE.exec(sql);
+  if (strict !== null) return rowTenantId === (params[Number(strict[1]) - 1] ?? null);
+  throw new Error(`a read carried no tenant_id scope predicate: ${sql}`);
+}
+
 export function fakeCertificationPg(): PgConnection {
   const rows = new Map<string, Record<string, unknown>>();
 
@@ -54,6 +81,8 @@ export function fakeCertificationPg(): PgConnection {
     params?: readonly unknown[],
   ): Promise<PgQueryResult> => {
     const p = params ?? [];
+    // `set_config(...)` is spelled as a `SELECT`, so it has to be answered before the read branch.
+    if (sql.includes("set_config")) return { rows: [], rowCount: 0 };
     if (sql.includes("INSERT INTO")) {
       const reportId = String(p[0]);
       if (!rows.has(reportId)) {
@@ -80,6 +109,11 @@ export function fakeCertificationPg(): PgConnection {
       } else if (sql.includes("WHERE framework = $1")) {
         visible = visible.filter((r) => r["framework"] === p[0]);
       }
+      // Apply the scope predicate the store carries beside RLS. The fake used to ignore `tenant_id`
+      // altogether, which is exactly the blindness that let the missing predicate live: a store
+      // reading every scope and a store reading one looked identical here. A read with no scope
+      // predicate is a bug, so it throws rather than quietly matching everything.
+      visible = visible.filter((r) => scopeMatches(sql, p, r["tenant_id"] ?? null));
       visible.sort((a, b) =>
         String(b["generated_at"]).localeCompare(String(a["generated_at"])),
       );

@@ -1,5 +1,8 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
 import {
+  scopedRead,
+  scopedWrite,
+  scopeFilter,
   SloEvaluationRecordSchema,
   type SloEvaluationRecord,
 } from "./records.js";
@@ -16,33 +19,51 @@ export class PostgresSloEvaluationStore {
 
   async record(record: SloEvaluationRecord): Promise<void> {
     const valid = SloEvaluationRecordSchema.parse(record);
-    await this.conn.query(
-      `INSERT INTO ${SCHEMA}.${TABLE} (
-         evaluation_id, tenant_id, slo_id, surface, breached,
-         worst_severity, worst_threshold_id, target, evaluations, evaluated_at
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
-       ON CONFLICT (evaluation_id) DO NOTHING`,
-      [
-        valid.evaluationId,
-        valid.tenantId,
-        valid.sloId,
-        valid.surface,
-        valid.breached,
-        valid.worstSeverity,
-        valid.worstThresholdId,
-        valid.target,
-        JSON.stringify(valid.evaluations),
-        valid.evaluatedAt,
-      ],
+    await scopedWrite(this.conn, valid.tenantId, (tx) =>
+      tx.query(
+        `INSERT INTO ${SCHEMA}.${TABLE} (
+           evaluation_id, tenant_id, slo_id, surface, breached,
+           worst_severity, worst_threshold_id, target, evaluations, evaluated_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
+         ON CONFLICT (evaluation_id) DO NOTHING`,
+        [
+          valid.evaluationId,
+          valid.tenantId,
+          valid.sloId,
+          valid.surface,
+          valid.breached,
+          valid.worstSeverity,
+          valid.worstThresholdId,
+          valid.target,
+          JSON.stringify(valid.evaluations),
+          valid.evaluatedAt,
+        ],
+    
+      ),
     );
   }
 
-  async countBreachesSince(sloId: string, since: Date): Promise<number> {
-    const result = await this.conn.query<{ count: string }>(
-      `SELECT COUNT(*)::TEXT AS count FROM ${SCHEMA}.${TABLE}
-       WHERE slo_id = $1 AND breached = true AND evaluated_at >= $2`,
-      [sloId, since.toISOString()],
+  /**
+   * How many breaching evaluations one scope recorded for `sloId` since `since`.
+   *
+   * `tenantId` defaults to the platform scope — what a non-owner with no tenant context has always
+   * been given, so the default makes the owner agree with it rather than changing the question.
+   * `slo_id` is not a scope: the same SLO can be evaluated platform-wide *and* per tenant, and this
+   * returned their sum as the owner.
+   */
+  async countBreachesSince(
+    sloId: string,
+    since: Date,
+    tenantId: string | null = null,
+  ): Promise<number> {
+    const scope = scopeFilter(tenantId, 3);
+    const result = await scopedRead(this.conn, tenantId, (tx) =>
+      tx.query<{ count: string }>(
+        `SELECT COUNT(*)::TEXT AS count FROM ${SCHEMA}.${TABLE}
+         WHERE slo_id = $1 AND breached = true AND evaluated_at >= $2 AND ${scope.sql}`,
+        [sloId, since.toISOString(), ...scope.params],
+      ),
     );
     const row = result.rows[0];
     if (row === undefined) return 0;

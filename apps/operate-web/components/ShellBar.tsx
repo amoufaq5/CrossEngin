@@ -1,8 +1,10 @@
 "use client";
 
 import Link from "next/link";
+import { useState } from "react";
 
 import { roleLabel, useSchema } from "@/lib/schema";
+import { LOGIN_PATH } from "@/lib/session";
 
 /**
  * SAP-Fiori-style shell bar: a translucent, blurred top bar spanning the whole
@@ -11,9 +13,30 @@ import { roleLabel, useSchema } from "@/lib/schema";
  */
 export function ShellBar() {
   const { schema } = useSchema();
+  const [signingOut, setSigningOut] = useState(false);
   const viewer = schema?.viewer ?? null;
   const roleName = viewer ? roleLabel(schema, viewer.primaryRole) : null;
   const initial = (roleName ?? "A").trim().charAt(0).toUpperCase();
+
+  /**
+   * The only caller of `/api/auth/logout`. A full document load afterwards for the same
+   * reason the login does one: the module-level schema, reference-label and subscription
+   * caches have no invalidation, so a client-side navigation would leave the signed-out
+   * principal's entity list and role on screen. The navigation runs whether or not the POST
+   * succeeded — a sign-out that reports a failure and leaves the user looking at their data
+   * is the worse of the two outcomes, and the cookie is `httpOnly` so this is the only
+   * mechanism there is.
+   */
+  async function signOut(): Promise<void> {
+    if (signingOut) return;
+    setSigningOut(true);
+    try {
+      await fetch("/api/auth/logout", { method: "POST", headers: { accept: "application/json" } });
+    } catch {
+      // fall through to the navigation
+    }
+    window.location.href = LOGIN_PATH;
+  }
 
   return (
     <header className="shell-bar">
@@ -40,6 +63,14 @@ export function ShellBar() {
         >
           {initial}
         </span>
+        <button
+          onClick={() => void signOut()}
+          disabled={signingOut}
+          className="text-xs font-semibold text-ink-faint transition hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+          title="Sign out"
+        >
+          {signingOut ? "Signing out…" : "Sign out"}
+        </button>
       </div>
     </header>
   );

@@ -143,3 +143,120 @@ export async function readLimitedBody(
   }
   return out;
 }
+
+/* ------------------------------------------------------------------------------------------------
+ * Per-route limits (ADR-0331)
+ * ---------------------------------------------------------------------------------------------- */
+
+/**
+ * One configured override: a path prefix and the limit that applies beneath it.
+ *
+ * ADR-0312 shipped a single platform-wide cap and left "a per-route or per-tenant request-body
+ * limit is unaddressed". The cost of only having one number is that it has to be set to the
+ * **largest legitimate body in the deployment** — a manifest upload, a migration preview — and that
+ * figure then applies to every cheap endpoint, so a 10 MiB POST to a route whose bodies are a few
+ * hundred bytes is accepted and buffered in full before anything looks at it.
+ *
+ * So the point of this is not really "some routes may be bigger". It is that the **default can
+ * finally be small**, with the few genuinely large routes named.
+ */
+export interface RouteBodyLimit {
+  /** Matched as a path prefix, not as a route template — see `routeBodyLimitFor`. */
+  readonly prefix: string;
+  readonly bytes: number;
+}
+
+/**
+ * The limit for one request, by longest matching prefix, falling back to the default.
+ *
+ * **A prefix and not the gateway's route template**, deliberately. The limit has to be chosen
+ * before the body is read, and route matching happens inside the pipeline *after* it — so matching
+ * a template here would mean a second route matcher in front of the first, which is two things to
+ * keep in step and the shape this codebase keeps finding defects in. A prefix is coarser and cannot
+ * disagree with anything.
+ *
+ * **Longest prefix wins**, so `/v1/platform` and `/v1/platform/deletion-requests` can both be
+ * configured and the more specific one applies. Ties are impossible: two identical prefixes are
+ * refused at parse time.
+ *
+ * The query string is cut before matching, because a limit that could be changed by appending
+ * `?x=1` would be no limit at all.
+ */
+export function routeBodyLimitFor(
+  url: string,
+  overrides: readonly RouteBodyLimit[],
+  defaultBytes: number,
+): number {
+  const path = pathOf(url);
+  let best: RouteBodyLimit | null = null;
+  for (const override of overrides) {
+    if (!path.startsWith(override.prefix)) continue;
+    if (best === null || override.prefix.length > best.prefix.length) best = override;
+  }
+  return best === null ? defaultBytes : best.bytes;
+}
+
+/** The path, with the query and fragment removed. A relative-form URL has no authority to strip. */
+function pathOf(url: string): string {
+  const cut = url.search(/[?#]/);
+  return cut === -1 ? url : url.slice(0, cut);
+}
+
+export type RouteBodyLimitParse =
+  | { readonly ok: true; readonly limit: RouteBodyLimit }
+  | { readonly ok: false; readonly reason: string };
+
+/**
+ * Parses one `<prefix>=<size>` spec.
+ *
+ * The prefix must be absolute, because a relative one could never match a request URL and a spec
+ * that silently matches nothing is worse than a refusal — ADR-0313's rule that an unsafe
+ * configuration is refused rather than stored, applied to one that is merely useless.
+ */
+export function parseRouteBodyLimit(raw: string): RouteBodyLimitParse {
+  const eq = raw.lastIndexOf("=");
+  if (eq <= 0) return { ok: false, reason: `expected <prefix>=<size>, got ${JSON.stringify(raw)}` };
+  const prefix = raw.slice(0, eq).trim();
+  const size = raw.slice(eq + 1).trim();
+  if (!prefix.startsWith("/")) {
+    return { ok: false, reason: `prefix must start with '/', got ${JSON.stringify(prefix)}` };
+  }
+  if (prefix.includes("?") || prefix.includes("#")) {
+    // The matcher cuts the query off the request URL, so a prefix containing one could never match.
+    return { ok: false, reason: `prefix must not contain a query or fragment: ${JSON.stringify(prefix)}` };
+  }
+  const parsed = parseRequestBodyLimit(size);
+  if (!parsed.ok) return { ok: false, reason: `${prefix}: ${parsed.reason}` };
+  return { ok: true, limit: { prefix, bytes: parsed.bytes } };
+}
+
+/**
+ * Parses every spec and refuses the set, not just each member.
+ *
+ * A duplicated prefix is refused rather than last-one-wins: two specs for one path is an operator
+ * who believes both are in force, and silently honouring one is how a deployment runs with a limit
+ * nobody configured.
+ */
+export function parseRouteBodyLimits(raws: readonly string[]): {
+  readonly ok: boolean;
+  readonly limits: readonly RouteBodyLimit[];
+  readonly reasons: readonly string[];
+} {
+  const limits: RouteBodyLimit[] = [];
+  const reasons: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of raws) {
+    const parsed = parseRouteBodyLimit(raw);
+    if (!parsed.ok) {
+      reasons.push(parsed.reason);
+      continue;
+    }
+    if (seen.has(parsed.limit.prefix)) {
+      reasons.push(`duplicate prefix ${JSON.stringify(parsed.limit.prefix)}`);
+      continue;
+    }
+    seen.add(parsed.limit.prefix);
+    limits.push(parsed.limit);
+  }
+  return { ok: reasons.length === 0, limits, reasons };
+}

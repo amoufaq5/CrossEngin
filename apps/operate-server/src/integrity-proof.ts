@@ -17,6 +17,10 @@ import {
   verifyChainFull,
   type ChainVerificationReport,
 } from "./chain-verify.js";
+import {
+  PostgresIntegrityVerdictStore,
+  integrityVerdictInputFor,
+} from "./integrity-verdict-store.js";
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
@@ -28,8 +32,24 @@ export const IntegrityProofConfigSchema = z
     /** Actor recorded on the verdict chain entry. */
     verifiedBy: z.string().min(1).default("operate-server"),
     tenants: z.array(z.string().uuid()).default([]),
-    /** Also prove the platform chain. Chain half only — `audit_log.tenant_id` is NOT NULL. */
-    includePlatform: z.boolean().default(false),
+    /**
+     * Also prove the platform chain — both halves, since ADR-0331 gave it audit rows.
+     *
+     * **Defaults to `true` as of ADR-0332**, together with `--checkpoint-config`'s, and the pairing
+     * is the whole decision. Three escalators write platform-scope rows now, so a deployment that
+     * did not opt in was writing rows **nothing verified** — ADR-0327's "built, correct, and read by
+     * nothing" in a new place, and in the one table where the integrity proof is the only detector
+     * there is.
+     *
+     * Flipping *one* of the two would be wrong rather than merely partial: ADR-0287 established that
+     * tail removal is invisible to hash links, so the truncation check needs a checkpoint witness,
+     * and proving a scope that is never checkpointed leaves that half silently unwitnessed. Flipping
+     * both is safe because an empty chain answers `skipped_empty` rather than erroring, so a
+     * deployment with no platform rows pays one cheap query per pass and hears nothing.
+     *
+     * An explicit `false` is still honoured; what changed is what silence means.
+     */
+    includePlatform: z.boolean().default(true),
     allTenants: z.boolean().default(false),
     tenantStatuses: z.array(z.string().min(1)).nonempty().optional(),
     /** How many of the most recent audit rows to prove per pass (the store clamps at 500). */
@@ -114,7 +134,11 @@ export interface IntegrityProofReport {
   readonly verdict: IntegrityVerdict;
   readonly verifiedAt: string;
   readonly chain: ChainVerificationReport;
-  /** Null for the platform chain, which has no audit rows to anchor. */
+  /**
+   * `proveScopeIntegrity` always fills this now, for the platform chain as well (ADR-0331). The
+   * field stays nullable because `meta.audit_integrity_verdicts` holds reports written while it
+   * meant "the platform chain has no audit rows to anchor", and a stored row must keep parsing.
+   */
   readonly anchors: AuditAnchorReport | null;
   readonly truncation: ChainTruncationCheck;
 }
@@ -151,8 +175,12 @@ export interface IntegrityProofPassResult {
  * entries off the chain's end leaves every link and signature valid, so truncation is asked about
  * separately, against a checkpoint.
  *
- * The platform chain (`scope === null`) gets no anchor check — `audit_log.tenant_id` is NOT NULL,
- * so there are no platform audit rows to anchor.
+ * The platform chain (`scope === null`) is checked the same way as a tenant's, because
+ * `audit_log.tenant_id` is nullable now and the three platform-scope escalators write rows into it
+ * (ADR-0331). Skipping it — which is what this did while the column was NOT NULL, correctly, since
+ * there was nothing to check — would leave the one table the forensics stack exists to protect
+ * holding rows that nothing verifies: ADR-0327's "built, correct, and read by nothing" in the worst
+ * possible place.
  */
 export async function proveScopeIntegrity(
   scope: string | null,
@@ -181,13 +209,14 @@ export async function proveScopeIntegrity(
       (tail === null || tail.sequenceNumber < checkpoint.sequenceNumber),
   };
 
-  let anchors: AuditAnchorReport | null = null;
-  if (scope !== null) {
-    const rows = await deps.audit.listAnchoredForTenant(scope, { limit: deps.auditRowLimit });
-    // The anchor check needs the entries the rows point at, which a checkpoint-bounded suffix
-    // may not contain, so it always reads the whole chain. The chain *half* stays bounded.
-    anchors = verifyAuditAnchors(scope, rows, await deps.logStore.loadChain(scope));
-  }
+  const rows = await deps.audit.listAnchoredForScope(scope, { limit: deps.auditRowLimit });
+  // The anchor check needs the entries the rows point at, which a checkpoint-bounded suffix
+  // may not contain, so it always reads the whole chain. The chain *half* stays bounded.
+  const anchors: AuditAnchorReport = verifyAuditAnchors(
+    scope,
+    rows,
+    await deps.logStore.loadChain(scope),
+  );
 
   return {
     scope,
@@ -447,6 +476,12 @@ export function buildIntegrityProofLifecycle(
   const checkpoints = new PostgresChainCheckpointStore(conn, { schema: config.schema });
   // A reader, not the anchoring emitter: this verifies what was written, and must never write.
   const audit = new PostgresAuditEmitter(conn, { schema: config.schema });
+  // Built only when the verdict is being recorded, so a pass that records nothing allocates
+  // nothing — and, more to the point, so there is no store sitting here that nothing calls, which
+  // is the state this whole table was in.
+  const verdicts = config.recordVerdict
+    ? new PostgresIntegrityVerdictStore(conn, { schema: config.schema })
+    : null;
   const scopes: IntegrityScopeSource = opts.tenants ?? (() => integrityConfigScopes(config));
   const now = opts.now ?? ((): Date => new Date());
 
@@ -471,6 +506,50 @@ export function buildIntegrityProofLifecycle(
               recordedAt: report.verifiedAt,
               payload: integrityVerdictPayload(report),
             });
+            // And the queryable row, which until ADR-0333 nothing wrote: `record()` and
+            // `integrityVerdictInputFor` were called by nothing but their own unit test, so
+            // `meta.audit_integrity_verdicts` was empty in every deployment and every
+            // `--audit-verdict-routes` answer was "no verifications" — for a table that exists to
+            // make "show me last month's verifications" answerable. The chain entry above was the
+            // whole of what `recordVerdict` recorded.
+            //
+            // Under the same flag rather than a new one, because `recordVerdict` already means
+            // "record the verdict": a second flag would let a deployment turn recording on and
+            // still get no record, which is the silence this increment is about.
+            //
+            // The anchor comes from the entry just appended, and both halves of it — ADR-0318's
+            // rule that half an anchor is worse than none, which `record()` enforces. The entry
+            // hash was always on the returned `ChainedLogEntry`; this callback discarded it and
+            // returned only the sequence, so the seam was never missing, just unread.
+            if (verdicts !== null) {
+              try {
+                await verdicts.record(
+                  integrityVerdictInputFor(report, {
+                    chainEntryHash: entry.entryHash,
+                    chainSequenceNumber: entry.sequenceNumber,
+                  }),
+                );
+              } catch (err) {
+                // Reported, never thrown: the chain entry has committed, so the verification *is*
+                // recorded where tamper-evidence lives. Raising here would turn a successful
+                // verification into a failed pass and skip the next scope, losing the anchored
+                // entry's value to protect a projection of it. Same shape as `appendPagedNote`
+                // (ADR-0327) — the durable half has landed, so the convenience half must not be
+                // able to undo it.
+                //
+                // Named here as well as handed to `opts.onError`, because that callback is shared by
+                // every failure in a pass and logs the error alone: "pass error: …" does not say
+                // that the *verification succeeded* and only its queryable projection was lost,
+                // which is the one distinction an operator reading this line needs. It is also
+                // optional on the seam, so a caller that omits it would otherwise get silence.
+                console.warn(
+                  `[integrity-proof] scope=${report.scope ?? "platform"} verified, but its` +
+                    ` queryable verdict row could not be written (the chain entry is committed and` +
+                    ` is the record of record): ${String(err)}`,
+                );
+                opts.onError?.(err);
+              }
+            }
             return entry.sequenceNumber;
           },
         }

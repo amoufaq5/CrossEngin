@@ -1,9 +1,15 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
-import { formatIncidentId, type IncidentRecord } from "@crossengin/incident-response";
+import {
+  formatIncidentId,
+  type IncidentRecord,
+  type PagedTimelineFacts,
+} from "@crossengin/incident-response";
+import { IncidentExecutor } from "@crossengin/incident-response-runtime";
 
 import {
   INCIDENT_COLUMNS,
   INCIDENT_COLUMN_NAMES,
+  assertAppendOnly,
   incidentPlaceholders,
   incidentRowValues,
   incidentUpdateAssignments,
@@ -37,6 +43,42 @@ export class IncidentNotFoundError extends Error {
   }
 }
 
+/**
+ * How many times a page note will re-read and re-append before giving up.
+ *
+ * Bounded on purpose: the note loses its race against whatever other writer advanced the
+ * revision, and a page note is not worth an unbounded loop in front of an escalation that has
+ * already gone out. The `meta.audit_log` row ADR-0326 writes is the other witness, so a note that
+ * cannot land is a thinner record, not a lost one.
+ */
+export const PAGED_NOTE_MAX_ATTEMPTS = 3;
+
+/** The reasons `appendPagedNote` reports instead of throwing. */
+export const PAGED_NOTE_NOT_FOUND = "incident_not_found";
+export const PAGED_NOTE_REVISION_CONFLICT = "revision_conflict";
+
+export interface PagedNoteOutcome {
+  readonly recorded: boolean;
+  readonly reason: string | null;
+}
+
+export interface AppendPagedNoteInput {
+  readonly facts: PagedTimelineFacts;
+  readonly actorUserId: string;
+  readonly at?: string;
+}
+
+/**
+ * Builds the note. Stateless, and its clock is never consulted — `appendPagedNote` resolves the
+ * instant itself and passes it explicitly, so the entry is stamped once however many times the
+ * write is retried.
+ */
+const PAGE_NOTE_EXECUTOR = new IncidentExecutor();
+
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 const PLACEHOLDERS = incidentPlaceholders();
 const UPDATE_ASSIGNMENTS = incidentUpdateAssignments();
 /** The revision guard binds after every column value, so it is always the next placeholder. */
@@ -50,11 +92,25 @@ const REVISION_GUARD_PARAM = INCIDENT_COLUMN_NAMES.length + 1;
  * incidents exist to describe. Reads are therefore unfiltered by design, which is why nothing
  * tenant-facing is wired to this store.
  */
+export interface PostgresIncidentStoreOptions {
+  /**
+   * The clock for the two instants this store stamps itself: a paged note with no explicit `at`,
+   * and the row's `updated_at` on that write (ADR-0328).
+   *
+   * Every other write takes its instant from the caller, which is why this store had no clock at
+   * all — and then ADR-0327's `appendPagedNote` read `new Date()` directly, so the one method that
+   * decides an instant for itself was the one a test could not control.
+   */
+  readonly clock?: () => Date;
+}
+
 export class PostgresIncidentStore {
   private readonly conn: PgConnection;
+  private readonly clock: () => Date;
 
-  constructor(conn: PgConnection) {
+  constructor(conn: PgConnection, opts: PostgresIncidentStoreOptions = {}) {
     this.conn = conn;
+    this.clock = opts.clock ?? ((): Date => new Date());
   }
 
   /**
@@ -137,6 +193,65 @@ export class PostgresIncidentStore {
       throw new IncidentRevisionConflictError(record.id, expectedRevision);
     }
     return { record, revision: nextRevision, updatedAt: at };
+  }
+
+  /**
+   * Appends a `paged` note to a stored incident and **reports** rather than throws.
+   *
+   * By the time this runs the page has already left the process and the incident row is already
+   * durable, so raising here would turn a successful escalation into a failed one — the mistake
+   * ADR-0325 refused when it chose `undelivered` over a throw, and ADR-0320 before it with
+   * `tenantRetired: false` on a 200. Every outcome, an incident that does not exist included, is
+   * a reason on the result.
+   *
+   * The read-modify-write is retried because the store's revision guard means a note can lose a
+   * race with another writer — a scheduler closing the incident out, say, which is exactly what
+   * happens around a resolve. `PAGED_NOTE_MAX_ATTEMPTS` is why that retry is short.
+   */
+  async appendPagedNote(
+    incidentId: string,
+    input: AppendPagedNoteInput,
+  ): Promise<PagedNoteOutcome> {
+    // Resolved once, so every attempt records the instant the page happened rather than the
+    // instant the last retry got through.
+    const at = input.at ?? this.clock().toISOString();
+    for (let attempt = 0; attempt < PAGED_NOTE_MAX_ATTEMPTS; attempt++) {
+      let loaded: StoredIncident | null;
+      try {
+        loaded = await this.load(incidentId);
+      } catch (err) {
+        return { recorded: false, reason: `read_failed: ${messageOf(err)}` };
+      }
+      if (loaded === null) return { recorded: false, reason: PAGED_NOTE_NOT_FOUND };
+      let next: IncidentRecord;
+      try {
+        next = PAGE_NOTE_EXECUTOR.notePage(loaded.record, {
+          facts: input.facts,
+          actorUserId: input.actorUserId,
+          at,
+        });
+        // The same guard every write through `PersistentIncidentEngine.apply` passes, and the
+        // reason it moved into `records.ts` (ADR-0328): this was the one writer it did not cover,
+        // so a note that rewrote an earlier entry would have been accepted by the only check
+        // standing between a JSONB column and an edited timeline.
+        assertAppendOnly(loaded.record, next);
+      } catch (err) {
+        // The contract refused the facts, or the candidate was not an extension of the stored
+        // timeline — a caller bug either way, and one retrying cannot fix. Reported rather than
+        // raised for the same reason as everything else here.
+        return { recorded: false, reason: `note_refused: ${messageOf(err)}` };
+      }
+      try {
+        // The entry keeps the instant the page happened; the row's `updated_at` is when it was
+        // written, which is this attempt and not the one before it.
+        await this.update(next, loaded.revision, this.clock().toISOString());
+        return { recorded: true, reason: null };
+      } catch (err) {
+        if (err instanceof IncidentRevisionConflictError) continue;
+        return { recorded: false, reason: `write_failed: ${messageOf(err)}` };
+      }
+    }
+    return { recorded: false, reason: PAGED_NOTE_REVISION_CONFLICT };
   }
 
   /**

@@ -6,6 +6,7 @@ import type {
   IncidentDeclarer,
 } from "@crossengin/incident-response-runtime";
 import type { AlertPolicy } from "@crossengin/observability";
+import type { PageDirective } from "@crossengin/observability-runtime";
 import { describe, expect, it } from "vitest";
 
 import type { AuditAnchorReport, AuditAnchorResult } from "./audit-anchor.js";
@@ -79,13 +80,13 @@ function report(over: Partial<IntegrityProofReport> = {}): IntegrityProofReport 
 
 /** Records what the emitter was asked to write, without a database. */
 function fakeAudit() {
-  const emitted: { operation: string; tenantId: string; after: unknown }[] = [];
+  const emitted: { operation: string; tenantId: string | null; after: unknown }[] = [];
   return {
     emitted,
     audit: {
       emit: async (entry: {
         operation: string;
-        tenantId: string;
+        tenantId: string | null;
         after: unknown;
       }): Promise<void> => {
         emitted.push({ operation: entry.operation, tenantId: entry.tenantId, after: entry.after });
@@ -283,8 +284,10 @@ describe("IntegrityEscalator — failure handling", () => {
     await expect(e.observe(report())).resolves.toMatchObject({ kind: "opened" });
   });
 
-  it("cannot audit a platform-scope escalation, and says so rather than dropping it", async () => {
-    // `audit_log.tenant_id` is NOT NULL, so the platform chain has no tenant-scoped row to write.
+  it("audits a platform-scope escalation at platform scope (ADR-0331)", async () => {
+    // The platform chain's own compromise finding is the one escalation that could never leave a
+    // record of itself, because `audit_log.tenant_id` was NOT NULL. It lands as `tenant_id IS
+    // NULL` now, and is anchored in the platform chain it is about.
     const { audit, emitted } = fakeAudit();
     const paged: string[] = [];
     const e = new IntegrityEscalator({
@@ -297,9 +300,26 @@ describe("IntegrityEscalator — failure handling", () => {
     });
     const out = await e.observe(report({ scope: null, anchors: null }));
     expect(out.kind).toBe("opened");
-    expect(out.audited).toBe(false);
-    expect(emitted).toEqual([]);
+    expect(out.audited).toBe(true);
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]?.tenantId).toBeNull();
     expect(paged).toEqual(["x"]);
+  });
+
+  it("records a platform-scope recovery at platform scope too", async () => {
+    const { audit, emitted } = fakeAudit();
+    const e = new IntegrityEscalator({ config: config(), audit, now: () => new Date(AT) });
+    await e.observe(report({ scope: null, anchors: null }));
+    const out = await e.observe(report({ scope: null, anchors: null, verdict: "verified" }));
+    expect(out.kind).toBe("recovered");
+    expect(out.audited).toBe(true);
+    expect(emitted.map((e2) => e2.tenantId)).toEqual([null, null]);
+  });
+
+  it("still reports audited=false for a platform escalation with no emitter wired", async () => {
+    const e = new IntegrityEscalator({ config: config(), now: () => new Date(AT) });
+    const out = await e.observe(report({ scope: null, anchors: null }));
+    expect(out.audited).toBe(false);
   });
 });
 
@@ -353,9 +373,7 @@ describe("INTEGRITY_ESCALATIONS", () => {
  * what has already been "stored", which is the property that matters: it continues rather than
  * restarts.
  *
- * Written out by hand on purpose. Test files are not typechecked in this repo, so a double that
- * stops satisfying `IncidentDeclarer` fails at runtime inside a `catch` that exists by design —
- * which is why every test below asserts on a recorded *call* (`declared`, `lookups`, `closedOut`)
+ * Written out by hand on purpose, and every test below asserts on a recorded *call* (`declared`, `lookups`, `closedOut`)
  * rather than on nothing having thrown.
  */
 function fakeDeclarer(
@@ -973,5 +991,163 @@ describe("formatIntegrityEscalation — dispositions", () => {
     await esc.observe(report());
     const text = formatIntegrityEscalation(await esc.observe(report({ verdict: "verified" })));
     expect(text).toContain("recovered, closing INC-2026-0001");
+  });
+});
+
+/**
+ * Closing the alert the declaration opened (ADR-0326).
+ *
+ * ADR-0325 wired real page transports and left this open: a PagerDuty alert was only ever
+ * *triggered*, so a recovery cancelled the incident record and left the alert on the board.
+ */
+describe("IntegrityEscalator — resolving the provider's alert", () => {
+  it("resolves the alert when the recovery cancels the record", async () => {
+    const resolved: PageDirective[] = [];
+    const { declarer } = fakeDeclarer();
+    const esc = new IntegrityEscalator({
+      config: config(),
+      declarer,
+      resolvePage: (page) => {
+        resolved.push(page);
+      },
+    });
+    await esc.observe(report());
+    const recovered = await esc.observe(report({ verdict: "verified" }));
+    expect(recovered.disposition).toBe("cancelled");
+    // Keyed on the incident id, which is PagerDuty's `dedup_key` for the alert the trigger opened.
+    expect(resolved.map((p) => p.incidentId)).toEqual(["INC-2026-0001"]);
+  });
+
+  it("resolves over the same channels the declaration paged", async () => {
+    const paged: PageDirective[] = [];
+    const resolved: PageDirective[] = [];
+    const { declarer } = fakeDeclarer();
+    const esc = new IntegrityEscalator({
+      config: config(),
+      declarer,
+      page: (page) => {
+        paged.push(page);
+      },
+      resolvePage: (page) => {
+        resolved.push(page);
+      },
+    });
+    await esc.observe(report());
+    await esc.observe(report({ verdict: "verified" }));
+    expect(resolved.map((p) => p.channels.map((c) => c.kind))).toEqual(
+      paged.map((p) => p.channels.map((c) => c.kind)),
+    );
+  });
+
+  it("does not resolve the alert of an incident a human has triaged", async () => {
+    const resolved: PageDirective[] = [];
+    const { declarer } = fakeDeclarer({ triaged: true });
+    const esc = new IntegrityEscalator({
+      config: config(),
+      declarer,
+      resolvePage: (page) => {
+        resolved.push(page);
+      },
+    });
+    await esc.observe(report());
+    const recovered = await esc.observe(report({ verdict: "verified" }));
+    // The record is still open and owned. Resolving its alert would take it off the board of the
+    // person holding it, which is worse than an alert left up.
+    expect(recovered.disposition).toBe("human_owned");
+    expect(resolved).toEqual([]);
+  });
+
+  it("does not resolve when the close-out itself could not be recorded", async () => {
+    const resolved: PageDirective[] = [];
+    const { declarer } = fakeDeclarer({ failCloseOut: true });
+    const esc = new IntegrityEscalator({
+      config: config(),
+      declarer,
+      onError: () => undefined,
+      resolvePage: (page) => {
+        resolved.push(page);
+      },
+    });
+    await esc.observe(report());
+    const recovered = await esc.observe(report({ verdict: "verified" }));
+    // `failed` reads as `declared`: the row is still open and we do not know its state. Fail
+    // closed — an alert left up is noise, an alert wrongly closed is silence.
+    expect(recovered.disposition).toBe("declared");
+    expect(resolved).toEqual([]);
+  });
+
+  it("resolves an unpersisted episode's alert, because the page was real either way", async () => {
+    const resolved: PageDirective[] = [];
+    // No declarer: ids come from `CountingIncidentDeclarer` and nothing stored the record. The
+    // page still left over a real transport with a real dedup key.
+    const esc = new IntegrityEscalator({
+      config: config(),
+      resolvePage: (page) => {
+        resolved.push(page);
+      },
+    });
+    await esc.observe(report());
+    const recovered = await esc.observe(report({ verdict: "verified" }));
+    expect(recovered.disposition).toBe("unpersisted");
+    expect(resolved).toHaveLength(1);
+  });
+
+  it("does not resolve when nothing was open", async () => {
+    const resolved: PageDirective[] = [];
+    const { declarer } = fakeDeclarer();
+    const esc = new IntegrityEscalator({
+      config: config(),
+      declarer,
+      resolvePage: (page) => {
+        resolved.push(page);
+      },
+    });
+    const none = await esc.observe(report({ verdict: "verified" }));
+    expect(none.kind).toBe("none");
+    expect(resolved).toEqual([]);
+  });
+
+  it("does not resolve while the tamper is still present", async () => {
+    const resolved: PageDirective[] = [];
+    const { declarer } = fakeDeclarer();
+    const esc = new IntegrityEscalator({
+      config: config(),
+      declarer,
+      resolvePage: (page) => {
+        resolved.push(page);
+      },
+    });
+    await esc.observe(report());
+    await esc.observe(report());
+    expect(resolved).toEqual([]);
+  });
+
+  it("does not let a provider that refuses the resolve throw at the pass", async () => {
+    const errors: unknown[] = [];
+    const { declarer } = fakeDeclarer();
+    const esc = new IntegrityEscalator({
+      config: config(),
+      declarer,
+      onError: (err) => errors.push(err),
+      resolvePage: () => {
+        throw new Error("pagerduty unreachable");
+      },
+    });
+    await esc.observe(report());
+    // The recovery is already recorded by here; a provider that will not take the resolve must not
+    // turn it into a thrown pass.
+    const recovered = await esc.observe(report({ verdict: "verified" }));
+    expect(recovered.kind).toBe("recovered");
+    expect(recovered.disposition).toBe("cancelled");
+    expect(errors).toHaveLength(1);
+  });
+
+  it("records the recovery even when no resolve sink is wired", async () => {
+    const { cancelled, declarer } = fakeDeclarer();
+    const esc = new IntegrityEscalator({ config: config(), declarer });
+    await esc.observe(report());
+    const recovered = await esc.observe(report({ verdict: "verified" }));
+    expect(recovered.disposition).toBe("cancelled");
+    expect(cancelled).toEqual(["INC-2026-0001"]);
   });
 });

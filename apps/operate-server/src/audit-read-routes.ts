@@ -15,7 +15,7 @@ import type {
   SensitiveFieldPolicy,
 } from "@crossengin/auth";
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
-import { entityClassifiedFields, type Entity } from "@crossengin/types/meta-schema";
+import { classifiedFields, type Entity } from "@crossengin/types/meta-schema";
 
 import { resolveWindow } from "./integrity-verdict-routes.js";
 
@@ -126,17 +126,50 @@ export interface AuditClassificationContext {
 /**
  * Builds a lookup from a resolved manifest's entities.
  *
- * Only the entity's *declared* fields: trait-added columns (`id`, `created_at`, a soft-delete
- * marker) are not among them, so a payload carrying them has those keys dropped as undescribed. A
- * deployment that wants them readable builds the lookup from the kernel's `resolvedFields` instead
- * — the same function `validateManifest` uses — rather than this convenience.
+ * ## The narrow aperture is deliberate, and it fails closed
+ *
+ * Both halves read the entity's **own** `fields` — `classifiedFields(entity.fields)` for the
+ * classifications and `entity.fields` for the key list — so a field a *trait* contributes
+ * (`created_at`, a soft-delete marker, anything a custom trait declares) is in neither. It is
+ * therefore not in `declared`, so `redactAuditPayloads` lists the key under `undescribedFields` and
+ * **drops it from the payload**: a value nothing here describes is a value nobody has decided may
+ * be read. That is a completeness limitation — an audit entry's `after.created_at` is not shown —
+ * and not a disclosure, which is why this is the one of the three raw readers that was left alone.
+ *
+ * The narrowing is now **stated** rather than inherited. `classifiedFields` used to take an
+ * `Entity` and read `entity.fields` itself, so the narrow answer was what a caller got for free and
+ * the wide one needed a workaround; it takes a field list, so this call site has to name which
+ * fields it means and the choice is visible in a diff.
+ *
+ * ## Widening it is both halves or neither
+ *
+ * A deployment that wants trait columns in the payload must take the classification half from
+ * `resolvedClassifiedFields(entity, manifest.traits)` **and** the key list from
+ * `resolvedFields(entity, manifest.traits)`, both from `@crossengin/kernel/ddl`, and must thread
+ * the manifest's `traits` in — this signature does not take them, which is the mechanical reason
+ * the convenience narrowed in the first place.
+ *
+ * Doing only the key list is **worse than doing nothing**, and that is the whole reason this
+ * paragraph is longer than the advice it replaces. A trait-contributed field would then be
+ * *described* and carry no classification, so `computeRedactedFields` would have nothing to withhold
+ * it for: the key stops being dropped as undescribed and is served in the clear, to every reader,
+ * for a field the trait declared as `phi`. The half-fix converts a fail-closed omission into a
+ * fail-open disclosure of exactly the values this route redacts. (Doing only the classification
+ * half is merely inert — the extra classifications describe keys the list still drops.)
+ *
+ * The advice here used to be the key list alone, which is ADR-0360's "a remedy that cannot work is
+ * worse than none" with the remedy in a comment rather than in a boot line.
  */
 export function entityFieldLookupFrom(manifest: {
   readonly entities?: readonly Entity[];
 }): EntityFieldLookup {
   const byName = new Map<string, readonly ClassifiedField[]>();
   for (const entity of manifest.entities ?? []) {
-    const classified = new Map(entityClassifiedFields(entity).map((c) => [c.field, c.classification]));
+    // `entity.fields` and never `resolvedFields`: see the paragraph above. The two reads below are
+    // over the same list on purpose, and they have to stay that way together.
+    const classified = new Map(
+      classifiedFields(entity.fields).map((c) => [c.field, c.classification]),
+    );
     byName.set(
       entity.name,
       entity.fields.map((f) => {
@@ -199,14 +232,27 @@ function topLevelKeys(payload: Readonly<Record<string, unknown>> | null): readon
   return payload === null ? [] : Object.keys(payload);
 }
 
+// `fields` rather than `classifiedFields`, which would shadow the import of that name. Worth
+// avoiding beyond style: the two vocabularies differ — the imported function answers
+// `{field, classification}` from the meta-schema while this spec wants `@crossengin/auth`'s
+// `{name, classification?}` — so a shadow here puts two incompatible shapes under one identifier.
 function specFor(
   ctx: AuditReadRoutesContext,
-  classifiedFields: readonly ClassifiedField[],
+  fields: readonly ClassifiedField[],
 ): ResponseRedactionSpec {
   return {
-    classifiedFields,
+    classifiedFields: fields,
     roles: ctx.classification.roles,
     rolesForPrincipal: ctx.principalRoles,
+    // One entry's payload at a time, so the shape is a record — this path already redacts per row,
+    // which is what ADR-0343 gave the gateway. It deliberately supplies **no** record and no
+    // `abac`, so a record-bearing field policy resolves `undischargeable` here and the field stays
+    // redacted. Two reasons, and the second is the real one: the "record" on this path is a
+    // *historical snapshot* in `before`/`after`, not the live row, so a policy of the form "only on
+    // a patient in your department" would be answered against the department the record held when
+    // it was written rather than the one it holds now — a different question, and the wrong one to
+    // answer silently.
+    recordShape: "record",
     ...(ctx.classification.policy !== undefined ? { policy: ctx.classification.policy } : {}),
   };
 }
@@ -338,9 +384,24 @@ export interface AuditReadEvent {
   readonly tenantId: string | null;
   /**
    * The reader's OWN tenant, which is not the same question as whose trail was read: a platform
-   * operator reading across tenants leaves `tenantId` null and this set. The recorder needs it
-   * because `meta.audit_log.tenant_id` is NOT NULL — without it a cross-tenant read is the one read
-   * that cannot be recorded, and so (fail-closed) the one that cannot be served.
+   * operator reading across tenants leaves `tenantId` null and this set.
+   *
+   * **A cross-tenant read is still recorded against the reader's own tenant, and the reason has
+   * changed** (ADR-0331). ADR-0313 gave a mechanical one — `meta.audit_log.tenant_id` was NOT NULL,
+   * so there was nowhere else to put it — and that reason is gone: the column is nullable now and a
+   * platform-scope row is expressible. The rule stays for the reason that was always the real one.
+   *
+   * This record is about a **person**, and that person belongs to a tenant. Filing it in their
+   * tenant's trail is what makes the read accountable to the people whose data it touched: their
+   * own `GET /v1/audit/entries` shows that somebody with a platform grant read across them. Moving
+   * it to platform scope would put it behind `app.platform_audit` — readable only by the same
+   * population that performed it — which removes the one reader the record exists for. A
+   * platform-scope row is the right home for a fact about the *deployment* (an SLO page, a stalled
+   * sweep); a privileged human's read is not one.
+   *
+   * So the fail-closed consequence stands too: a reader with no resolvable tenant still cannot
+   * read, and must not be given a platform row instead. That would admit an **unattributable**
+   * privileged read, which is worse than refusing one.
    */
   readonly readerTenantId: string | null;
   readonly principalId: string | null;

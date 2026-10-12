@@ -130,6 +130,7 @@ export function helpText(): string {
 "  --plan                  With apply, introspect and print the reconciliation plan",
 "                          (including differences it will not close) without executing",
     "  --confirm               Required when PGDATABASE looks like production",
+    "  --allow-loosening       With apply: also DROP foreign keys the catalog no longer declares",
     "  license mint flags:     --tenant --status --plan --expires --issued",
     "                          --private-key --public-key --max-records-per-entity --features",
     "  license inspect:        crossengin license inspect <token> --public-key <b64>",

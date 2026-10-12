@@ -8,7 +8,12 @@ import {
   type ChainedLogEntry,
 } from "@crossengin/forensics";
 
-import { assertTenantId, SET_TENANT_CONTEXT_SQL } from "./tenant-context.js";
+import {
+  assertTenantId,
+  scopeFilter,
+  SET_PLATFORM_AUDIT_WRITE_SQL,
+  SET_TENANT_CONTEXT_SQL,
+} from "./tenant-context.js";
 import {
   ChainAppendInputSchema,
   rowToChainEntry,
@@ -42,6 +47,13 @@ export interface PostgresChainLogStoreOptions {
  * chain WITHOUT a signing key. Verification only needs public keys (resolved elsewhere), so a `verify-chain`
  * tool / auditor can read a chain it has no authority to write; the signing key stays with the producer
  * (`PostgresChainLogStore`, which extends this reader with the append path).
+ *
+ * **Every read binds its scope as a predicate.** RLS is the isolation boundary, but a table's owner
+ * bypasses it and connecting as the owner is ordinary — so relying on RLS alone made an
+ * owner-connected reader return every scope's entries to every scope, which is both a disclosure and
+ * a correctness failure: `verify` reported a sequence gap on healthy data, and `tailWithin` handed the
+ * next append another scope's `priorEntryHash`. See `scopeFilter` for why the predicate branches
+ * rather than using `IS NOT DISTINCT FROM`.
  */
 export class PostgresChainLogReader {
   protected readonly schema: string;
@@ -57,9 +69,12 @@ export class PostgresChainLogReader {
   }
 
   async loadChain(tenantId: string | null): Promise<readonly ChainedLogEntry[]> {
+    const scope = scopeFilter(tenantId);
     return this.scoped(tenantId, async (tx) => {
       const result = await tx.query<Record<string, unknown>>(
-        `SELECT ${READ_COLUMNS} FROM ${this.schema}.${TABLE} ORDER BY sequence_number ASC`,
+        `SELECT ${READ_COLUMNS} FROM ${this.schema}.${TABLE}
+         WHERE ${scope.sql} ORDER BY sequence_number ASC`,
+        scope.params,
       );
       return result.rows.map((row) => rowToChainEntry(row));
     });
@@ -72,7 +87,7 @@ export class PostgresChainLogReader {
   }
 
   async tail(tenantId: string | null): Promise<ChainTail | null> {
-    return this.scoped(tenantId, (tx) => this.tailWithin(tx));
+    return this.scoped(tenantId, (tx) => this.tailWithin(tx, tenantId));
   }
 
   /** The chain suffix at or after `fromSequence`, ordered — the input to a checkpoint-anchored verify. */
@@ -80,11 +95,12 @@ export class PostgresChainLogReader {
     tenantId: string | null,
     fromSequence: number,
   ): Promise<readonly ChainedLogEntry[]> {
+    const scope = scopeFilter(tenantId, 2);
     return this.scoped(tenantId, async (tx) => {
       const result = await tx.query<Record<string, unknown>>(
         `SELECT ${READ_COLUMNS} FROM ${this.schema}.${TABLE}
-         WHERE sequence_number >= $1 ORDER BY sequence_number ASC`,
-        [fromSequence],
+         WHERE sequence_number >= $1 AND ${scope.sql} ORDER BY sequence_number ASC`,
+        [fromSequence, ...scope.params],
       );
       return result.rows.map((row) => rowToChainEntry(row));
     });
@@ -120,10 +136,19 @@ export class PostgresChainLogReader {
     });
   }
 
-  protected async tailWithin(tx: PgConnection): Promise<ChainTail | null> {
+  /**
+   * The scope's own tail. `tenantId` is a parameter and not inferred from the transaction, because
+   * an append in a **caller's** transaction (`appendWithin`) has no context this class set.
+   */
+  protected async tailWithin(
+    tx: PgConnection,
+    tenantId: string | null,
+  ): Promise<ChainTail | null> {
+    const scope = scopeFilter(tenantId);
     const result = await tx.query<Record<string, unknown>>(
       `SELECT sequence_number, entry_hash FROM ${this.schema}.${TABLE}
-       ORDER BY sequence_number DESC LIMIT 1`,
+       WHERE ${scope.sql} ORDER BY sequence_number DESC LIMIT 1`,
+      scope.params,
     );
     const row = result.rows[0];
     if (row === undefined) return null;
@@ -150,11 +175,17 @@ export class PostgresChainLogReader {
  * The chain producer: appends signed, hash-linked `ChainedLogEntry` rows to `meta.forensic_chain_entries`,
  * on top of the read-only {@link PostgresChainLogReader}.
  *
- * Every append runs in ONE transaction that first takes a per-tenant `pg_advisory_xact_lock` (auto-released
- * at commit, bound to the transaction's own connection — so concurrent appends for a tenant serialize and
- * the `priorEntryHash` chain never races), then sets the tenant's RLS context, reads the current tail,
- * builds + signs the next entry from the genesis-anchored `priorEntryHash`, and inserts it. A platform
- * chain (`tenantId = null`) skips the RLS context (RLS then exposes only `tenant_id IS NULL` rows).
+ * Every append runs in ONE transaction that first takes a per-scope `pg_advisory_xact_lock` (auto-released
+ * at commit, bound to the transaction's own connection — so concurrent appends for a scope serialize and
+ * the `priorEntryHash` chain never races), then sets the scope's RLS elevation, reads the scope's current
+ * tail, builds + signs the next entry from the genesis-anchored `priorEntryHash`, and inserts it.
+ *
+ * A platform chain (`tenantId = null`) sets `app.platform_audit_write` rather than a tenant context.
+ * That elevation exists because the platform arm used to ride inside the tenant isolation policy as
+ * `tenant_id IS NULL OR …`, and on an `ALL`-scope policy the `USING` expression also serves as the
+ * `WITH CHECK` — so any tenant session could insert, update and delete platform chain entries, which
+ * is a tenant's switch for making the platform's own tamper-evident log read compromised. Verified
+ * live as a non-owner role before and after.
  */
 export class PostgresChainLogStore extends PostgresChainLogReader {
   constructor(
@@ -180,6 +211,11 @@ export class PostgresChainLogStore extends PostgresChainLogReader {
    * **RLS context is the caller's responsibility**, since the caller's transaction has already
    * established whatever scope it is writing under. Passing a `tenantId` that differs from the
    * context the caller set would be caught by RLS on insert, not silently accepted.
+   *
+   * For a **platform** entry (`tenantId = null`) that means the caller's transaction must carry
+   * `SET_PLATFORM_AUDIT_WRITE_SQL`. `PostgresAuditEmitter` already does, for the same GUC and in the
+   * same transaction, which is why an anchored platform audit row keeps working — and why the chain
+   * reuses that GUC rather than minting its own.
    */
   async appendWithin(tx: PgConnection, input: ChainAppendInput): Promise<ChainedLogEntry> {
     const valid = ChainAppendInputSchema.parse(input);
@@ -190,7 +226,7 @@ export class PostgresChainLogStore extends PostgresChainLogReader {
 
   /** Reads the tail, builds + signs the next entry from it, inserts it. Assumes lock + context. */
   private async appendSealed(tx: PgConnection, valid: ChainAppendInput): Promise<ChainedLogEntry> {
-    const tail = await this.tailWithin(tx);
+    const tail = await this.tailWithin(tx, valid.tenantId);
     const sequenceNumber = tail === null ? 0 : tail.sequenceNumber + 1;
     const priorEntryHash = tail === null ? GENESIS_HASH : tail.entryHash;
     const sealed = await buildChainEntry({
@@ -235,7 +271,17 @@ export class PostgresChainLogStore extends PostgresChainLogReader {
     );
   }
 
-  /** One transaction: per-tenant xact advisory lock → RLS context → fn. Serializes appends per scope. */
+  /**
+   * One transaction: per-scope xact advisory lock → the scope's RLS elevation → fn. Serializes
+   * appends per scope.
+   *
+   * The two elevations are different grants, and that is the security property. A **tenant** append
+   * sets `app.current_tenant_id`, which the isolation policy confines to that tenant's own rows — it
+   * can no longer reach the platform chain, because the platform arm was split out of that policy. A
+   * **platform** append sets `app.platform_audit_write`, which satisfies an `INSERT`-scoped policy
+   * whose `WITH CHECK` also demands `tenant_id IS NULL`, so holding it buys no route into any
+   * tenant's chain. Neither elevation carries the other.
+   */
   private serialized<T>(
     tenantId: string | null,
     fn: (tx: PgConnection) => Promise<T>,
@@ -243,7 +289,10 @@ export class PostgresChainLogStore extends PostgresChainLogReader {
     if (tenantId !== null) assertTenantId(tenantId);
     return this.conn.transaction(async (tx) => {
       await tx.query("SELECT pg_advisory_xact_lock($1)", [advisoryKeyFor(tenantId)]);
-      if (tenantId !== null) await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
+      await tx.query(
+        tenantId === null ? SET_PLATFORM_AUDIT_WRITE_SQL : SET_TENANT_CONTEXT_SQL,
+        tenantId === null ? [] : [tenantId],
+      );
       return fn(tx);
     });
   }

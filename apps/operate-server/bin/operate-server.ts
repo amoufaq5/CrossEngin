@@ -8,10 +8,19 @@ import {
   parseVerifyChainArgs,
   pruneHelpText,
   verifyChainHelpText,
+  parseReplayArgs,
+  replayHelpText,
+  parseRekeyArgs,
+  rekeyHelpText,
+  parseSetCredentialArgs,
+  setCredentialCliHelpText,
 } from "../src/cli.js";
 import { formatMultiTenantReport } from "../src/link-sweep.js";
 import { formatChainVerification } from "../src/chain-verify.js";
-import { runPruneLinks, runVerifyChain, serve } from "../src/node.js";
+import { runPruneLinks, runRekey, runReplay, runVerifyChain, serve } from "../src/node.js";
+import { formatReplayReport } from "../src/replay.js";
+import { formatRekeyResult, formatRekeySurvey } from "../src/rekey.js";
+import { formatSetCredentialReport, runSetCredential } from "../src/set-credential.js";
 
 const CLI_VERSION = "0.0.0";
 
@@ -59,13 +68,105 @@ async function runVerify(argv: readonly string[]): Promise<number> {
   return report.ok ? 0 : 1;
 }
 
+async function runReplayCommand(argv: readonly string[]): Promise<number> {
+  let options;
+  try {
+    options = parseReplayArgs(argv);
+  } catch (err) {
+    if (err instanceof CliUsageError) {
+      process.stderr.write(`error: ${err.message}\n\n${replayHelpText}`);
+      return 2;
+    }
+    throw err;
+  }
+  if (options.help) {
+    process.stdout.write(replayHelpText);
+    return 0;
+  }
+  const report = await runReplay(options);
+  process.stdout.write(
+    options.format === "json"
+      ? `${JSON.stringify(report, null, 2)}\n`
+      : `${formatReplayReport(report)}\n`,
+  );
+  // Non-zero for a refused or failed section as well as for a finding: "0 findings" from a
+  // subsystem that could not be read must not exit 0, or a maintenance job launders an unread
+  // subsystem into a pass. `summarizeReplay` carries that rule; this is just its exit code.
+  return report.ok ? 0 : 1;
+}
+
+async function runRekeyCommand(argv: readonly string[]): Promise<number> {
+  let options;
+  try {
+    options = parseRekeyArgs(argv);
+  } catch (err) {
+    if (err instanceof CliUsageError) {
+      process.stderr.write(`error: ${err.message}\n\n${rekeyHelpText}`);
+      return 2;
+    }
+    throw err;
+  }
+  if (options.help) {
+    process.stdout.write(rekeyHelpText);
+    return 0;
+  }
+  const report = await runRekey(options);
+  if (options.format === "json") {
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  } else {
+    // The survey either way, including after a completed rekey: it is what names the columns and
+    // the row counts, and a result printed alone would not say what was examined.
+    process.stdout.write(`${formatRekeySurvey(report.survey, report.writeStatus)}\n`);
+    if (report.result !== null) {
+      process.stdout.write(`\n${formatRekeyResult(report.result, report.staleKeyWindowMs, report.staleKeyWindowStated)}\n`);
+    }
+  }
+  // A refused survey exits 1 and a clean plan exits 0, following `replay`: a plan that printed
+  // nothing actionable must not be indistinguishable from a refusal nobody read.
+  return report.ok ? 0 : 1;
+}
+
+async function runSetCredentialCommand(argv: readonly string[]): Promise<number> {
+  let options;
+  try {
+    options = parseSetCredentialArgs(argv);
+  } catch (err) {
+    if (err instanceof CliUsageError) {
+      process.stderr.write(`error: ${err.message}\n\n${setCredentialCliHelpText}`);
+      return 2;
+    }
+    throw err;
+  }
+  if (options.help) {
+    process.stdout.write(setCredentialCliHelpText);
+    return 0;
+  }
+  const report = await runSetCredential(options);
+  process.stdout.write(
+    options.format === "json"
+      ? `${JSON.stringify(report, null, 2)}\n`
+      : `${formatSetCredentialReport(report)}\n`,
+  );
+  return report.ok ? 0 : 1;
+}
+
 async function main(): Promise<number> {
+
   const argv = process.argv.slice(2);
   if (argv[0] === "prune-links") {
     return runPrune(argv.slice(1));
   }
+  if (argv[0] === "rekey") {
+    return runRekeyCommand(argv.slice(1));
+  }
   if (argv[0] === "verify-chain") {
     return runVerify(argv.slice(1));
+  }
+  if (argv[0] === "replay") {
+    return runReplayCommand(argv.slice(1));
+  }
+  if (argv[0] === "set-credential") {
+    return runSetCredentialCommand(argv.slice(1));
   }
 
   let options;

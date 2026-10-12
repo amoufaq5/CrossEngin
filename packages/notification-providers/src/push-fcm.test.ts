@@ -16,6 +16,7 @@ import {
   parseFcmErrorBody,
   parseFcmMessageName,
   PUSH_ALLOWED_DATA_KEYS,
+  FCM_TOKEN_REFUSED_ERROR_CODE,
   PUSH_PAYLOAD_REFUSED_ERROR_CODE,
   PUSH_RECIPIENT_REFUSED_ERROR_CODE,
   pushPayloadViolations,
@@ -598,5 +599,134 @@ describe("error body parsing", () => {
       code: null,
       message: null,
     });
+  });
+});
+
+/**
+ * A token mint that cannot succeed must not be retried forever (ADR-0327).
+ *
+ * ADR-0310 made the access token an injected seam, and `send` let its failure propagate — which the
+ * drain records as `failed`, i.e. retryable. Right for a 5xx at Google's token endpoint, wrong for
+ * `invalid_grant`: a wrong or revoked service account became indistinguishable from a blip, so a
+ * misconfigured deployment re-presented the same refusal on every tick and the dispatch never
+ * settled.
+ */
+describe("FcmPushSender — a permanently ungrantable token (ADR-0327)", () => {
+  class FakeTokenError extends Error {
+    constructor(
+      message: string,
+      private readonly retryable: boolean,
+    ) {
+      super(message);
+    }
+    isRetryable(): boolean {
+      return this.retryable;
+    }
+  }
+
+  function senderWith(accessToken: () => Promise<string>, calls: string[] = []): FcmPushSender {
+    return new FcmPushSender({
+      projectId: "p-1",
+      accessToken,
+      fetchImpl: async (url) => {
+        calls.push(String(url));
+        return { ok: true, status: 200, text: async () => JSON.stringify({ name: "n/1" }) };
+      },
+    });
+  }
+
+  it("drops rather than fails when the provider says the credential is not grantable", async () => {
+    const calls: string[] = [];
+    const sender = senderWith(async () => {
+      throw new FakeTokenError("invalid_grant: account not found", false);
+    }, calls);
+    const result = await sender.send(pushRequest());
+    // `dropped` is terminal: the delivery is over and the reason is on the record, so an operator
+    // fixes the credential instead of watching a queue grow.
+    expect(result.outcome).toBe("dropped");
+    expect(result.errorCode).toBe(FCM_TOKEN_REFUSED_ERROR_CODE);
+    expect(result.errorMessage).toContain("invalid_grant");
+    // And FCM was never called — there was nothing to present.
+    expect(calls).toEqual([]);
+  });
+
+  it("still propagates a retryable token failure, because retrying delivers", async () => {
+    const sender = senderWith(async () => {
+      throw new FakeTokenError("token endpoint answered 503", true);
+    });
+    await expect(sender.send(pushRequest())).rejects.toThrow(/503/);
+  });
+
+  it("treats a token error that reports nothing as retryable, which is the old behaviour", async () => {
+    // A plain Error carries no verdict. Reading silence as "permanent" would turn a DNS blip into a
+    // dropped notification.
+    const sender = senderWith(async () => {
+      throw new Error("getaddrinfo ENOTFOUND oauth2.googleapis.com");
+    });
+    await expect(sender.send(pushRequest())).rejects.toThrow(/ENOTFOUND/);
+  });
+
+  it("does not mistake a provider whose isRetryable is not a function", async () => {
+    const sender = senderWith(async () => {
+      throw Object.assign(new Error("odd"), { isRetryable: false });
+    });
+    await expect(sender.send(pushRequest())).rejects.toThrow(/odd/);
+  });
+});
+
+describe("FcmPushSender — invalidating a credential FCM refused (ADR-0327)", () => {
+  function senderAnswering(
+    status: number,
+    body: string,
+    invalidated: number[],
+  ): FcmPushSender {
+    return new FcmPushSender({
+      projectId: "p-1",
+      accessToken: async () => "tok",
+      invalidateToken: () => invalidated.push(1),
+      fetchImpl: async () => ({ ok: status < 400, status, text: async () => body }),
+    });
+  }
+
+  it("discards the cached token when FCM answers 401", async () => {
+    const invalidated: number[] = [];
+    // A key revoked mid-token-life otherwise leaves every send 401ing until the token expires on
+    // its own, with the retry budget spent re-presenting a token the provider already refused.
+    await senderAnswering(401, JSON.stringify({ error: { status: "UNAUTHENTICATED" } }), invalidated).send(
+      pushRequest(),
+    );
+    expect(invalidated).toHaveLength(1);
+  });
+
+  it("discards it for a configuration refusal too, not only a bare 401", async () => {
+    const invalidated: number[] = [];
+    const result = await senderAnswering(
+      403,
+      JSON.stringify({ error: { status: "PERMISSION_DENIED" } }),
+      invalidated,
+    ).send(pushRequest());
+    // The code carries FCM's own status suffix, which is exactly why the invalidation decision is
+    // made from the status and the code rather than from this string.
+    expect(result.errorCode).toBe("fcm_permission_denied");
+    expect(invalidated).toHaveLength(1);
+  });
+
+  it("leaves the token alone for a failure that is not about the credential", async () => {
+    const invalidated: number[] = [];
+    await senderAnswering(500, JSON.stringify({ error: { status: "INTERNAL" } }), invalidated).send(
+      pushRequest(),
+    );
+    // Throwing the token away on every server error would mint a new one per outage tick.
+    expect(invalidated).toEqual([]);
+  });
+
+  it("works with no invalidator wired, since a provider with no cache has nothing to discard", async () => {
+    const sender = new FcmPushSender({
+      projectId: "p-1",
+      accessToken: async () => "tok",
+      fetchImpl: async () => ({ ok: false, status: 401, text: async () => "{}" }),
+    });
+    const result = await sender.send(pushRequest());
+    expect(result.outcome).toBe("failed");
   });
 });

@@ -2,12 +2,22 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 import {
   encodeKeyset,
   keysetOf,
+  ListSurfaceUnserveable,
   type EntityRecord,
   type ListPage,
   type ListQuery,
+  type ListValueType,
 } from "@crossengin/operate-runtime";
 
-import { buildListSql, type ListSqlAdapter } from "./list-sql.js";
+import {
+  buildListSql,
+  columnUnavailable,
+  guardedNumericCast,
+  refusableSurfaces,
+  sqlColumn,
+  type ListSqlAdapter,
+} from "./list-sql.js";
+import { guardedTimestamptzCast } from "./temporal-sql.js";
 import { mergeRecord, resolveRecordId, type DocumentRow } from "./records.js";
 
 const FIELD_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -40,12 +50,66 @@ export async function listPageOp(
   query: ListQuery,
 ): Promise<ListPage> {
   const params: unknown[] = [tenantId, entity];
+  // `document ->> 'f'` is TEXT whichever way the JSON held the value, so a field the manifest
+  // declares numeric is compared through a guarded cast rather than byte-wise — otherwise
+  // `"100.00"` sorts before `"9.00"` and `"10"` before `"9"`, and the keyset cursor built from
+  // that order skips and repeats rows. A field with no declared type (an admin query, a store
+  // used without a manifest) keeps the text comparison it had.
+  const valueTypes = query.valueTypes;
+  const valueTypeOf = (field: string): ListValueType => valueTypes?.get(field) ?? "text";
   const adapter: ListSqlAdapter = {
-    columnExpr: (field) => (FIELD_RE.test(field) ? `document ->> '${field}'` : null),
-    castSuffix: () => "",
+    columnExpr: (field) => {
+      // The JSONB store holds plaintext, so there is no encryption arm here: a field it cannot
+      // express is one whose name cannot be interpolated into a JSON path at all. Note what it
+      // deliberately does NOT answer `not_a_column` for — a field the entity does not declare is a
+      // perfectly valid JSON path that yields NULL, which is why this store answered such a filter
+      // with *zero* rows where the column store answered with every row. One request, two
+      // opposite wrong answers; the kernel refuses the manifest that produces it now, and the
+      // honest answer from here is still the SQL, because `document ->> 'nope' = $1` is a real
+      // predicate over a real document.
+      if (!FIELD_RE.test(field)) return columnUnavailable("unsafe_field_name");
+      const json = `document ->> '${field}'`;
+      switch (valueTypeOf(field)) {
+        case "numeric":
+          return sqlColumn(`(${guardedNumericCast(json)})`);
+        // A `datetime` field is compared as an instant, not as bytes, because the spellings a
+        // document can hold are not all the canonical one: a legacy `2026-01-31T19:00:00+09:00` is
+        // the same instant as `2026-01-31T10:00:00.000Z` and sorts nine hours away from it as
+        // text. Measured live over eight rows, the JSONB store placed such a row five positions
+        // from where `ColumnMappedEntityStore` placed it. `date` and `time` get no cast — their
+        // canonical spellings are fixed-width and zero-padded, so byte order *is* chronological,
+        // and `date_in`/`time_in` are STABLE (so a cast would also be unindexable and
+        // `DateStyle`-dependent: `'01/02/2026'::date` is January 2nd under MDY and February 1st
+        // under DMY, measured).
+        case "timestamptz":
+          return sqlColumn(`(${guardedTimestamptzCast(json)})`);
+        default:
+          return sqlColumn(json);
+      }
+    },
+    castSuffix: (field) => {
+      switch (valueTypeOf(field)) {
+        case "numeric":
+          return "::numeric";
+        case "timestamptz":
+          return "::timestamptz";
+        default:
+          return "";
+      }
+    },
+    valueType: valueTypeOf,
     idExpr: "record_id",
   };
-  const { where, orderBy } = buildListSql(query, adapter, [`tenant_id = $1`, `entity = $2`], params);
+  const { where, orderBy, unserveable } = buildListSql(
+    query,
+    adapter,
+    [`tenant_id = $1`, `entity = $2`],
+    params,
+  );
+  // `column-store.ts`'s reason: the SQL beside it is the query minus what could not be expressed,
+  // so issuing it answers a question the caller did not ask.
+  const refusable = refusableSurfaces(unserveable);
+  if (refusable.length > 0) throw new ListSurfaceUnserveable(entity, refusable);
   const limitParam = `$${(params.push(query.limit + 1), params.length).toString()}`;
   const res = await tx.query<DocumentRow>(
     `SELECT document FROM ${table} WHERE ${where} ORDER BY ${orderBy} LIMIT ${limitParam}`,

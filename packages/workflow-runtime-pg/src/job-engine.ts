@@ -2,6 +2,8 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 import {
   jobCancellationDisposition,
   nextRetryAt,
+  type DeadLetterReason,
+  type OnFailure,
   type RetryPolicy,
 } from "@crossengin/jobs";
 
@@ -56,6 +58,14 @@ export interface JobHandlerRegistration {
   readonly maxAttempts?: number;
   readonly retry?: RetryPolicy;
   readonly jitterRng?: () => number;
+  /**
+   * The declaration's `onFailure`, which decides whether a terminal failure is written to
+   * `meta.dead_letter_jobs`. Optional because a caller may register a handler without a declaration
+   * in hand; absent means the default, which is to record — a dead letter is a record of work that
+   * did not happen, and `swallow-and-log` is the one strategy that asks for silence, so it has to be
+   * *stated* rather than inferred from a missing field.
+   */
+  readonly onFailure?: OnFailure;
 }
 
 /**
@@ -85,7 +95,47 @@ export class JobHandlerRegistry {
 export interface PostgresJobRunEngineOptions {
   readonly schema?: string;
   readonly now?: () => Date;
+  /**
+   * Reported when the dead-letter row could not be written. The terminal status has already
+   * committed by then, so the failure is handed over rather than raised — raising would turn a
+   * recorded failure into a thrown one to protect a projection of it (ADR-0333's rule for the
+   * integrity verdict row, same shape).
+   */
+  readonly onDeadLetterError?: (err: unknown, detail: { readonly runId: string }) => void;
 }
+
+/**
+ * What became of the dead-letter row for a terminal failure.
+ *
+ * `suppressed` is the declaration's own `swallow-and-log` strategy, not an error. `already_recorded`
+ * is the unique `(tenant_id, run_id)` constraint doing its job on a re-finalize. `failed` means the
+ * run's status committed and its dead-letter row did not — the one outcome an operator has to see,
+ * which is why it is on the result and not only in a log line.
+ */
+export const JOB_DEAD_LETTER_OUTCOMES = [
+  "recorded",
+  "already_recorded",
+  "suppressed",
+  "failed",
+] as const;
+export type JobDeadLetterOutcome = (typeof JOB_DEAD_LETTER_OUTCOMES)[number];
+
+/**
+ * How a terminal disposition maps to the catalog's `reason` CHECK.
+ *
+ * A total map over the two terminal failure dispositions, derived rather than chosen at the call
+ * site: `dead-lettered` is reached only when a *retryable* error exhausted its attempt ceiling, and
+ * `failed` only when the error was not retryable, so the reason is a fact about the path taken.
+ * `cancelled` and `timeout` are the other two members of `DeadLetterReasonSchema` and neither is
+ * reachable from here — a cancellation is terminal by request and finalized by
+ * `finalizeCancelledJobRun`, and nothing in this engine imposes a timeout.
+ */
+export const JOB_DEAD_LETTER_REASONS: Readonly<
+  Record<"failed" | "dead-lettered", DeadLetterReason>
+> = Object.freeze({
+  "dead-lettered": "max-retries-exceeded",
+  failed: "permanent-error",
+});
 
 /** The terminal disposition of an `executeJobRun` call. */
 export type JobRunDisposition =
@@ -104,6 +154,8 @@ export interface ExecuteJobRunResult {
   readonly attempts?: number;
   /** Which checkpoint honoured a cancellation (`cancelled` dispositions only). */
   readonly cancelledAt?: "before_handler" | "cooperative_abort";
+  /** Present on `failed` / `dead-lettered` only: what became of the dead-letter row. */
+  readonly deadLetter?: JobDeadLetterOutcome;
 }
 
 /** Per-execution inputs. `signal` is the cooperative cancellation channel handed to the handler. */
@@ -162,6 +214,9 @@ function parseJson(v: unknown): unknown {
 export class PostgresJobRunEngine {
   private readonly schema: string;
   private readonly now: () => Date;
+  private readonly onDeadLetterError:
+    | ((err: unknown, detail: { readonly runId: string }) => void)
+    | undefined;
 
   constructor(
     private readonly conn: PgConnection,
@@ -173,6 +228,7 @@ export class PostgresJobRunEngine {
       throw new Error(`invalid schema identifier: ${JSON.stringify(this.schema)}`);
     }
     this.now = options.now ?? (() => new Date());
+    this.onDeadLetterError = options.onDeadLetterError;
   }
 
   async executeJobRun(
@@ -207,10 +263,14 @@ export class PostgresJobRunEngine {
     const registration = this.registry.resolve(jobDefinitionId, jobKind);
 
     if (registration === undefined) {
+      // Recorded as a dead letter with no `onFailure` to consult: a run this process cannot execute
+      // is exactly what the dead-letter queue is for, and the declaration that would have asked for
+      // silence is the thing that is missing. With `claimDueJobs`' `serves` filter in place this is
+      // reachable only when a handler is deregistered between the claim and the execute.
       return this.finalizeFailure(runId, tenantId, execStart, "failed", {
         code: "handler_not_found",
         message: `no handler for job ${jobDefinitionId} (kind ${jobKind})`,
-      });
+      }, { jobDefinitionId, attempts, input: row.input_redacted });
     }
 
     let settlement: { readonly outcome: "completed" | "failed"; readonly result: JobHandlerResult };
@@ -279,7 +339,70 @@ export class PostgresJobRunEngine {
     }
 
     const disposition: "failed" | "dead-lettered" = result.retryable === true ? "dead-lettered" : "failed";
-    return this.finalizeFailure(runId, tenantId, execStart, disposition, result.error, attempts);
+    return this.finalizeFailure(runId, tenantId, execStart, disposition, result.error, {
+      jobDefinitionId,
+      attempts,
+      input: row.input_redacted,
+      ...(registration.onFailure !== undefined ? { onFailure: registration.onFailure } : {}),
+    });
+  }
+
+  /**
+   * Writes the `meta.dead_letter_jobs` row for a terminal failure — the first writer this table has
+   * ever had. It was declared in Phase 1 and referenced by nothing in the workspace, so a run that
+   * exhausted its retries flipped a status column and left no record anywhere of *what* did not
+   * happen; the one question a dead-letter queue exists to answer ("what needs a human") had no
+   * data behind it. ADR-0300's class, in the job subsystem.
+   *
+   * Three things are deliberate. The write is **after** the status update and its outcome is
+   * reported rather than thrown, because the terminal status has committed and a throw here would
+   * turn a recorded failure into an unrecorded exception. `reprocessable` is left to the catalog's
+   * `DEFAULT true`, because whether this run can be re-driven is a property of the job rather than
+   * of this engine, and a default of `true` is the recoverable direction. And the `ON CONFLICT`
+   * target is the declared `(tenant_id, run_id)` unique constraint, so a re-finalize after a lost
+   * race is `already_recorded` rather than a second row for one failure.
+   */
+  private async recordDeadLetter(input: {
+    readonly runId: string;
+    readonly tenantId: string;
+    readonly jobDefinitionId: string;
+    readonly disposition: "failed" | "dead-lettered";
+    readonly attempts: number;
+    readonly error: JobError;
+    readonly inputRedacted: unknown;
+    readonly onFailure?: OnFailure;
+  }): Promise<JobDeadLetterOutcome> {
+    if (input.onFailure?.strategy === "swallow-and-log") return "suppressed";
+    // `DeadLetterRecord.finalError` is `{kind, message}` with `message` non-empty, while a
+    // `JobHandlerResult` failure carries `{code, message?}` — so the code is the message when the
+    // handler gave none. The kind follows the path: `dead-lettered` is only reached from a
+    // retryable error, `failed` only from a non-retryable one.
+    const finalError = {
+      kind: input.disposition === "dead-lettered" ? "retryable" : "permanent",
+      message: input.error.message !== undefined && input.error.message !== "" ? input.error.message : input.error.code,
+      code: input.error.code,
+    };
+    try {
+      const inserted = await this.conn.query(
+        `INSERT INTO ${this.schema}.dead_letter_jobs
+           (tenant_id, job_id, run_id, reason, attempt_count, final_error, input_redacted)
+         VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6::jsonb, $7::jsonb)
+         ON CONFLICT (tenant_id, run_id) DO NOTHING`,
+        [
+          input.tenantId,
+          input.jobDefinitionId,
+          input.runId,
+          JOB_DEAD_LETTER_REASONS[input.disposition],
+          Math.max(1, Math.floor(input.attempts)),
+          JSON.stringify(finalError),
+          JSON.stringify(input.inputRedacted ?? null),
+        ],
+      );
+      return (inserted.rowCount ?? 0) > 0 ? "recorded" : "already_recorded";
+    } catch (err) {
+      this.onDeadLetterError?.(err, { runId: input.runId });
+      return "failed";
+    }
   }
 
   /**
@@ -318,7 +441,12 @@ export class PostgresJobRunEngine {
     execStart: number,
     disposition: "failed" | "dead-lettered",
     error: JobError,
-    attempts?: number,
+    deadLetter: {
+      readonly jobDefinitionId: string;
+      readonly attempts: number;
+      readonly input: unknown;
+      readonly onFailure?: OnFailure;
+    },
   ): Promise<ExecuteJobRunResult> {
     const completedAt = this.now();
     const durationMs = Math.max(0, completedAt.getTime() - execStart);
@@ -329,7 +457,26 @@ export class PostgresJobRunEngine {
         WHERE run_id = $1 AND tenant_id = $2::uuid AND status = 'pending'`,
       [runId, tenantId, disposition, completedAt.toISOString(), durationMs, JSON.stringify(error)],
     );
+    // A lost guard means another worker already finalized this run — and wrote (or suppressed) its
+    // own dead letter. Writing one here would attribute the failure to an execution that did not
+    // settle it, so the row is left alone exactly as the status is.
     if ((updated.rowCount ?? 0) === 0) return { runId, executed: false, disposition: "not_claimable" };
-    return { runId, executed: true, disposition, ...(attempts !== undefined ? { attempts } : {}) };
+    const recorded = await this.recordDeadLetter({
+      runId,
+      tenantId,
+      jobDefinitionId: deadLetter.jobDefinitionId,
+      disposition,
+      attempts: deadLetter.attempts,
+      error,
+      inputRedacted: parseJson(deadLetter.input),
+      ...(deadLetter.onFailure !== undefined ? { onFailure: deadLetter.onFailure } : {}),
+    });
+    return {
+      runId,
+      executed: true,
+      disposition,
+      attempts: deadLetter.attempts,
+      deadLetter: recorded,
+    };
   }
 }

@@ -54,8 +54,12 @@ const SELECT_COLUMNS =
 
 /**
  * Which rows a read may see. The caller's authorisation decides this; the store only executes it.
- * There is no `platform` scope, unlike the verdict store — `meta.audit_log.tenant_id` is NOT NULL,
- * so every audit row belongs to exactly one tenant and "the platform's own" is not a thing to read.
+ *
+ * There is still no `platform` scope, and since ADR-0331 that is a choice rather than a consequence.
+ * `meta.audit_log.tenant_id` is nullable now, so platform rows exist — but they are reachable here
+ * through `all`, which is what a human holding the cross-tenant grant should see: a platform-scope
+ * row is part of the one trail, not a separate one. What a *tenant* scope must never do is return
+ * one, and it cannot: `tenant_id = $1` never matches NULL and the isolation policy does not either.
  */
 export type AuditReadScope =
   | { readonly kind: "tenant"; readonly tenantId: string }

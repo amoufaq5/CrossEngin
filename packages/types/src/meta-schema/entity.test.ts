@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { EntitySchema, entityClassifiedFields } from "./entity.js";
+import { EntitySchema, classifiedFields } from "./entity.js";
 
-describe("entityClassifiedFields", () => {
+describe("classifiedFields", () => {
   it("lists only the classified fields with their data class", () => {
     const entity = EntitySchema.parse({
       name: "Patient",
@@ -11,7 +11,7 @@ describe("entityClassifiedFields", () => {
         { name: "status", type: { kind: "text", maxLength: 20 } },
       ],
     });
-    expect(entityClassifiedFields(entity)).toEqual([
+    expect(classifiedFields(entity.fields)).toEqual([
       { field: "mrn", classification: "phi" },
       { field: "given_name", classification: "pii" },
     ]);
@@ -22,7 +22,34 @@ describe("entityClassifiedFields", () => {
       name: "Widget",
       fields: [{ name: "label", type: { kind: "text", maxLength: 20 } }],
     });
-    expect(entityClassifiedFields(entity)).toEqual([]);
+    expect(classifiedFields(entity.fields)).toEqual([]);
+  });
+
+  it("preserves the order of the list it was given, not the entity's", () => {
+    const entity = EntitySchema.parse({
+      name: "Patient",
+      fields: [
+        { name: "mrn", type: { kind: "text", maxLength: 32 }, classification: "phi" },
+        { name: "sex", type: { kind: "text", maxLength: 10 }, classification: "pii" },
+      ],
+    });
+    expect(classifiedFields([...entity.fields].reverse())).toEqual([
+      { field: "sex", classification: "pii" },
+      { field: "mrn", classification: "phi" },
+    ]);
+  });
+
+  it("answers over a field list the entity does not contain, which is the point of the signature", () => {
+    // A trait's fields are not `entity.fields`. Before this took a list there was no way to ask
+    // this question about them without fabricating an entity, which is why three readers did not.
+    const traitField = {
+      name: "personal_email",
+      type: { kind: "text" as const, maxLength: 200 },
+      classification: "pii" as const,
+    };
+    expect(classifiedFields([traitField])).toEqual([
+      { field: "personal_email", classification: "pii" },
+    ]);
   });
 });
 

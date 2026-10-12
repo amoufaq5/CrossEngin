@@ -1,10 +1,28 @@
+import { isoInstant } from "@crossengin/kernel-pg";
+
 import type {
   DrDrillExecutionRecord,
   DrFailoverExecutionRecord,
 } from "./records.js";
 import { PostgresDrFailoverStore } from "./failover-store.js";
 import { PostgresDrDrillStore } from "./drill-store.js";
+import type { DrReadScope } from "./tenant-context.js";
 
+/**
+ * `projection_disagrees_with_record` is the detector for the failure mode the upsert introduces.
+ *
+ * Until these rows could be updated, both halves of every row — the indexed projection columns and
+ * the `record` JSONB they are derived from — always came from one write, so they could not diverge
+ * and nothing needed to check. A partial `SET` list makes divergence reachable: a column added to
+ * the projection and forgotten in `FAILOVER_MUTABLE_COLUMNS`, or the reverse, leaves a row that
+ * reports one status to a `WHERE status = …` query and another to `assessDrReadiness`, which reads
+ * `record`. That is the shape the dropped-transition defect itself had — a stale half believed by
+ * one reader — and it is worth a named finding rather than a comment.
+ *
+ * Note what the eight pre-existing kinds could *not* see: every one is an intra-row consistency
+ * check, and a row left behind by `DO NOTHING` is a perfectly consistent *plan* row. The replayer
+ * was not silently right about this bug; it was structurally unable to see it.
+ */
 export const DR_DRIFT_ISSUE_KINDS = [
   "succeeded_without_completion",
   "succeeded_without_rpo",
@@ -14,6 +32,7 @@ export const DR_DRIFT_ISSUE_KINDS = [
   "outage_without_incident_ticket",
   "executed_without_timestamp",
   "drill_breach_without_measurement",
+  "projection_disagrees_with_record",
 ] as const;
 export type DrDriftIssueKind = (typeof DR_DRIFT_ISSUE_KINDS)[number];
 
@@ -62,7 +81,123 @@ export function verifyFailoverExecutionShape(
       `trigger '${record.trigger}' requires an incidentTicketId`,
     );
   }
+  for (const field of divergentFailoverFields(record)) {
+    at(
+      "projection_disagrees_with_record",
+      `column '${field.column}' is ${JSON.stringify(field.projected)} and the record says ${JSON.stringify(field.inRecord)}`,
+    );
+  }
   return issues;
+}
+
+interface DivergentField {
+  readonly column: string;
+  readonly projected: unknown;
+  readonly inRecord: unknown;
+  /**
+   * `instant` where the two halves are **the same moment stored twice in different media**, and so
+   * cannot be compared as text — see `divergesAt`.
+   */
+  readonly compare?: "instant";
+}
+
+/**
+ * Whether one pair disagrees, which for a timestamp is not a question about text.
+ *
+ * A projected timestamp column is `TIMESTAMPTZ`, and node-postgres hands it back as a `Date` that
+ * the stores turn into `toISOString()` — fixed width, always `Z`, always three fraction digits. The
+ * `record` half is the **same timestamp inside JSONB**, where the writer's own bytes survive
+ * untouched. `FailoverRecord.triggeredAt` and `DrillRecord.scheduledFor` are
+ * `z.string().datetime({ offset: true })`, so `2026-03-01T09:00:00Z` and `2026-03-01T12:00:00+03:00`
+ * are both legal and both name the moment the column round-trips as `2026-03-01T09:00:00.000Z` — and
+ * `FailoverExecutorInput.triggeredAt` / `DrillExecutorInput.scheduledFor` are caller-supplied, so
+ * neither form is hypothetical; a drill is *booked* for a date rather than clocked at one.
+ *
+ * Compared as text, every such row reported `projection_disagrees_with_record` on a row where
+ * nothing had diverged. This is ADR-0330's defect in a second place and it was invisible for the
+ * same reason: the fake hands back strings, and this package's fixtures spell every timestamp in the
+ * one form — `toISOString()`'s — where the two media happen to agree.
+ *
+ * `isoInstant` is the normaliser `kernel-pg` already defines for exactly this, so both halves are
+ * reduced to one spelling before `!==`, and a genuine divergence still reports the raw pair.
+ */
+function divergesAt(pair: DivergentField): boolean {
+  if (pair.compare === "instant") {
+    return isoInstant(pair.projected) !== isoInstant(pair.inRecord);
+  }
+  return pair.projected !== pair.inRecord;
+}
+
+/**
+ * Every projected column that is a copy of a `FailoverRecord` field, compared against it.
+ *
+ * `incident_ticket_id` is `null` in the row where the record leaves it `undefined`, so the
+ * comparison normalises that one direction rather than reporting a difference that is only a
+ * representation.
+ */
+function divergentFailoverFields(
+  record: DrFailoverExecutionRecord,
+): readonly DivergentField[] {
+  const pairs: readonly DivergentField[] = [
+    { column: "execution_id", projected: record.executionId, inRecord: record.record.id },
+    { column: "tier", projected: record.tier, inRecord: record.record.tier },
+    { column: "trigger", projected: record.trigger, inRecord: record.record.trigger },
+    { column: "status", projected: record.status, inRecord: record.record.status },
+    { column: "from_region", projected: record.fromRegion, inRecord: record.record.fromRegion },
+    { column: "to_region", projected: record.toRegion, inRecord: record.record.toRegion },
+    {
+      column: "triggered_at",
+      projected: record.triggeredAt,
+      inRecord: record.record.triggeredAt,
+      compare: "instant",
+    },
+    {
+      column: "completed_at",
+      projected: record.completedAt,
+      inRecord: record.record.completedAt,
+      compare: "instant",
+    },
+    {
+      column: "actual_rpo_seconds",
+      projected: record.actualRpoSeconds,
+      inRecord: record.record.actualRpoSeconds,
+    },
+    {
+      column: "actual_rto_seconds",
+      projected: record.actualRtoSeconds,
+      inRecord: record.record.actualRtoSeconds,
+    },
+    {
+      column: "incident_ticket_id",
+      projected: record.incidentTicketId,
+      inRecord: record.record.incidentTicketId ?? null,
+    },
+  ];
+  return pairs.filter(divergesAt);
+}
+
+function divergentDrillFields(
+  record: DrDrillExecutionRecord,
+): readonly DivergentField[] {
+  const pairs: readonly DivergentField[] = [
+    { column: "execution_id", projected: record.executionId, inRecord: record.record.id },
+    { column: "kind", projected: record.kind, inRecord: record.record.kind },
+    { column: "tier", projected: record.tier, inRecord: record.record.tier },
+    { column: "outcome", projected: record.outcome, inRecord: record.record.outcome },
+    {
+      column: "scheduled_for",
+      projected: record.scheduledFor,
+      inRecord: record.record.scheduledFor,
+      compare: "instant",
+    },
+    {
+      column: "executed_at",
+      projected: record.executedAt,
+      inRecord: record.record.executedAt,
+      compare: "instant",
+    },
+  ];
+  return pairs.filter(divergesAt);
 }
 
 export function verifyDrillExecutionShape(
@@ -90,6 +225,12 @@ export function verifyDrillExecutionShape(
       "rpoBreached is true but the drill records no measuredRpoSeconds",
     );
   }
+  for (const field of divergentDrillFields(record)) {
+    at(
+      "projection_disagrees_with_record",
+      `column '${field.column}' is ${JSON.stringify(field.projected)} and the record says ${JSON.stringify(field.inRecord)}`,
+    );
+  }
   return issues;
 }
 
@@ -111,28 +252,40 @@ export class DrReplayer {
     this.drillStore = drillStore;
   }
 
-  async verifyRecentFailovers(limit = 100): Promise<readonly DrDriftIssue[]> {
-    const rows = await this.failoverStore.listRecent(limit);
+  async verifyRecentFailovers(
+    scope: DrReadScope,
+    limit = 100,
+  ): Promise<readonly DrDriftIssue[]> {
+    const rows = await this.failoverStore.listRecent(scope, limit);
     return rows.flatMap((row) => verifyFailoverExecutionShape(row));
   }
 
-  async verifyRecentDrills(limit = 100): Promise<readonly DrDriftIssue[]> {
-    const rows = await this.drillStore.listRecent(limit);
+  async verifyRecentDrills(
+    scope: DrReadScope,
+    limit = 100,
+  ): Promise<readonly DrDriftIssue[]> {
+    const rows = await this.drillStore.listRecent(scope, limit);
     return rows.flatMap((row) => verifyDrillExecutionShape(row));
   }
 
-  async bulkVerify(limit = 100): Promise<readonly DrDriftIssue[]> {
+  async bulkVerify(scope: DrReadScope, limit = 100): Promise<readonly DrDriftIssue[]> {
     const [failovers, drills] = await Promise.all([
-      this.verifyRecentFailovers(limit),
-      this.verifyRecentDrills(limit),
+      this.verifyRecentFailovers(scope, limit),
+      this.verifyRecentDrills(scope, limit),
     ]);
     return [...failovers, ...drills];
   }
 
-  async summarize(limit = 100): Promise<DrReplaySummary> {
+  /**
+   * `scope` is required here for the same reason as on the stores, and the consequence is the one
+   * ADR-0330 found for the workflow replayer inverted: an unscoped summary counted every tenant's
+   * rows into one drift figure, so a clean scope could be reported as drifted by a row it does not
+   * own — and a drifted one hidden among rows it does.
+   */
+  async summarize(scope: DrReadScope, limit = 100): Promise<DrReplaySummary> {
     const [failovers, drills] = await Promise.all([
-      this.failoverStore.listRecent(limit),
-      this.drillStore.listRecent(limit),
+      this.failoverStore.listRecent(scope, limit),
+      this.drillStore.listRecent(scope, limit),
     ]);
     const issues =
       failovers.flatMap((row) => verifyFailoverExecutionShape(row)).length +

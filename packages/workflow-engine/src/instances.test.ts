@@ -1,9 +1,19 @@
 import { describe, expect, it } from "vitest";
+import type { CompensationStrategy } from "./definitions.js";
 import {
   ACTIVE_INSTANCE_STATUSES,
+  ACTIVITY_CANCELLATION_CHECKPOINTS,
+  INSTANCE_CANCELLATION_COMPENSATION_OUTCOMES,
+  INSTANCE_CANCELLATION_DISPOSITIONS,
+  INSTANCE_CANCELLATION_EFFECTS,
+  INSTANCE_CANCELLATION_GUARANTEES,
+  INSTANCE_CANCELLATION_OUTCOMES,
+  INSTANCE_CANCELLATION_STRENGTHS,
+  INSTANCE_CANCELLATION_WORK_KINDS,
   INSTANCE_STATUSES,
   CLOSED_INSTANCE_STATUSES,
   INSTANCE_TRANSITIONS,
+  InstanceCancellationRequestSchema,
   RELATED_ENTITY_KINDS,
   RelatedEntityRefSchema,
   TERMINAL_INSTANCE_STATUSES,
@@ -13,7 +23,11 @@ import {
   isInstanceActive,
   isInstanceTerminal,
   isInstanceTimedOut,
+  planInstanceCancellation,
   transitionInstance,
+  type InstanceCancellationDisposition,
+  type InstanceCancellationWorkSurvey,
+  type InstanceStatus,
   type WorkflowInstance,
 } from "./instances.js";
 
@@ -325,5 +339,283 @@ describe("transitionInstance", () => {
         new Date("2026-05-16T12:00:00Z"),
       ),
     ).toThrow(/cannot transition/);
+  });
+});
+
+describe("instance cancellation vocabulary", () => {
+  it("answers for every kind of outstanding work", () => {
+    expect(INSTANCE_CANCELLATION_WORK_KINDS).toHaveLength(6);
+    for (const kind of INSTANCE_CANCELLATION_WORK_KINDS) {
+      expect(INSTANCE_CANCELLATION_EFFECTS[kind], kind).toBeDefined();
+    }
+    expect(Object.keys(INSTANCE_CANCELLATION_EFFECTS).sort()).toEqual(
+      [...INSTANCE_CANCELLATION_WORK_KINDS].sort(),
+    );
+  });
+
+  it("states a guarantee for every strength, and uses each one", () => {
+    expect(INSTANCE_CANCELLATION_STRENGTHS).toHaveLength(4);
+    for (const strength of INSTANCE_CANCELLATION_STRENGTHS) {
+      expect(INSTANCE_CANCELLATION_GUARANTEES[strength].length, strength).toBeGreaterThan(20);
+    }
+    const used = new Set(Object.values(INSTANCE_CANCELLATION_EFFECTS));
+    expect([...used].sort()).toEqual([...INSTANCE_CANCELLATION_STRENGTHS].sort());
+  });
+
+  it("promises certainty for the work the engine owns and only a signal for a running handler", () => {
+    expect(INSTANCE_CANCELLATION_EFFECTS.unfired_timer).toBe("dropped");
+    expect(INSTANCE_CANCELLATION_EFFECTS.scheduled_activity).toBe("never_started");
+    expect(INSTANCE_CANCELLATION_EFFECTS.automatic_transition).toBe("never_started");
+    expect(INSTANCE_CANCELLATION_EFFECTS.in_flight_activity).toBe("signalled");
+  });
+
+  it("does not cascade to a child instance", () => {
+    expect(INSTANCE_CANCELLATION_EFFECTS.child_instance).toBe("not_cascaded");
+  });
+
+  it("names ADR-0315's two activity checkpoints and nothing else", () => {
+    expect(ACTIVITY_CANCELLATION_CHECKPOINTS).toEqual([
+      "before_handler",
+      "cooperative_abort",
+    ]);
+  });
+
+  it("offers exactly two dispositions and five outcomes", () => {
+    expect(INSTANCE_CANCELLATION_DISPOSITIONS).toEqual(["compensate", "abandon"]);
+    expect(INSTANCE_CANCELLATION_OUTCOMES).toHaveLength(5);
+    expect(INSTANCE_CANCELLATION_COMPENSATION_OUTCOMES).toHaveLength(4);
+  });
+});
+
+describe("InstanceCancellationRequestSchema", () => {
+  const request = {
+    instanceId: "wfi_pr00000001",
+    disposition: "compensate" as const,
+    reason: "buyer withdrew",
+    requestedByUserId: "22222222-2222-2222-2222-222222222222",
+  };
+
+  it("accepts a well-formed request", () => {
+    expect(InstanceCancellationRequestSchema.safeParse(request).success).toBe(true);
+  });
+
+  it("refuses a request that omits the disposition", () => {
+    const { disposition, ...withoutDisposition } = request;
+    void disposition;
+    expect(InstanceCancellationRequestSchema.safeParse(withoutDisposition).success).toBe(
+      false,
+    );
+  });
+
+  it("has no schema default for the disposition, because a default is applied to silence", () => {
+    // ADR-0328's rule. Whether a half-written saga is reversed may not be decided by an omitted
+    // field, so the empty object must fail rather than resolve to either answer.
+    expect(InstanceCancellationRequestSchema.safeParse({}).success).toBe(false);
+  });
+
+  it("requires a reason, since a cancelled instance's own schema requires one", () => {
+    expect(
+      InstanceCancellationRequestSchema.safeParse({ ...request, reason: "" }).success,
+    ).toBe(false);
+    const cancelled = WorkflowInstanceSchema.safeParse({
+      ...baseInstance,
+      status: "cancelled",
+      cancelledAt: "2026-05-16T11:00:00.000Z",
+      cancelledReason: null,
+    });
+    expect(cancelled.success).toBe(false);
+  });
+
+  it("requires an actor, by user or by system", () => {
+    expect(
+      InstanceCancellationRequestSchema.safeParse({
+        instanceId: request.instanceId,
+        disposition: "abandon",
+        reason: "superseded",
+      }).success,
+    ).toBe(false);
+    expect(
+      InstanceCancellationRequestSchema.safeParse({
+        instanceId: request.instanceId,
+        disposition: "abandon",
+        reason: "superseded",
+        requestedBySystem: "activation-poller",
+      }).success,
+    ).toBe(true);
+  });
+
+  it("rejects an id that is not an instance id", () => {
+    expect(
+      InstanceCancellationRequestSchema.safeParse({ ...request, instanceId: "wfa_abcdefgh" })
+        .success,
+    ).toBe(false);
+  });
+});
+
+describe("planInstanceCancellation", () => {
+  const noWork: InstanceCancellationWorkSurvey = {
+    outstandingTimerIds: [],
+    scheduledActivityIds: [],
+    inFlightActivityIds: [],
+    compensatableActivityIds: [],
+  };
+
+  function plan(
+    over: {
+      status?: InstanceStatus | null;
+      cancellationAlreadyRequested?: boolean;
+      disposition?: InstanceCancellationDisposition;
+      strategy?: CompensationStrategy;
+      work?: InstanceCancellationWorkSurvey;
+    } = {},
+  ) {
+    return planInstanceCancellation({
+      status: over.status === undefined ? "running" : over.status,
+      cancellationAlreadyRequested: over.cancellationAlreadyRequested ?? false,
+      disposition: over.disposition ?? "abandon",
+      strategy: over.strategy ?? "immediate_reverse_order",
+      work: over.work ?? noWork,
+    });
+  }
+
+  it("cancels from every status the transition map admits", () => {
+    const cancellable = INSTANCE_STATUSES.filter((s) =>
+      INSTANCE_TRANSITIONS[s].includes("cancelled"),
+    );
+    expect(cancellable.length).toBeGreaterThan(5);
+    for (const status of cancellable) {
+      expect(plan({ status }).outcome, status).toBe("cancelled");
+    }
+  });
+
+  it("refuses a completed or compensated instance as terminal", () => {
+    expect(plan({ status: "completed" }).outcome).toBe("refused_terminal");
+    expect(plan({ status: "compensated" }).outcome).toBe("refused_terminal");
+  });
+
+  it("refuses a failed instance by the map, not by either terminal set", () => {
+    // ADR-0307's wart: `failed` is in TERMINAL_INSTANCE_STATUSES *and* has an outgoing edge, so
+    // neither "is terminal" nor "is closed" can answer this. The map can, and its answer is that a
+    // failed instance is compensated rather than cancelled.
+    expect(TERMINAL_INSTANCE_STATUSES.has("failed")).toBe(true);
+    expect(CLOSED_INSTANCE_STATUSES.has("failed")).toBe(false);
+    expect(INSTANCE_TRANSITIONS.failed).toEqual(["compensating"]);
+    expect(plan({ status: "failed" }).outcome).toBe("refused_not_cancellable");
+  });
+
+  it("refuses an instance whose rollback is already running", () => {
+    expect(plan({ status: "compensating" }).outcome).toBe("refused_not_cancellable");
+  });
+
+  it("reports an unknown instance distinctly from a refusal", () => {
+    expect(plan({ status: null }).outcome).toBe("unknown_instance");
+  });
+
+  it("reports a second request as already_requested rather than as a refusal", () => {
+    expect(plan({ cancellationAlreadyRequested: true }).outcome).toBe("already_requested");
+    expect(plan({ status: "cancelled" }).outcome).toBe("already_requested");
+  });
+
+  it("plans no work at all for any refusal", () => {
+    for (const status of ["completed", "failed", "compensating", null] as const) {
+      const p = plan({
+        status,
+        work: {
+          outstandingTimerIds: ["wft_00000001"],
+          scheduledActivityIds: ["wfa_00000001"],
+          inFlightActivityIds: ["wfa_00000002"],
+          compensatableActivityIds: ["wfa_00000003"],
+        },
+      });
+      expect(p.dropTimerIds, String(status)).toEqual([]);
+      expect(p.signalActivityIds, String(status)).toEqual([]);
+      expect(p.compensateActivityIds, String(status)).toEqual([]);
+      expect(p.unreversedActivityIds, String(status)).toEqual([]);
+    }
+  });
+
+  it("drops every outstanding timer and splits activities by checkpoint", () => {
+    const p = plan({
+      work: {
+        outstandingTimerIds: ["wft_00000001", "wft_00000002"],
+        scheduledActivityIds: ["wfa_00000001"],
+        inFlightActivityIds: ["wfa_00000002"],
+        compensatableActivityIds: [],
+      },
+    });
+    expect(p.dropTimerIds).toEqual(["wft_00000001", "wft_00000002"]);
+    expect(p.cancelBeforeHandlerActivityIds).toEqual(["wfa_00000001"]);
+    expect(p.signalActivityIds).toEqual(["wfa_00000002"]);
+  });
+
+  it("executes the rollback when the request asks and the strategy runs", () => {
+    for (const strategy of ["immediate_reverse_order", "parallel"] as const) {
+      const p = plan({
+        disposition: "compensate",
+        strategy,
+        work: { ...noWork, compensatableActivityIds: ["wfa_00000003"] },
+      });
+      expect(p.compensationOutcome, strategy).toBe("executed");
+      expect(p.compensateActivityIds).toEqual(["wfa_00000003"]);
+      expect(p.unreversedActivityIds).toEqual([]);
+    }
+  });
+
+  it("names the rollback skipped when the request abandons, and lists what it left standing", () => {
+    const p = plan({
+      disposition: "abandon",
+      work: { ...noWork, compensatableActivityIds: ["wfa_00000003"] },
+    });
+    expect(p.compensationOutcome).toBe("skipped_by_request");
+    expect(p.compensateActivityIds).toEqual([]);
+    expect(p.unreversedActivityIds).toEqual(["wfa_00000003"]);
+  });
+
+  it("defers to a human rather than rolling back under manual_review", () => {
+    const p = plan({
+      disposition: "compensate",
+      strategy: "manual_review",
+      work: { ...noWork, compensatableActivityIds: ["wfa_00000003"] },
+    });
+    expect(p.compensationOutcome).toBe("deferred_to_human");
+    expect(p.unreversedActivityIds).toEqual(["wfa_00000003"]);
+  });
+
+  it("reports unavailable, not skipped, when the definition has no compensation", () => {
+    const p = plan({
+      disposition: "compensate",
+      strategy: "no_compensation",
+      work: { ...noWork, compensatableActivityIds: ["wfa_00000003"] },
+    });
+    expect(p.compensationOutcome).toBe("unavailable");
+    expect(p.unreversedActivityIds).toEqual(["wfa_00000003"]);
+  });
+
+  it("leaves unreversedActivityIds empty only when the rollback actually ran", () => {
+    const work = { ...noWork, compensatableActivityIds: ["wfa_00000003"] };
+    const outcomes = INSTANCE_CANCELLATION_COMPENSATION_OUTCOMES.map((expected) => {
+      const p =
+        expected === "executed"
+          ? plan({ disposition: "compensate", strategy: "immediate_reverse_order", work })
+          : expected === "skipped_by_request"
+            ? plan({ disposition: "abandon", work })
+            : expected === "deferred_to_human"
+              ? plan({ disposition: "compensate", strategy: "manual_review", work })
+              : plan({ disposition: "compensate", strategy: "no_compensation", work });
+      expect(p.compensationOutcome).toBe(expected);
+      return p.unreversedActivityIds.length === 0;
+    });
+    expect(outcomes).toEqual([true, false, false, false]);
+  });
+
+  it("is a pure function of its input", () => {
+    const input = {
+      status: "running" as const,
+      cancellationAlreadyRequested: false,
+      disposition: "compensate" as const,
+      strategy: "parallel" as const,
+      work: { ...noWork, compensatableActivityIds: ["wfa_00000003"] },
+    };
+    expect(planInstanceCancellation(input)).toEqual(planInstanceCancellation(input));
   });
 });

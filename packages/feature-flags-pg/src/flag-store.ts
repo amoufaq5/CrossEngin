@@ -1,4 +1,9 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  classifyScopedWriteRefusal,
+  scopeFilter,
+  type PgConnection,
+  type ScopedWriteRefusal,
+} from "@crossengin/kernel-pg";
 import {
   FLAG_STATUSES,
   FlagDefinitionSchema,
@@ -7,7 +12,12 @@ import {
   type FlagStatus,
 } from "@crossengin/feature-flags";
 
-import { SET_TENANT_CONTEXT_SQL, assertTenantId } from "./kill-switch-store.js";
+import {
+  SET_PLATFORM_CONFIG_WRITE_SQL,
+  SET_TENANT_CONTEXT_SQL,
+  assertTenantId,
+  scopeFilterWithPlatform,
+} from "./kill-switch-store.js";
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 const TABLE = "feature_flags";
@@ -28,7 +38,7 @@ export type FlagEnvironment = FlagDefinition["environments"][number];
  * unable to store the records their contracts produce; `meta.feature_flags` was the worst instance,
  * because it predated `FlagDefinition` entirely. Of the eleven columns it declared, six mapped
  * (`key`, `description`, `environments`, `created_at`, `updated_at`, `archived_at`), one held the
- * contract's text as JSONB (`default_value`), two had no contract counterpart at all (`enabled`,
+ * contract's text as JSONB (`default_value_json`), two had no contract counterpart at all (`enabled`,
  * `rules`) and **eighteen contract fields had no column** — `tenantId`, `status`, `label`,
  * `riskLevel` and `ownerUserId` among them, every one required. No store limited to that shape
  * could round-trip a single flag, because the re-parse below would reject what came back.
@@ -45,12 +55,15 @@ export const FEATURE_FLAG_COLUMN_NAMES: readonly string[] = Object.freeze([
   "label",
   "description",
   "status",
-  // `default_value`, beside a `killed_value_json` — the asymmetry is deliberate, not a typo. Both
-  // are TEXT; only the second got the `_json` suffix, because the reconciler has no concept of a
-  // rename and renaming the pre-existing column would add the new name while reporting the old one
-  // as undeclared-but-not-dropped, leaving a `NOT NULL` column with no default that every insert
-  // would fail on.
-  "default_value",
+  // `default_value_json`, matching the contract's `defaultValueJson` and its sibling
+  // `killed_value_json`. It really was the asymmetric `default_value` for one increment, because the
+  // reconciler then had no concept of a rename; ADR-0308's `renamedFrom` closed that and the catalog
+  // was renamed with it — and **this list was not**, so every statement here named a column no
+  // applied database has had since. Measured as a non-owner role against a live cluster: every
+  // insert, update and read raised `column "default_value" of relation "feature_flags" does not
+  // exist`, so this store could not round-trip a single flag. The catalog is the source of truth and
+  // the only reader of this list is the SQL, so the list is what moves.
+  "default_value_json",
   "killed_value_json",
   "variants",
   "environments",
@@ -168,7 +181,7 @@ function asJson(value: unknown): unknown {
  * between a hand-edited row and a flag the platform will act on. `TableDefinition.constraints` can
  * now carry a cross-column CHECK, so several of them *could* be declared — that a `kill_switch`
  * flag requires four eyes, that an `archived` row carries all three archival columns, that
- * `expires_at` is after `created_at`. Two cannot be, at all: whether `default_value` parses as
+ * `expires_at` is after `created_at`. Two cannot be, at all: whether `default_value_json` parses as
  * JSON (no `IS JSON` before Postgres 17), and whether a `multivariate` flag's variant weights sum
  * to 10000 basis points with no duplicate key — that needs `jsonb_array_elements`, and a CHECK
  * admits neither a set-returning function nor an aggregate. So the re-parse is both the only place
@@ -184,7 +197,7 @@ export function rowToFeatureFlag(row: Record<string, unknown>): FlagDefinition {
     label: asString(row["label"]),
     description: asString(row["description"]),
     status: asString(row["status"]),
-    defaultValueJson: asString(row["default_value"]),
+    defaultValueJson: asString(row["default_value_json"]),
     killedValueJson: asNullableString(row["killed_value_json"]),
     variants: asJson(row["variants"]),
     environments: asJson(row["environments"]),
@@ -223,15 +236,26 @@ function predecessorsOf(to: FlagStatus): readonly FlagStatus[] {
   return FLAG_STATUSES.filter((from) => canTransitionFlag(from, to));
 }
 
+/**
+ * A guarded write that moved no row, and **which of the three reasons it was**.
+ *
+ * The class, its name and `expectedUpdatedAt` stay — a caller catching it would be broken by a new
+ * unrelated type — and it carries `reason` now. The old message was not merely incomplete, it was
+ * **measured wrong**: as a non-owner, where RLS already refused a cross-scope write, it claimed
+ * "another writer changed it first" about a row no writer had touched. The scope predicate did not
+ * create that ambiguity, it only made it reachable as the owner too; `classifyScopedWriteRefusal`
+ * resolves it for both.
+ */
 export class FeatureFlagConflictError extends Error {
   constructor(
     readonly flagId: string,
     readonly expectedUpdatedAt: string,
+    readonly reason: ScopedWriteRefusal,
+    readonly scopeTenantId: string | null,
+    readonly storedTenantId: string | null,
+    detail: string,
   ) {
-    super(
-      `feature flag '${flagId}' was not last updated at ${expectedUpdatedAt} — ` +
-        "another writer changed it first, or it is no longer in a status this write may leave",
-    );
+    super(`feature flag '${flagId}' was not written (${reason}): ${detail}`);
     this.name = "FeatureFlagConflictError";
   }
 }
@@ -242,6 +266,17 @@ export interface PostgresFeatureFlagStoreOptions {
 
 /**
  * Persists `FlagDefinition` records in `meta.feature_flags`.
+ *
+ * **Nothing constructs this store.** It is declared in `subsystem-survey.ts` as
+ * `no_consumer_exists`, and the reason is one level up from this file: no component in the workspace
+ * evaluates a feature flag, so a persisted flag has no reader. ADR-0300 built the store and never
+ * claimed to wire it — read that ADR's Decision rather than a summary of it — but its argument for
+ * doing so, "the store is what makes the next drift fail loudly", was later disproved by ADR-0332
+ * rather than borne out: `FEATURE_FLAG_COLUMN_NAMES` named `default_value` where the catalog said
+ * `default_value_json`, this store could not round-trip a single flag against any real database, and
+ * every offline test passed, because a fake connection asserts SQL shape and cannot know a column
+ * does not exist. What makes drift fail loudly is the assertion against `META_TABLES`. Everything
+ * below is correct and unexercised outside this package's tests; do not read it as in service.
  *
  * **Tenant scoping is conditional**, as in `PostgresKillSwitchStore`, and for the same reason read
  * off the contract: `FlagDefinition.tenantId` is `.nullable()`, so a flag is either one tenant's or
@@ -290,7 +325,7 @@ export class PostgresFeatureFlagStore {
 
   async insert(flag: FlagDefinition): Promise<void> {
     const values = flagRowValues(flag);
-    await this.scoped(flag.tenantId, (tx) =>
+    await this.scopedWrite(flag.tenantId, (tx) =>
       tx.query(
         `INSERT INTO ${this.schema}.${TABLE} (${FEATURE_FLAG_COLUMNS})
          VALUES (${this.placeholders})`,
@@ -335,11 +370,12 @@ export class PostgresFeatureFlagStore {
     flagId: string,
     tenantId: string | null = null,
   ): Promise<FlagDefinition | null> {
+    const scope = scopeFilterWithPlatform(tenantId, 2);
     return this.scoped(tenantId, async (tx) => {
       const result = await tx.query<Record<string, unknown>>(
         `SELECT ${FEATURE_FLAG_COLUMNS} FROM ${this.schema}.${TABLE}
-         WHERE flag_id = $1`,
-        [flagId],
+         WHERE flag_id = $1 AND ${scope.sql}`,
+        [flagId, ...scope.params],
       );
       const row = result.rows[0];
       return row === undefined ? null : rowToFeatureFlag(row);
@@ -357,16 +393,22 @@ export class PostgresFeatureFlagStore {
    * NULLs as distinct by default, so it would permit two platform-wide flags on one key — the one
    * collision that matters most. Expressing it properly needs `UNIQUE NULLS NOT DISTINCT`, which
    * the DDL vocabulary has no spelling for.
+   *
+   * At most one row *in the table* can answer, and the scope predicate is still required: table-wide
+   * uniqueness says which row holds a key, never which scope asked. As the owner, `loadByKey(key,
+   * null)` answered a platform lookup with a tenant's flag — the uniqueness is exactly what makes
+   * that single wrong row look like a correct answer.
    */
   async loadByKey(
     key: string,
     tenantId: string | null = null,
   ): Promise<FlagDefinition | null> {
+    const scope = scopeFilterWithPlatform(tenantId, 2);
     return this.scoped(tenantId, async (tx) => {
       const result = await tx.query<Record<string, unknown>>(
         `SELECT ${FEATURE_FLAG_COLUMNS} FROM ${this.schema}.${TABLE}
-         WHERE key = $1`,
-        [key],
+         WHERE key = $1 AND ${scope.sql}`,
+        [key, ...scope.params],
       );
       const row = result.rows[0];
       return row === undefined ? null : rowToFeatureFlag(row);
@@ -404,13 +446,14 @@ export class PostgresFeatureFlagStore {
     tenantId: string | null,
   ): Promise<readonly FlagDefinition[]> {
     if (limit <= 0) throw new Error("limit must be positive");
+    const scope = scopeFilterWithPlatform(tenantId, 2);
     return this.scoped(tenantId, async (tx) => {
       const result = await tx.query<Record<string, unknown>>(
         `SELECT ${FEATURE_FLAG_COLUMNS} FROM ${this.schema}.${TABLE}
-         WHERE environments @> $1::jsonb${extra}
+         WHERE environments @> $1::jsonb AND ${scope.sql}${extra}
          ORDER BY created_at DESC
-         LIMIT $2`,
-        [JSON.stringify([environment]), limit],
+         LIMIT $${String(2 + scope.params.length)}`,
+        [JSON.stringify([environment]), ...scope.params, limit],
       );
       return result.rows.map((row) => rowToFeatureFlag(row));
     });
@@ -429,24 +472,67 @@ export class PostgresFeatureFlagStore {
     }
   }
 
+  /**
+   * The one `UPDATE` both `update` and `transition` go through, **scoped to the record's own
+   * tenant**.
+   *
+   * The scope predicate is the write-side half of ADR-0331's defect, and this is where it bit
+   * hardest. `flag_id` is table-wide unique, so a platform-scoped write naming a tenant's flag
+   * matched it as the owner — and `updateAssignments` covers **`tenant_id`**, so the statement did
+   * not merely edit that row, it rewrote the row's scope. Measured live on a fresh cluster as the
+   * owner, before the predicate: `update({...flag, tenantId: null}, …)` on a tenant's
+   * `checkout.new_pricing` reported success, moved the row to `tenant_id = NULL` and flipped its
+   * default from `false` to `true`. The flag was taken away from the tenant and the call said it
+   * worked.
+   *
+   * **Strict** rather than inclusive, which is the opposite choice from every read in this package
+   * and the right one. `tenant_id = $n OR tenant_id IS NULL` is correct for a read because a
+   * platform-wide flag is *meant* to be evaluated by every tenant's gateway; on a write it is a
+   * route from a tenant's session into the platform's row — a tenant flipping
+   * `gateway.strict_jwt_aud`, which is exactly the authentication bypass ADR-0332's `config` grant
+   * was separated from `record` to prevent.
+   *
+   * It goes **after** the guard parameter rather than before it, so `guardParam` and the column
+   * placeholders keep the positions `flagUpdateAssignments` derives.
+   */
   private async guardedWrite(
     flag: FlagDefinition,
     expectedUpdatedAt: string,
     extra: string,
   ): Promise<void> {
     const values = flagRowValues(flag);
-    const result = await this.scoped(flag.tenantId, (tx) =>
-      tx.query(
+    const scope = scopeFilter(flag.tenantId, this.guardParam + 1);
+    await this.scopedWrite(flag.tenantId, async (tx) => {
+      const result = await tx.query(
         `UPDATE ${this.schema}.${TABLE} SET ${this.updateAssignments}
-         WHERE flag_id = $1 AND updated_at = $${this.guardParam}${extra}`,
-        [...values, expectedUpdatedAt],
-      ),
-    );
-    if ((result.rowCount ?? 0) === 0) {
-      throw new FeatureFlagConflictError(flag.id, expectedUpdatedAt);
-    }
+         WHERE flag_id = $1 AND ${scope.sql}
+           AND updated_at = $${this.guardParam}${extra}`,
+        [...values, expectedUpdatedAt, ...scope.params],
+      );
+      const refusal = await classifyScopedWriteRefusal(tx, result.rowCount, {
+        schema: this.schema,
+        table: TABLE,
+        idColumn: "flag_id",
+        idValue: flag.id,
+        tenantId: flag.tenantId,
+        guard:
+          `it was not last updated at ${expectedUpdatedAt} — another writer changed it first, ` +
+          "or it is no longer in a status this write may leave",
+      });
+      if (refusal !== null) {
+        throw new FeatureFlagConflictError(
+          flag.id,
+          expectedUpdatedAt,
+          refusal.reason,
+          flag.tenantId,
+          refusal.storedTenantId,
+          refusal.detail,
+        );
+      }
+    });
   }
 
+  /** A read's scope: a tenant context, or nothing — `PostgresKillSwitchStore.scoped`'s reasoning. */
   private scoped<T>(
     tenantId: string | null,
     fn: (tx: PgConnection) => Promise<T>,
@@ -454,6 +540,19 @@ export class PostgresFeatureFlagStore {
     if (tenantId !== null) assertTenantId(tenantId);
     return this.conn.transaction(async (tx) => {
       if (tenantId !== null) await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
+      return fn(tx);
+    });
+  }
+
+  /** A write's scope: a tenant context, or the platform config-write elevation, never both. */
+  private scopedWrite<T>(
+    tenantId: string | null,
+    fn: (tx: PgConnection) => Promise<T>,
+  ): Promise<T> {
+    if (tenantId !== null) assertTenantId(tenantId);
+    return this.conn.transaction(async (tx) => {
+      if (tenantId === null) await tx.query(SET_PLATFORM_CONFIG_WRITE_SQL);
+      else await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
       return fn(tx);
     });
   }

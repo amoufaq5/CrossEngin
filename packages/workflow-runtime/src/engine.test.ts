@@ -1,4 +1,4 @@
-import type { WorkflowDefinition, WorkflowEvent } from "@crossengin/workflow-engine";
+import type { TimerDefinition, WorkflowDefinition, WorkflowEvent } from "@crossengin/workflow-engine";
 import { WorkflowEventSchema, isHistoryDense } from "@crossengin/workflow-engine";
 import { describe, expect, it } from "vitest";
 
@@ -10,18 +10,60 @@ import {
 import { CountingIdGenerator, FixedClock } from "./clock.js";
 import { InMemoryEventLog } from "./event-log.js";
 import {
+  InMemorySignalDeduplicator,
   MAX_CHILD_WORKFLOW_DEPTH,
   MAX_SIGNAL_DISPATCH_DEPTH,
+  SignalIdempotencyRequired,
   WORKFLOW_ACTION_FAILURES,
   WorkflowActionError,
   WorkflowEngine,
   activityRetryDelayMs,
   parseActivityBackoff,
+  priorReceiptSignalId,
+  signalIdempotencyCacheKey,
+  type SignalDeduplicator,
+  type SignalDelivery,
+  type SignalIdempotency,
 } from "./engine.js";
-import { projectActivities, projectInstance, projectTimers } from "./projection.js";
+import {
+  isInstanceCancellationRequested,
+  isInstanceCancelled,
+  projectActivities,
+  projectInstance,
+  projectTimers,
+} from "./projection.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const USER = "00000000-0000-4000-8000-000000000099";
+
+/**
+ * A declared `relative_after` timer. Every fixture here needs one now: the engine schedules a timer
+ * from its **declaration** rather than from the action's parameters, so a `schedule_timer` naming an
+ * undeclared timer is a refusal — and these fixtures were already invalid against
+ * `WorkflowDefinitionSchema`, whose `superRefine` has always refused a `timer_fired` trigger naming
+ * an undeclared timer. They were never parsed, so nothing noticed.
+ */
+function rel(name: string, relativeSeconds: number): TimerDefinition {
+  return {
+    name,
+    kind: "relative_after",
+    relativeSeconds,
+    absoluteTimestampVariable: null,
+    cronExpression: null,
+    timezone: "UTC",
+  };
+}
+
+function cron(name: string, cronExpression: string, timezone = "UTC"): TimerDefinition {
+  return {
+    name,
+    kind: "cron_schedule",
+    relativeSeconds: null,
+    absoluteTimestampVariable: null,
+    cronExpression,
+    timezone,
+  };
+}
 
 function definitionFixture(
   overrides: Partial<WorkflowDefinition> = {},
@@ -79,7 +121,7 @@ function definitionFixture(
       },
     ],
     variables: [],
-    timers: [],
+    timers: [rel("deadline", 60)],
     signals: [],
     initialState: "draft",
     compensationStrategy: "no_compensation",
@@ -99,6 +141,8 @@ function makeEngine(opts: {
   readonly definition?: WorkflowDefinition;
   readonly registry?: ActivityRegistry;
   readonly clock?: FixedClock;
+  readonly deferActivities?: boolean;
+  readonly signalDeduplicator?: SignalDeduplicator;
 } = {}) {
   const definition = opts.definition ?? definitionFixture();
   const log = new InMemoryEventLog();
@@ -111,6 +155,10 @@ function makeEngine(opts: {
     activityRegistry: registry,
     clock,
     idGenerator: ids,
+    ...(opts.deferActivities === undefined ? {} : { deferActivities: opts.deferActivities }),
+    ...(opts.signalDeduplicator === undefined
+      ? {}
+      : { signalDeduplicator: opts.signalDeduplicator }),
   });
   return { engine, log, clock, definition, ids };
 }
@@ -269,6 +317,383 @@ describe("submitSignal", () => {
     expect(second.deduplicated).toBe(true);
   });
 
+  it("mints a signal id per matched instance, not one for the fan-out", async () => {
+    const { engine, definition } = makeEngine();
+    const a = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-fan",
+    });
+    const b = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-fan",
+    });
+    const result = await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-fan",
+      tenantId: TENANT,
+    });
+    expect(result.deliveries.map((d) => d.instanceId)).toEqual([a.instanceId, b.instanceId]);
+    const ids = result.deliveries.map((d) => d.signalId);
+    expect(new Set(ids).size).toBe(2);
+    // The log has to agree, because `meta.workflow_signals.signal_id` is UNIQUE and the row is
+    // projected from these events: one id across both would be one row for two deliveries.
+    for (const delivery of result.deliveries) {
+      const received = (await engine.listEvents(delivery.instanceId)).filter(
+        (e) => e.kind === "signal_received",
+      );
+      expect(received.map((e) => e.signalId)).toEqual([delivery.signalId]);
+    }
+  });
+
+  it("reports matchedInstanceIds as the deliveries' instances, in order", async () => {
+    const { engine, definition } = makeEngine();
+    const a = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-fan2",
+    });
+    const b = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-fan2",
+    });
+    const result = await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-fan2",
+      tenantId: TENANT,
+    });
+    expect(result.matchedInstanceIds).toEqual([a.instanceId, b.instanceId]);
+    expect(result.matchedInstanceIds).toEqual(result.deliveries.map((d) => d.instanceId));
+  });
+
+  it("records the submitted idempotency key on the receipt event", async () => {
+    const { engine, definition } = makeEngine();
+    const state = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-k",
+    });
+    await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-k",
+      tenantId: TENANT,
+      idempotencyKey: "evt-7",
+    });
+    const receipt = (await engine.listEvents(state.instanceId)).find(
+      (e) => e.kind === "signal_received",
+    );
+    expect(receipt?.payload["idempotencyKey"]).toBe("evt-7");
+  });
+
+  it("records a null key on the receipt rather than omitting the field", async () => {
+    const { engine, definition } = makeEngine();
+    const state = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-nk",
+    });
+    await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-nk",
+      tenantId: TENANT,
+    });
+    const receipt = (await engine.listEvents(state.instanceId)).find(
+      (e) => e.kind === "signal_received",
+    );
+    expect(receipt?.payload).toHaveProperty("idempotencyKey", null);
+  });
+
+  it("a duplicate returns the deliveries the first submit made", async () => {
+    const { engine, definition } = makeEngine();
+    const a = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-dup",
+    });
+    const b = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-dup",
+    });
+    const first = await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-dup",
+      tenantId: TENANT,
+      idempotencyKey: "evt-dup",
+    });
+    const second = await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-dup",
+      tenantId: TENANT,
+      idempotencyKey: "evt-dup",
+    });
+    expect(second.deduplicated).toBe(true);
+    expect(second.deliveries).toEqual(first.deliveries);
+    expect(second.matchedInstanceIds).toEqual([a.instanceId, b.instanceId]);
+  });
+
+  it("appends nothing on a duplicate", async () => {
+    const { engine, definition } = makeEngine();
+    const state = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-dup2",
+    });
+    await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-dup2",
+      tenantId: TENANT,
+      idempotencyKey: "evt-d2",
+    });
+    const before = (await engine.listEvents(state.instanceId)).length;
+    await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-dup2",
+      tenantId: TENANT,
+      idempotencyKey: "evt-d2",
+    });
+    expect((await engine.listEvents(state.instanceId)).length).toBe(before);
+  });
+
+  it("asks the injected deduplicator, and a prior answer short-circuits delivery", async () => {
+    const prior: SignalDelivery[] = [{ instanceId: "wfi_elsewhere", signalId: "wfs_elsewhere" }];
+    const asked: SignalIdempotency[] = [];
+    const dedup: SignalDeduplicator = {
+      async lookup(key) {
+        asked.push(key);
+        return prior;
+      },
+      async remember() {
+        throw new Error("a duplicate must not be remembered again");
+      },
+    };
+    const { engine, definition } = makeEngine({ signalDeduplicator: dedup });
+    const state = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-inj",
+    });
+    const result = await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-inj",
+      tenantId: TENANT,
+      idempotencyKey: "evt-inj",
+    });
+    expect(asked).toEqual([
+      { tenantId: TENANT, signalName: "approve", idempotencyKey: "evt-inj" },
+    ]);
+    expect(result).toEqual({
+      deduplicated: true,
+      deliveries: prior,
+      matchedInstanceIds: ["wfi_elsewhere"],
+    });
+    // Untouched: the short-circuit is before the match loop.
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("waiting_for_signal");
+  });
+
+  it("never consults the deduplicator when no key was submitted", async () => {
+    let asked = 0;
+    const dedup: SignalDeduplicator = {
+      async lookup() {
+        asked += 1;
+        return null;
+      },
+      async remember() {
+        asked += 1;
+      },
+    };
+    const { engine, definition } = makeEngine({ signalDeduplicator: dedup });
+    await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-nokey",
+    });
+    await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-nokey",
+      tenantId: TENANT,
+    });
+    expect(asked).toBe(0);
+  });
+
+  it("remembers the deliveries it made, so the second submit can report them", async () => {
+    const remembered: Array<{ key: SignalIdempotency; deliveries: readonly SignalDelivery[] }> = [];
+    const dedup: SignalDeduplicator = {
+      async lookup() {
+        return null;
+      },
+      async remember(key, deliveries) {
+        remembered.push({ key, deliveries });
+      },
+    };
+    const { engine, definition } = makeEngine({ signalDeduplicator: dedup });
+    const state = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-rem",
+    });
+    const result = await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-rem",
+      tenantId: TENANT,
+      idempotencyKey: "evt-rem",
+    });
+    expect(remembered).toHaveLength(1);
+    expect(remembered[0]?.deliveries).toEqual(result.deliveries);
+    expect(remembered[0]?.deliveries.map((d) => d.instanceId)).toEqual([state.instanceId]);
+  });
+
+  it("a stale deduplicator cannot make the instance receive one key twice", async () => {
+    // Both concurrent submits of one key read "unseen" — which is exactly what a deduplicator
+    // reading before the appends it guards will do. The instance's own log is what catches it.
+    const blind: SignalDeduplicator = {
+      async lookup() {
+        return null;
+      },
+      async remember() {
+        return;
+      },
+    };
+    const { engine, definition } = makeEngine({ signalDeduplicator: blind });
+    const state = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-race",
+    });
+    // A signal name no transition names, so the instance stays `waiting_for_signal` and is still
+    // a candidate on the second submit — which is what a real race looks like. A terminating
+    // signal is already covered by the status check.
+    const first = await engine.submitSignal({
+      signalName: "nosuchsignal",
+      correlationKey: "po-race",
+      tenantId: TENANT,
+      idempotencyKey: "evt-race",
+    });
+    const before = (await engine.listEvents(state.instanceId)).length;
+    const second = await engine.submitSignal({
+      signalName: "nosuchsignal",
+      correlationKey: "po-race",
+      tenantId: TENANT,
+      idempotencyKey: "evt-race",
+    });
+    expect((await engine.listEvents(state.instanceId)).length).toBe(before);
+    expect(second.deduplicated).toBe(true);
+    expect(second.deliveries).toEqual(first.deliveries);
+  });
+
+  it("delivers a second, different key to the same instance", async () => {
+    const { engine, definition } = makeEngine();
+    const state = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-two",
+    });
+    await engine.submitSignal({
+      signalName: "nosuchsignal",
+      correlationKey: "po-two",
+      tenantId: TENANT,
+      idempotencyKey: "evt-1",
+    });
+    const second = await engine.submitSignal({
+      signalName: "nosuchsignal",
+      correlationKey: "po-two",
+      tenantId: TENANT,
+      idempotencyKey: "evt-2",
+    });
+    // Two distinct keys are two distinct deliveries, so the guard must not collapse them.
+    expect(second.deduplicated).toBe(false);
+    const receipts = (await engine.listEvents(state.instanceId)).filter(
+      (e) => e.kind === "signal_received",
+    );
+    expect(receipts).toHaveLength(2);
+    expect(new Set(receipts.map((e) => e.signalId)).size).toBe(2);
+  });
+
+  it("refuses an exactly_once_idempotent signal submitted with no key, appending nothing", async () => {
+    const definition = definitionFixture({
+      signals: [
+        {
+          name: "approve",
+          correlationVariable: "poNumber",
+          payloadSchemaSha256: null,
+          deliveryGuarantee: "exactly_once_idempotent",
+          idempotencyKey: null,
+        },
+      ],
+    });
+    const { engine } = makeEngine({ definition });
+    const state = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-req",
+    });
+    const before = (await engine.listEvents(state.instanceId)).length;
+    await expect(
+      engine.submitSignal({
+        signalName: "approve",
+        correlationKey: "po-req",
+        tenantId: TENANT,
+      }),
+    ).rejects.toThrow(SignalIdempotencyRequired);
+    expect((await engine.listEvents(state.instanceId)).length).toBe(before);
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("waiting_for_signal");
+  });
+
+  it("delivers that same signal once a key is supplied", async () => {
+    const definition = definitionFixture({
+      signals: [
+        {
+          name: "approve",
+          correlationVariable: "poNumber",
+          payloadSchemaSha256: null,
+          deliveryGuarantee: "exactly_once_idempotent",
+          idempotencyKey: null,
+        },
+      ],
+    });
+    const { engine } = makeEngine({ definition });
+    const state = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-ok",
+    });
+    const result = await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-ok",
+      tenantId: TENANT,
+      idempotencyKey: "evt-ok",
+    });
+    expect(result.matchedInstanceIds).toEqual([state.instanceId]);
+  });
+
+  it("does not demand a key for a weaker declared guarantee", async () => {
+    const definition = definitionFixture({
+      signals: [
+        {
+          name: "approve",
+          correlationVariable: "poNumber",
+          payloadSchemaSha256: null,
+          deliveryGuarantee: "at_least_once",
+          idempotencyKey: null,
+        },
+      ],
+    });
+    const { engine } = makeEngine({ definition });
+    const state = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-weak",
+    });
+    const result = await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-weak",
+      tenantId: TENANT,
+    });
+    expect(result.matchedInstanceIds).toEqual([state.instanceId]);
+  });
+
   it("rejects a transition into rejected (terminal_failure) emits instance_failed", async () => {
     const { engine, definition } = makeEngine();
     const state = await engine.startInstance({
@@ -287,6 +712,160 @@ describe("submitSignal", () => {
   });
 });
 
+describe("priorReceiptSignalId", () => {
+  function receipt(overrides: Partial<WorkflowEvent>): WorkflowEvent {
+    return {
+      id: "wfe_e1",
+      instanceId: "wfi_a",
+      tenantId: TENANT,
+      sequenceNumber: 1,
+      kind: "signal_received",
+      occurredAt: "2026-05-16T12:00:00.000Z",
+      actorPrincipalId: null,
+      actorSystemId: "s",
+      previousState: null,
+      newState: null,
+      activityId: null,
+      signalId: "wfs_a",
+      timerId: null,
+      childInstanceId: null,
+      variableName: null,
+      payload: { signalName: "approve", correlationKey: "po-1", idempotencyKey: "evt-1" },
+      correlationId: null,
+      causationEventId: null,
+      ...overrides,
+    };
+  }
+
+  it("finds the id of a receipt matching both name and key", () => {
+    expect(priorReceiptSignalId([receipt({})], "approve", "evt-1")).toBe("wfs_a");
+  });
+
+  it("is null for a different key", () => {
+    expect(priorReceiptSignalId([receipt({})], "approve", "evt-2")).toBeNull();
+  });
+
+  it("is null for a different signal name under the same key", () => {
+    expect(priorReceiptSignalId([receipt({})], "reject", "evt-1")).toBeNull();
+  });
+
+  it("is null for a receipt that recorded no key", () => {
+    const e = receipt({ payload: { signalName: "approve", correlationKey: "po-1" } });
+    expect(priorReceiptSignalId([e], "approve", "evt-1")).toBeNull();
+  });
+
+  it("ignores events of other kinds carrying the same signal id", () => {
+    const consumed = receipt({ kind: "signal_consumed", payload: { signalName: "approve" } });
+    expect(priorReceiptSignalId([consumed], "approve", "evt-1")).toBeNull();
+  });
+
+  it("takes the first matching receipt when a log holds two", () => {
+    expect(
+      priorReceiptSignalId(
+        [receipt({}), receipt({ id: "wfe_e2", signalId: "wfs_b", sequenceNumber: 2 })],
+        "approve",
+        "evt-1",
+      ),
+    ).toBe("wfs_a");
+  });
+});
+
+describe("signalIdempotencyCacheKey", () => {
+  it("joins the three fields of the unique key", () => {
+    expect(
+      signalIdempotencyCacheKey({
+        tenantId: TENANT,
+        signalName: "approve",
+        idempotencyKey: "evt-1",
+      }),
+    ).toBe(`${TENANT}|approve|evt-1`);
+  });
+
+  it("separates one tenant's key from another's", () => {
+    const a = signalIdempotencyCacheKey({
+      tenantId: TENANT,
+      signalName: "approve",
+      idempotencyKey: "evt-1",
+    });
+    const b = signalIdempotencyCacheKey({
+      tenantId: "00000000-0000-4000-8000-000000000002",
+      signalName: "approve",
+      idempotencyKey: "evt-1",
+    });
+    expect(a).not.toBe(b);
+  });
+
+  it("separates two signal names sharing a key", () => {
+    const a = signalIdempotencyCacheKey({
+      tenantId: TENANT,
+      signalName: "approve",
+      idempotencyKey: "evt-1",
+    });
+    const b = signalIdempotencyCacheKey({
+      tenantId: TENANT,
+      signalName: "reject",
+      idempotencyKey: "evt-1",
+    });
+    expect(a).not.toBe(b);
+  });
+});
+
+describe("InMemorySignalDeduplicator", () => {
+  const key: SignalIdempotency = {
+    tenantId: TENANT,
+    signalName: "approve",
+    idempotencyKey: "evt-1",
+  };
+
+  it("answers null for an unseen key", async () => {
+    expect(await new InMemorySignalDeduplicator().lookup(key)).toBeNull();
+  });
+
+  it("returns what it was told to remember", async () => {
+    const dedup = new InMemorySignalDeduplicator();
+    const deliveries: SignalDelivery[] = [{ instanceId: "wfi_a", signalId: "wfs_a" }];
+    await dedup.remember(key, deliveries);
+    expect(await dedup.lookup(key)).toEqual(deliveries);
+  });
+
+  it("does not remember a submit that delivered nothing", async () => {
+    const dedup = new InMemorySignalDeduplicator();
+    await dedup.remember(key, []);
+    // The persistent deduplicator has no row to find for such a submit, and the two must agree —
+    // so "no instance matched" stays retryable here too.
+    expect(await dedup.lookup(key)).toBeNull();
+  });
+
+  it("keeps two tenants' identical keys apart", async () => {
+    const dedup = new InMemorySignalDeduplicator();
+    await dedup.remember(key, [{ instanceId: "wfi_a", signalId: "wfs_a" }]);
+    expect(
+      await dedup.lookup({ ...key, tenantId: "00000000-0000-4000-8000-000000000002" }),
+    ).toBeNull();
+  });
+
+  it("keeps two signal names' identical keys apart", async () => {
+    const dedup = new InMemorySignalDeduplicator();
+    await dedup.remember(key, [{ instanceId: "wfi_a", signalId: "wfs_a" }]);
+    expect(await dedup.lookup({ ...key, signalName: "reject" })).toBeNull();
+  });
+});
+
+describe("SignalIdempotencyRequired", () => {
+  it("names the signal, the instance and the definition that declared the guarantee", () => {
+    const err = new SignalIdempotencyRequired({
+      signalName: "approve",
+      instanceId: "wfi_inst0001",
+      definitionId: "wfd_def00001",
+    });
+    expect(err.name).toBe("SignalIdempotencyRequired");
+    expect(err.message).toContain("approve");
+    expect(err.message).toContain("wfi_inst0001");
+    expect(err.message).toContain("wfd_def00001");
+    expect(err.signalName).toBe("approve");
+  });
+});
+
 describe("tickTimers", () => {
   it("fires a scheduled timer and runs the timer_fired transition", async () => {
     const def: WorkflowDefinition = {
@@ -300,7 +879,7 @@ describe("tickTimers", () => {
           onEntryActions: [
             {
               kind: "schedule_timer",
-              parameters: { timerName: "deadline", relativeSeconds: 60 },
+              parameters: { timerName: "deadline" },
             },
           ],
           onExitActions: [],
@@ -329,6 +908,7 @@ describe("tickTimers", () => {
   it("does not fire a timer whose fireAt is in the future", async () => {
     const def: WorkflowDefinition = {
       ...definitionFixture(),
+      timers: [rel("deadline", 3_600)],
       states: [
         { name: "draft", kind: "initial", label: "Draft", onEntryActions: [], onExitActions: [], slaSeconds: null },
         {
@@ -338,7 +918,7 @@ describe("tickTimers", () => {
           onEntryActions: [
             {
               kind: "schedule_timer",
-              parameters: { timerName: "deadline", relativeSeconds: 3_600 },
+              parameters: { timerName: "deadline" },
             },
           ],
           onExitActions: [],
@@ -361,13 +941,14 @@ describe("fireDueTimersForInstance (distributed firing)", () => {
   function timerDef(relativeSeconds: number): WorkflowDefinition {
     return {
       ...definitionFixture(),
+      timers: [rel("deadline", relativeSeconds)],
       states: [
         { name: "draft", kind: "initial", label: "Draft", onEntryActions: [], onExitActions: [], slaSeconds: null },
         {
           name: "awaiting_approval",
           kind: "waiting",
           label: "Awaiting",
-          onEntryActions: [{ kind: "schedule_timer", parameters: { timerName: "deadline", relativeSeconds } }],
+          onEntryActions: [{ kind: "schedule_timer", parameters: { timerName: "deadline" } }],
           onExitActions: [],
           slaSeconds: null,
         },
@@ -613,49 +1194,6 @@ describe("set_variable action", () => {
     const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
     expect(state.variables["status"]).toBe("checked");
     expect(state.status).toBe("completed");
-  });
-});
-
-describe("cancelInstance", () => {
-  it("emits instance_cancelled", async () => {
-    const { engine, definition } = makeEngine();
-    const state = await engine.startInstance({
-      definitionId: definition.id,
-      tenantId: TENANT,
-    });
-    await engine.cancelInstance({
-      instanceId: state.instanceId,
-      reason: "user requested",
-      cancelledByUserId: USER,
-    });
-    const finalState = await engine.getInstanceState(state.instanceId);
-    expect(finalState?.status).toBe("cancelled");
-    expect(finalState?.cancelledReason).toBe("user requested");
-    expect(finalState?.cancelledByUserId).toBe(USER);
-  });
-
-  it("rejects cancellation of a completed instance", async () => {
-    const { engine, definition } = makeEngine();
-    const state = await engine.startInstance({
-      definitionId: definition.id,
-      tenantId: TENANT,
-      correlationKey: "po-x",
-    });
-    await engine.submitSignal({
-      signalName: "approve",
-      correlationKey: "po-x",
-      tenantId: TENANT,
-    });
-    await expect(
-      engine.cancelInstance({ instanceId: state.instanceId, reason: "late" }),
-    ).rejects.toThrow(/terminal status/);
-  });
-
-  it("rejects cancellation of an unknown instance", async () => {
-    const { engine } = makeEngine();
-    await expect(
-      engine.cancelInstance({ instanceId: "wfi_nope0001", reason: "x" }),
-    ).rejects.toThrow(/unknown instance/);
   });
 });
 
@@ -1321,10 +1859,11 @@ function cancelTimerDef(cancelParams: Record<string, unknown> = { timerName: "lo
     id: "wfd_cancel01",
     definitionKey: "cancel.timer",
     initialState: "armed",
+    timers: [rel("short_deadline", 60), rel("long_deadline", 3_600), rel("never_armed", 60)],
     states: [
       st("armed", "initial", [
-        { kind: "schedule_timer", parameters: { timerName: "short_deadline", relativeSeconds: 60 } },
-        { kind: "schedule_timer", parameters: { timerName: "long_deadline", relativeSeconds: 3600 } },
+        { kind: "schedule_timer", parameters: { timerName: "short_deadline" } },
+        { kind: "schedule_timer", parameters: { timerName: "long_deadline" } },
       ]),
       st("settled", "terminal_success"),
     ],
@@ -1835,6 +2374,68 @@ describe("send_signal action", () => {
     expect((await engine.getInstanceState(second.instanceId))?.status).toBe("completed");
   });
 
+  it("carries an idempotencyKey parameter through to the receipt", async () => {
+    const receiver = definitionFixture();
+    const sender = senderDef({
+      signalName: "approve",
+      correlationKey: "po-1",
+      idempotencyKey: "internal-1",
+    });
+    const { engine } = makeMultiEngine([receiver, sender]);
+    const waiting = await startReceiver(engine, receiver, "po-1");
+    await engine.startInstance({ definitionId: sender.id, tenantId: TENANT });
+    const receipt = (await engine.listEvents(waiting.instanceId)).find(
+      (e) => e.kind === "signal_received",
+    );
+    expect(receipt?.payload["idempotencyKey"]).toBe("internal-1");
+  });
+
+  it("can address an exactly_once_idempotent signal, which it could not without the parameter", async () => {
+    const receiver = definitionFixture({
+      signals: [
+        {
+          name: "approve",
+          correlationVariable: "poNumber",
+          payloadSchemaSha256: null,
+          deliveryGuarantee: "exactly_once_idempotent",
+          idempotencyKey: null,
+        },
+      ],
+    });
+    const sender = senderDef({
+      signalName: "approve",
+      correlationKey: "po-1",
+      idempotencyKey: "internal-2",
+    });
+    const { engine } = makeMultiEngine([receiver, sender]);
+    const waiting = await startReceiver(engine, receiver, "po-1");
+    await engine.startInstance({ definitionId: sender.id, tenantId: TENANT });
+    expect((await engine.getInstanceState(waiting.instanceId))?.status).toBe("completed");
+  });
+
+  it("refuses an exactly_once_idempotent target when the action names no key", async () => {
+    const receiver = definitionFixture({
+      signals: [
+        {
+          name: "approve",
+          correlationVariable: "poNumber",
+          payloadSchemaSha256: null,
+          deliveryGuarantee: "exactly_once_idempotent",
+          idempotencyKey: null,
+        },
+      ],
+    });
+    const sender = senderDef({ signalName: "approve", correlationKey: "po-1" });
+    const { engine } = makeMultiEngine([receiver, sender]);
+    const waiting = await startReceiver(engine, receiver, "po-1");
+    await expect(
+      engine.startInstance({ definitionId: sender.id, tenantId: TENANT }),
+    ).rejects.toThrow(SignalIdempotencyRequired);
+    expect((await engine.getInstanceState(waiting.instanceId))?.status).toBe(
+      "waiting_for_signal",
+    );
+  });
+
   it("replays sender and receiver identically in a second engine", async () => {
     const receiver = definitionFixture();
     const sender = senderDef({ signalName: "approve", correlationKey: "po-1" });
@@ -1875,6 +2476,1030 @@ describe("WorkflowActionError", () => {
       "unresolved_correlation_key",
       "child_depth_exceeded",
       "signal_depth_exceeded",
+      "undeclared_timer",
+      "unschedulable_timer",
     ]);
+  });
+});
+
+describe("cancelInstance — the guarantee", () => {
+  /**
+   * A definition with a timer, a compensatable side-effect activity and a terminal state, so one
+   * fixture exercises every kind of outstanding work a cancellation has to answer for.
+   */
+  function sagaDef(
+    over: Partial<WorkflowDefinition> = {},
+  ): WorkflowDefinition {
+    return {
+      ...definitionFixture(),
+      compensationStrategy: "immediate_reverse_order",
+      timers: [rel("deadline", 600)],
+      states: [
+        {
+          name: "draft",
+          kind: "initial",
+          label: "Draft",
+          onEntryActions: [
+            {
+              kind: "schedule_activity",
+              parameters: {
+                activityKey: "charge_card",
+                kind: "http_call",
+                input: { amount: 100 },
+                compensationActivityKey: "refund_card",
+              },
+            },
+            { kind: "schedule_timer", parameters: { timerName: "deadline" } },
+          ],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "awaiting_approval",
+          kind: "waiting",
+          label: "Awaiting",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "approved",
+          kind: "terminal_success",
+          label: "Approved",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+      ],
+      transitions: [
+        {
+          name: "charged",
+          fromState: "draft",
+          toState: "awaiting_approval",
+          trigger: { kind: "activity_completed", activityKey: "charge_card" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+        {
+          name: "approve",
+          fromState: "awaiting_approval",
+          toState: "approved",
+          trigger: { kind: "signal_received", signalName: "approve" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+        {
+          name: "timeout",
+          fromState: "awaiting_approval",
+          toState: "approved",
+          trigger: { kind: "timer_fired", timerName: "deadline" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+      ],
+      initialState: "draft",
+      ...over,
+    };
+  }
+
+  function sideEffectRegistry(
+    refunds: string[] = [],
+  ): ActivityRegistry {
+    const r = createDefaultRegistry();
+    r.registerForKind("http_call", () => ({ status: "succeeded", output: { charged: true } }));
+    r.registerForActivity("wfd_def00001", "refund_card", (inv) => {
+      refunds.push(inv.instanceId);
+      return { status: "succeeded" };
+    });
+    return r;
+  }
+
+  const abandon = { disposition: "abandon" as const, reason: "buyer withdrew", requestedByUserId: USER };
+  const compensate = { disposition: "compensate" as const, reason: "buyer withdrew", requestedByUserId: USER };
+
+  it("records the fence first and the terminal event last", async () => {
+    const { engine, definition } = makeEngine({
+      definition: sagaDef(),
+      registry: sideEffectRegistry(),
+    });
+    const state = await engine.startInstance({ definitionId: definition.id, tenantId: TENANT });
+    const result = await engine.cancelInstance({ ...abandon, instanceId: state.instanceId });
+    expect(result.outcome).toBe("cancelled");
+    const kinds = (await engine.listEvents(state.instanceId)).map((e) => e.kind);
+    expect(kinds.indexOf("instance_cancellation_requested")).toBeGreaterThan(-1);
+    expect(kinds.indexOf("instance_cancellation_requested")).toBeLessThan(
+      kinds.indexOf("instance_cancelled"),
+    );
+    expect(kinds[kinds.length - 1]).toBe("instance_cancelled");
+  });
+
+  it("lands the instance cancelled with its reason and actor", async () => {
+    const { engine, definition } = makeEngine({
+      definition: sagaDef(),
+      registry: sideEffectRegistry(),
+    });
+    const state = await engine.startInstance({ definitionId: definition.id, tenantId: TENANT });
+    await engine.cancelInstance({ ...abandon, instanceId: state.instanceId });
+    const final = await engine.getInstanceState(state.instanceId);
+    expect(final?.status).toBe("cancelled");
+    expect(final?.cancelledReason).toBe("buyer withdrew");
+    expect(final?.cancelledByUserId).toBe(USER);
+    expect(final?.cancellationDisposition).toBe("abandon");
+    expect(final?.cancellationRequestedAt).not.toBeNull();
+  });
+
+  it("cancels from every non-terminal status the map admits", async () => {
+    // created / running are reached by a definition that parks immediately; waiting_for_activity,
+    // waiting_for_timer and waiting_for_signal by the saga fixture at its three resting points.
+    const cases: readonly [string, WorkflowDefinition][] = [
+      ["waiting_for_signal", definitionFixture()],
+      ["waiting_for_timer", sagaDef()],
+    ];
+    for (const [label, def] of cases) {
+      const { engine } = makeEngine({ definition: def, registry: sideEffectRegistry() });
+      const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+      const result = await engine.cancelInstance({ ...abandon, instanceId: state.instanceId });
+      expect(result.outcome, label).toBe("cancelled");
+      expect((await engine.getInstanceState(state.instanceId))?.status, label).toBe("cancelled");
+    }
+  });
+
+  it("refuses a completed instance as terminal, and appends nothing", async () => {
+    const { engine, definition } = makeEngine();
+    const state = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-x",
+    });
+    await engine.submitSignal({ signalName: "approve", correlationKey: "po-x", tenantId: TENANT });
+    const before = (await engine.listEvents(state.instanceId)).length;
+    const result = await engine.cancelInstance({ ...abandon, instanceId: state.instanceId });
+    expect(result.outcome).toBe("refused_terminal");
+    expect((await engine.listEvents(state.instanceId)).length).toBe(before);
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("completed");
+  });
+
+  it("refuses a failed instance as not cancellable, because the map sends it to compensating", async () => {
+    const { engine, definition } = makeEngine();
+    const state = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-y",
+    });
+    await engine.submitSignal({ signalName: "reject", correlationKey: "po-y", tenantId: TENANT });
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("failed");
+    const result = await engine.cancelInstance({ ...abandon, instanceId: state.instanceId });
+    expect(result.outcome).toBe("refused_not_cancellable");
+  });
+
+  it("reports an unknown instance rather than throwing", async () => {
+    const { engine } = makeEngine();
+    const result = await engine.cancelInstance({ ...abandon, instanceId: "wfi_nope0001" });
+    expect(result.outcome).toBe("unknown_instance");
+  });
+
+  it("is idempotent: a second request appends nothing and reports already_requested", async () => {
+    const { engine, definition } = makeEngine({
+      definition: sagaDef(),
+      registry: sideEffectRegistry(),
+    });
+    const state = await engine.startInstance({ definitionId: definition.id, tenantId: TENANT });
+    await engine.cancelInstance({ ...abandon, instanceId: state.instanceId });
+    const after = await engine.listEvents(state.instanceId);
+    const second = await engine.cancelInstance({
+      ...abandon,
+      reason: "a different reason",
+      instanceId: state.instanceId,
+    });
+    expect(second.outcome).toBe("already_requested");
+    expect((await engine.listEvents(state.instanceId)).length).toBe(after.length);
+    // The first request's reason stands, as `COALESCE`-stamping gives the job record.
+    expect((await engine.getInstanceState(state.instanceId))?.cancelledReason).toBe(
+      "buyer withdrew",
+    );
+  });
+
+  it("drops an unfired timer, and the drop is in the log with the schedule's name", async () => {
+    const { engine, definition } = makeEngine({
+      definition: sagaDef(),
+      registry: sideEffectRegistry(),
+    });
+    const state = await engine.startInstance({ definitionId: definition.id, tenantId: TENANT });
+    expect(state.awaitingTimerNames).toEqual(["deadline"]);
+    const result = await engine.cancelInstance({ ...abandon, instanceId: state.instanceId });
+    expect(result.cancelledTimerIds).toHaveLength(1);
+    const events = await engine.listEvents(state.instanceId);
+    const drop = events.find((e) => e.kind === "timer_cancelled");
+    expect(drop?.timerId).toBe(result.cancelledTimerIds[0]);
+    expect(drop?.payload["timerName"]).toBe("deadline");
+    expect(drop?.payload["cancelledBy"]).toBe("instance_cancellation");
+    expect(projectTimers(events).map((t) => t.status)).toEqual(["cancelled"]);
+    // The drop carries the name, so the instance stops being recorded as waiting on it.
+    expect((await engine.getInstanceState(state.instanceId))?.awaitingTimerNames).toEqual([]);
+  });
+
+  it("does not fire a due timer after cancellation", async () => {
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const { engine, definition } = makeEngine({
+      definition: sagaDef(),
+      registry: sideEffectRegistry(),
+      clock,
+    });
+    const state = await engine.startInstance({ definitionId: definition.id, tenantId: TENANT });
+    await engine.cancelInstance({ ...abandon, instanceId: state.instanceId });
+    clock.advance(3_600_000);
+    const tick = await engine.tickTimers(clock.now().getTime());
+    expect(tick.firedTimerIds).toEqual([]);
+    const kinds = (await engine.listEvents(state.instanceId)).map((e) => e.kind);
+    expect(kinds).not.toContain("timer_fired");
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("cancelled");
+  });
+
+  it("does not fire a due timer for an instance that is cancelled but was never requested", async () => {
+    // A `terminal_cancelled` state emits `instance_cancelled` with no request event, so the fence
+    // has to answer from the status too.
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const def = sagaDef();
+    const { engine, log } = makeEngine({ definition: def, registry: sideEffectRegistry(), clock });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const seq = (await log.latestSequence(state.instanceId))!;
+    await log.append({
+      id: "wfe_handwritten1",
+      instanceId: state.instanceId,
+      tenantId: TENANT,
+      sequenceNumber: seq + 1,
+      kind: "instance_cancelled",
+      occurredAt: clock.nowIso(),
+      actorPrincipalId: null,
+      actorSystemId: "terminal-state",
+      previousState: null,
+      newState: null,
+      activityId: null,
+      signalId: null,
+      timerId: null,
+      childInstanceId: null,
+      variableName: null,
+      payload: { reason: "terminal_cancelled state" },
+      correlationId: null,
+      causationEventId: null,
+    });
+    const projected = await engine.getInstanceState(state.instanceId);
+    expect(projected?.cancellationRequestedAt).toBeNull();
+    clock.advance(3_600_000);
+    expect((await engine.tickTimers(clock.now().getTime())).firedTimerIds).toEqual([]);
+  });
+
+  it("does not start a scheduled activity after cancellation, and records it at before_handler", async () => {
+    const { engine, definition } = makeEngine({
+      definition: sagaDef(),
+      registry: sideEffectRegistry(),
+      deferActivities: true,
+    });
+    const state = await engine.startInstance({ definitionId: definition.id, tenantId: TENANT });
+    const scheduledId = state.awaitingActivityIds[0]!;
+    const result = await engine.cancelInstance({ ...abandon, instanceId: state.instanceId });
+    expect(result.beforeHandlerActivityIds).toEqual([scheduledId]);
+    const cancelled = (await engine.listEvents(state.instanceId)).find(
+      (e) => e.kind === "activity_cancelled",
+    );
+    expect(cancelled?.payload["checkpoint"]).toBe("before_handler");
+    expect(cancelled?.payload["signalDelivered"]).toBe(false);
+    // The deferred worker's entry point refuses it, and says so rather than reporting a phantom run.
+    expect(await engine.executeScheduledActivity(state.instanceId, scheduledId)).toEqual({
+      executed: false,
+    });
+    const kinds = (await engine.listEvents(state.instanceId)).map((e) => e.kind);
+    expect(kinds).not.toContain("activity_started");
+  });
+
+  it("fences every driver entry point, so nothing advances a cancelled instance", async () => {
+    // `runStepLoop`'s own guard is defence in depth: the timer, signal and activity fences all sit
+    // above it, so no public entry point can reach the loop with a cancelled instance. What is
+    // observable — and what a cancellation that stopped only some of the three would break — is that
+    // invoking all of them appends nothing and moves nothing.
+    const def = sagaDef();
+    const { engine, clock } = makeEngine({
+      definition: def,
+      registry: sideEffectRegistry(),
+      deferActivities: true,
+    });
+    const state = await engine.startInstance({
+      definitionId: def.id,
+      tenantId: TENANT,
+      correlationKey: "po-fence",
+    });
+    const scheduledId = state.awaitingActivityIds[0]!;
+    await engine.cancelInstance({ ...abandon, instanceId: state.instanceId });
+    const afterCancel = await engine.listEvents(state.instanceId);
+    const stateAfterCancel = await engine.getInstanceState(state.instanceId);
+
+    clock.advance(3_600_000);
+    await engine.tickTimers(clock.now().getTime());
+    await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-fence",
+      tenantId: TENANT,
+    });
+    expect(await engine.executeScheduledActivity(state.instanceId, scheduledId)).toEqual({
+      executed: false,
+    });
+
+    expect(await engine.listEvents(state.instanceId)).toEqual(afterCancel);
+    expect(await engine.getInstanceState(state.instanceId)).toEqual(stateAfterCancel);
+  });
+
+  it("emits no instance_completed for a cancelled instance parked in a terminal state", async () => {
+    // The step-loop fence is checked *above* the terminal-state-kind emit for this case: a cancelled
+    // instance whose currentState is `terminal_success` must not then be reported as completed.
+    const def = sagaDef();
+    const { engine, log, clock } = makeEngine({
+      definition: def,
+      registry: sideEffectRegistry(),
+      deferActivities: true,
+    });
+    const state = await engine.startInstance({
+      definitionId: def.id,
+      tenantId: TENANT,
+      correlationKey: "po-terminal",
+    });
+    await engine.cancelInstance({ ...abandon, instanceId: state.instanceId });
+    const seq = (await log.latestSequence(state.instanceId))!;
+    await log.append({
+      id: "wfe_handplaced1",
+      instanceId: state.instanceId,
+      tenantId: TENANT,
+      sequenceNumber: seq + 1,
+      kind: "state_transitioned",
+      occurredAt: clock.nowIso(),
+      actorPrincipalId: null,
+      actorSystemId: "test",
+      previousState: "draft",
+      newState: "approved",
+      activityId: null,
+      signalId: null,
+      timerId: null,
+      childInstanceId: null,
+      variableName: null,
+      payload: { transitionName: "hand-placed" },
+      correlationId: null,
+      causationEventId: null,
+    });
+    const parked = await engine.getInstanceState(state.instanceId);
+    expect(parked?.currentState).toBe("approved");
+    // The seal keeps the status cancelled even though a state_transitioned followed it.
+    expect(parked?.status).toBe("cancelled");
+
+    clock.advance(3_600_000);
+    await engine.tickTimers(clock.now().getTime());
+    await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-terminal",
+      tenantId: TENANT,
+    });
+    const kinds = (await engine.listEvents(state.instanceId)).map((e) => e.kind);
+    expect(kinds).not.toContain("instance_completed");
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("cancelled");
+  });
+
+  it("does not deliver a signal to a cancelled instance", async () => {
+    const { engine, definition } = makeEngine();
+    const state = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-sig",
+    });
+    await engine.cancelInstance({ ...abandon, instanceId: state.instanceId });
+    const delivery = await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-sig",
+      tenantId: TENANT,
+    });
+    expect(delivery.matchedInstanceIds).toEqual([]);
+    const kinds = (await engine.listEvents(state.instanceId)).map((e) => e.kind);
+    expect(kinds).not.toContain("signal_received");
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("cancelled");
+  });
+
+  it("tells an in-flight handler, and one that ignores the signal still lands cancelled", async () => {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let announce: ((id: string) => void) | undefined;
+    const entered = new Promise<string>((resolve) => {
+      announce = resolve;
+    });
+    let sawAbort = false;
+    const registry = createDefaultRegistry();
+    registry.registerForKind("http_call", async (inv) => {
+      announce?.(inv.instanceId);
+      await gate;
+      sawAbort = inv.signal.aborted;
+      // Deliberately ignores the signal and reports success anyway.
+      return { status: "succeeded", output: { charged: true } };
+    });
+    const def = sagaDef();
+    const { engine } = makeEngine({ definition: def, registry });
+
+    // Parked inside the handler, which is the only window in which `in_flight_activity`'s weaker
+    // guarantee is the one that applies.
+    const starting = engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const id = await entered;
+
+    const result = await engine.cancelInstance({ ...abandon, instanceId: id });
+    expect(result.outcome).toBe("cancelled");
+    expect(result.cooperativeAbortActivityIds).toHaveLength(1);
+    expect(result.signalDeliveredActivityIds).toEqual(result.cooperativeAbortActivityIds);
+
+    release?.();
+    await starting;
+    expect(sawAbort).toBe(true);
+
+    const events = await engine.listEvents(id);
+    const cancelled = events.find((e) => e.kind === "activity_cancelled");
+    expect(cancelled?.payload["checkpoint"]).toBe("cooperative_abort");
+    expect(cancelled?.payload["signalDelivered"]).toBe(true);
+    // The handler's report is a fact and is in the log; it moves nothing.
+    expect(events.map((e) => e.kind)).toContain("activity_completed");
+    const final = await engine.getInstanceState(id);
+    expect(final?.status).toBe("cancelled");
+    expect(final?.cancellationSignalledActivityIds).toEqual(result.cooperativeAbortActivityIds);
+    // And the activity record keeps `cancelled` while still carrying what the handler produced.
+    const activity = projectActivities(events).find(
+      (a) => a.id === result.cooperativeAbortActivityIds[0],
+    );
+    expect(activity?.status).toBe("cancelled");
+    expect(activity?.outputSha256).not.toBeNull();
+  });
+
+  it("runs the saga rollback when the request asks to compensate", async () => {
+    const refunds: string[] = [];
+    const def = sagaDef();
+    const { engine } = makeEngine({ definition: def, registry: sideEffectRegistry(refunds) });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    expect(state.currentState).toBe("awaiting_approval");
+    const result = await engine.cancelInstance({ ...compensate, instanceId: state.instanceId });
+    expect(result.compensationOutcome).toBe("executed");
+    expect(result.compensatedActivityIds).toHaveLength(1);
+    expect(result.unreversedActivityIds).toEqual([]);
+    expect(refunds).toEqual([state.instanceId]);
+    const events = await engine.listEvents(state.instanceId);
+    expect(events.map((e) => e.kind)).toContain("activity_compensated");
+    // Not the compensating/compensated bracket: the instance ends `cancelled`, because that is what
+    // the caller asked for and `compensated` would be indistinguishable from unwinding a failure.
+    expect(events.map((e) => e.kind)).not.toContain("compensation_started");
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("cancelled");
+  });
+
+  it("leaves the side effect standing when the request abandons, and says which", async () => {
+    const refunds: string[] = [];
+    const def = sagaDef();
+    const { engine } = makeEngine({ definition: def, registry: sideEffectRegistry(refunds) });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const result = await engine.cancelInstance({ ...abandon, instanceId: state.instanceId });
+    expect(result.compensationOutcome).toBe("skipped_by_request");
+    expect(result.compensatedActivityIds).toEqual([]);
+    expect(result.unreversedActivityIds).toHaveLength(1);
+    expect(refunds).toEqual([]);
+    const final = (await engine.listEvents(state.instanceId)).at(-1);
+    expect(final?.payload["unreversedActivityIds"]).toEqual(result.unreversedActivityIds);
+    expect(final?.payload["compensationOutcome"]).toBe("skipped_by_request");
+  });
+
+  it("defers rather than rolls back under manual_review, and records that", async () => {
+    const refunds: string[] = [];
+    const def = sagaDef({ compensationStrategy: "manual_review" });
+    const { engine } = makeEngine({ definition: def, registry: sideEffectRegistry(refunds) });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const result = await engine.cancelInstance({ ...compensate, instanceId: state.instanceId });
+    expect(result.compensationOutcome).toBe("deferred_to_human");
+    expect(refunds).toEqual([]);
+    expect(result.unreversedActivityIds).toHaveLength(1);
+  });
+
+  it("reports unavailable when the definition declares no compensation", async () => {
+    const def = sagaDef({ compensationStrategy: "no_compensation" });
+    const { engine } = makeEngine({ definition: def, registry: sideEffectRegistry() });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const result = await engine.cancelInstance({ ...compensate, instanceId: state.instanceId });
+    expect(result.compensationOutcome).toBe("unavailable");
+    expect(result.unreversedActivityIds).toHaveLength(1);
+  });
+
+  it("refuses a request with no disposition", async () => {
+    const { engine, definition } = makeEngine({
+      definition: sagaDef(),
+      registry: sideEffectRegistry(),
+    });
+    const state = await engine.startInstance({ definitionId: definition.id, tenantId: TENANT });
+    await expect(
+      engine.cancelInstance({
+        instanceId: state.instanceId,
+        reason: "no disposition",
+        requestedByUserId: USER,
+      } as never),
+    ).rejects.toThrow(/disposition/);
+  });
+
+  it("answers from the log alone: a fresh fold of the events gives the same state", async () => {
+    const def = sagaDef();
+    const { engine } = makeEngine({ definition: def, registry: sideEffectRegistry() });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    await engine.cancelInstance({ ...compensate, instanceId: state.instanceId });
+    const events = await engine.listEvents(state.instanceId);
+    const refolded = projectInstance(events, def);
+    const live = await engine.getInstanceState(state.instanceId);
+    expect(refolded).toEqual(live);
+    expect(refolded?.status).toBe("cancelled");
+    expect(isInstanceCancelled(refolded!)).toBe(true);
+    expect(isInstanceCancellationRequested(refolded!)).toBe(true);
+    // And the whole history stays a dense, schema-valid, append-only log.
+    expect(isHistoryDense(events)).toBe(true);
+    for (const e of events) {
+      expect(() => WorkflowEventSchema.parse(e), e.kind).not.toThrow();
+    }
+  });
+
+  it("records the cancellation under the requesting system when no user asked", async () => {
+    const { engine, definition } = makeEngine({
+      definition: sagaDef(),
+      registry: sideEffectRegistry(),
+    });
+    const state = await engine.startInstance({ definitionId: definition.id, tenantId: TENANT });
+    await engine.cancelInstance({
+      instanceId: state.instanceId,
+      disposition: "abandon",
+      reason: "tenant deprovisioned",
+      requestedBySystem: "tenant-lifecycle",
+    });
+    const fence = (await engine.listEvents(state.instanceId)).find(
+      (e) => e.kind === "instance_cancellation_requested",
+    );
+    expect(fence?.actorSystemId).toBe("tenant-lifecycle");
+    expect((await engine.getInstanceState(state.instanceId))?.cancellationRequestedBy).toBe(
+      "tenant-lifecycle",
+    );
+  });
+
+  it("does not cascade to a child instance", async () => {
+    const childDef: WorkflowDefinition = {
+      ...definitionFixture(),
+      id: "wfd_child0001",
+      definitionKey: "child.flow",
+      timers: [rel("child_deadline", 600)],
+      states: [
+        {
+          name: "draft",
+          kind: "initial",
+          label: "Draft",
+          onEntryActions: [
+            { kind: "schedule_timer", parameters: { timerName: "child_deadline" } },
+          ],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+      ],
+      transitions: [],
+      initialState: "draft",
+    };
+    const parentDef: WorkflowDefinition = {
+      ...definitionFixture(),
+      states: [
+        {
+          name: "draft",
+          kind: "initial",
+          label: "Draft",
+          onEntryActions: [
+            { kind: "spawn_child_workflow", parameters: { definitionKey: "child.flow" } },
+          ],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+      ],
+      transitions: [],
+      initialState: "draft",
+    };
+    const log = new InMemoryEventLog();
+    const engine = new WorkflowEngine({
+      eventLog: log,
+      definitions: new Map([
+        [parentDef.id, parentDef],
+        [childDef.id, childDef],
+      ]),
+      activityRegistry: createDefaultRegistry(),
+      clock: new FixedClock(new Date("2026-05-16T12:00:00.000Z")),
+      idGenerator: new CountingIdGenerator(),
+    });
+    const parent = await engine.startInstance({
+      definitionId: parentDef.id,
+      tenantId: TENANT,
+    });
+    const spawn = (await engine.listEvents(parent.instanceId)).find(
+      (e) => e.kind === "child_workflow_spawned",
+    );
+    const childId = spawn?.childInstanceId;
+    expect(childId).toBeDefined();
+    await engine.cancelInstance({ ...abandon, instanceId: parent.instanceId });
+    const child = await engine.getInstanceState(childId!);
+    expect(child?.status).not.toBe("cancelled");
+    expect(child?.cancellationRequestedAt).toBeNull();
+    // Cancelling it is a separate request, by its own id — and it then works.
+    expect(
+      (await engine.cancelInstance({ ...abandon, instanceId: childId! })).outcome,
+    ).toBe("cancelled");
+  });
+});
+
+// ── timer kinds: a timer fires at the instant its own declaration says ─────────────────────────────
+//
+// Every timer used to be scheduled as `relative_after` regardless of its declared `kind`:
+// `applyScheduleTimer` read `parameters.relativeSeconds` (defaulting to 60) and never looked at the
+// kind, while `timer-provenance.ts` wrote the *declared* kind into `meta.workflow_timers`. The row
+// said `cron_schedule`; the behaviour was a fire-once timer at `now + 60s`.
+
+describe("applyScheduleTimer — per-kind scheduling", () => {
+  function timerOnlyDef(timers: readonly TimerDefinition[], over: Partial<WorkflowDefinition> = {}): WorkflowDefinition {
+    return definitionFixture({
+      id: "wfd_timerkd1",
+      definitionKey: "timer.kinds",
+      initialState: "armed",
+      timers: [...timers],
+      states: [
+        st("armed", "initial", timers.map((t) => ({ kind: "schedule_timer", parameters: { timerName: t.name } }))),
+        st("done", "terminal_success"),
+      ],
+      transitions: [tr({ name: "settle", from: "armed", to: "done", trigger: { kind: "signal_received", signalName: "go" } })],
+      signals: [
+        {
+          name: "go",
+          correlationVariable: "corr",
+          payloadSchemaSha256: null,
+          deliveryGuarantee: "at_least_once",
+          idempotencyKey: null,
+        },
+      ],
+      ...over,
+    });
+  }
+
+  async function scheduledFireAt(def: WorkflowDefinition, clock: FixedClock): Promise<string> {
+    const { engine } = makeMultiEngine([def], { clock });
+    const started = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const events = await engine.listEvents(started.instanceId);
+    const scheduled = events.find((e) => e.kind === "timer_scheduled");
+    return String(scheduled?.payload["fireAt"]);
+  }
+
+  it("relative_after fires at now + the declared seconds", async () => {
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    expect(await scheduledFireAt(timerOnlyDef([rel("wait", 900)]), clock)).toBe(
+      "2026-05-16T12:15:00.000Z",
+    );
+  });
+
+  it("absolute_at fires at the instant its variable names, not at now + 60s", async () => {
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const def = timerOnlyDef(
+      [
+        {
+          name: "wait",
+          kind: "absolute_at",
+          relativeSeconds: null,
+          absoluteTimestampVariable: "due_at",
+          cronExpression: null,
+          timezone: "UTC",
+        },
+      ],
+      {
+        variables: [{ name: "due_at", type: "date", required: false, defaultValueJson: null }],
+        states: [
+          st("armed", "initial", [
+            { kind: "set_variable", parameters: { variableName: "due_at", value: "2026-07-04T08:00:00.000Z" } },
+            { kind: "schedule_timer", parameters: { timerName: "wait" } },
+          ]),
+          st("done", "terminal_success"),
+        ],
+      },
+    );
+    const fireAt = await scheduledFireAt(def, clock);
+    expect(fireAt).toBe("2026-07-04T08:00:00.000Z");
+    expect(fireAt).not.toBe("2026-05-16T12:01:00.000Z");
+  });
+
+  it("cron_schedule fires at the next cron occurrence, not at now + 60s", async () => {
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const def = timerOnlyDef([cron("wait", "0 2 * * *")]);
+    const fireAt = await scheduledFireAt(def, clock);
+    expect(fireAt).toBe("2026-05-17T02:00:00.000Z");
+    expect(fireAt).not.toBe("2026-05-16T12:01:00.000Z");
+  });
+
+  it("cron_schedule honours the declared timezone", async () => {
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const def = timerOnlyDef([cron("wait", "0 2 * * *", "America/New_York")]);
+    // 02:00 EDT on the 17th is 06:00Z, not 02:00Z.
+    expect(await scheduledFireAt(def, clock)).toBe("2026-05-17T06:00:00.000Z");
+  });
+
+  it("records the declared kind on the timer_scheduled event", async () => {
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const def = timerOnlyDef([cron("wait", "0 2 * * *")]);
+    const { engine } = makeMultiEngine([def], { clock });
+    const started = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const events = await engine.listEvents(started.instanceId);
+    expect(events.find((e) => e.kind === "timer_scheduled")?.payload["timerKind"]).toBe(
+      "cron_schedule",
+    );
+  });
+
+  it("refuses business_hours as unschedulable rather than arming a 60-second timer", async () => {
+    const def = timerOnlyDef([
+      {
+        name: "wait",
+        kind: "business_hours",
+        relativeSeconds: null,
+        absoluteTimestampVariable: null,
+        cronExpression: null,
+        timezone: "Europe/London",
+      },
+    ]);
+    const { engine } = makeMultiEngine([def]);
+    const err = await engine
+      .startInstance({ definitionId: def.id, tenantId: TENANT })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(WorkflowActionError);
+    expect((err as WorkflowActionError).failure).toBe("unschedulable_timer");
+    expect((err as WorkflowActionError).message).toContain("business_hours_unschedulable");
+  });
+
+  it("refuses a schedule_timer naming an undeclared timer rather than arming a nameless one", async () => {
+    const def = definitionFixture({
+      id: "wfd_undecl01",
+      definitionKey: "timer.undeclared",
+      initialState: "armed",
+      timers: [],
+      states: [
+        st("armed", "initial", [{ kind: "schedule_timer", parameters: { timerName: "ghost" } }]),
+        st("done", "terminal_success"),
+      ],
+      transitions: [tr({ name: "settle", from: "armed", to: "done", trigger: { kind: "automatic" } })],
+    });
+    const { engine } = makeMultiEngine([def]);
+    const err = await engine
+      .startInstance({ definitionId: def.id, tenantId: TENANT })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect((err as WorkflowActionError).failure).toBe("undeclared_timer");
+    expect((err as WorkflowActionError).message).toContain("ghost");
+  });
+
+  it("refuses an absolute_at timer whose variable the instance has not set", async () => {
+    const def = timerOnlyDef(
+      [
+        {
+          name: "wait",
+          kind: "absolute_at",
+          relativeSeconds: null,
+          absoluteTimestampVariable: "due_at",
+          cronExpression: null,
+          timezone: "UTC",
+        },
+      ],
+      { variables: [{ name: "due_at", type: "date", required: false, defaultValueJson: null }] },
+    );
+    const { engine } = makeMultiEngine([def]);
+    const err = await engine
+      .startInstance({ definitionId: def.id, tenantId: TENANT })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect((err as WorkflowActionError).failure).toBe("unschedulable_timer");
+    expect((err as WorkflowActionError).message).toContain("absolute_variable_unset");
+  });
+});
+
+// ── cron recurrence ───────────────────────────────────────────────────────────────────────────────
+
+describe("fireDueTimersForInstance — a cron timer recurs", () => {
+  function recurringDef(expression: string, timezone = "UTC"): WorkflowDefinition {
+    // No `timer_fired` transition, so the fire does periodic work and leaves the instance where it
+    // is — which is what a recurring timer is for. The instance leaves by signal.
+    return definitionFixture({
+      id: "wfd_recur001",
+      definitionKey: "timer.recurring",
+      initialState: "ticking",
+      timers: [cron("heartbeat", expression, timezone)],
+      states: [
+        st("ticking", "initial", [{ kind: "schedule_timer", parameters: { timerName: "heartbeat" } }]),
+        st("done", "terminal_success"),
+      ],
+      transitions: [tr({ name: "settle", from: "ticking", to: "done", trigger: { kind: "signal_received", signalName: "stop" } })],
+      signals: [
+        {
+          name: "stop",
+          correlationVariable: "corr",
+          payloadSchemaSha256: null,
+          deliveryGuarantee: "at_least_once",
+          idempotencyKey: null,
+        },
+      ],
+    });
+  }
+
+  it("fires more than once on one timer id, with fireCount advancing and nextFireAt moving", async () => {
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const def = recurringDef("0 * * * *"); // hourly
+    const { engine } = makeMultiEngine([def], { clock });
+    const started = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+
+    const timerIdOf = async (): Promise<string> => {
+      const events = await engine.listEvents(started.instanceId);
+      return String(events.find((e) => e.kind === "timer_scheduled")?.timerId);
+    };
+    const timerId = await timerIdOf();
+
+    const projectionNow = async (): Promise<{ fireCount: number; nextFireAt: string | null; fireAt: string; status: string }> => {
+      const events = await engine.listEvents(started.instanceId);
+      const t = projectTimers(events).find((x) => x.id === timerId)!;
+      return { fireCount: t.fireCount, nextFireAt: t.nextFireAt, fireAt: t.fireAt, status: t.status };
+    };
+
+    expect(await projectionNow()).toMatchObject({
+      fireCount: 0,
+      fireAt: "2026-05-16T13:00:00.000Z",
+      status: "scheduled",
+    });
+
+    // First fire.
+    clock.advance(70 * 60_000);
+    const first = await engine.fireDueTimersForInstance(started.instanceId, clock.now().getTime());
+    expect(first.firedTimerIds).toEqual([timerId]);
+    const afterFirst = await projectionNow();
+    expect(afterFirst.fireCount).toBe(1);
+    expect(afterFirst.status).toBe("scheduled"); // re-armed
+    expect(afterFirst.fireAt).toBe("2026-05-16T14:00:00.000Z");
+
+    // Second fire, on the same timer id.
+    clock.advance(60 * 60_000);
+    const second = await engine.fireDueTimersForInstance(started.instanceId, clock.now().getTime());
+    expect(second.firedTimerIds).toEqual([timerId]);
+    const afterSecond = await projectionNow();
+    expect(afterSecond.fireCount).toBe(2);
+    expect(afterSecond.fireAt).toBe("2026-05-16T15:00:00.000Z");
+
+    // Third, to show it is not a one-off re-arm.
+    clock.advance(60 * 60_000);
+    await engine.fireDueTimersForInstance(started.instanceId, clock.now().getTime());
+    const afterThird = await projectionNow();
+    expect(afterThird.fireCount).toBe(3);
+    expect(afterThird.fireAt).toBe("2026-05-16T16:00:00.000Z");
+
+    // One timer row, three fires — not three timers.
+    const events = await engine.listEvents(started.instanceId);
+    expect(new Set(projectTimers(events).map((t) => t.id)).size).toBe(1);
+    expect(events.filter((e) => e.kind === "timer_fired")).toHaveLength(3);
+    expect(events.filter((e) => e.kind === "timer_scheduled")).toHaveLength(4); // 1 arm + 3 re-arms
+  });
+
+  it("records nextFireAt on every timer_fired of a recurring timer", async () => {
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const def = recurringDef("0 * * * *");
+    const { engine } = makeMultiEngine([def], { clock });
+    const started = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    clock.advance(70 * 60_000);
+    await engine.fireDueTimersForInstance(started.instanceId, clock.now().getTime());
+    const fired = (await engine.listEvents(started.instanceId)).find((e) => e.kind === "timer_fired");
+    expect(fired?.payload["nextFireAt"]).toBe("2026-05-16T14:00:00.000Z");
+  });
+
+  it("records no nextFireAt on a relative_after fire, which fires once", async () => {
+    const def = definitionFixture({
+      id: "wfd_oneshot1",
+      definitionKey: "timer.oneshot",
+      initialState: "ticking",
+      timers: [rel("heartbeat", 60)],
+      states: [
+        st("ticking", "initial", [{ kind: "schedule_timer", parameters: { timerName: "heartbeat" } }]),
+        st("done", "terminal_success"),
+      ],
+      transitions: [
+        tr({ name: "settle", from: "ticking", to: "done", trigger: { kind: "signal_received", signalName: "stop" } }),
+      ],
+      signals: [
+        {
+          name: "stop",
+          correlationVariable: "corr",
+          payloadSchemaSha256: null,
+          deliveryGuarantee: "at_least_once",
+          idempotencyKey: null,
+        },
+      ],
+    });
+    const { engine, clock } = makeMultiEngine([def]);
+    const started = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    clock.advance(120_000);
+    await engine.fireDueTimersForInstance(started.instanceId, clock.now().getTime());
+    const fired = (await engine.listEvents(started.instanceId)).find((e) => e.kind === "timer_fired");
+    expect(fired?.payload["nextFireAt"]).toBeUndefined();
+    const timer = projectTimers(await engine.listEvents(started.instanceId))[0];
+    expect(timer?.fireCount).toBe(1);
+    expect(timer?.status).toBe("fired");
+    expect(timer?.nextFireAt).toBeNull();
+  });
+
+  it("marks the re-arm, so the log says which arming is which", async () => {
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const { engine } = makeMultiEngine([recurringDef("0 * * * *")], { clock });
+    const started = await engine.startInstance({ definitionId: "wfd_recur001", tenantId: TENANT });
+    clock.advance(70 * 60_000);
+    await engine.fireDueTimersForInstance(started.instanceId, clock.now().getTime());
+    const armings = (await engine.listEvents(started.instanceId)).filter((e) => e.kind === "timer_scheduled");
+    expect(armings[0]?.payload["rearm"]).toBeUndefined();
+    expect(armings[1]?.payload["rearm"]).toBe(true);
+  });
+
+  it("does not re-arm into a terminal instance, which would leave a claim loop with nothing to advance", async () => {
+    // The fire's transition ends the instance, so the next occurrence has nothing to act on. A
+    // `scheduled` row on a completed instance is claimed, advances nothing, and is re-claimed for
+    // ever once the lease lapses.
+    const def = definitionFixture({
+      id: "wfd_recurt1",
+      definitionKey: "timer.recurring.terminal",
+      initialState: "ticking",
+      timers: [cron("heartbeat", "0 * * * *")],
+      states: [
+        st("ticking", "initial", [{ kind: "schedule_timer", parameters: { timerName: "heartbeat" } }]),
+        st("done", "terminal_success"),
+      ],
+      transitions: [
+        tr({ name: "settle", from: "ticking", to: "done", trigger: { kind: "timer_fired", timerName: "heartbeat" } }),
+      ],
+    });
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const { engine } = makeMultiEngine([def], { clock });
+    const started = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    clock.advance(70 * 60_000);
+    await engine.fireDueTimersForInstance(started.instanceId, clock.now().getTime());
+    const events = await engine.listEvents(started.instanceId);
+    expect(events.filter((e) => e.kind === "timer_scheduled")).toHaveLength(1);
+    const timer = projectTimers(events)[0];
+    expect(timer?.status).toBe("fired");
+    // The occurrence is still *named*, so the row is storable: `WorkflowTimerSchema` requires a
+    // fired cron timer to carry one.
+    expect(timer?.nextFireAt).toBe("2026-05-16T14:00:00.000Z");
+    expect((await engine.getInstanceState(started.instanceId))?.status).toBe("completed");
+  });
+
+  it("re-arms strictly into the future, so a late fire does not immediately re-qualify", async () => {
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const { engine } = makeMultiEngine([recurringDef("0 * * * *")], { clock });
+    const started = await engine.startInstance({ definitionId: "wfd_recur001", tenantId: TENANT });
+    // Ten hours late: the backlog is not replayed, the next occurrence is after *now*.
+    clock.advance(10 * 60 * 60_000 + 60_000);
+    const fired = await engine.fireDueTimersForInstance(started.instanceId, clock.now().getTime());
+    expect(fired.firedTimerIds).toHaveLength(1);
+    const timer = projectTimers(await engine.listEvents(started.instanceId))[0];
+    expect(Date.parse(timer!.fireAt)).toBeGreaterThan(clock.now().getTime());
+    // And a second pass at the same instant fires nothing.
+    expect(
+      (await engine.fireDueTimersForInstance(started.instanceId, clock.now().getTime())).firedTimerIds,
+    ).toEqual([]);
+  });
+
+  it("replays identically in a second engine over the same log", async () => {
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const def = recurringDef("0 * * * *");
+    const { engine, log } = makeMultiEngine([def], { clock });
+    const started = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    clock.advance(70 * 60_000);
+    await engine.fireDueTimersForInstance(started.instanceId, clock.now().getTime());
+    clock.advance(60 * 60_000);
+    await engine.fireDueTimersForInstance(started.instanceId, clock.now().getTime());
+    const replayed = await replayIn([def], log, started.instanceId);
+    expect(replayed).toEqual(await engine.getInstanceState(started.instanceId));
+    const events = await engine.listEvents(started.instanceId);
+    for (const event of events) {
+      expect(WorkflowEventSchema.safeParse(event).success, `${event.kind}@${String(event.sequenceNumber)}`).toBe(true);
+    }
+    expect(isHistoryDense(events)).toBe(true);
+  });
+
+  it("a cancelled instance's recurring timer stops recurring", async () => {
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const { engine } = makeMultiEngine([recurringDef("0 * * * *")], { clock });
+    const started = await engine.startInstance({ definitionId: "wfd_recur001", tenantId: TENANT });
+    await engine.cancelInstance({
+      instanceId: started.instanceId,
+      disposition: "abandon",
+      reason: "operator asked",
+      requestedBySystem: "ops",
+    });
+    clock.advance(70 * 60_000);
+    expect(
+      (await engine.fireDueTimersForInstance(started.instanceId, clock.now().getTime())).firedTimerIds,
+    ).toEqual([]);
   });
 });

@@ -38,7 +38,7 @@ describe("processActivityBatch", () => {
     const processor: ActivityProcessor = { process: async (a) => void processed.push(a.activityId) };
     const result = await processActivityBatch(claimerOf([activity("a"), activity("b")]), processor, OPTS);
     expect(processed).toEqual(["a", "b"]);
-    expect(result).toEqual({ claimed: 2, succeeded: ["a", "b"], failed: [] });
+    expect(result).toEqual({ claimed: 2, succeeded: ["a", "b"], failed: [], skipped: [] });
   });
 
   it("releases an activity whose processing throws, and records the failure", async () => {
@@ -63,6 +63,40 @@ describe("processActivityBatch", () => {
 
   it("reports an empty batch when nothing is claimed", async () => {
     const result = await processActivityBatch(claimerOf([]), { process: async () => undefined }, OPTS);
-    expect(result).toEqual({ claimed: 0, succeeded: [], failed: [] });
+    expect(result).toEqual({ claimed: 0, succeeded: [], failed: [], skipped: [] });
+  });
+  it("releases the rest of the batch when the worker stops mid-batch", async () => {
+    const released: string[] = [];
+    const processed: string[] = [];
+    let stopping = false;
+    const processor: ActivityProcessor = {
+      process: async (a) => {
+        processed.push(a.activityId);
+        stopping = true;
+      },
+    };
+    const result = await processActivityBatch(
+      claimerOf([activity("a"), activity("b")], released),
+      processor,
+      OPTS,
+      { shouldContinue: () => !stopping },
+    );
+    expect(processed).toEqual(["a"]);
+    expect(result.skipped).toEqual([{ activityId: "b", reason: "worker_stopping" }]);
+    expect(released).toEqual(["b"]);
+  });
+
+  it("reports each skip through onSkipped with the claimed activity", async () => {
+    const seen: string[] = [];
+    await processActivityBatch(
+      claimerOf([activity("a")]),
+      { process: async () => undefined },
+      OPTS,
+      {
+        shouldContinue: () => false,
+        onSkipped: (a, reason) => void seen.push(`${a.activityId}:${reason}`),
+      },
+    );
+    expect(seen).toEqual(["a:worker_stopping"]);
   });
 });

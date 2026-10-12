@@ -62,7 +62,7 @@ describe("isBridgeSuccess", () => {
     return {
       kind,
       reason: "x",
-      signalId: null,
+      deliveries: [],
       matchedInstanceIds: [],
       deduplicated: false,
     };

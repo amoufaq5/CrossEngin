@@ -338,9 +338,19 @@ export class TwilioVoiceSender implements ChannelSender {
       ...(this.statusCallbackUrl !== null
         ? {
             StatusCallback: this.statusCallbackUrl,
-            // Without naming the events, Twilio sends only `completed`; `answered` is what carries
-            // the AnsweredBy verdict that machine detection produces.
-            StatusCallbackEvent: "initiated ringing answered completed",
+            // **One callback per call, at the end** (ADR-0329). This asked for four — `initiated`,
+            // `ringing`, `answered`, `completed` — which was harmless while nothing consumed the
+            // callback and is not harmless now that `twilio_voice` is a bounce source: three of the
+            // four are non-terminal, so the webhook can never plan a suppression from them, answers
+            // `422 event_not_suppressible`, and Twilio **retries non-2xx**. Four calls' worth of
+            // progress events per call, each retried, for information the consumer discards.
+            //
+            // `completed` is Twilio's "the call ended" event and the POST carries the terminal
+            // `CallStatus` itself, so every `failed` ErrorCode the suppression table is keyed on
+            // still arrives — and `recognizeTwilioVoiceStatusCallback` reads `AnsweredBy` on
+            // `completed`, which is the only status it reads it on. Nothing the consumer acts on is
+            // lost by narrowing; only the responses nobody wanted.
+            StatusCallbackEvent: "completed",
           }
         : {}),
       ...(this.machineDetection !== null

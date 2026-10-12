@@ -1,4 +1,10 @@
-import type { Entity, Field, Trait } from "@crossengin/types/meta-schema";
+import {
+  classifiedFields,
+  type ClassifiedField,
+  type Entity,
+  type Field,
+  type Trait,
+} from "@crossengin/types/meta-schema";
 import { BUILT_IN_TRAIT_FIELDS } from "./built-in-traits.js";
 import { columnNameForField } from "./column.js";
 import { FieldNameCollisionError, ReservedFieldNameError, UnknownTraitError } from "./errors.js";
@@ -79,6 +85,30 @@ export function resolvedFieldNames(
   const names = new Set<string>(["id"]);
   for (const field of resolvedFields(entity, customTraits)) names.add(field.name);
   return names;
+}
+
+/**
+ * Which of an entity's fields are classified, **as the served table has them**: its own fields and
+ * whatever its traits contribute.
+ *
+ * This is the one answer to that question, for the reason `resolvedFields` is the one answer to
+ * "which fields become columns?" — so what a role may read, what it may write, which column is
+ * encrypted at rest, which value may ride in a cursor and which field a boot survey counts are all
+ * derived from one resolution and cannot disagree about what is classified.
+ *
+ * It exists because five call sites were spelling it by hand as
+ * `classifiedFields([...resolvedFields(entity, traits)])` while three read `entity.fields`
+ * directly, and the three were invisible precisely because `classifiedFields` used to take an
+ * entity: the narrow answer needed no workaround and the wide one did. A trait-contributed
+ * classified field was therefore served unredacted and writable by anybody, while the boot surveys
+ * reported it as classified — two readings of one declaration, disagreeing, with the safe one in
+ * the minority.
+ */
+export function resolvedClassifiedFields(
+  entity: Entity,
+  customTraits: readonly Trait[],
+): readonly ClassifiedField[] {
+  return classifiedFields(resolvedFields(entity, customTraits));
 }
 
 export function checkEntityFieldNames(entity: Entity, traitFields: readonly Field[]): void {

@@ -315,6 +315,25 @@ describe("formatSchemaDiff", () => {
               detail: "(a < b) → (a <= b)",
             },
           ],
+          changedColumnChecks: [
+            {
+              column: "kind",
+              expression: "kind IN ('a','b')",
+              liveName: "widgets_kind_check",
+              expectedName: "widgets_kind_check",
+              addName: "widgets_kind_check",
+              reasons: ["expression"],
+              detail: "(kind = 'a'::text) → (kind = ANY (ARRAY['a'::text, 'b'::text]))",
+            },
+          ],
+          missingColumnChecks: [
+            {
+              column: "label",
+              expression: "label <> ''",
+              expectedName: "widgets_label_check",
+              addName: "widgets_label_check",
+            },
+          ],
           rlsTargetEnabled: true,
           rlsLiveEnabled: false,
         },
@@ -1505,5 +1524,196 @@ describe("diffSchema — a table-level foreign key matched by its columns", () =
       ),
     ]));
     expect(d.hasDrift).toBe(false);
+  });
+});
+
+describe("diffSchema — column-level CHECK expressions", () => {
+  const TARGET: TableDefinition = {
+    schema: "meta",
+    name: "widgets",
+    columns: [
+      { name: "id", type: "UUID", notNull: true },
+      { name: "kind", type: "TEXT", notNull: true, check: "kind IN ('a', 'b')" },
+      { name: "amount_cents", type: "INTEGER", notNull: true },
+      { name: "remaining_cents", type: "INTEGER", check: "remaining_cents <= amount_cents" },
+    ],
+    primaryKey: ["id"],
+  };
+  const KIND = "(kind = ANY (ARRAY['a'::text, 'b'::text]))";
+  const REMAINING = "(remaining_cents <= amount_cents)";
+  const RENDERED = {
+    byRequest: new Map<string, string | null>([
+      [expressionKey("widgets", "kind IN ('a', 'b')"), KIND],
+      [expressionKey("widgets", "remaining_cents <= amount_cents"), REMAINING],
+    ]),
+    columnsByRequest: new Map<string, readonly string[] | null>([
+      [expressionKey("widgets", "kind IN ('a', 'b')"), ["kind"]],
+      [
+        expressionKey("widgets", "remaining_cents <= amount_cents"),
+        ["amount_cents", "remaining_cents"],
+      ],
+    ]),
+  };
+
+  function live(checks: LiveTable["checkConstraints"]): LiveSchema {
+    return liveSchema([
+      liveTable(
+        "widgets",
+        [
+          { name: "id", dataType: "uuid", isNullable: false, defaultExpr: null },
+          { name: "kind", dataType: "text", isNullable: false, defaultExpr: null },
+          { name: "amount_cents", dataType: "integer", isNullable: false, defaultExpr: null },
+          { name: "remaining_cents", dataType: "integer", isNullable: true, defaultExpr: null },
+        ],
+        {
+          indexes: [
+            { name: "widgets_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true },
+          ],
+          checkConstraints: checks,
+        },
+      ),
+    ]);
+  }
+
+  const CORRECT: LiveTable["checkConstraints"] = [
+    { name: "widgets_kind_check", expression: KIND, columns: ["kind"] },
+    { name: "widgets_check", expression: REMAINING, columns: ["amount_cents", "remaining_cents"] },
+  ];
+
+  it("asks the renderer to deparse every column check", () => {
+    expect(expressionRequestsFor(TARGET)).toEqual([
+      { table: "widgets", expr: "kind IN ('a', 'b')" },
+      { table: "widgets", expr: "remaining_cents <= amount_cents" },
+    ]);
+  });
+
+  it("reports no drift against a correctly-applied table", () => {
+    const d = diffSchema([TARGET], live(CORRECT), RENDERED);
+    expect(d.hasDrift).toBe(false);
+  });
+
+  it("reports a changed inline CHECK as changed, not as missing plus undeclared", () => {
+    const d = diffSchema(
+      [TARGET],
+      live([
+        { name: "widgets_kind_check", expression: "(kind = 'a'::text)", columns: ["kind"] },
+        CORRECT[1] as LiveTable["checkConstraints"][number],
+      ]),
+      RENDERED,
+    );
+    const m = d.modifiedTables[0];
+    expect(m?.changedColumnChecks).toHaveLength(1);
+    expect(m?.changedColumnChecks[0]).toMatchObject({
+      column: "kind",
+      liveName: "widgets_kind_check",
+      reasons: ["expression"],
+    });
+    expect(m?.missingColumnChecks).toEqual([]);
+    expect(m?.removedConstraints).toEqual([]);
+  });
+
+  it("reports a declared inline CHECK the database does not hold", () => {
+    const d = diffSchema([TARGET], live([CORRECT[1] as LiveTable["checkConstraints"][number]]), RENDERED);
+    expect(d.modifiedTables[0]?.missingColumnChecks).toEqual([
+      {
+        column: "kind",
+        expression: "kind IN ('a', 'b')",
+        expectedName: "widgets_kind_check",
+        addName: "widgets_kind_check",
+      },
+    ]);
+  });
+
+  it("reports an undeclared live CHECK separately from a changed one", () => {
+    const d = diffSchema(
+      [TARGET],
+      live([
+        { name: "widgets_kind_check", expression: "(kind = 'a'::text)", columns: ["kind"] },
+        CORRECT[1] as LiveTable["checkConstraints"][number],
+        { name: "widgets_adhoc_check", expression: "(amount_cents < 10)", columns: ["amount_cents"] },
+      ]),
+      RENDERED,
+    );
+    const m = d.modifiedTables[0];
+    expect(m?.changedColumnChecks.map((c) => c.column)).toEqual(["kind"]);
+    expect(m?.removedConstraints.map((c) => c.name)).toEqual(["widgets_adhoc_check"]);
+  });
+
+  it("reports an undeclared CHECK the old name guess used to swallow", () => {
+    // `expectedCheckConstraintNames` expects `<table>_check` whenever any column check exists, so
+    // before the probe determined which spelling each one really takes, a hand-added
+    // `widgets_check1` beside the real `widgets_check` read as accounted for.
+    const d = diffSchema(
+      [TARGET],
+      live([
+        ...CORRECT,
+        { name: "widgets_check1", expression: "(amount_cents > 0)", columns: ["amount_cents"] },
+      ]),
+      RENDERED,
+    );
+    expect(d.modifiedTables[0]?.removedConstraints.map((c) => c.name)).toEqual(["widgets_check1"]);
+  });
+
+  it("compares nothing — and reports nothing — when no renderings were supplied", () => {
+    const d = diffSchema(
+      [TARGET],
+      live([
+        { name: "widgets_kind_check", expression: "(kind = 'a'::text)", columns: ["kind"] },
+        CORRECT[1] as LiveTable["checkConstraints"][number],
+      ]),
+    );
+    expect(d.hasDrift).toBe(false);
+  });
+
+  it("falls back to the over-approximated name set when the pass was incomplete", () => {
+    // No renderings, so nothing was claimed — and the hand-added `widgets_check1` must still read
+    // as accounted for rather than as drift, because an unexamined column check might be it.
+    const d = diffSchema(
+      [TARGET],
+      live([
+        ...CORRECT,
+        { name: "widgets_check1", expression: "(amount_cents > 0)", columns: ["amount_cents"] },
+      ]),
+    );
+    expect(d.hasDrift).toBe(true);
+    expect(d.modifiedTables[0]?.removedConstraints.map((c) => c.name)).toEqual(["widgets_check1"]);
+  });
+
+  it("prints both kinds of column-check finding in the drift report", () => {
+    const d = diffSchema(
+      [TARGET],
+      live([{ name: "widgets_kind_check", expression: "(kind = 'a'::text)", columns: ["kind"] }]),
+      RENDERED,
+    );
+    const out = formatSchemaDiff(d);
+    expect(out).toContain("~ check on column kind (widgets_kind_check) [expression]");
+    expect(out).toContain("+ check on column remaining_cents (widgets_check)");
+  });
+
+  it("does not report a column check whose column the diff is adding", () => {
+    const d = diffSchema(
+      [TARGET],
+      liveSchema([
+        liveTable(
+          "widgets",
+          [
+            { name: "id", dataType: "uuid", isNullable: false, defaultExpr: null },
+            { name: "amount_cents", dataType: "integer", isNullable: false, defaultExpr: null },
+            { name: "remaining_cents", dataType: "integer", isNullable: true, defaultExpr: null },
+          ],
+          {
+            indexes: [
+              { name: "widgets_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true },
+            ],
+            checkConstraints: [CORRECT[1] as LiveTable["checkConstraints"][number]],
+          },
+        ),
+      ]),
+      RENDERED,
+    );
+    const m = d.modifiedTables[0];
+    expect(m?.addedColumns).toEqual(["kind"]);
+    expect(m?.missingColumnChecks).toEqual([]);
+    expect(m?.changedColumnChecks).toEqual([]);
   });
 });

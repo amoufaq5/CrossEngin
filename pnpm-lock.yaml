@@ -108,6 +108,9 @@ importers:
       '@crossengin/api-gateway':
         specifier: workspace:*
         version: link:../../packages/api-gateway
+      '@crossengin/api-gateway-pg':
+        specifier: workspace:*
+        version: link:../../packages/api-gateway-pg
       '@crossengin/api-gateway-runtime':
         specifier: workspace:*
         version: link:../../packages/api-gateway-runtime
@@ -243,6 +246,9 @@ importers:
       '@crossengin/workflow-runtime-pg':
         specifier: workspace:*
         version: link:../../packages/workflow-runtime-pg
+      '@crossengin/workflow-worker':
+        specifier: workspace:*
+        version: link:../../packages/workflow-worker
       zod:
         specifier: ^3.23.0
         version: 3.25.76
@@ -327,6 +333,9 @@ importers:
       '@crossengin/access-reviews':
         specifier: workspace:*
         version: link:../access-reviews
+      '@crossengin/crypto':
+        specifier: workspace:*
+        version: link:../crypto
       zod:
         specifier: ^3.23.0
         version: 3.25.76
@@ -2431,6 +2440,9 @@ importers:
       '@crossengin/forensics-pg':
         specifier: workspace:*
         version: link:../forensics-pg
+      '@crossengin/kernel':
+        specifier: workspace:*
+        version: link:../kernel
       '@crossengin/kernel-pg':
         specifier: workspace:*
         version: link:../kernel-pg
@@ -2519,6 +2531,9 @@ importers:
 
   packages/workflow-engine:
     dependencies:
+      '@crossengin/jobs':
+        specifier: workspace:*
+        version: link:../jobs
       zod:
         specifier: ^3.23.0
         version: 3.25.76
@@ -2566,9 +2581,15 @@ importers:
 
   packages/workflow-runtime-pg:
     dependencies:
+      '@crossengin/crypto':
+        specifier: workspace:*
+        version: link:../crypto
       '@crossengin/jobs':
         specifier: workspace:*
         version: link:../jobs
+      '@crossengin/kernel':
+        specifier: workspace:*
+        version: link:../kernel
       '@crossengin/kernel-pg':
         specifier: workspace:*
         version: link:../kernel-pg

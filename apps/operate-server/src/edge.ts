@@ -5,6 +5,8 @@ import type { RawHttpRequest, RawHttpResponse } from "./http.js";
 import {
   readLimitedBody,
   resolveMaxRequestBodyBytes,
+  routeBodyLimitFor,
+  type RouteBodyLimit,
   RequestBodyTooLargeError,
 } from "./request-body-limit.js";
 import type { ApiKeySpec, JwtVerifyConfig } from "./principals.js";
@@ -26,12 +28,28 @@ import { OperateHttpServer, buildOperateHttpServer } from "./server.js";
 export async function fetchToRaw(
   request: Request,
   maxRequestBodyBytes?: number | null,
+  /**
+   * Per-route overrides (ADR-0331), the same set the Node path takes.
+   *
+   * Both paths or neither: ADR-0312 exists because the cap had only ever been on the Node path,
+   * and a per-route allowance that applied to one and not the other would reopen exactly that —
+   * on the surface actually exposed to the internet.
+   */
+  routeBodyLimits: readonly RouteBodyLimit[] = [],
 ): Promise<{ raw: RawHttpRequest; body: Uint8Array | null }> {
   const headers: Record<string, string> = {};
   request.headers.forEach((value, key) => {
     headers[key] = value;
   });
-  const limit = resolveMaxRequestBodyBytes(maxRequestBodyBytes ?? null);
+  // `request.url` is absolute here, unlike Node's relative-form `req.url`, so the path is taken
+  // from a parse rather than matched directly — a prefix like `/v1/a` would otherwise never match
+  // `https://host/v1/a`. A URL this runtime cannot parse falls back to the platform cap, which is
+  // the tighter of the two answers.
+  const limit = routeBodyLimitFor(
+    pathOfRequestUrl(request.url),
+    routeBodyLimits.map((o) => ({ prefix: o.prefix, bytes: resolveMaxRequestBodyBytes(o.bytes) })),
+    resolveMaxRequestBodyBytes(maxRequestBodyBytes ?? null),
+  );
   let body: Uint8Array | null = null;
   if (request.method !== "GET" && request.method !== "HEAD") {
     // `request.body` is a ReadableStream, which is async-iterable in Node but not dependably so in
@@ -77,14 +95,20 @@ export type FetchHandler = (request: Request) => Promise<Response>;
 export function createFetchHandler(
   server: OperateHttpServer,
   maxRequestBodyBytes?: number | null,
+  routeBodyLimits: readonly RouteBodyLimit[] = [],
 ): FetchHandler {
-  // Resolved once, so a misconfigured cap fails here rather than on the first large request.
+  // Resolved once, so a misconfigured cap fails here rather than on the first large request. Each
+  // override is range-checked the same way, for the same reason.
   const limit = resolveMaxRequestBodyBytes(maxRequestBodyBytes ?? null);
+  const overrides = routeBodyLimits.map((o) => ({
+    prefix: o.prefix,
+    bytes: resolveMaxRequestBodyBytes(o.bytes),
+  }));
   return async (request: Request): Promise<Response> => {
     let raw: RawHttpRequest;
     let body: Uint8Array | null;
     try {
-      ({ raw, body } = await fetchToRaw(request, limit));
+      ({ raw, body } = await fetchToRaw(request, limit, overrides));
     } catch (err) {
       if (err instanceof RequestBodyTooLargeError) return payloadTooLarge(err);
       throw err;
@@ -118,6 +142,8 @@ export interface BuildEdgeFetchHandlerOptions {
   readonly now?: () => Date;
   /** Max bytes accepted in one request body before 413. Absent means the platform default. */
   readonly maxRequestBodyBytes?: number | null;
+  /** Per-route overrides, longest path prefix winning (ADR-0331). */
+  readonly maxRequestBodyRoutes?: readonly RouteBodyLimit[];
 }
 
 export interface EdgeFetchHandler {
@@ -141,7 +167,11 @@ export function buildEdgeFetchHandler(options: BuildEdgeFetchHandlerOptions): Ed
     ...(options.now !== undefined ? { now: options.now } : {}),
   });
   return {
-    fetch: createFetchHandler(httpServer, options.maxRequestBodyBytes ?? null),
+    fetch: createFetchHandler(
+      httpServer,
+      options.maxRequestBodyBytes ?? null,
+      options.maxRequestBodyRoutes ?? [],
+    ),
     gateway,
   };
 }
@@ -158,4 +188,19 @@ export function asModuleWorker(handler: FetchHandler): ModuleWorker {
       return handler(request);
     },
   };
+}
+
+/**
+ * The path of an absolute Fetch URL, for prefix matching.
+ *
+ * Falls back to the raw string on a URL this runtime cannot parse, which then matches no `/`-rooted
+ * prefix and so resolves to the platform cap — the tighter answer, which is the direction a limit
+ * must fail in.
+ */
+function pathOfRequestUrl(url: string): string {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return url;
+  }
 }

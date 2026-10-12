@@ -1,7 +1,7 @@
 import type { Entity } from "@crossengin/types/meta-schema";
 import { describe, expect, it } from "vitest";
 
-import { columnPlanForEntity, joinTablePlansForManifest } from "./column-plan.js";
+import { columnPlanForEntity, joinTablePlansForManifest, UnresolvableUniqueScopeError } from "./column-plan.js";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import {
   emitAddColumnDdl,
@@ -9,7 +9,11 @@ import {
   emitManifestSchemaDdl,
   emitForeignKeyDdl,
   emitJoinTableDdl,
+  emitUniqueIndexDdl,
   onDeleteClause,
+  UNIQUE_WITHHELD_REASONS,
+  uniqueIndexFields,
+  uniqueWithheldFor,
 } from "./entity-ddl.js";
 
 const WIDGET: Entity = {
@@ -158,6 +162,250 @@ describe("emitJoinTableDdl", () => {
   });
 });
 
+describe("emitUniqueIndexDdl", () => {
+  // `unique` had TWO readers in the workspace and neither emitted anything: `kernel`'s
+  // `ddl/diff.ts` reads it only to *throw* when it changes, and `ui-schema.ts` copies it onto the
+  // `UiSchema` — where `unique` occurs exactly once in the whole apps/operate-web tree, as a type
+  // declaration, and no component reads it. So it was authored, validated, hashed into
+  // `manifestHash`, serialized to every client and read by nobody at either end, and two patients
+  // could share an `mrn`. Measured: 45 distinct (entity, field) pairs across the seven resolved
+  // packs (47 source declarations) and zero UNIQUE constraints on any of the 54 tables.
+  const UNIQ: Entity = {
+    name: "Widget",
+    fields: [
+      { name: "sku", type: { kind: "text" }, required: true, unique: true },
+      { name: "price", type: { kind: "decimal", precision: 12, scale: 2 } },
+      { name: "mrn", type: { kind: "text" }, classification: "phi", unique: true },
+    ],
+  };
+  const plan = columnPlanForEntity(UNIQ, { schema: "tenant_app" });
+
+  it("scopes the index by tenant, which is the whole reason it is not an inline UNIQUE", () => {
+    // `(tenant_id, col)` and never `(col)`: these tables are multi-tenant with a `(tenant_id, id)`
+    // primary key, so a bare UNIQUE would make one tenant's sku collide with another's — a
+    // cross-tenant coupling, which is the one thing the isolation model exists to prevent.
+    const sql = emitUniqueIndexDdl(plan).join("\n");
+    expect(sql).toContain('CREATE UNIQUE INDEX IF NOT EXISTS "widget_sku_uniq"');
+    expect(sql).toContain('ON "tenant_app"."widget" ("tenant_id", "sku")');
+    expect(sql).not.toContain('("sku")');
+  });
+
+  it("emits nothing for a field that does not declare unique", () => {
+    expect(emitUniqueIndexDdl(plan).join("\n")).not.toContain("price");
+  });
+
+  it("withholds the index on an encrypted column rather than emitting one that cannot fire", () => {
+    // `pgp_sym_encrypt` is non-deterministic, so two rows with the same plaintext encrypt to
+    // different bytes and a UNIQUE over them never fires. Emitting it would be worse than nothing:
+    // an operator reading `\d` would see a constraint that cannot do its job.
+    expect(emitUniqueIndexDdl(plan).join("\n")).not.toContain("mrn");
+    expect(uniqueWithheldFor(plan)).toEqual([
+      { entity: "Widget", field: "mrn", reason: "encrypted_at_rest" },
+    ]);
+  });
+
+  it("withholds nothing when no unique field is encrypted", () => {
+    const clean = columnPlanForEntity(
+      { name: "Thing", fields: [{ name: "code", type: { kind: "text" }, unique: true }] },
+      { schema: "s" },
+    );
+    expect(uniqueWithheldFor(clean)).toEqual([]);
+    expect(emitUniqueIndexDdl(clean)).toHaveLength(1);
+  });
+
+  it("is idempotent, because ensureSchema re-runs on every boot", () => {
+    expect(emitUniqueIndexDdl(plan).every((x) => x.includes("IF NOT EXISTS"))).toBe(true);
+  });
+
+  it("is NOT part of emitEntityTableDdl, because these statements can fail on data", () => {
+    // Adding a unique index to a populated table holding duplicates raises 23505 and no
+    // `IF NOT EXISTS` helps, because the condition is in the rows. They are returned separately so
+    // `ensureSchema` can report a failure rather than take the deployment down over rows it cannot
+    // deduplicate — `kernel-pg`'s "anything whose outcome depends on existing data is reported"
+    // line, one emitter over.
+    expect(emitEntityTableDdl(plan).join("\n")).not.toContain("UNIQUE INDEX");
+  });
+
+  it("truncates an over-long index name rather than emitting an invalid identifier", () => {
+    const long = columnPlanForEntity(
+      {
+        name: "A".repeat(50),
+        fields: [{ name: "b".repeat(40), type: { kind: "text" }, unique: true }],
+      },
+      { schema: "s" },
+    );
+    const name = /"([^"]+)"/.exec(emitUniqueIndexDdl(long)[0]!)![1]!;
+    expect(name.length).toBeLessThanOrEqual(63);
+  });
+
+  it("covers every withheld reason", () => {
+    // `document_store` has no producer in this module and that is deliberate: it plans column
+    // tables only, so the member lives here with the vocabulary and the boot survey emits it.
+    expect(Object.keys(UNIQUE_WITHHELD_REASONS).sort()).toEqual([
+      "document_store",
+      "encrypted_at_rest",
+    ]);
+  });
+
+  it("maps each emitted index name back to the field it enforces", () => {
+    // Postgres reports a 23505 with the constraint *name* and nothing else usable, so a store can
+    // only name the field by asking the thing that generated the name — the index name truncates
+    // at 63 characters, so a parser would have to guess where the column started.
+    expect([...uniqueIndexFields(plan).entries()]).toEqual([["widget_sku_uniq", "sku"]]);
+    expect(uniqueIndexFields(plan).has("widget_mrn_uniq")).toBe(false);
+  });
+
+  it("maps every index it emits and nothing it does not", () => {
+    // The two must agree in both directions or a 23505 resolves to a field whose index was never
+    // created — the shape that would let an unattributable violation be attributed anyway.
+    const named = [...uniqueIndexFields(plan).keys()].sort();
+    const emitted = emitUniqueIndexDdl(plan)
+      .map((s) => /"([^"]+)"/.exec(s)![1]!)
+      .sort();
+    expect(named).toEqual(emitted);
+  });
+});
+
+describe("emitUniqueIndexDdl — the scoped form", () => {
+  // `UniqueHintSchema` is `boolean | {scope: string[]}` and has been since it was written, so
+  // `field.unique === true` silently drops a declared composite key — this increment's own class
+  // inside its own fix. Measured: 0 of the 47 source declarations use it, so reading it costs
+  // nothing today and is the only reading that cannot go quietly wrong later.
+  const SCOPED: Entity = {
+    name: "Employee",
+    fields: [
+      { name: "department_id", type: { kind: "reference", target: "Employee" } },
+      { name: "staff_no", type: { kind: "text" }, unique: { scope: ["department_id"] } },
+    ],
+  };
+
+  it("puts tenant first, then the declared scope, then the column", () => {
+    // Tenant first because a multi-column index serves a *prefix* of its own columns: leading with
+    // `tenant_id` makes it useful to the tenant-filtered lookups every read here issues, where
+    // leading with the scope would leave it serving a cross-tenant prefix no query ever asks for.
+    const sql = emitUniqueIndexDdl(columnPlanForEntity(SCOPED, { schema: "s" })).join("\n");
+    expect(sql).toContain('ON "s"."employee" ("tenant_id", "department_id", "staff_no")');
+  });
+
+  it("resolves the scope to COLUMNS, not field names", () => {
+    // The one transform `columnNameForField` makes is appending `_id` to a **reference** field, so
+    // a scope naming `department` must index `department_id`. Field names are
+    // `/^[a-z][a-z0-9_]*$/`, so there is no case conversion to observe and this is the whole of the
+    // difference between the two namespaces — index the field name and the statement names a
+    // column that does not exist.
+    const ref: Entity = {
+      name: "Thing",
+      fields: [
+        { name: "department", type: { kind: "reference", target: "Thing" } },
+        { name: "code", type: { kind: "text" }, unique: { scope: ["department"] } },
+      ],
+    };
+    const sql = emitUniqueIndexDdl(columnPlanForEntity(ref, { schema: "s" })).join("\n");
+    expect(sql).toContain('("tenant_id", "department_id", "code")');
+    expect(sql).not.toContain('"department"');
+  });
+
+  it("refuses a scope naming a field the entity does not have, rather than emitting a narrower one", () => {
+    // Emitting the index without the unresolved column would enforce a *stricter* constraint than
+    // the manifest declares — refusing writes a reviewer approved — so the plan throws and
+    // `applyTenantManifestSchema` reports it as a blocking change, which is `UNDECIDED_SQL_TYPES`'
+    // precedent in the same function.
+    expect(() =>
+      columnPlanForEntity(
+        {
+          name: "Thing",
+          fields: [{ name: "code", type: { kind: "text" }, unique: { scope: ["nope"] } }],
+        },
+        { schema: "s" },
+      ),
+    ).toThrow(UnresolvableUniqueScopeError);
+  });
+
+  it("names the entity, the field and the scope field in the refusal", () => {
+    try {
+      columnPlanForEntity(
+        {
+          name: "Thing",
+          fields: [{ name: "code", type: { kind: "text" }, unique: { scope: ["nope"] } }],
+        },
+        { schema: "s" },
+      );
+      expect.unreachable();
+    } catch (err) {
+      expect(err).toBeInstanceOf(UnresolvableUniqueScopeError);
+      const e = err as UnresolvableUniqueScopeError;
+      // All three, because a field name may be declared on several entities and an operator
+      // reading a boot failure needs to know which one to edit.
+      expect([e.entity, e.field, e.scopeField]).toEqual(["Thing", "code", "nope"]);
+    }
+  });
+
+  it("resolves a scope naming a TRAIT-supplied field", () => {
+    // A unique field and the field its scope names can both arrive from a trait, so resolution
+    // goes through `resolvedFields` — a rule reading `entity.fields` raw while the emitter resolves
+    // traits is a divergence this repo keeps finding.
+    const plan = columnPlanForEntity(
+      {
+        name: "Visit",
+        traits: ["auditable"],
+        fields: [{ name: "ref", type: { kind: "text" }, unique: { scope: ["created_by"] } }],
+      },
+      { schema: "s" },
+    );
+    expect(emitUniqueIndexDdl(plan).join("\n")).toContain('("tenant_id", "created_by", "ref")');
+  });
+
+  it("still withholds a scoped unique on an encrypted column", () => {
+    // The scope changes which rows collide; it does not make ciphertext comparable.
+    const plan = columnPlanForEntity(
+      {
+        name: "Patient",
+        fields: [
+          { name: "ward", type: { kind: "text" } },
+          {
+            name: "mrn",
+            type: { kind: "text" },
+            classification: "phi",
+            unique: { scope: ["ward"] },
+          },
+        ],
+      },
+      { schema: "s" },
+    );
+    expect(emitUniqueIndexDdl(plan)).toEqual([]);
+    expect(uniqueWithheldFor(plan)).toEqual([
+      { entity: "Patient", field: "mrn", reason: "encrypted_at_rest" },
+    ]);
+  });
+
+  it("treats `unique: false` as no declaration at all", () => {
+    const plan = columnPlanForEntity(
+      { name: "Thing", fields: [{ name: "code", type: { kind: "text" }, unique: false }] },
+      { schema: "s" },
+    );
+    expect(emitUniqueIndexDdl(plan)).toEqual([]);
+    expect(uniqueWithheldFor(plan)).toEqual([]);
+    expect(plan.columns[0]!.uniqueScope).toBeNull();
+  });
+
+  it("distinguishes an unscoped declaration from no declaration in the plan itself", () => {
+    // `[]` (unique within the tenant) against `null` (declares none) — the distinction a boolean
+    // could not carry, and the reason the plan does not hold one.
+    const plan = columnPlanForEntity(
+      {
+        name: "Thing",
+        fields: [
+          { name: "code", type: { kind: "text" }, unique: true },
+          { name: "note", type: { kind: "text" } },
+        ],
+      },
+      { schema: "s" },
+    );
+    expect(plan.columns[0]!.uniqueScope).toEqual([]);
+    expect(plan.columns[1]!.uniqueScope).toBeNull();
+  });
+});
+
 describe("emitEntityTableDdl — trait-supplied timestamps", () => {
   const AUDITED: Entity = {
     name: "Visit",
@@ -174,7 +422,38 @@ describe("emitEntityTableDdl — trait-supplied timestamps", () => {
 
   it("keeps the trait column's own default, so inserts that omit it still work", () => {
     const create = emitEntityTableDdl(columnPlanForEntity(AUDITED, { schema: "app" }))[0] ?? "";
+    // The trait declares `now()` and the emitter does not rewrite a declared default — a planned
+    // column's default is the manifest's statement, not this emitter's. Its *precision* is
+    // corrected by the `ALTER COLUMN … SET DEFAULT` that follows, which is the one place that
+    // reaches a table an earlier manifest already created.
     expect(create).toContain('"created_at" TIMESTAMPTZ NOT NULL DEFAULT now()');
+  });
+
+  it("follows up with a millisecond-truncating SET DEFAULT, reaching an existing table too", () => {
+    const stmts = emitEntityTableDdl(columnPlanForEntity(AUDITED, { schema: "app" }));
+    const alters = stmts.filter((s) => s.includes("SET DEFAULT"));
+    expect(alters).toEqual([
+      `ALTER TABLE "app"."visit" ALTER COLUMN "created_at" SET DEFAULT date_trunc('milliseconds', now());`,
+      `ALTER TABLE "app"."visit" ALTER COLUMN "updated_at" SET DEFAULT date_trunc('milliseconds', now());`,
+    ]);
+    // After the ADD COLUMNs: on an `auditable` entity the timestamps are planned columns, so a
+    // table created by an earlier manifest may not hold them yet and the ALTER would fail.
+    const lastAdd = stmts.reduce(
+      (acc, stmt, i) => (stmt.includes("ADD COLUMN IF NOT EXISTS") ? i : acc),
+      -1,
+    );
+    expect(stmts.indexOf(alters[0]!)).toBeGreaterThan(lastAdd);
+  });
+
+  it("truncates to the millisecond because that is all the wire form holds", () => {
+    // `TIMESTAMPTZ` keeps microseconds; a JS `Date` does not; so `isoInstant` serves a truncated
+    // instant, the keyset cursor is rendered from the served value, and the seek then compares a
+    // truncated cursor against an untruncated column. Measured live before this: six rows 100
+    // microseconds apart, walked with `limit 2`, returned `us-0 us-1 us-1 us-2 us-1 us-2 …` and
+    // never terminated. Storing what the contract can hold is the fix; truncating in the ORDER BY
+    // would pay per row forever and could never back an index (`date_trunc` is STABLE).
+    const stmts = emitEntityTableDdl(columnPlanForEntity(PLAIN, { schema: "app" }));
+    expect(stmts.join("\n")).not.toMatch(/DEFAULT now\(\)/);
   });
 
   it("emits the trait's other columns as ordinary domain columns", () => {
@@ -185,8 +464,8 @@ describe("emitEntityTableDdl — trait-supplied timestamps", () => {
 
   it("still supplies the housekeeping timestamps for an entity with no auditable trait", () => {
     const create = emitEntityTableDdl(columnPlanForEntity(PLAIN, { schema: "app" }))[0] ?? "";
-    expect(create).toContain('"created_at" TIMESTAMPTZ NOT NULL DEFAULT now()');
-    expect(create).toContain('"updated_at" TIMESTAMPTZ NOT NULL DEFAULT now()');
+    expect(create).toContain(`"created_at" TIMESTAMPTZ NOT NULL DEFAULT date_trunc('milliseconds', now())`);
+    expect(create).toContain(`"updated_at" TIMESTAMPTZ NOT NULL DEFAULT date_trunc('milliseconds', now())`);
   });
 });
 

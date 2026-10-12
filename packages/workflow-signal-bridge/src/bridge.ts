@@ -14,8 +14,8 @@ export interface SignalSubmitter {
     readonly sourceSystem?: string;
   }): Promise<{
     readonly deduplicated: boolean;
+    readonly deliveries: readonly { readonly instanceId: string; readonly signalId: string }[];
     readonly matchedInstanceIds: readonly string[];
-    readonly signalId: string | null;
   }>;
 }
 
@@ -124,8 +124,11 @@ export class WorkflowSignalBridge {
       if (result.deduplicated) {
         return {
           kind: "deduplicated",
-          reason: "signal already processed (exactly_once_idempotent dedup)",
-          signalId: result.signalId,
+          // The deliveries the *first* submit produced, not an empty list. A client retrying a
+          // webhook is asking what already happened, and "nothing matched" is the one answer that
+          // is never true of a duplicate.
+          reason: `signal already processed (${result.deliveries.length.toString()} prior delivery/ies)`,
+          deliveries: result.deliveries,
           matchedInstanceIds: result.matchedInstanceIds,
           deduplicated: true,
         };
@@ -134,7 +137,7 @@ export class WorkflowSignalBridge {
         return {
           kind: "no_matching_instance",
           reason: `no running instance matched signal=${this.signalName} correlationKey=${correlationKey}`,
-          signalId: result.signalId,
+          deliveries: [],
           matchedInstanceIds: [],
           deduplicated: false,
         };
@@ -142,7 +145,7 @@ export class WorkflowSignalBridge {
       return {
         kind: "advanced",
         reason: `signal delivered to ${result.matchedInstanceIds.length.toString()} instance(s)`,
-        signalId: result.signalId,
+        deliveries: result.deliveries,
         matchedInstanceIds: result.matchedInstanceIds,
         deduplicated: false,
       };
@@ -159,7 +162,7 @@ function outcome(input: { readonly kind: BridgeOutcome["kind"]; readonly reason:
   return {
     kind: input.kind,
     reason: input.reason,
-    signalId: null,
+    deliveries: [],
     matchedInstanceIds: [],
     deduplicated: false,
   };

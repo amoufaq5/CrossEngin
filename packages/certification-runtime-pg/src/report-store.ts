@@ -2,6 +2,9 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 import type { ComplianceFramework } from "@crossengin/certification-runtime";
 import {
   CertificationReportRecordSchema,
+  scopedRead,
+  scopedWrite,
+  scopeFilter,
   type CertificationReportRecord,
 } from "./records.js";
 
@@ -21,45 +24,66 @@ export class PostgresCertificationReportStore {
 
   async record(record: CertificationReportRecord): Promise<void> {
     const valid = CertificationReportRecordSchema.parse(record);
-    await this.conn.query(
-      `INSERT INTO ${SCHEMA}.${TABLE} (${COLUMNS})
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11)
-       ON CONFLICT (report_id) DO NOTHING`,
-      [
-        valid.reportId,
-        valid.tenantId,
-        valid.framework,
-        valid.certifiable,
-        valid.controlsTotal,
-        valid.controlsSatisfied,
-        valid.controlsDeficient,
-        valid.controlsNotAssessed,
-        valid.sealedSha256,
-        JSON.stringify(valid.report),
-        valid.generatedAt,
-      ],
+    await scopedWrite(this.conn, valid.tenantId, (tx) =>
+      tx.query(
+        `INSERT INTO ${SCHEMA}.${TABLE} (${COLUMNS})
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11)
+         ON CONFLICT (report_id) DO NOTHING`,
+        [
+          valid.reportId,
+          valid.tenantId,
+          valid.framework,
+          valid.certifiable,
+          valid.controlsTotal,
+          valid.controlsSatisfied,
+          valid.controlsDeficient,
+          valid.controlsNotAssessed,
+          valid.sealedSha256,
+          JSON.stringify(valid.report),
+          valid.generatedAt,
+        ],
+    
+      ),
     );
   }
 
+  /**
+   * One report by id, within `tenantId`'s scope.
+   *
+   * `report_id` is unique table-wide, which is exactly what makes the missing predicate invisible:
+   * the single row that comes back looks like a correct answer whichever scope holds it.
+   */
   async getByReportId(
     reportId: string,
+    tenantId: string | null = null,
   ): Promise<CertificationReportRecord | null> {
-    const result = await this.conn.query<Record<string, unknown>>(
-      `SELECT ${COLUMNS} FROM ${SCHEMA}.${TABLE} WHERE report_id = $1`,
-      [reportId],
+    const scope = scopeFilter(tenantId, 2);
+    const result = await scopedRead(this.conn, tenantId, (tx) =>
+      tx.query<Record<string, unknown>>(
+        `SELECT ${COLUMNS} FROM ${SCHEMA}.${TABLE}
+         WHERE report_id = $1 AND ${scope.sql}`,
+        [reportId, ...scope.params],
+      ),
     );
     const row = result.rows[0];
     if (row === undefined) return null;
     return rowToRecord(row);
   }
 
-  async listRecent(limit = 100): Promise<readonly CertificationReportRecord[]> {
+  async listRecent(
+    limit = 100,
+    tenantId: string | null = null,
+  ): Promise<readonly CertificationReportRecord[]> {
     if (limit <= 0) throw new Error("limit must be positive");
-    const result = await this.conn.query<Record<string, unknown>>(
-      `SELECT ${COLUMNS} FROM ${SCHEMA}.${TABLE}
-       ORDER BY generated_at DESC
-       LIMIT $1`,
-      [limit],
+    const scope = scopeFilter(tenantId, 1);
+    const result = await scopedRead(this.conn, tenantId, (tx) =>
+      tx.query<Record<string, unknown>>(
+        `SELECT ${COLUMNS} FROM ${SCHEMA}.${TABLE}
+         WHERE ${scope.sql}
+         ORDER BY generated_at DESC
+         LIMIT $${String(1 + scope.params.length)}`,
+        [...scope.params, limit],
+      ),
     );
     return result.rows.map((row) => rowToRecord(row));
   }
@@ -67,27 +91,43 @@ export class PostgresCertificationReportStore {
   async listByFramework(
     framework: ComplianceFramework,
     limit = 100,
+    tenantId: string | null = null,
   ): Promise<readonly CertificationReportRecord[]> {
     if (limit <= 0) throw new Error("limit must be positive");
-    const result = await this.conn.query<Record<string, unknown>>(
-      `SELECT ${COLUMNS} FROM ${SCHEMA}.${TABLE}
-       WHERE framework = $1
-       ORDER BY generated_at DESC
-       LIMIT $2`,
-      [framework, limit],
+    const scope = scopeFilter(tenantId, 2);
+    const result = await scopedRead(this.conn, tenantId, (tx) =>
+      tx.query<Record<string, unknown>>(
+        `SELECT ${COLUMNS} FROM ${SCHEMA}.${TABLE}
+         WHERE framework = $1 AND ${scope.sql}
+         ORDER BY generated_at DESC
+         LIMIT $${String(2 + scope.params.length)}`,
+        [framework, ...scope.params, limit],
+      ),
     );
     return result.rows.map((row) => rowToRecord(row));
   }
 
+  /**
+   * The newest report for a framework in one scope.
+   *
+   * The one read in this class whose wrongness is a *claim* rather than a number: `ORDER BY … LIMIT
+   * 1` over two scopes returns whichever report is newest in the table, so as the owner a tenant's
+   * failing assessment answered "is the platform certifiable for SOC 2" with `false` while the
+   * platform's own passing report sat one row behind it. Verified live, in both directions.
+   */
   async latestForFramework(
     framework: ComplianceFramework,
+    tenantId: string | null = null,
   ): Promise<CertificationReportRecord | null> {
-    const result = await this.conn.query<Record<string, unknown>>(
-      `SELECT ${COLUMNS} FROM ${SCHEMA}.${TABLE}
-       WHERE framework = $1
-       ORDER BY generated_at DESC
-       LIMIT 1`,
-      [framework],
+    const scope = scopeFilter(tenantId, 2);
+    const result = await scopedRead(this.conn, tenantId, (tx) =>
+      tx.query<Record<string, unknown>>(
+        `SELECT ${COLUMNS} FROM ${SCHEMA}.${TABLE}
+         WHERE framework = $1 AND ${scope.sql}
+         ORDER BY generated_at DESC
+         LIMIT 1`,
+        [framework, ...scope.params],
+      ),
     );
     const row = result.rows[0];
     if (row === undefined) return null;

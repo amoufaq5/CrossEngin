@@ -12,8 +12,8 @@ const NOW_SECONDS = 1_700_000_000;
 function buildEngine(
   result: Awaited<ReturnType<SignalSubmitter["submitSignal"]>> | Error = {
     deduplicated: false,
+    deliveries: [{ instanceId: "wfi_inst0001", signalId: "wfs_sig00001" }],
     matchedInstanceIds: ["wfi_inst0001"],
-    signalId: "wfs_sig00001",
   },
 ): SignalSubmitter & { calls: number } {
   let calls = 0;
@@ -83,7 +83,9 @@ describe("WorkflowSignalBridge.handle — success path", () => {
       tenantId: TENANT,
     });
     expect(result.kind).toBe("advanced");
-    expect(result.signalId).toBe("wfs_sig00001");
+    expect(result.deliveries).toEqual([
+      { instanceId: "wfi_inst0001", signalId: "wfs_sig00001" },
+    ]);
     expect(result.matchedInstanceIds).toEqual(["wfi_inst0001"]);
     expect(engine.calls).toBe(1);
   });
@@ -108,8 +110,10 @@ describe("WorkflowSignalBridge.handle — success path", () => {
   it("returns deduplicated when the engine reports dedup", async () => {
     const engine = buildEngine({
       deduplicated: true,
-      matchedInstanceIds: [],
-      signalId: null,
+      // What the first submit delivered. A duplicate reports the deliveries it already made, so
+      // "deduplicated" and "nothing matched" stop being the same answer.
+      deliveries: [{ instanceId: "wfi_inst0001", signalId: "wfs_sig00001" }],
+      matchedInstanceIds: ["wfi_inst0001"],
     });
     const bridge = buildBridge({ engine });
     const { bodyString, signatureValue } = signedBody({ order: { id: "po-1" } });
@@ -122,13 +126,17 @@ describe("WorkflowSignalBridge.handle — success path", () => {
     });
     expect(result.kind).toBe("deduplicated");
     expect(result.deduplicated).toBe(true);
+    expect(result.deliveries).toEqual([
+      { instanceId: "wfi_inst0001", signalId: "wfs_sig00001" },
+    ]);
+    expect(result.matchedInstanceIds).toEqual(["wfi_inst0001"]);
   });
 
   it("returns no_matching_instance when no instances correlate", async () => {
     const engine = buildEngine({
       deduplicated: false,
+      deliveries: [],
       matchedInstanceIds: [],
-      signalId: "wfs_sig00001",
     });
     const bridge = buildBridge({ engine });
     const { bodyString, signatureValue } = signedBody({ order: { id: "po-1" } });
@@ -139,7 +147,7 @@ describe("WorkflowSignalBridge.handle — success path", () => {
       tenantId: TENANT,
     });
     expect(result.kind).toBe("no_matching_instance");
-    expect(result.signalId).toBe("wfs_sig00001");
+    expect(result.deliveries).toEqual([]);
   });
 });
 
@@ -269,7 +277,11 @@ describe("WorkflowSignalBridge — passes idempotencyKey to engine", () => {
     const engine: SignalSubmitter = {
       submitSignal: vi.fn(async (input) => {
         captured.push(input);
-        return { deduplicated: false, matchedInstanceIds: ["wfi_x"], signalId: "wfs_y" };
+        return {
+          deduplicated: false,
+          deliveries: [{ instanceId: "wfi_x", signalId: "wfs_y" }],
+          matchedInstanceIds: ["wfi_x"],
+        };
       }),
     };
     const bridge = buildBridge({ engine });

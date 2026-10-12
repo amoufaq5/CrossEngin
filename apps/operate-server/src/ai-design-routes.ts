@@ -12,12 +12,21 @@ import {
   type ReviewStatusLike,
 } from "./design-review-routes.js";
 import { DESIGN_JOB_MAX_ATTEMPTS, type DesignJobStoreLike } from "./design-runner.js";
+import {
+  MANIFEST_PROPOSAL_STATUSES,
+  type ManifestProposalSource,
+  type ManifestProposalStatus,
+} from "./tenant-manifests.js";
 
-export const AI_MANIFEST_STATUSES = ["draft", "active", "archived"] as const;
-export type AiManifestStatus = (typeof AI_MANIFEST_STATUSES)[number];
-
-export const AI_MANIFEST_SOURCES = ["ai", "manual"] as const;
-export type AiManifestSource = (typeof AI_MANIFEST_SOURCES)[number];
+/*
+ * The manifest status and source domains are *imported* from `tenant-manifests.ts` rather than
+ * declared here, and that asymmetry is deliberate: `AiManifestRecordLike` below is a structural
+ * seam, because this module must not depend on the concrete store — but a value set is not a
+ * structure. Spelling one twice is how a declaration ends up naming a constant no writer binds
+ * (ADR-0354): `AI_MANIFEST_SOURCES` here and `MANIFEST_PROPOSAL_SOURCES` there were the same two
+ * members in one app, and the catalog's `operate_tenant_manifests.source` CHECK answers to the one
+ * `tenant-manifests.ts` writes.
+ */
 
 export interface AiManifestRecordLike {
   readonly id: string;
@@ -26,8 +35,8 @@ export interface AiManifestRecordLike {
   readonly description: string;
   readonly manifest: Record<string, unknown>;
   readonly manifestHash: string;
-  readonly status: AiManifestStatus;
-  readonly source: AiManifestSource;
+  readonly status: ManifestProposalStatus;
+  readonly source: ManifestProposalSource;
   readonly providerLabel: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -39,12 +48,12 @@ export interface AiManifestCreateInput {
   readonly description: string;
   readonly manifest: Record<string, unknown>;
   readonly manifestHash: string;
-  readonly source: AiManifestSource;
+  readonly source: ManifestProposalSource;
   readonly providerLabel?: string | null;
 }
 
 export interface AiManifestListQuery {
-  readonly status?: AiManifestStatus;
+  readonly status?: ManifestProposalStatus;
   readonly limit?: number;
   readonly cursor?: string;
 }
@@ -58,7 +67,7 @@ export interface AiManifestStore {
   create(tenantId: string, input: AiManifestCreateInput): Promise<AiManifestRecordLike>;
   list(tenantId: string, query?: AiManifestListQuery): Promise<AiManifestListPage>;
   getById(tenantId: string, id: string): Promise<AiManifestRecordLike | null>;
-  setStatus(tenantId: string, id: string, status: AiManifestStatus): Promise<AiManifestRecordLike | null>;
+  setStatus(tenantId: string, id: string, status: ManifestProposalStatus): Promise<AiManifestRecordLike | null>;
   activate(tenantId: string, id: string): Promise<AiManifestRecordLike | null>;
 }
 
@@ -146,8 +155,8 @@ function readListQuery(input: Parameters<Handler>[0]): AiManifestListQuery {
   const query = (input.request as { query?: Record<string, string | string[]> } | undefined)?.query ?? {};
   const statusRaw = firstQueryValue(query["status"]);
   const status =
-    statusRaw !== undefined && (AI_MANIFEST_STATUSES as readonly string[]).includes(statusRaw)
-      ? (statusRaw as AiManifestStatus)
+    statusRaw !== undefined && (MANIFEST_PROPOSAL_STATUSES as readonly string[]).includes(statusRaw)
+      ? (statusRaw as ManifestProposalStatus)
       : undefined;
   const limitRaw = firstQueryValue(query["limit"]);
   const limit = limitRaw === undefined ? undefined : Number.parseInt(limitRaw, 10);

@@ -3,15 +3,19 @@ import {
   INCIDENT_ID_REGEX,
   INCIDENT_STATUSES,
   IncidentRecordSchema,
+  TimelineEntrySchema,
   canTransitionIncident,
   autoDeclaredForKey,
   formatIncidentId,
   parseIncidentId,
   metAckSla,
   metMitigateSla,
+  pagedTimelineMessage,
+  pagedTimelineMetadata,
   timeToAckMinutes,
   timeToResolveMinutes,
   type IncidentRecord,
+  type PagedTimelineFacts,
 } from "./incidents.js";
 
 const requiredRoles = [
@@ -388,5 +392,261 @@ describe("IncidentRecordSchema.autoDeclaredFor", () => {
     expect(
       IncidentRecordSchema.safeParse({ ...declared(), autoDeclaredFor: "" }).success,
     ).toBe(false);
+  });
+});
+
+describe("TimelineEntrySchema paged kind", () => {
+  const entry = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    occurredAt: "2026-05-14T10:00:00Z",
+    actorUserId: "system-slo-enforcer",
+    kind: "paged",
+    message: "paged 2/3 over pagerduty_phone, slack",
+    metadata: {},
+    ...over,
+  });
+
+  it("accepts a paged entry", () => {
+    const record = IncidentRecordSchema.parse({
+      id: "INC-2026-0042",
+      title: "Checkout failing",
+      severity: "sev3",
+      category: "availability",
+      status: "declared",
+      declaredAt: "2026-05-14T10:00:00Z",
+      declaredBy: "system-slo-enforcer",
+      timeline: [...baseTimeline, entry()],
+    });
+    expect(record.timeline[1]?.kind).toBe("paged");
+  });
+
+  it("still refuses an unknown kind, so the enum widened and did not open", () => {
+    expect(
+      IncidentRecordSchema.safeParse({
+        id: "INC-2026-0042",
+        title: "x",
+        severity: "sev3",
+        category: "availability",
+        status: "declared",
+        declaredAt: "2026-05-14T10:00:00Z",
+        declaredBy: "u-1",
+        timeline: [entry({ kind: "pagedd" })],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("requires a message on a paged entry like every other kind", () => {
+    expect(TimelineEntrySchema.safeParse(entry({ message: "" })).success).toBe(false);
+  });
+
+  it("defaults a paged entry's metadata to empty", () => {
+    const parsed = TimelineEntrySchema.parse({
+      occurredAt: "2026-05-14T10:00:00Z",
+      actorUserId: "u-1",
+      kind: "paged",
+      message: "m",
+    });
+    expect(parsed.metadata).toEqual({});
+  });
+});
+
+describe("pagedTimelineMetadata", () => {
+  const FACTS: PagedTimelineFacts = {
+    channels: ["pagerduty_phone", "slack"],
+    delivered: 2,
+    attempted: 3,
+  };
+
+  it("carries the operation, the channel kinds and the counts", () => {
+    expect(pagedTimelineMetadata(FACTS)).toEqual({
+      operation: "trigger",
+      channels: ["pagerduty_phone", "slack"],
+      delivered: 2,
+      attempted: 3,
+    });
+  });
+
+  it("defaults the operation to trigger", () => {
+    expect(pagedTimelineMetadata(FACTS)["operation"]).toBe("trigger");
+  });
+
+  it("carries an explicit resolve operation", () => {
+    expect(pagedTimelineMetadata({ ...FACTS, operation: "resolve" })["operation"]).toBe("resolve");
+  });
+
+  it("includes a provider reference when one is given", () => {
+    expect(pagedTimelineMetadata({ ...FACTS, reference: "INC-2026-0042" })["reference"]).toBe(
+      "INC-2026-0042",
+    );
+  });
+
+  it("omits the reference key entirely when there is none", () => {
+    expect("reference" in pagedTimelineMetadata({ ...FACTS, reference: null })).toBe(false);
+    expect("reference" in pagedTimelineMetadata(FACTS)).toBe(false);
+  });
+
+  it("copies the channel list, so a later mutation cannot rewrite a stored note", () => {
+    const channels = ["slack"];
+    const metadata = pagedTimelineMetadata({ ...FACTS, channels });
+    channels.push("sms");
+    expect(metadata["channels"]).toEqual(["slack"]);
+  });
+
+  it("has nowhere for an address, a number, a channel name or a key to land", () => {
+    // The structural half of the rule: the builder's input only takes channel KINDS, so a
+    // caller that reaches for its credentials cannot smuggle them onto the incident record.
+    const leaky = {
+      ...FACTS,
+      serviceKey: "R0ABCDEF0123456789",
+      phoneNumbers: ["+15551234567"],
+      channel: "#incidents",
+      email: "oncall@example.com",
+    } as unknown as PagedTimelineFacts;
+    expect(Object.keys(pagedTimelineMetadata(leaky)).sort()).toEqual([
+      "attempted",
+      "channels",
+      "delivered",
+      "operation",
+    ]);
+  });
+
+  it("refuses a channel value that is not an identifier", () => {
+    // The mechanical half: an address, a number, a Slack channel name or a mixed-case key is
+    // not lower snake_case, so it cannot be passed off as a channel kind.
+    for (const bad of ["oncall@example.com", "+15551234567", "#incidents", "PagerDuty", ""]) {
+      expect(() => pagedTimelineMetadata({ ...FACTS, channels: [bad] })).toThrow(TypeError);
+    }
+  });
+
+  it("names the position and never the rejected value", () => {
+    // A rejected "channel kind" may well be the address the rule exists to keep out, and an
+    // error message is written to a log.
+    expect(() =>
+      pagedTimelineMetadata({ ...FACTS, channels: ["slack", "oncall@example.com"] }),
+    ).toThrow(/^channels\[1\] is not a channel kind$/);
+  });
+
+  it("refuses a channel kind longer than 40 characters", () => {
+    expect(() => pagedTimelineMetadata({ ...FACTS, channels: ["a".repeat(41)] })).toThrow(
+      TypeError,
+    );
+  });
+
+  it("accepts an empty channel list, which is what an unroutable page looks like", () => {
+    expect(
+      pagedTimelineMetadata({ channels: [], delivered: 0, attempted: 0 })["channels"],
+    ).toEqual([]);
+  });
+
+  it("refuses delivered above attempted, naming both numbers", () => {
+    expect(() => pagedTimelineMetadata({ ...FACTS, delivered: 4, attempted: 3 })).toThrow(
+      /delivered=4, attempted=3/,
+    );
+  });
+
+  it("refuses a negative or non-integer count with a RangeError", () => {
+    expect(() => pagedTimelineMetadata({ ...FACTS, delivered: -1 })).toThrow(RangeError);
+    expect(() => pagedTimelineMetadata({ ...FACTS, attempted: -1 })).toThrow(RangeError);
+    expect(() => pagedTimelineMetadata({ ...FACTS, delivered: 1.5 })).toThrow(RangeError);
+    expect(() =>
+      pagedTimelineMetadata({ ...FACTS, delivered: Number.NaN }),
+    ).toThrow(RangeError);
+  });
+
+  it("refuses a blank or over-long reference", () => {
+    expect(() => pagedTimelineMetadata({ ...FACTS, reference: "   " })).toThrow(TypeError);
+    expect(() => pagedTimelineMetadata({ ...FACTS, reference: "x".repeat(201) })).toThrow(
+      TypeError,
+    );
+  });
+
+  it("produces metadata a timeline entry accepts", () => {
+    expect(
+      TimelineEntrySchema.safeParse({
+        occurredAt: "2026-05-14T10:00:00Z",
+        actorUserId: "system-slo-enforcer",
+        kind: "paged",
+        message: pagedTimelineMessage(FACTS),
+        metadata: pagedTimelineMetadata(FACTS),
+      }).success,
+    ).toBe(true);
+  });
+});
+
+describe("pagedTimelineMessage", () => {
+  it("reads as prose a human scans", () => {
+    expect(
+      pagedTimelineMessage({
+        channels: ["pagerduty_phone", "slack"],
+        delivered: 2,
+        attempted: 3,
+      }),
+    ).toBe("paged 2/3 over pagerduty_phone, slack");
+  });
+
+  it("shouts when a page reached nobody", () => {
+    // The line an incident review looks for; a quiet "paged 0/2" reads like every other entry.
+    expect(
+      pagedTimelineMessage({ channels: ["slack", "sms"], delivered: 0, attempted: 2 }),
+    ).toBe("PAGED NOBODY — 0/2 over slack, sms");
+  });
+
+  it("shouts when there was no channel to attempt at all", () => {
+    expect(pagedTimelineMessage({ channels: [], delivered: 0, attempted: 0 })).toBe(
+      "PAGED NOBODY — no page channel was attempted",
+    );
+  });
+
+  it("reads a resolve as a close, not as a page", () => {
+    expect(
+      pagedTimelineMessage({
+        channels: ["pagerduty_phone"],
+        delivered: 1,
+        attempted: 1,
+        operation: "resolve",
+      }),
+    ).toBe("resolved the alert on pagerduty_phone");
+  });
+
+  it("does not shout for a resolve that closed nothing", () => {
+    // An all-`unsupported` resolve is the expected answer on Slack and a webhook, not a failure.
+    expect(
+      pagedTimelineMessage({
+        channels: ["slack"],
+        delivered: 0,
+        attempted: 1,
+        operation: "resolve",
+      }),
+    ).toBe("closed no alert — 0/1 over slack");
+    expect(
+      pagedTimelineMessage({ channels: [], delivered: 0, attempted: 0, operation: "resolve" }),
+    ).toBe("closed no alert — no page channel was attempted");
+  });
+
+  it("is always a non-empty message the schema accepts", () => {
+    for (const operation of ["trigger", "resolve"] as const) {
+      for (const [delivered, attempted] of [
+        [0, 0],
+        [0, 2],
+        [1, 1],
+        [2, 3],
+      ] as ReadonlyArray<readonly [number, number]>) {
+        const message = pagedTimelineMessage({
+          channels: delivered === 0 && attempted === 0 ? [] : ["slack", "sms"],
+          delivered,
+          attempted,
+          operation,
+        });
+        expect(message.length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("validates its facts on the same rules as the metadata builder", () => {
+    expect(() =>
+      pagedTimelineMessage({ channels: ["slack"], delivered: 3, attempted: 1 }),
+    ).toThrow(RangeError);
+    expect(() =>
+      pagedTimelineMessage({ channels: ["#incidents"], delivered: 1, attempted: 1 }),
+    ).toThrow(TypeError);
   });
 });

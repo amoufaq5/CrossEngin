@@ -1,6 +1,5 @@
 import {
   emitMetaBootstrapSql,
-  emitSchemaCreate,
   META_SCHEMA_NAME,
   META_TABLES,
 } from "@crossengin/kernel/bootstrap";
@@ -30,6 +29,14 @@ export async function runApply(
   const dryRun = getBooleanFlag(command, "dry-run");
   const planOnly = getBooleanFlag(command, "plan");
   const confirm = getBooleanFlag(command, "confirm");
+  // The one reconciliation refusal an operator can override (ADR-0328). It has existed on
+  // `ReconciliationOptions` since ADR-0308 with no way to pass it, so the four kill-switch
+  // `meta.users` foreign keys ADR-0296 removed from the catalog have been reported as undeclared
+  // drift on every existing deployment since, with no way to drop them but by hand. It reaches
+  // **foreign keys only**, because dropping one is the single loosening that cannot fail against
+  // existing rows — which is what keeps ADR-0290's "every step in the plan is expected to succeed"
+  // true.
+  const allowLoosening = getBooleanFlag(command, "allow-loosening");
   if (dryRun) {
     return emitDryRun(ctx.io, command);
   }
@@ -53,7 +60,9 @@ export async function runApply(
     // database the plan *is* the bootstrap SQL, so a fresh install is unchanged; on a database
     // that already has the schema, only the differences are applied — which is what lets an
     // edited table definition migrate instead of re-running `CREATE TABLE` and halting.
-    const plan = await planLiveReconciliation(conn, META_SCHEMA_NAME, META_TABLES);
+    const plan = await planLiveReconciliation(conn, META_SCHEMA_NAME, META_TABLES, {
+      ...(allowLoosening ? { allowLoosening: true } : {}),
+    });
     if (planOnly) {
       if (command.format === "json") {
         printJson(ctx.io, plan);
@@ -62,10 +71,26 @@ export async function runApply(
       }
       return 0;
     }
+    if (allowLoosening) {
+      // Said out loud before anything runs: this is the one invocation that *removes* a constraint
+      // the database is currently enforcing, and the apply report alone would not say so.
+      printError(
+        ctx.io,
+        "apply: --allow-loosening — undeclared foreign keys will be DROPPED rather than reported",
+      );
+    }
     const applier = new MigrationApplier({
       connection: conn,
       schema: META_SCHEMA_NAME,
-      statements: [emitSchemaCreate(META_SCHEMA_NAME), ...plan.statements],
+      // The plan's own statements, and nothing prepended. `emitSchemaCreate` used to lead this
+      // list and was redundant twice over: `MigrationApplier` calls `ensureMigrationLog` before the
+      // first statement and *its* first DDL is `CREATE SCHEMA IF NOT EXISTS`, and on an empty
+      // database the plan is `emitBootstrapSql`, which already begins with the same statement. The
+      // cost was a report that read as a claim about the schema: on a fully converged database the
+      // plan is empty, so the applier ran exactly that one idempotent statement and printed
+      // `total: 1, executed: 1` — "one change was made" where nothing had changed, which is the
+      // confusion ADR-0331 added the re-plan to remove.
+      statements: [...plan.statements],
       // The plan was computed from the live schema, so every statement in it is needed; the hash
       // log records what ran, not what the database holds, and skipping on it here would leave a
       // dropped object missing.
@@ -75,12 +100,45 @@ export async function runApply(
       stopOnFailure: false,
     });
     const report = await applier.apply();
+    // Re-plan after a clean apply, because "executed 3, failed 0" is not the same claim as "the
+    // schema now matches the catalog" and an operator reads it as if it were (ADR-0331).
+    //
+    // A plan converges in one pass almost always, but not always: a step can only be planned
+    // against the schema as it was *before* the pass, so a declared CHECK on a column whose type
+    // is also changing is deferred to the next plan rather than ordered after the `ALTER` — which
+    // is the safe choice, since the plan's invariant is that every step in it is expected to
+    // succeed, and ordering it would be guessing at a dependency this planner does not model.
+    // Found live: a two-pass case reported `failed: 0` with the CHECK still missing.
+    //
+    // Only on a clean apply. After a failure the remaining difference is obviously the failure's,
+    // and a second message would bury the first.
+    const converged =
+      report.preconditions.ok && report.failed === 0
+        ? await planLiveReconciliation(conn, META_SCHEMA_NAME, META_TABLES, {
+            ...(allowLoosening ? { allowLoosening: true } : {}),
+          })
+        : null;
     if (command.format === "json") {
-      printJson(ctx.io, applyJsonPayload(report, plan));
+      printJson(ctx.io, applyJsonPayload(report, plan, converged));
     } else {
       printSuccess(ctx.io, formatApplyReport(report));
-      if (plan.unreconciled.length > 0) {
-        printSuccess(ctx.io, formatReconciliationPlan(plan));
+      // Which plan's differences to print is not cosmetic. After a clean apply the pre-apply plan's
+      // statements have all *run*, so rendering it prints "1 statement(s) to apply" about work this
+      // invocation just did — the same confusion between a report of the past and a claim about the
+      // present that the re-plan above exists to end. `converged` is the only one of the two that
+      // describes the schema as it now is; `plan` is the best available only when the apply did not
+      // finish, and there the failure report sits beside it.
+      const standing = standingDifferences(plan, converged);
+      if (standing.unreconciled.length > 0) {
+        printSuccess(ctx.io, formatReconciliationPlan(standing));
+      }
+      if (converged !== null && converged.statements.length > 0) {
+        printSuccess(
+          ctx.io,
+          `  ${converged.statements.length.toString()} statement(s) still to apply —` +
+            " run apply again. A step is planned against the schema as it was before this pass," +
+            " so a change that depends on one of them lands on the next.",
+        );
       }
     }
     if (!report.preconditions.ok || report.failed > 0) return 1;
@@ -101,13 +159,42 @@ export interface ApplyJsonPayload {
    * and error without walking 800 outcome entries to find them.
    */
   readonly failures: readonly ApplyStatementRecord[];
+  /**
+   * The plan as it stands **after** this pass, so a machine consumer can tell "it ran" from "it is
+   * done" (ADR-0331). `null` when the apply did not finish cleanly — the remaining difference is
+   * then obviously the failure's, and re-planning would only describe it a second way.
+   *
+   * `remaining.statements.length === 0` is the convergence claim. Anything else means another
+   * `apply` is needed, which happens when a step could only be planned against the schema as it
+   * was before this pass.
+   */
+  readonly remaining: ReconciliationPlan | null;
 }
 
 export function applyJsonPayload(
   report: ApplyReport,
   plan: ReconciliationPlan,
+  remaining: ReconciliationPlan | null = null,
 ): ApplyJsonPayload {
-  return { report, plan, failures: applyFailures(report) };
+  return { report, plan, failures: applyFailures(report), remaining };
+}
+
+/**
+ * Which of the two plans describes the differences that **still** stand, for printing.
+ *
+ * Not cosmetic, and found live. After a clean apply the pre-apply plan's statements have all run, so
+ * rendering it prints "1 statement(s) to apply" about work this very invocation just did — a report
+ * of the past read as a claim about the present, which is the confusion ADR-0331's re-plan exists to
+ * end. The re-plan is the only one of the two that describes the schema as it now is.
+ *
+ * `null` means no re-plan was taken, which only happens when the apply did not finish; the pre-apply
+ * plan is then the best available and the failure report sits beside it to say so.
+ */
+export function standingDifferences(
+  plan: ReconciliationPlan,
+  converged: ReconciliationPlan | null,
+): ReconciliationPlan {
+  return converged ?? plan;
 }
 
 function emitDryRun(io: IoStreams, command: ParsedCommand): number {

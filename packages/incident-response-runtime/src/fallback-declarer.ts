@@ -28,9 +28,10 @@ export interface FallbackIncidentDeclarerOptions {
   /** Clock for the default fallback. Ignored when `fallback` is supplied. */
   readonly clock?: Clock;
   /**
-   * Reports the primary's error before the fallback is used. Without it a store outage is invisible
-   * — the page goes out either way, and the only thing that says the record is not durable is this
-   * callback and `servedBy`.
+   * Reports the primary's error before the fallback is used — on `declare` and on `findById`, the
+   * two paths that have a fallback to use. A failed `findOpen` propagates instead and is not
+   * reported here. Without this sink a store outage is invisible: the page goes out either way, and
+   * the only thing that says the record is not durable is this callback and `servedBy`.
    */
   readonly onPrimaryFailure?: (error: unknown) => void;
 }
@@ -118,6 +119,39 @@ export class FallbackIncidentDeclarer implements IncidentDeclarer {
    */
   async findOpen(autoDeclaredFor: string): Promise<IncidentRecord | null> {
     return await this.primary.findOpen(autoDeclaredFor);
+  }
+
+  /**
+   * The record behind an id, from whichever declarer can still answer for it.
+   *
+   * Routed by origin like `closeOut`, and for the sharper version of its reason. A fallback id came
+   * from a counter and may name a *different* stored incident, so reading it out of the store could
+   * hand the caller somebody else's severity — which is exactly the mis-routed resolve ADR-0326
+   * exists to stop. A fallback-issued id is therefore never looked up in the store.
+   *
+   * On a primary failure the error goes to the sink and the fallback is asked, which is the opposite
+   * of `findOpen`, and the difference is where the two sit. A failed `findOpen` happens *before* a
+   * declaration, where the caller reads a throw as "nothing open" and reports it, so propagating
+   * loses nothing. A `findById` happens on a recovery, where the only thing this process can still
+   * be certain of is what it minted itself: falling back recovers the grade of a page that really
+   * went out, and the sink is what keeps the outage visible while it does.
+   *
+   * A primary answering `null` — or not implementing this at all — falls through to the fallback
+   * too. No stored row holds that id, so a fallback record for it cannot be shadowing a different
+   * incident, which is the one hazard of a colliding counter id. Neither branch invents anything:
+   * both can only return a record one of the two declarers already holds.
+   */
+  async findById(incidentId: string): Promise<IncidentRecord | null> {
+    if (this.origins.get(incidentId) === "fallback") {
+      return (await this.fallback.findById?.(incidentId)) ?? null;
+    }
+    try {
+      const found = await this.primary.findById?.(incidentId);
+      if (found !== undefined && found !== null) return found;
+    } catch (err) {
+      this.onPrimaryFailure?.(err);
+    }
+    return (await this.fallback.findById?.(incidentId)) ?? null;
   }
 
   /**

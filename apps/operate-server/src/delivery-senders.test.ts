@@ -16,7 +16,6 @@ import {
   SENDER_THREW_ERROR_CODE,
   SenderRegistry,
   UNROUTED_ERROR_CODE,
-  UnroutableChannelSender,
   defaultSenderRegistry,
   sendWithTimeout,
   truncateErrorMessage,
@@ -228,12 +227,13 @@ describe("unroutedResult", () => {
     expect(result.bytesSent).toBeNull();
   });
 
-  it("is what UnroutableChannelSender sends", async () => {
-    const sender = new UnroutableChannelSender("email");
-    expect(sender.channel).toBe("email");
-    await expect(
-      sender.send({ ...IN_APP_REQUEST, channel: "email" }),
-    ).resolves.toEqual(unroutedResult("email"));
+  it("names the channel it could not route, so two unconfigured channels are distinguishable", () => {
+    // Retargeted from `UnroutableChannelSender`, deleted in ADR-0337: the class was a second
+    // spelling of this function that nothing constructed, and `drainOnce` has always called the
+    // function directly. What mattered in the old test was the result shape, which is here.
+    expect(unroutedResult("email").errorMessage).toContain("email");
+    expect(unroutedResult("sms").errorMessage).toContain("sms");
+    expect(unroutedResult("email")).not.toEqual(unroutedResult("sms"));
   });
 });
 
@@ -409,10 +409,7 @@ describe("every producible SendResult", () => {
       await new InAppSender().send(IN_APP_REQUEST),
       await new InAppSender().send({ ...IN_APP_REQUEST, channel: "sms" }),
       unroutedResult("email"),
-      await new UnroutableChannelSender("sms").send({
-        ...IN_APP_REQUEST,
-        channel: "sms",
-      }),
+      unroutedResult("sms"),
       await sendWithTimeout(
         thrower,
         { ...IN_APP_REQUEST, channel: "webhook" },

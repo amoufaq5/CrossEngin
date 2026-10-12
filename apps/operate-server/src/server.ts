@@ -1,4 +1,8 @@
 import type { ForwardedProto, HttpMethod, PipelineExecution } from "@crossengin/api-gateway";
+import type { AbacBatchEvaluator, AbacEvaluator, SensitiveFieldPolicy } from "@crossengin/auth";
+import type { CursorSealer } from "@crossengin/operate-runtime";
+import type { CursorSealingMode } from "./cursor-encryption.js";
+import type { IdempotencyStore, RateLimitChecker } from "@crossengin/api-gateway-runtime";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import type { Region } from "@crossengin/residency";
 import { decideRegionRouting, type TenantResidencyDirectory } from "@crossengin/residency-runtime";
@@ -13,10 +17,14 @@ import {
   type SequenceAllocator,
   type SettingsStore,
   type WriteEffect,
+  type WriteMaskMode,
 } from "@crossengin/operate-runtime";
 
 import { parseMethod, rawToIncoming, splitTarget, type RawHttpRequest, type RawHttpResponse } from "./http.js";
 import { buildPrincipalWiring, type ApiKeySpec, type JwtVerifyConfig } from "./principals.js";
+import { applyTenantStatusGate, type TenantStatusGateOptions } from "./tenant-status-gate.js";
+import { AbacObligationsUnevaluable, checkAbacObligations } from "./abac-obligations.js";
+import { withAbacAttributes, type AbacAttributeDirectory } from "./abac-attributes.js";
 
 let requestCounter = 0;
 function defaultRequestId(): string {
@@ -186,6 +194,24 @@ export interface BuildOperateHttpServerOptions {
   readonly apiKeys: readonly ApiKeySpec[];
   /** Optional production identity: verify Bearer JWTs against a JWKS. */
   readonly jwt?: JwtVerifyConfig;
+  /**
+   * Who is privileged for each sensitive data class, for **both** the response redaction and the
+   * write mask (ADR-0339).
+   *
+   * Absent until this option existed, which is why 39 of the 46 classified fields in the packs
+   * were unreadable by every role: the redaction policy was `{}`, so `privilegedForClass` answered
+   * false for everyone and only a field with an explicit per-field `read` grant came back. One
+   * policy reaches both directions deliberately — `privilegedForClass` has one definition so that a
+   * role cannot end up able to write a class it may not read (ADR-0329), and two policy sources
+   * would have made that property unenforceable.
+   */
+  readonly policyForEntity?: (entity: string) => SensitiveFieldPolicy | undefined;
+  /**
+   * `explicit_only` (the default) enforces a per-field `update` grant the manifest declares;
+   * `classified` adds the classification default. See `--classified-write-mask` for why the second
+   * is opt-in and refuses at boot.
+   */
+  readonly writeMaskMode?: WriteMaskMode;
   /** Allocates document numbers for sequence-defaulted fields on create. */
   readonly allocator?: SequenceAllocator;
   /** Backs the `/v1/admin/settings` endpoints + runtime numbering overrides. */
@@ -215,6 +241,71 @@ export interface BuildOperateHttpServerOptions {
   readonly idGenerator?: () => string;
   /** Optional live-request observer sink (e.g. the SLO request observer). */
   readonly onExecution?: (execution: PipelineExecution) => void;
+  /**
+   * Enforce the caller tenant's lifecycle state on every request (ADR-0334). Absent ⇒ no gate, which
+   * is what every deployment had: `meta.tenants.status` was a column nothing on the request path
+   * read, so a `pending_deletion` tenant went on accepting writes into data about to be destroyed.
+   */
+  readonly tenantStatusGate?: TenantStatusGateOptions;
+  /**
+   * The per-request rate-limit decision maker. Absent ⇒ `buildOperateGateway` installs
+   * `InMemoryRateLimitChecker` at 10,000/window, which is today's behaviour and persists nothing:
+   * `meta.rate_limit_decisions` had a store and no caller, so no deployment has ever written a row.
+   */
+  readonly rateLimitChecker?: RateLimitChecker;
+  /**
+   * The gateway's replay guard. Absent ⇒ `buildOperateGateway` installs `InMemoryIdempotencyStore`,
+   * which is today's behaviour and is **per process**: a retried `POST` landing on another replica,
+   * or on this one after a restart, is not deduplicated — including on the tenant-deletion route,
+   * the one route here that requires an idempotency key precisely because a retry mints a second
+   * tombstone.
+   */
+  readonly idempotencyStore?: IdempotencyStore;
+  /**
+   * Seals the keyset cursors entity lists hand back (ADR-0346), and the mode the boot check is told.
+   *
+   * Grouped for `abac`'s reason: the sealer and the mode must agree, and they are silently wrong if
+   * formed apart — a sealer with mode `absent` would seal cursors while the check refused the boot
+   * for not sealing them, and a mode of `sealed` with no sealer would pass the check while serving
+   * the disclosure it exists to prevent. `resolveCursorSealing` is the one producer of the pair.
+   */
+  readonly cursorSealing?: {
+    readonly mode: CursorSealingMode;
+    readonly sealer: CursorSealer | null;
+  };
+  /**
+   * The deployment's ABAC policy layer, or absent for none — in which case a manifest declaring an
+   * obligation is refused below (ADR-0340).
+   *
+   * One object rather than three options, because the three must agree and two of the pairings are
+   * silently wrong if they can be formed separately. An `evaluator` without its `answerableKeys`
+   * leaves this function unable to check that the manifest's obligations are ones the layer can
+   * answer, which is the per-key gap ADR-0341 made the boot refusal ask about; and an evaluator
+   * without an `attributeDirectory` refuses every obligation, since `dischargeAbac` treats an
+   * unresolved attribute set as unanswerable. So `answerableKeys` is required beside the evaluator
+   * and the directory is the one genuinely optional member — a policy over no attributes at all
+   * (`present` on nothing) is expressible, if useless.
+   *
+   * `recordBearingKeys` joined them for the same reason: without it this function cannot tell a
+   * policy that compares against the record from one that does not, so a manifest putting a record
+   * policy on a `create` would compile and deny that grant at every request.
+   *
+   * `evaluateBatch` is the **second** genuinely optional member, beside the directory, and for the
+   * opposite reason to the two required ones: absent, every obligation is still enforced through
+   * one call per question, which is what every deployment did before it existed. It can only make
+   * the asking cheaper, never the answer different — so there is nothing for its absence to break
+   * and nothing to refuse at boot.
+   */
+  readonly abac?: {
+    readonly evaluator: AbacEvaluator;
+    /** The policy keys `evaluator` can answer. Checked against the manifest's obligations. */
+    readonly answerableKeys: ReadonlySet<string>;
+    /** Of those, the keys whose comparison references a field of the record. */
+    readonly recordBearingKeys: ReadonlySet<string>;
+    /** Answers a whole set of questions at once, for the per-record redaction pass (ADR-0344). */
+    readonly evaluateBatch?: AbacBatchEvaluator;
+    readonly attributeDirectory?: AbacAttributeDirectory;
+  };
 }
 
 export interface BuiltOperateHttpServer {
@@ -228,11 +319,34 @@ export interface BuiltOperateHttpServer {
  * the manifest) wired to the auth resolver derived from the API keys.
  */
 export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): BuiltOperateHttpServer {
+  // Before anything is compiled, and here rather than in `node.ts`, because this function is also
+  // what compiles a *per-tenant* activated manifest — the same placement that gives a per-tenant
+  // gateway the tenant-status gate (ADR-0334). A tenant whose own manifest declares an obligation
+  // this deployment cannot discharge gets no gateway, which is the fail-closed answer: ADR-0314's
+  // degradation to the JSONB fallback is right for a schema it cannot apply and wrong for an
+  // authorization rule it cannot enforce, because serving the rule unenforced is the defect.
+  const obligations = checkAbacObligations({
+    manifest: options.manifest,
+    answerableKeys: options.abac?.answerableKeys ?? new Set(),
+    recordBearingKeys: options.abac?.recordBearingKeys ?? new Set(),
+    // `absent` when the caller supplied nothing, which is the refusing value: a caller that forgot
+    // to resolve the mode must not be read as having sealed the cursors.
+    cursorSealing: options.cursorSealing?.mode ?? "absent",
+  });
+  if (obligations.refusal !== null) throw new AbacObligationsUnevaluable(obligations);
+
   const wiring = buildPrincipalWiring(options.apiKeys, options.now !== undefined ? { now: options.now } : {});
+  // Decorated here rather than inside `buildPrincipalWiring`: the directory needs a connection and
+  // this is the seam that already takes deployment-supplied collaborators, so the api-key and JWT
+  // paths both get attributes from one wrap instead of two.
+  const principalResolver =
+    options.abac?.attributeDirectory !== undefined
+      ? withAbacAttributes(wiring.principalResolver, options.abac.attributeDirectory)
+      : wiring.principalResolver;
   const gateway = buildOperateGateway(options.manifest, {
     store: options.store,
     principalRoles: wiring.principalRoles,
-    principalResolver: wiring.principalResolver,
+    principalResolver,
     opaqueTokenLookup: wiring.opaqueTokenLookup,
     ...(options.jwt !== undefined
       ? {
@@ -251,8 +365,28 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     ...(options.jobInvokeRoles !== undefined ? { jobInvokeRoles: options.jobInvokeRoles as never } : {}),
     ...(options.jobInvokeActionRoles !== undefined ? { jobInvokeActionRoles: options.jobInvokeActionRoles } : {}),
     ...(options.extraRoutes !== undefined ? { extraRoutes: options.extraRoutes } : {}),
+    ...(options.rateLimitChecker !== undefined ? { rateLimitChecker: options.rateLimitChecker } : {}),
+    ...(options.idempotencyStore !== undefined ? { idempotencyStore: options.idempotencyStore } : {}),
+    ...(options.policyForEntity !== undefined ? { policyForEntity: options.policyForEntity } : {}),
+    ...(options.writeMaskMode !== undefined ? { writeMaskMode: options.writeMaskMode } : {}),
+    ...(options.abac !== undefined ? { abacEvaluator: options.abac.evaluator } : {}),
+    ...(options.abac?.evaluateBatch !== undefined
+      ? { abacBatchEvaluator: options.abac.evaluateBatch }
+      : {}),
+    ...(options.cursorSealing?.sealer != null
+      ? { cursorSealer: options.cursorSealing.sealer }
+      : {}),
     ...(options.now !== undefined ? { clock: { now: options.now } } : {}),
   });
+  // After every registration and before the first request. The gate goes on the registry rather than
+  // on each `register` call because that is the only way it is *total*: `operationIds()` is the whole
+  // surface — manifest CRUD, lifecycle transitions, associations, the meta routes and every injected
+  // `extraRoutes` entry — and a decorator applied per call site covers the ones somebody remembered.
+  // `GatewayRuntime` resolves a handler per request from this same registry, so replacing entries
+  // after it was constructed takes effect.
+  if (options.tenantStatusGate !== undefined) {
+    applyTenantStatusGate(gateway.handlers, options.tenantStatusGate);
+  }
   const httpServer = new OperateHttpServer({
     gateway,
     ...(options.webhookRoute !== undefined ? { webhookRoute: options.webhookRoute } : {}),

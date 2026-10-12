@@ -8,6 +8,8 @@ import {
   type SuppressionRecord,
 } from "@crossengin/notifications";
 
+import { isE164 } from "./voice-twilio.js";
+
 /*
  * This module is attacker-reachable: anything that can POST to the route can claim that an
  * address bounced, and a believed claim writes a suppression that stops that address receiving
@@ -26,7 +28,9 @@ import {
  *     fetch. SNS also offers no shared secret and no replay window.
  *   - Twilio signs `X-Twilio-Signature` as base64 HMAC-**SHA1** over the URL plus sorted POST
  *     parameters. It is a shared secret, but it is SHA-1, which @crossengin/crypto does not do,
- *     and it carries no timestamp at all, so it admits unbounded replay.
+ *     and it carries no timestamp at all, so it admits unbounded replay. A voice status callback is
+ *     signed the same way as a messaging one — one scheme, two resources — so the voice source
+ *     needs nothing new here.
  *
  * A deployment therefore terminates the provider's native scheme at the edge — an SNS-subscribed
  * Lambda, or the reverse proxy fronting the API for Twilio — and re-signs the byte-identical body
@@ -38,7 +42,23 @@ import {
  * adding one.
  */
 
-export const BOUNCE_WEBHOOK_SOURCES = ["ses", "twilio"] as const;
+/*
+ * A source names the **payload shape** a deployment has pointed at this route, not the channel.
+ *
+ * `twilio_voice` is a third source rather than a branch inside `twilio` because the two Twilio
+ * callbacks are different documents (`MessageStatus` against `CallStatus`) that suppress on
+ * different channels (`sms` against `voice_call`). Sniffing the channel out of the payload would
+ * mean a mis-shaped or half-populated body picks which channel's suppression space it writes into
+ * — the one error that produces a well-formed row against the wrong address space. The path
+ * segment is the deployment's own declaration of which sender it configured the URL for, and a
+ * declaration beats a probe (ADR-0328's rule for `FCM_CREDENTIAL_SOURCE`, one layer out).
+ *
+ * The slug is `twilio_voice` and not `voice` for the same reason: `VOICE_PROVIDERS` already names a
+ * second voice provider, and a Vonage callback is a different document. It matches
+ * `TwilioVoiceSender.provider` exactly, so the `provider:twilio_voice` this plans into `applied_by`
+ * is the same string the delivery attempt that provoked it recorded.
+ */
+export const BOUNCE_WEBHOOK_SOURCES = ["ses", "twilio", "twilio_voice"] as const;
 export type BounceWebhookSource = (typeof BOUNCE_WEBHOOK_SOURCES)[number];
 
 export const DEFAULT_BOUNCE_TOLERANCE_SECONDS = 300;
@@ -64,6 +84,7 @@ export const BOUNCE_EVENT_KINDS = [
   "transient_bounce",
   "complaint",
   "sms_failure",
+  "voice_failure",
 ] as const;
 export type BounceEventKind = (typeof BOUNCE_EVENT_KINDS)[number];
 
@@ -98,6 +119,51 @@ export interface BounceWebhookRequest {
   readonly now: Date;
 }
 
+/*
+ * What one callback says about whether a *spoken* notice can land on a number, when it says anything
+ * at all (ADR-0310's open `fax` verdict).
+ *
+ * This is a second output of the same parse and not a second kind of acceptance, which is the
+ * distinction that keeps the module's invariant intact: `accepted: true` still means — and only
+ * means — that suppressions were planned. A reachability signal plans nothing. It is evidence to be
+ * *counted* somewhere durable, and the count is what a threshold can then be crossed by, so the
+ * signal rides on the refusal that already describes the callback.
+ *
+ * Two members, because the count needs both directions. A `fax_detected` advances it; a
+ * `voice_answered` refutes the inference outright and must therefore be able to reset it. There is
+ * deliberately no third member for `unknown`: the detector declining to answer is not evidence
+ * either way, and a signal for it would have to mean "leave the count alone", which is what emitting
+ * nothing already means.
+ */
+export const VOICE_REACHABILITY_SIGNALS = [
+  /** `AnsweredBy=fax`: the number answered, and no spoken notice can be heard on it. */
+  "fax_detected",
+  /** `AnsweredBy=human` / `machine_start` / `machine_end_beep`: something that can hear speech. */
+  "voice_answered",
+] as const;
+export type VoiceReachabilitySignal = (typeof VOICE_REACHABILITY_SIGNALS)[number];
+
+export interface VoiceReachabilityObservation {
+  readonly signal: VoiceReachabilitySignal;
+  readonly channel: "voice_call";
+  /**
+   * The destination, already normalised by `normalizeRecipientAddress`. Normalised **here** rather
+   * than by whatever counts it, for `planSuppression`'s reason one layer on: the counter's key and
+   * the suppression the count eventually justifies have to be the same string, or the threshold is
+   * crossed for one spelling and the row written for another.
+   */
+  readonly address: string;
+  /**
+   * The `CallSid`, and never null — a callback that does not name its call is refused rather than
+   * counted. A count has no idempotency of its own: `suppressionIdFor` makes a replayed *bounce*
+   * plan the identical row, and nothing makes a replayed *observation* a no-op. Twilio retries a
+   * non-2xx callback, so without a per-call handle to compare against, one call's retries would walk
+   * a number to the threshold on their own. Advancing is the unsafe direction, so a callback we
+   * cannot place against a call is not evidence.
+   */
+  readonly callSid: string;
+}
+
 export type BounceWebhookResult =
   | {
       readonly accepted: true;
@@ -109,13 +175,27 @@ export type BounceWebhookResult =
       readonly accepted: false;
       readonly refusal: BounceWebhookRefusal;
       readonly reason: string;
+      /**
+       * Present when the callback was understood and says something about the destination's voice
+       * reachability. Nothing was planned, so the refusal stands as the answer to "was a suppression
+       * written"; a caller that counts observations reads this and may cross a threshold of its own.
+       * A caller that does not is unaffected, which is why this is an added field rather than a new
+       * variant.
+       */
+      readonly observation?: VoiceReachabilityObservation;
     };
 
 function refuse(
   refusal: BounceWebhookRefusal,
   reason: string,
+  observation?: VoiceReachabilityObservation,
 ): BounceWebhookResult {
-  return { accepted: false, refusal, reason };
+  return {
+    accepted: false,
+    refusal,
+    reason,
+    ...(observation !== undefined ? { observation } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -532,6 +612,40 @@ export const TWILIO_FAILED_STATUSES: readonly string[] = [
 ];
 
 /**
+ * Every `MessageStatus` Twilio defines, so an unknown one is refused rather than declared harmless
+ * (ADR-0329).
+ *
+ * This set exists for the reason `TWILIO_CALL_CALLBACK_STATUSES` does, and it is the older of the
+ * two paths that lacked it: `recognizeTwilioStatusCallback` refused anything outside
+ * `TWILIO_FAILED_STATUSES` as `event_not_suppressible` — "message status X is not a failure" — which
+ * asserts knowledge of a status it has never seen. That is the exact shape ADR-0302 fixed in the
+ * suppression *readers*: a safety path must not answer "nothing to do" from ignorance. If Twilio
+ * ever adds a terminal failure status, the old behaviour kept messaging a number that had stopped
+ * working, silently and forever.
+ *
+ * **The list errs wide on purpose.** An unknown status now answers `payload_unrecognized` → 400, and
+ * Twilio retries non-2xx — so a *missing* legitimate status costs a retry storm, while an extra
+ * value that Twilio never sends costs exactly nothing (it would be refused one step later as not a
+ * failure). The two mistakes are not symmetric, so this names every status the API documents
+ * including the ones only messaging services and group messages produce.
+ */
+export const TWILIO_MESSAGE_CALLBACK_STATUSES: readonly string[] = [
+  "accepted",
+  "scheduled",
+  "queued",
+  "sending",
+  "sent",
+  "receiving",
+  "received",
+  "delivered",
+  "read",
+  "partially_delivered",
+  "canceled",
+  "undelivered",
+  "failed",
+];
+
+/**
  * The only Twilio error codes this module will turn into a suppression, and the reason each one
  * means. Anything absent here is refused rather than guessed: an unrecognised code is not
  * evidence that an address should stop receiving notifications.
@@ -558,7 +672,13 @@ export const TWILIO_SUPPRESSION_REASONS: Readonly<
 
 export type TwilioRecognition =
   | { readonly ok: true; readonly event: RecognizedBounceEvent; readonly reason: SuppressionReason }
-  | { readonly ok: false; readonly refusal: BounceWebhookRefusal; readonly reason: string };
+  | {
+      readonly ok: false;
+      readonly refusal: BounceWebhookRefusal;
+      readonly reason: string;
+      /** Only ever set by the voice recognizer; see `VoiceReachabilityObservation`. */
+      readonly observation?: VoiceReachabilityObservation;
+    };
 
 /** A Twilio status callback is a form-encoded POST body, not JSON. */
 export function recognizeTwilioStatusCallback(body: string): TwilioRecognition {
@@ -569,6 +689,18 @@ export function recognizeTwilioStatusCallback(body: string): TwilioRecognition {
       ok: false,
       refusal: "payload_unrecognized",
       reason: "status callback carries no MessageStatus",
+    };
+  }
+  // Unknown first, then known-but-not-a-failure — the order the voice branch uses, and the order
+  // that matters (ADR-0329). Collapsed into one check, a status Twilio has never sent answered
+  // "is not a failure", which asserts knowledge this module does not have: if Twilio adds a
+  // terminal failure status, the old behaviour kept messaging a number that had stopped working,
+  // silently and forever. The two answers are different facts and a reader must not conflate them.
+  if (!TWILIO_MESSAGE_CALLBACK_STATUSES.includes(status)) {
+    return {
+      ok: false,
+      refusal: "payload_unrecognized",
+      reason: `MessageStatus ${status} is not a status Twilio defines`,
     };
   }
   if (!TWILIO_FAILED_STATUSES.includes(status)) {
@@ -614,6 +746,415 @@ export function recognizeTwilioStatusCallback(body: string): TwilioRecognition {
       providerCode: code,
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Twilio voice status callbacks
+// ---------------------------------------------------------------------------
+
+/*
+ * **A call that nobody answered is not a suppression.** This is the whole of the module's voice
+ * judgement and the one line to read before changing anything below it.
+ *
+ * `busy` means the line was engaged. `no-answer` means it rang out. In both the number is live, a
+ * handset is attached to it, and a human was — or could have been — standing next to it. The only
+ * fact either reports is about a moment. Suppressing on one would permanently silence a working
+ * number because somebody was in a meeting, and `hard_bounce` sits in
+ * `UNCONDITIONAL_SUPPRESSION_REASONS` (ADR-0302), so the row would then outrank even a
+ * `security_alert` — on the channel an on-call rotation reaches a person by. Ringing again in a
+ * minute is the entire point of the dispatch's retry ladder, which is why `voice-twilio.ts`
+ * classifies both as retryable `failed` rather than terminal.
+ *
+ * (The blast radius is the notification stack's `voice_call` channel, not the page transports: a
+ * page deliberately travels outside preferences, suppressions and quiet hours — ADR-0326 — so
+ * `SmsPageSender` and its siblings would still fire. That makes this less than catastrophic. It
+ * does not make it acceptable: an on-call *notification* going quiet for a reachable number is
+ * exactly the failure the suppression table is supposed to prevent, inverted.)
+ *
+ * The status is therefore checked **before** any error code is looked at, so a `busy` that happens
+ * to carry a code can never route around this.
+ */
+export const VOICE_NEVER_SUPPRESSIBLE_STATUSES: ReadonlySet<string> = new Set([
+  "busy",
+  "no-answer",
+]);
+
+/** Statuses that report the call advancing and nothing about its outcome. */
+export const VOICE_PROGRESS_STATUSES: ReadonlySet<string> = new Set([
+  "queued",
+  "initiated",
+  "ringing",
+  "in-progress",
+]);
+
+/**
+ * Every `CallStatus` Twilio sends on a status callback. A value outside this set is Twilio changing
+ * its vocabulary or our own bug, and is refused as unrecognised rather than read as "not a
+ * failure" — a module that answers "nothing to do" for a status it has never seen is how a number
+ * that has stopped working keeps being called.
+ */
+export const TWILIO_CALL_CALLBACK_STATUSES: readonly string[] = [
+  "queued",
+  "initiated",
+  "ringing",
+  "in-progress",
+  "completed",
+  "busy",
+  "no-answer",
+  "failed",
+  "canceled",
+];
+
+/**
+ * Twilio voice error codes that are a statement about the **destination number**, and the reason
+ * each one means.
+ *
+ * The boundary against `TWILIO_VOICE_TRANSIENT_CODES` is not "will it happen again" — almost
+ * everything here recurs. It is **whose fact it is.** A code belongs in this table when the number
+ * itself cannot be reached by anybody: it is unallocated, malformed, carries a country code that
+ * does not exist, or is one Twilio will not connect a call to at all. Nothing we change makes the
+ * call land, so a permanent row is the truth.
+ *
+ *   13223 — the number is not a dialable number (format).
+ *   13224 — Twilio does not support calling this number; invalid or unsupported destination.
+ *   13225 — Twilio forbids calls to this number (high-risk / premium-rate ranges). Forbidden *to
+ *           everyone*, which is what puts it here and not beside 21216 below.
+ *   13226 — invalid country code; there is no such numbering plan.
+ *   21211 — invalid `To`. The same code, meaning the same thing, as on Messages (ADR-0310).
+ *   21214 — `To` cannot be reached: unallocated or out of service.
+ *   21217 — the number does not appear to be valid.
+ *
+ * Every value is `hard_bounce`, and that is a finding rather than a shortcut. There is no voice
+ * analogue of SMS 21610: a callee cannot reply STOP to a phone call, and inline TwiML cannot
+ * `<Gather>` a keypress by design (`voice-twilio.ts`), so **no voice code can ever mean
+ * `unsubscribe`** — consent on this channel is only ever expressible through preferences. Nor is
+ * there a voice complaint feedback loop, so nothing here is a `spam_complaint`: 13225 is the
+ * nearest thing and it is still Twilio declining, not a person complaining. The map keeps its shape
+ * for symmetry with `TWILIO_SUPPRESSION_REASONS` and so a future code with a different reason has
+ * somewhere to go.
+ */
+export const TWILIO_VOICE_SUPPRESSION_REASONS: Readonly<
+  Record<string, SuppressionReason>
+> = {
+  "13223": "hard_bounce",
+  "13224": "hard_bounce",
+  "13225": "hard_bounce",
+  "13226": "hard_bounce",
+  "21211": "hard_bounce",
+  "21214": "hard_bounce",
+  "21217": "hard_bounce",
+};
+
+/**
+ * Voice error codes that are a statement about **us**, or about the moment — named, rather than
+ * merely left out, so that leaving them out is legibly deliberate and nobody completes the table
+ * later by adding them.
+ *
+ *   13227 — geo permissions do not permit this call.
+ *   21215 — the account is not authorized to call this number's geography. The same fact as 13227
+ *           from the REST side; one console checkbox away from working.
+ *   21216 — the *account* is not allowed to call this number. Reads almost identically to 13225 in
+ *           English and sits on the opposite side of the boundary, which is the whole reason both
+ *           are spelled out: 13225 is Twilio refusing the number, 21216 is Twilio refusing us.
+ *   21219 — `To` is not a verified number on a trial account. Our account's restriction.
+ *   21210 — the `From` we presented is not a number we own. Not about the callee at all.
+ *   13214 — invalid caller id. Likewise ours.
+ *   20003 — authentication failed. Ours, and on every call.
+ *
+ * A transient code produces **no** suppression, not a short one. `soft_bounce_exceeded` would be
+ * the tempting shape, and it is wrong twice over: it means a *threshold was crossed*, and counting
+ * needs state this pure module does not have (the same reason an SES transient bounce suppresses
+ * nothing by default); and it is itself in `UNCONDITIONAL_SUPPRESSION_REASONS`, so a bounded row
+ * would still outrank a security alert for its whole window. Recording any verdict about the callee
+ * for a fault that was ours blames the wrong party, and it keeps blaming them after the
+ * configuration is fixed — the row does not know the geo permission was enabled an hour later.
+ *
+ * `BounceWebhookOptions.transientSuppressionHours` therefore has no effect on this source. It
+ * exists for a full mailbox, which is a real fact about a real destination; none of these is.
+ *
+ * The voice equivalent of a switched-off handset (SMS 30003, deliberately absent there too) is not
+ * a code at all here — it is `no-answer`, decided by status above.
+ */
+export const TWILIO_VOICE_TRANSIENT_CODES: ReadonlySet<string> = new Set([
+  "13227",
+  "21215",
+  "21216",
+  "21219",
+  "21210",
+  "13214",
+  "20003",
+]);
+
+export const TWILIO_ANSWERED_BY_VALUES = [
+  "human",
+  "machine_start",
+  "machine_end_beep",
+  "fax",
+  "unknown",
+] as const;
+export type TwilioAnsweredBy = (typeof TWILIO_ANSWERED_BY_VALUES)[number];
+
+/**
+ * What each machine-detection verdict is, and why **none** of them suppresses.
+ *
+ * `human` is the channel working. `machine_start` / `machine_end_beep` are too: `DetectMessageEnd`
+ * waits for the greeting precisely so the notice lands on the voicemail rather than being talked
+ * over, so a recorded notice is a delivery. `unknown` is the detector declining to answer, which is
+ * the same non-answer SES gives as `Undetermined` and is refused for the same reason.
+ *
+ * `fax` is the one that is genuinely a third fact, and the one worth stating a decision about: the
+ * number answers, it is reachable, and a spoken notification will never be heard on it. Calling it
+ * again is money spent to make a fax machine squeal. The temptation is a `hard_bounce` scoped to
+ * `voice_call` — and because the suppression table is unique per (tenant, **channel**, address),
+ * that would leave the same number's SMS and email untouched, so it is not even a wide row.
+ *
+ * **One `fax` verdict still suppresses nothing**, because `AnsweredBy` is a *detector's guess*, not
+ * a carrier's verdict. Machine detection decides from a few hundred milliseconds of audio; a false
+ * `fax` on an on-call engineer's handset would stop their voice notifications, and ADR-0302's rule is
+ * explicit that a safety record must never widen on an inference — suppressing an address that did
+ * not fail "is not a safer error than failing to suppress one that did; it is a silent outage."
+ *
+ * What changed is that the gap now has a floor under it. The verdict leaves here as a
+ * `VoiceReachabilityObservation` riding on the refusal: `fax_detected` for this one, `voice_answered`
+ * for the three above it, nothing for `unknown`. A caller holding durable state counts those —
+ * `fax-observation.ts` is the pure arithmetic and the threshold — and only a *run* of them, inside a
+ * window, with no answered call between, is ever evidence enough to plan a row. This module still
+ * writes nothing and still plans nothing from one sample; it has stopped throwing the sample away.
+ */
+export const VOICE_ANSWERED_BY_VERDICTS: Readonly<
+  Record<TwilioAnsweredBy, string>
+> = {
+  human: "a human answered; the call was delivered",
+  machine_start: "voicemail answered; the notice was recorded, which is a delivery",
+  machine_end_beep: "voicemail answered after its greeting; the notice was recorded",
+  fax: "a fax machine answered, so no spoken notice can land — reachable, but never by voice",
+  unknown: "machine detection reached no verdict, which is not evidence either way",
+};
+
+/*
+ * Twilio posts a callback **per call**, and would post more than one per call as the state advances
+ * — but `TwilioVoiceSender` asks for `completed` alone (ADR-0329), so one. It asked for four until
+ * then, which is how this comment came to say so: three of them are non-terminal, could never plan
+ * a suppression, answered `422`, and Twilio **retries non-2xx**. Does any of it need handling here?
+ *
+ * **No, and not anywhere else either.** Only `failed` with a code in the permanent table plans
+ * anything, and `failed` is terminal, so at most one callback per call can produce a suppression;
+ * every progress callback plans nothing, so replaying one is already a no-op. And a genuine
+ * re-delivery of the `failed` callback plans the *identical* record, because `suppressionIdFor`
+ * commits to (tenant, channel, normalised address, reason) and to nothing else — no `CallSid`, no
+ * timestamp — which the store then declines with `ON CONFLICT … DO NOTHING`, never an update, so
+ * `applied_at` does not move (ADR-0302).
+ *
+ * Putting the `CallSid` in the id would *destroy* that property rather than strengthen it: two
+ * calls to one dead number would plan two different ids for one fact, which is the opposite of
+ * what a dedup key is for, and the table's `UNIQUE (tenant_id, channel, recipient_address)` would
+ * then reject the second write as a conflict on a row the id no longer agrees with. The address is
+ * the identity of the thing being suppressed; the call that revealed it is provenance, and
+ * provenance belongs in `notes`.
+ */
+
+/**
+ * A Twilio **voice** status callback: form-encoded, like the messaging one, and sharing none of its
+ * field names.
+ *
+ * Nothing here is parsed by `JSON.parse`, so there is no exception to catch and "unparseable" has
+ * to be defined structurally: a body that does not carry a `CallStatus`, or carries one Twilio does
+ * not define, is refused as `payload_unrecognized`. That refusal — rather than
+ * `event_not_suppressible`, which asserts we understood the event and found nothing to do — is the
+ * fail-closed half of this module applied to its own input. The webhook verified the platform's
+ * HMAC before this function saw the bytes, so a body that then fails to parse is not a forgery: it
+ * is a Twilio change or a bug on our side, and reporting "nothing to suppress" for one is how a
+ * number that has stopped accepting calls keeps being called forever.
+ *
+ * No refusal reason quotes the `To`. A voice callback's destination is an E.164 telephone number,
+ * which is pii under this repo's classification rules, and `bounce-webhook-routes.ts` forwards
+ * these strings to `onRefusal`; the number's *length* is as much as any of them says.
+ */
+export function recognizeTwilioVoiceStatusCallback(
+  body: string,
+): TwilioRecognition {
+  const params = new URLSearchParams(body);
+  const status = params.get("CallStatus");
+  if (status === null || status.length === 0) {
+    // The one misconfiguration that will actually happen: `TWILIO_VOICE_STATUS_CALLBACK_URL`
+    // pointed at the `/twilio` path segment. Worth naming, because the symptom is otherwise a
+    // silent 400 on every call with no hint of which end is wrong.
+    const messaging =
+      params.get("MessageStatus") ?? params.get("SmsStatus");
+    if (messaging !== null) {
+      return {
+        ok: false,
+        refusal: "payload_unrecognized",
+        reason:
+          "body is a messaging status callback, not a voice one: it was posted to the twilio_voice source",
+      };
+    }
+    return {
+      ok: false,
+      refusal: "payload_unrecognized",
+      reason: "status callback carries no CallStatus",
+    };
+  }
+  if (!TWILIO_CALL_CALLBACK_STATUSES.includes(status)) {
+    return {
+      ok: false,
+      refusal: "payload_unrecognized",
+      reason: `CallStatus ${status} is not a status Twilio defines`,
+    };
+  }
+
+  // Before the error code, always: see VOICE_NEVER_SUPPRESSIBLE_STATUSES.
+  if (VOICE_NEVER_SUPPRESSIBLE_STATUSES.has(status)) {
+    return {
+      ok: false,
+      refusal: "event_not_suppressible",
+      reason: `CallStatus ${status} says the line was reachable and nobody answered, which is never a suppression`,
+    };
+  }
+  if (status === "canceled") {
+    // Somebody or something cancelled this call before it connected. That is a fact about us.
+    return {
+      ok: false,
+      refusal: "event_not_suppressible",
+      reason: "CallStatus canceled is our own cancellation, not a verdict on the number",
+    };
+  }
+  if (VOICE_PROGRESS_STATUSES.has(status) || status === "completed") {
+    const answeredBy = params.get("AnsweredBy");
+    const known = answeredBy !== null && isTwilioAnsweredBy(answeredBy);
+    const verdict = known
+      ? `; AnsweredBy=${answeredBy}: ${VOICE_ANSWERED_BY_VERDICTS[answeredBy]}`
+      : "";
+    return {
+      ok: false,
+      refusal: "event_not_suppressible",
+      reason: `CallStatus ${status} reports no failure${verdict}`,
+      ...(known
+        ? observationFor(answeredBy, params.get("To"), params.get("CallSid"))
+        : {}),
+    };
+  }
+
+  // `failed` is the only status left, and the only one that carries an ErrorCode.
+  const to = params.get("To");
+  if (to === null || to.length === 0 || to.length > MAX_RECIPIENT_ADDRESS_LENGTH) {
+    return {
+      ok: false,
+      refusal: "recipient_missing",
+      reason: "status callback carries no usable To",
+    };
+  }
+  if (!isE164(to)) {
+    /*
+     * Every code in `TWILIO_VOICE_SUPPRESSION_REASONS` is a statement about a *telephone number* —
+     * unallocated, malformed, blocked, bad country code — so applying one to a destination that is
+     * not a telephone number is incoherent, and refusing costs a suppression there was never
+     * evidence for. It also closes the live defect `voice-twilio.ts` guards the other end of: the
+     * serving recipient directory hands `voice_call` the user's email address today, and a
+     * permanent row recorded against that would be our own misconfiguration written down as an
+     * unconditional verdict about the callee. A `client:` or `sip:` destination lands here too,
+     * correctly: none of these codes describes a SIP endpoint.
+     */
+    return {
+      ok: false,
+      refusal: "recipient_missing",
+      reason: `To (${String(to.length)} chars) is not an E.164 telephone number`,
+    };
+  }
+  const code = params.get("ErrorCode");
+  if (code === null || code.length === 0) {
+    return {
+      ok: false,
+      refusal: "event_not_suppressible",
+      reason: "CallStatus failed carries no ErrorCode to attribute it to",
+    };
+  }
+  if (TWILIO_VOICE_TRANSIENT_CODES.has(code)) {
+    return {
+      ok: false,
+      refusal: "event_not_suppressible",
+      reason: `Twilio voice error code ${code} describes our own configuration, not the number`,
+    };
+  }
+  const reason = TWILIO_VOICE_SUPPRESSION_REASONS[code];
+  if (reason === undefined) {
+    return {
+      ok: false,
+      refusal: "event_not_suppressible",
+      reason: `Twilio voice error code ${code} is not a known suppression signal`,
+    };
+  }
+  return {
+    ok: true,
+    reason,
+    event: {
+      source: "twilio_voice",
+      channel: "voice_call",
+      kind: "voice_failure",
+      addresses: [to],
+      providerMessageId: params.get("CallSid"),
+      providerCode: code,
+    },
+  };
+}
+
+function isTwilioAnsweredBy(value: string): value is TwilioAnsweredBy {
+  return (TWILIO_ANSWERED_BY_VALUES as readonly string[]).includes(value);
+}
+
+/**
+ * Which machine-detection verdicts the counter is allowed to hear, and as what.
+ *
+ * A **total** map over `TwilioAnsweredBy`, so a sixth verdict Twilio invents is a compile error
+ * rather than a value that falls into whichever branch an `if`-chain ended on — the shape ADR-0330
+ * used for `DESIGN_SHAPE_RETRIABILITY`, and for the same reason: the two mistakes here are not
+ * symmetric. A new verdict silently read as `fax_detected` walks a working number toward a
+ * suppression; read as `null` it is ignored, which is what "we have not been told what this means"
+ * should cost.
+ *
+ * `unknown` is `null` and not a third signal. The detector declining to answer is the same non-answer
+ * SES gives as `Undetermined`, and the three ways to treat it are: advance the count (asserting a
+ * fax from silence), reset it (discarding evidence that was actually collected), or leave it
+ * (neither). The third is the only one that does not invent a fact.
+ */
+const VOICE_REACHABILITY_BY_VERDICT: Readonly<
+  Record<TwilioAnsweredBy, VoiceReachabilitySignal | null>
+> = {
+  human: "voice_answered",
+  machine_start: "voice_answered",
+  machine_end_beep: "voice_answered",
+  fax: "fax_detected",
+  unknown: null,
+};
+
+/**
+ * Builds the observation a known `AnsweredBy` carries, or nothing.
+ *
+ * It re-applies both of the `failed` branch's guards on purpose. The `isE164` check is there for the
+ * identical live reason — the serving recipient directory hands `voice_call` the user's email
+ * address today, and a `fax` verdict recorded against one would eventually cross a threshold and
+ * write a permanent row about a mailbox. The `CallSid` requirement is the counter's only dedup key;
+ * see `VoiceReachabilityObservation`.
+ *
+ * Returned as a spreadable fragment rather than `T | null` so the single call site cannot forget the
+ * conditional spread and attach `observation: undefined` to a result whose field is optional.
+ */
+function observationFor(
+  verdict: TwilioAnsweredBy,
+  to: string | null,
+  callSid: string | null,
+): { readonly observation?: VoiceReachabilityObservation } {
+  const signal = VOICE_REACHABILITY_BY_VERDICT[verdict];
+  if (signal === null) return {};
+  if (to === null || to.length === 0 || to.length > MAX_RECIPIENT_ADDRESS_LENGTH) return {};
+  if (callSid === null || callSid.length === 0) return {};
+  // Normalised *before* the E.164 check, so the string checked is the string carried and the string
+  // a suppression is eventually keyed on. (The `failed` branch below checks the raw `To` instead,
+  // which is tighter than it needs to be — a punctuated number is refused — but fails closed, so it
+  // is left as it is rather than changed here.)
+  const address = normalizeRecipientAddress("voice_call", to);
+  if (!isE164(address)) return {};
+  return { observation: { signal, channel: "voice_call", address, callSid } };
 }
 
 // ---------------------------------------------------------------------------
@@ -664,33 +1205,55 @@ export function handleBounceWebhook(
     return refuse("body_unparseable", "body is empty");
   }
 
-  if (request.source === "ses") {
-    const recognized = recognizeSesEvent(request.body);
-    if (!recognized.ok) return refuse(recognized.refusal, recognized.reason);
-    const mapped = sesReasonFor(
-      recognized.event,
-      options.transientSuppressionHours,
-    );
-    if (mapped === null) {
-      return refuse(
-        "event_not_suppressible",
-        `${recognized.event.kind} does not suppress under this configuration`,
+  // Exhaustive over `BounceWebhookSource`, deliberately: this was an `if (ses) … else twilio`, so
+  // a fourth source would have been parsed as a Twilio *messaging* callback by default — refused,
+  // but refused for the wrong reason, and only by luck.
+  switch (request.source) {
+    case "ses": {
+      const recognized = recognizeSesEvent(request.body);
+      if (!recognized.ok) return refuse(recognized.refusal, recognized.reason);
+      const mapped = sesReasonFor(
+        recognized.event,
+        options.transientSuppressionHours,
       );
+      if (mapped === null) {
+        return refuse(
+          "event_not_suppressible",
+          `${recognized.event.kind} does not suppress under this configuration`,
+        );
+      }
+      const expiresAt =
+        mapped.reason === "soft_bounce_exceeded" &&
+        options.transientSuppressionHours !== undefined
+          ? new Date(
+              request.now.getTime() +
+                options.transientSuppressionHours * 3_600_000,
+            )
+          : mapped.expiresAt;
+      return planAll(request, recognized.event, mapped.reason, expiresAt);
     }
-    const expiresAt =
-      mapped.reason === "soft_bounce_exceeded" &&
-      options.transientSuppressionHours !== undefined
-        ? new Date(
-            request.now.getTime() +
-              options.transientSuppressionHours * 3_600_000,
-          )
-        : mapped.expiresAt;
-    return planAll(request, recognized.event, mapped.reason, expiresAt);
+    case "twilio": {
+      const recognized = recognizeTwilioStatusCallback(request.body);
+      if (!recognized.ok) return refuse(recognized.refusal, recognized.reason);
+      return planAll(request, recognized.event, recognized.reason, null);
+    }
+    case "twilio_voice": {
+      /*
+       * `expiresAt` is null unconditionally, and `transientSuppressionHours` is not consulted.
+       * Every reason this source can produce is permanent (`planSuppression` would force null
+       * anyway), and the codes a bounded window would otherwise fit describe our own configuration
+       * rather than a destination — see `TWILIO_VOICE_TRANSIENT_CODES`.
+       */
+      const recognized = recognizeTwilioVoiceStatusCallback(request.body);
+      if (!recognized.ok) {
+        // The one refusal that carries something out with it. Everything else about the refusal is
+        // unchanged — the caller still sees `accepted: false` and still writes no suppression from
+        // it — so a deployment that counts nothing behaves exactly as it did.
+        return refuse(recognized.refusal, recognized.reason, recognized.observation);
+      }
+      return planAll(request, recognized.event, recognized.reason, null);
+    }
   }
-
-  const recognized = recognizeTwilioStatusCallback(request.body);
-  if (!recognized.ok) return refuse(recognized.refusal, recognized.reason);
-  return planAll(request, recognized.event, recognized.reason, null);
 }
 
 function planAll(

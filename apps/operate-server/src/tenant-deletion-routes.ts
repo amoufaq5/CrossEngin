@@ -2,6 +2,10 @@ import type { PathSegment, ResolvedPrincipal, RouteDefinition } from "@crossengi
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
 import { z } from "zod";
+import {
+  DeletionAttestationSchema,
+  type DeletionAttestation,
+} from "@crossengin/tenant-lifecycle";
 
 /**
  * `POST /v1/platform/tenants/{id}/delete` and `GET /v1/platform/tenants/{id}/tombstones` — the route
@@ -44,7 +48,17 @@ const TOMBSTONE_ID_RE = /^tomb_[A-Za-z0-9_-]{12,40}$/;
 export const DELETABLE_TOMBSTONE_KINDS = ["tenant_deletion", "data_subject_erasure"] as const;
 export type DeletableTombstoneKind = (typeof DELETABLE_TOMBSTONE_KINDS)[number];
 
-/** Structural mirror of a `DeletionAttestation`, so the route layer imports no contracts package. */
+/**
+ * Structural mirror of a `DeletionAttestation`, kept for the **read** side only (ADR-0329).
+ *
+ * The route used to parse an incoming attestation against a copy of this — `subsystem: string`,
+ * `outcome: string` — and the request body is now parsed by `DeletionAttestationSchema` itself,
+ * because a loose mirror on the *write* side accepts a typo and turns a bad request into an
+ * assembly refusal naming a subsystem that does not exist. On the read side the looseness is
+ * harmless and deliberate: `tombstonesFor` returns whatever is stored, and a stored row that no
+ * longer satisfies the contract is a finding for the audit path (ADR-0323), not something this
+ * route should refuse to display.
+ */
 export interface AttestationLike {
   readonly subsystem: string;
   readonly outcome: string;
@@ -66,6 +80,30 @@ export interface StoredTombstoneLike {
     readonly proofSha256: string;
     readonly anchors: readonly { readonly kind: string; readonly reference: string }[];
     readonly retainedReason?: string;
+    /**
+     * What a receipt past v1 needs to be **independently verifiable**, which is the whole point of
+     * ADR-0320's receipt: a bare "deleted" would be ADR-0317's defect in response form.
+     *
+     * Without these a caller holding the receipt cannot recompute `contentManifestSha256` at all —
+     * absent `proofVersion` they cannot even choose the domain tag, and absent the declaration and
+     * the obligations they cannot reconstruct v2 or v3 bytes. The receipt regressed at v2 and was one
+     * field further away at v3. It also shipped `retainedReason` without `retainedDataReference`, so
+     * it said *why* data survived and not *where*.
+     *
+     * `recordStorage` is the v4 field (ADR-0351), added in the same increment as the version for the
+     * reason the sentence above records twice: this receipt has fallen behind the bytes at every
+     * previous tag. A v4 receipt without it is a receipt whose holder can read `proofVersion: "v4"`,
+     * select the right domain tag, and still not reconstruct the body.
+     */
+    readonly proofVersion?: string;
+    readonly capabilityDeclaration?: Readonly<Record<string, string>>;
+    readonly retainedObligations?: readonly string[];
+    readonly retainedDataReference?: string;
+    readonly recordStorage?: {
+      readonly model: string;
+      readonly schema: string | null;
+      readonly relationCount: number;
+    };
   };
   readonly attestations: readonly AttestationLike[];
   readonly chainEntryHash: string | null;
@@ -83,6 +121,59 @@ export type DeletionOutcomeLike =
         readonly storageBytes: number;
         readonly alreadyAbsent: boolean;
       };
+      /**
+       * The second performed subsystem (ADR-0329), and the reason this is a separate field rather
+       * than folded into `erased`: the two are different claims with different scopes — a tenant's
+       * own schema, and the tenant-scoped rows in the platform's shared `meta` tables — and the
+       * tombstone carries them as two attestations. Summing them into one figure would make the
+       * receipt unable to say which erasure a number came from, which is the whole point of
+       * composing a scope from per-subsystem reports.
+       */
+      readonly erasedSharedTables: {
+        readonly schema: string;
+        readonly tables: readonly string[];
+        readonly rowCount: number;
+        readonly storageBytes: number;
+        /** Every erasable table, so a reader can see the coverage the scope does not carry. */
+        readonly examinedTables: readonly string[];
+        /** Every table the retention set deliberately left in place. */
+        readonly retainedTables: readonly string[];
+        /**
+         * What is lawfully still there, and why (ADR-0330).
+         *
+         * `null` when nothing was retained — never an empty list, so "nothing to claim" cannot
+         * collapse into the silence the attestation schema refuses. It deliberately carries **no
+         * count**: a figure on the retained side could be read as part of the erasure, and
+         * ADR-0317's whole subject is numbers that mean something other than what a reader assumes.
+         *
+         * This is the sentence an operator sends in answer to an Article 17 request: everything was
+         * destroyed except these rows, which are held under this obligation.
+         */
+        readonly statutoryRetained: {
+          readonly obligations: readonly string[];
+          readonly dataReference: string;
+        } | null;
+      };
+      /**
+       * The `… -> deleted` transition as the pipeline recorded it, or `null` when the deployment
+       * supplied no lifecycle store.
+       *
+       * A **required key with a nullable value**, not an optional field, which is the whole point:
+       * `meta.tenant_lifecycle_events`' own protection note is that *"without it nothing in the
+       * database distinguishes a tenant that was deleted from one that never existed"*, so an
+       * absent trail has to be a thing this type can say rather than a field a mirror can forget.
+       *
+       * `transitionLegal` is **reported, never enforced**, and it is `false` here: this route
+       * deletes straight from `active`, because ADR-0334 moved the tenant to `pending_deletion` on
+       * the *asynchronous* route's verify only. Refusing would drop the only record of a deletion
+       * that happened, and recording it silently would hide the gap — so the flag is on the receipt.
+       */
+      readonly lifecycleEvent: {
+        readonly id: string;
+        readonly fromState: string;
+        readonly toState: string;
+        readonly transitionLegal: boolean;
+      } | null;
     }
   | {
       readonly ok: false;
@@ -97,8 +188,9 @@ export interface TenantDeleterLike {
     readonly kind: DeletableTombstoneKind;
     readonly executedBy: string;
     readonly approvedBy: string;
-    readonly requiredSubsystems: readonly string[];
-    readonly attestations: readonly AttestationLike[];
+    // The contract's own type, not the mirror: this is the write side, and the pipeline will
+    // require exactly this (ADR-0329).
+    readonly attestations: readonly DeletionAttestation[];
     readonly relatedDeletionRequestId?: string;
   }): Promise<DeletionOutcomeLike>;
   /** Retires the tenant row. Called only after the pipeline has committed. */
@@ -154,26 +246,25 @@ export const DeleteTenantInputSchema = z
     /** An irreversible act should not be one mistyped path segment away. */
     confirmTenantId: z.string().regex(UUID_RE),
     kind: z.enum(DELETABLE_TOMBSTONE_KINDS).default("tenant_deletion"),
-    /**
-     * Subsystems beyond `tenant_schema`, which the pipeline always covers. Naming one obliges it to
-     * attest: its silence refuses the deletion rather than being read as nothing to delete (ADR-0317).
+    /*
+     * `requiredSubsystems` used to stand here, read from this body with `[]` as its default — so a
+     * remote caller chose how much of the deployment the Article 17 proof covered, and omitting the
+     * field covered nothing (ADR-0328). What a deployment holds is a property of the deployment, not
+     * of a request, exactly as ADR-0321 found for the Article 12(3) deadline: it is declared once
+     * with `--deletion-capabilities` and the route cannot narrow it.
      */
-    requiredSubsystems: z.array(z.string().min(1)).default([]),
-    attestations: z
-      .array(
-        z
-          .object({
-            subsystem: z.string().min(1),
-            outcome: z.string().min(1),
-            scope: z.record(z.unknown()).optional(),
-            retentionObligation: z.string().min(1).optional(),
-            retainedDataReference: z.string().min(1).optional(),
-            attestedBy: z.string().min(1),
-            attestedAt: z.string().datetime({ offset: true }),
-          })
-          .strict(),
-      )
-      .default([]),
+    /**
+     * Parsed by the **real** contract, not by a loose mirror of it (ADR-0329).
+     *
+     * This was `subsystem: z.string().min(1)` and `outcome: z.string().min(1)`, which accepts
+     * `{subsystem: "objekt_storage", outcome: "erazed"}` — and `node.ts` then cast the array to
+     * `DeletionAttestation[]`. It failed closed, because an unknown subsystem is never in the
+     * required set and so never satisfies one: the assembly refused. But it refused by naming a
+     * subsystem that does not exist, so a typo in a request body read as a platform bug, and a
+     * misspelled *outcome* on a real subsystem read as a missing attestation. `DeletionAttestationSchema`
+     * answers both at the edge, as a 400 naming the field — which is what the caller can act on.
+     */
+    attestations: z.array(DeletionAttestationSchema).default([]),
     relatedDeletionRequestId: z.string().min(1).optional(),
   })
   .strict();
@@ -212,6 +303,10 @@ export function newTombstoneId(uuid: string): string {
 /** The receipt a caller needs to establish later what was destroyed. */
 export function tombstoneReceipt(stored: StoredTombstoneLike): Record<string, unknown> {
   return {
+    // Read from the record, never inferred from whether a claim is attached: an inference would read
+    // a *deleted* declaration as an older record, which is the tamper that covers its own tracks
+    // (ADR-0329). `v1` is the honest default for a row written before the field existed.
+    proofVersion: stored.record.proofVersion ?? "v1",
     tombstoneId: stored.record.id,
     kind: stored.record.kind,
     deletedAt: stored.record.deletedAt,
@@ -225,7 +320,50 @@ export function tombstoneReceipt(stored: StoredTombstoneLike): Record<string, un
     ...(stored.record.retainedReason !== undefined
       ? { retainedReason: stored.record.retainedReason }
       : {}),
+    ...(stored.record.capabilityDeclaration !== undefined
+      ? { capabilityDeclaration: stored.record.capabilityDeclaration }
+      : {}),
+    // `[]` is the signed claim that nothing was kept, so this key is emitted whenever the bytes
+    // cover a claim at all. Omitting it on an empty list would be the pre-v3 "cannot say" again, in
+    // a new place — and it is the one distinction v3 exists to make.
+    ...(stored.record.retainedObligations !== undefined
+      ? { retainedObligations: stored.record.retainedObligations }
+      : {}),
+    // The same rule for the v4 field, which has the same empty-looking case: a `typed_tables`
+    // declaration counting zero is the claim, so a key present only when the count is non-zero would
+    // hide exactly what the version exists to express.
+    ...(stored.record.recordStorage !== undefined
+      ? { recordStorage: stored.record.recordStorage }
+      : {}),
+    ...(stored.record.retainedDataReference !== undefined
+      ? { retainedDataReference: stored.record.retainedDataReference }
+      : {}),
   };
+}
+
+/**
+ * The lifecycle trail's half of the receipt, which **always has a `recorded` flag**.
+ *
+ * Emitting the pipeline's `null` straight through would make "this deployment records no trail" and
+ * "this response predates the field" the same bytes to a caller, and that is the exact confusion the
+ * trail exists to end: a deleted tenant and one that never existed look identical without it. So the
+ * absence is stated rather than left as a missing key.
+ */
+export function lifecycleReceipt(
+  event: {
+    readonly id: string;
+    readonly fromState: string;
+    readonly toState: string;
+    readonly transitionLegal: boolean;
+  } | null,
+): Record<string, unknown> {
+  if (event === null) {
+    return {
+      recorded: false,
+      detail: "this deployment records no tenant lifecycle trail; the deletion is proven by the tombstone alone",
+    };
+  }
+  return { recorded: true, ...event };
 }
 
 function buildDeleteHandler(ctx: TenantDeletionRoutesContext): Handler {
@@ -279,7 +417,6 @@ function buildDeleteHandler(ctx: TenantDeletionRoutesContext): Handler {
         kind: parsed.data.kind,
         executedBy,
         approvedBy: parsed.data.approvedBy,
-        requiredSubsystems: parsed.data.requiredSubsystems,
         attestations: parsed.data.attestations,
         ...(parsed.data.relatedDeletionRequestId !== undefined
           ? { relatedDeletionRequestId: parsed.data.relatedDeletionRequestId }
@@ -343,7 +480,12 @@ function buildDeleteHandler(ctx: TenantDeletionRoutesContext): Handler {
       operation: TENANT_DELETED_OPERATION,
       tombstoneId: outcome.stored.record.id,
       chainEntryHash: outcome.stored.chainEntryHash,
-      rowCount: outcome.erased.rowCount,
+      // Both erasures (ADR-0329). The audit row has one figure and it means "rows this deletion
+      // destroyed", so reporting only the schema half understated it by every tenant-scoped row in
+      // the platform's own tables. The per-subsystem breakdown is not lost — it is in the
+      // tombstone's attestations, which is where a claim about *which* subsystem destroyed what
+      // belongs; this number is the total.
+      rowCount: outcome.erased.rowCount + outcome.erasedSharedTables.rowCount,
       refusals: [],
       tenantRetired: retired,
       at,
@@ -353,7 +495,9 @@ function buildDeleteHandler(ctx: TenantDeletionRoutesContext): Handler {
       tenantId,
       deleted: true,
       tenantRetired: retired,
+      lifecycleEvent: lifecycleReceipt(outcome.lifecycleEvent),
       erased: outcome.erased,
+      erasedSharedTables: outcome.erasedSharedTables,
       // The receipt, not a bare "deleted": it is the only thing that can later establish what was
       // destroyed, and a response without it would be ADR-0317's defect in response form.
       tombstone: tombstoneReceipt(outcome.stored),

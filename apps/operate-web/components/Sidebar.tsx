@@ -6,7 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { FINANCE_ROLES } from "@/lib/aging";
 import { useInbox } from "@/lib/inbox";
-import { listNotifications, recentDecisionCount } from "@/lib/notifications";
+import { fetchUnreadCount, listNotifications, recentDecisionCount } from "@/lib/notifications";
 import { accessibleEntities, entityByName, featureEnabled, groupByModule, roleLabel, useSchema } from "@/lib/schema";
 
 export function Sidebar() {
@@ -28,23 +28,36 @@ export function Sidebar() {
   const searching = q.trim() !== "";
   const primaryRole = schema?.viewer?.primaryRole;
   const viewerRoleList = schema?.viewer?.roles;
-  // No viewer (dev) → show; otherwise gate on holding a finance role.
-  const showReports = viewerRoleList === undefined || viewerRoleList.some((r) => FINANCE_ROLES.includes(r));
+  // Gate on holding a finance role, and an *unresolved* viewer is not a pass. The old
+  // `viewerRoleList === undefined ||` arm was labelled "no viewer (dev) → show", but
+  // `roles === undefined` is exactly the unauthenticated state — so the one browser holding no
+  // session at all was the one shown the finance navigation. Absent roles hide.
+  const showReports = viewerRoleList !== undefined && viewerRoleList.some((r) => FINANCE_ROLES.includes(r));
   const hasWht = entityByName(schema, "WhtCertificate") !== undefined;
   const inboxEnabled = featureEnabled(schema, "approvals_inbox", true);
   const { items: inboxItems } = useInbox(inboxEnabled ? schema : null);
   const inboxCount = inboxItems.length;
 
-  // The notification contract carries no per-user read state, so "unacknowledged"
-  // is approximated by recency: design-review decisions from the last 7 days.
+  // The badge asks "how many notices have you not seen", and the server can finally answer it:
+  // per-user read state (rows + a watermark) scoped to the calling credential. The recency
+  // approximation stays as the fallback and is not dead code — a deployment that has not mounted
+  // the read-state routes answers 404, and a nav badge must degrade rather than disappear.
+  //
+  // The two figures differ in subject: the server counts every unread in-app notice, which is a
+  // superset of the review decisions recency was counting. That is the question the badge was
+  // approximating, so the superset is the better answer, not a widening.
   const [decisionCount, setDecisionCount] = useState(0);
 
   useEffect(() => {
     let alive = true;
-    listNotifications({ channel: "in_app", limit: 50 })
-      .then((page) => alive && setDecisionCount(recentDecisionCount(page.data)))
-      // A failed fetch renders no badge — never an error in the nav.
-      .catch(() => alive && setDecisionCount(0));
+    fetchUnreadCount("in_app")
+      .then((count) => alive && setDecisionCount(count.unread))
+      .catch(() =>
+        listNotifications({ channel: "in_app", limit: 50 })
+          .then((page) => alive && setDecisionCount(recentDecisionCount(page.data)))
+          // A failed fetch renders no badge — never an error in the nav.
+          .catch(() => alive && setDecisionCount(0)),
+      );
     return () => {
       alive = false;
     };

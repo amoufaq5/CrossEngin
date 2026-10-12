@@ -150,6 +150,45 @@ export const fireTimer = (
   };
 };
 
+/**
+ * Arms the next occurrence of a **recurring** timer: one row, one timer id, `fireCount` advancing
+ * and `fireAt` moving to the occurrence `nextFireAt` already named.
+ *
+ * `TIMER_TRANSITIONS.fired` is `[]` and stays that way, so `canTransitionTimer("fired",
+ * "scheduled")` is false and this does not go through it. That is not an inconsistency of the
+ * ADR-0307 kind — it is the two axes kept apart. **Status** says whether this occurrence is over;
+ * **kind** says whether there is another one. Three of the four kinds fire exactly once, so an edge
+ * on the status map would be false for three quarters of its domain and would quietly let a
+ * `relative_after` timer be re-armed; a kind-gated door cannot.
+ *
+ * `scheduledAt` moves to `now` because `WorkflowTimerSchema`'s only invariant on it is
+ * `fireAt > scheduledAt` — it is the start of *this* wait, not a creation stamp, and the full arming
+ * history is in the log's `timer_scheduled` events either way. `firedAt` is kept: "when did this
+ * last fire" is still true, and it is what tells a re-armed row from one that has never fired.
+ */
+export const rearmTimer = (
+  timer: WorkflowTimer,
+  nextFireAt: string,
+  now: Date,
+): WorkflowTimer => {
+  if (timer.kind !== "cron_schedule") {
+    throw new Error(`cannot re-arm a ${timer.kind} timer: only cron_schedule recurs`);
+  }
+  if (timer.status !== "fired") {
+    throw new Error(`cannot re-arm a timer in status ${timer.status}: re-arming follows a fire`);
+  }
+  if (Date.parse(nextFireAt) <= now.getTime()) {
+    throw new Error("cannot re-arm a timer into the past");
+  }
+  return {
+    ...timer,
+    status: "scheduled",
+    scheduledAt: now.toISOString(),
+    fireAt: nextFireAt,
+    nextFireAt: null,
+  };
+};
+
 export const cancelTimer = (
   timer: WorkflowTimer,
   reason: string,

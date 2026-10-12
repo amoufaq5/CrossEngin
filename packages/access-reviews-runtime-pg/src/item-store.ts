@@ -3,7 +3,7 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 
 import { CampaignUuidResolver, ItemUuidResolver } from "./id-mapping.js";
 import { rowToItem, type ItemRow } from "./records.js";
-import { withTenantContext } from "./tenant-context.js";
+import { tenantScopePredicate, withTenantContext } from "./tenant-context.js";
 
 const SCHEMA = "meta";
 const TABLE = "access_review_items";
@@ -109,14 +109,23 @@ export class PostgresAccessReviewItemStore {
     });
   }
 
+  /**
+   * Both sides of the join carry the predicate, which is what a non-owner is shown: RLS applies each
+   * table's own isolation policy to each table in a join. Pinning only the item would admit one
+   * whose campaign belongs to another tenant — a corruption no finding in this package can see.
+   */
   async listByCampaign(
     tenantId: string,
     campaignId: string,
   ): Promise<readonly AccessReviewItem[]> {
     return withTenantContext(this.conn, tenantId, async (tx) => {
       const result = await tx.query<ItemRow>(
-        `${SELECT_JOINED} WHERE c.campaign_id = $1 ORDER BY i.created_at ASC, i.item_id ASC`,
-        [campaignId],
+        `${SELECT_JOINED}
+          WHERE c.campaign_id = $1
+            AND ${tenantScopePredicate("i", 2)}
+            AND ${tenantScopePredicate("c", 2)}
+          ORDER BY i.created_at ASC, i.item_id ASC`,
+        [campaignId, tenantId],
       );
       return result.rows.map(rowToItem);
     });

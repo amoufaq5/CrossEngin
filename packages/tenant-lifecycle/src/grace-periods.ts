@@ -38,9 +38,16 @@ const GRACE_MAX_DAYS: Readonly<Record<GraceKind, number>> = Object.freeze({
   appeal_window: 60,
 });
 
+/**
+ * `billing_grace` reads `active` rather than `past_due` since ADR-0334: a tenant in arrears is
+ * still an `active` tenant, and the arrears are a *subscription* status with its own transition map
+ * in `@crossengin/billing`. Two of this map's five outputs used to be states
+ * `meta.tenants.status`' CHECK could not hold, so a `billing_grace` period named a `fromState` no
+ * tenant row could ever be in.
+ */
 export const GRACE_FROM_STATE: Readonly<Record<GraceKind, TenantLifecycleState>> =
   Object.freeze({
-    billing_grace: "past_due",
+    billing_grace: "active",
     suspension_grace: "suspended",
     archive_grace: "archived",
     deletion_grace: "pending_deletion",

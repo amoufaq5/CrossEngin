@@ -205,6 +205,26 @@ export function pushPayloadViolations(input: {
 
 export const PUSH_PAYLOAD_REFUSED_ERROR_CODE = "push_payload_not_reference_only";
 
+/** A permanently-failed access-token mint: the service account is wrong, not the network. */
+export const FCM_TOKEN_REFUSED_ERROR_CODE = "fcm_token_not_grantable";
+
+/**
+ * Whether a thrown token-mint failure says it is **not** worth retrying (ADR-0327).
+ *
+ * Checked structurally rather than against a class, so this file stays free of the token-minting
+ * module: ADR-0310 made `FcmAccessTokenProvider` a seam precisely because a private key, a second
+ * endpoint and a refresh cache do not belong in a pure FCM client, and importing that module back
+ * for an `instanceof` would undo the separation to learn one boolean. The contract is "a provider
+ * may report retryability"; a provider that reports nothing is treated as retryable, which is the
+ * behaviour this had before — a transport blip must not become a dropped notification.
+ */
+function reportsNonRetryable(err: unknown): boolean {
+  if (typeof err !== "object" || err === null || !("isRetryable" in err)) return false;
+  const reporting = err as { readonly isRetryable: unknown };
+  if (typeof reporting.isRetryable !== "function") return false;
+  return (reporting.isRetryable as () => unknown)() === false;
+}
+
 // ---------------------------------------------------------------------------
 // The recipient
 // ---------------------------------------------------------------------------
@@ -297,6 +317,21 @@ function fcmCode(code: string): string {
  * device in a deployment over an environment variable is the error worth avoiding. Without a code it
  * falls through to `dropped`: terminal for this attempt, but no suppression.
  */
+/**
+ * Whether FCM refused the *credential* we presented, rather than the message (ADR-0327).
+ *
+ * One definition, two readers: `classifyFcmFailure` turns it into an outcome, and `send` uses it to
+ * discard the cached access token. Deriving it from the resulting `errorCode` instead was wrong and
+ * a test caught it — the code carries the provider's own status suffix, so `PERMISSION_DENIED`
+ * yields `fcm_permission_denied` and a string comparison against `fcm_not_authorized` silently
+ * matched none of the suffixed cases, which is every case FCM actually names.
+ */
+export function fcmRefusedTheCredential(status: number, code: string | null): boolean {
+  return (
+    status === 401 || status === 403 || (code !== null && FCM_CONFIGURATION_CODES.includes(code))
+  );
+}
+
 export function classifyFcmFailure(
   status: number,
   code: string | null,
@@ -311,11 +346,7 @@ export function classifyFcmFailure(
   if (code !== null && FCM_PERMANENT_RECIPIENT_CODES.includes(code)) {
     return { outcome: "bounced_hard", errorCode: fcmCode(code) };
   }
-  if (
-    (code !== null && FCM_CONFIGURATION_CODES.includes(code)) ||
-    status === 401 ||
-    status === 403
-  ) {
+  if (fcmRefusedTheCredential(status, code)) {
     return { outcome: "failed", errorCode: suffix ?? "fcm_not_authorized" };
   }
   return { outcome: "dropped", errorCode: suffix ?? "fcm_rejected" };
@@ -388,6 +419,19 @@ export interface FcmPushSenderOptions {
   /** Overridden for an egress proxy, or by a test. */
   readonly baseUrl?: string;
   readonly compose?: PushComposer;
+  /**
+   * Discards the cached access token, called when FCM itself says the credential is not accepted
+   * (ADR-0327).
+   *
+   * A token provider caches until shortly before the token's stated expiry, so a key revoked
+   * mid-lifetime leaves every send answering 401 for up to the rest of that hour — and the retry
+   * budget is spent re-presenting the same dead token. One call on a `fcm_not_authorized` and the
+   * next send mints a fresh one, which either works (the key was rotated) or fails at the token
+   * endpoint, where the failure is *diagnosable* instead of looking like a delivery problem.
+   *
+   * Optional, and a no-op when omitted: a provider with no cache has nothing to discard.
+   */
+  readonly invalidateToken?: () => void;
 }
 
 export class FcmPushSender implements ChannelSender {
@@ -396,6 +440,7 @@ export class FcmPushSender implements ChannelSender {
 
   private readonly projectId: string;
   private readonly accessToken: FcmAccessTokenProvider;
+  private readonly invalidateToken: (() => void) | undefined;
   private readonly notices: readonly PushNotice[];
   private readonly noticeLocales: readonly string[];
   private readonly fetchImpl: FetchLike;
@@ -429,6 +474,7 @@ export class FcmPushSender implements ChannelSender {
     }
     this.projectId = opts.projectId;
     this.accessToken = opts.accessToken;
+    this.invalidateToken = opts.invalidateToken;
     this.notices = notices;
     this.noticeLocales = opts.noticeLocales ?? [];
     this.fetchImpl =
@@ -497,7 +543,28 @@ export class FcmPushSender implements ChannelSender {
       );
     }
 
-    const token = await this.accessToken();
+    // Minting the token is the one pre-flight step that can fail *permanently* (ADR-0327). A 5xx at
+    // Google's token endpoint is a transport blip and `failed` is right, because retrying delivers.
+    // `invalid_grant` is a wrong or revoked service account: letting it propagate made it
+    // indistinguishable from the blip, so a misconfigured deployment retried the same refusal
+    // forever and the dispatch never settled. A non-retryable token error is `dropped` instead —
+    // the delivery is over, the reason is on the record, and an operator fixes the credential rather
+    // than watching a queue grow.
+    let token: string;
+    try {
+      token = await this.accessToken();
+    } catch (err) {
+      if (reportsNonRetryable(err)) {
+        return {
+          ...this.refuse(
+            FCM_TOKEN_REFUSED_ERROR_CODE,
+            err instanceof Error ? err.message : String(err),
+          ),
+          outcome: "dropped",
+        };
+      }
+      throw err;
+    }
     const path = fcmSendPath(this.projectId);
     // As in the other senders, a transport failure propagates rather than being classified: there
     // is no provider verdict to classify, and the drain already records `failed` / `sender_threw`.
@@ -515,6 +582,12 @@ export class FcmPushSender implements ChannelSender {
     if (!response.ok) {
       const parsed = parseFcmErrorBody(text);
       const classified = classifyFcmFailure(response.status, parsed.code);
+      if (fcmRefusedTheCredential(response.status, parsed.code)) {
+        // FCM has rejected the credential we presented. Keeping it cached would re-present it on
+        // every send until it expires on its own, so the retry spends its whole budget on a token
+        // the provider has already refused.
+        this.invalidateToken?.();
+      }
       return {
         outcome: classified.outcome,
         provider: this.provider,

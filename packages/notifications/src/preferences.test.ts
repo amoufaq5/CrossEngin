@@ -16,6 +16,7 @@ import {
   type SuppressionRecord,
   type UserPreferenceMatrix,
 } from "./preferences.js";
+import { NON_SUPPRESSIBLE_CATEGORIES, REQUIRES_EXPLICIT_OPT_IN } from "./templates.js";
 
 const baseMatrix: UserPreferenceMatrix = {
   userId: "11111111-1111-1111-1111-111111111111",
@@ -91,7 +92,7 @@ describe("UserPreferenceMatrixSchema", () => {
           },
         ],
       }),
-    ).toThrow(/cannot be opted-out by user/);
+    ).toThrow(/cannot be opted out of, by any source/);
   });
 });
 
@@ -502,5 +503,96 @@ describe("SuppressionRecordSchema — appliedBy", () => {
     });
     expect(r.eligible).toBe(false);
     expect(r.reason).toBe("suppressed");
+  });
+});
+
+describe("a non-suppressible category cannot be opted out of, by anyone", () => {
+  const USER = "00000000-0000-4000-8000-000000000001";
+  const TENANT = "00000000-0000-4000-8000-000000000002";
+  const AT = "2026-01-01T00:00:00.000Z";
+
+  const matrix = (source: string): unknown => ({
+    userId: USER,
+    tenantId: TENANT,
+    updatedAt: AT,
+    entries: [
+      { category: "security_alert", channel: "email", optedIn: false, source, updatedAt: AT },
+    ],
+  });
+
+  it("refuses the opt-out from every source, not only user_set", () => {
+    // The defect: the guard was `source === "user_set"`, so an `admin_set`, `regulatory_requirement`
+    // or `default_policy` entry parsed — and `computeDispatchEligibility` then answered
+    // `not_opted_in`, silently withholding a security alert. Non-suppressibility is a property of
+    // the message, not of who is asking.
+    for (const source of ["user_set", "admin_set", "regulatory_requirement", "default_policy"]) {
+      const result = UserPreferenceMatrixSchema.safeParse(matrix(source));
+      expect(result.success, source).toBe(false);
+    }
+  });
+
+  it("accepts an opt-IN from every source, which is the direction that is allowed", () => {
+    for (const source of ["user_set", "admin_set", "regulatory_requirement", "default_policy"]) {
+      const m = matrix(source) as { entries: { optedIn: boolean }[] };
+      m.entries[0]!.optedIn = true;
+      expect(UserPreferenceMatrixSchema.safeParse(m).success, source).toBe(true);
+    }
+  });
+
+  it("delivers anyway when a matrix built in code says otherwise", () => {
+    // The second layer. `computeDispatchEligibility`'s own comment says a non-suppressible category
+    // "overrides consent", and that override existed only on the suppression branch — so a matrix
+    // assembled without parsing could still withhold the alert.
+    const unparsed = {
+      userId: USER,
+      tenantId: TENANT,
+      updatedAt: AT,
+      entries: [
+        { category: "security_alert", channel: "email", optedIn: false, source: "admin_set", updatedAt: AT },
+      ],
+    } as never;
+    expect(
+      computeDispatchEligibility({
+        preferences: unparsed,
+        category: "security_alert",
+        channel: "email",
+        suppressions: [],
+        recipientAddress: "alice@acme.com",
+        now: new Date("2026-05-20T10:00:00Z"),
+      }),
+    ).toEqual({ eligible: true, reason: "ok", suppressionId: null });
+  });
+
+  it("still withholds a suppressible category the user opted out of", () => {
+    // The override must not swallow a real opt-out: marketing consent is exactly what it protects.
+    const m = UserPreferenceMatrixSchema.parse({
+      userId: USER,
+      tenantId: TENANT,
+      updatedAt: AT,
+      entries: [
+        { category: "marketing", channel: "email", optedIn: false, source: "user_set", updatedAt: AT },
+      ],
+    });
+    expect(
+      computeDispatchEligibility({
+        preferences: m,
+        category: "marketing",
+        channel: "email",
+        suppressions: [],
+        recipientAddress: "alice@acme.com",
+        now: new Date("2026-05-20T10:00:00Z"),
+      }).reason,
+    ).toBe("not_opted_in");
+  });
+
+  it("keeps the two category sets disjoint, which is what makes the override safe", () => {
+    // If a category were both non-suppressible and explicit-opt-in, the override above would send
+    // it without the consent it requires. Asserted rather than assumed, because the overlap is an
+    // edit somebody could make in `templates.ts` without ever reading this file.
+    for (const category of NON_SUPPRESSIBLE_CATEGORIES) {
+      expect(REQUIRES_EXPLICIT_OPT_IN.has(category), category).toBe(false);
+    }
+    expect([...NON_SUPPRESSIBLE_CATEGORIES].sort()).toEqual(["security_alert", "transactional"]);
+    expect([...REQUIRES_EXPLICIT_OPT_IN]).toEqual(["marketing"]);
   });
 });

@@ -56,6 +56,14 @@ export const ITEM_PERMISSIONS: EntityPermissions = {
   create: { roles: INV_WRITERS },
   update: { roles: INV_WRITERS },
   delete: { roles: ADMIN_ONLY },
+  fields: {
+    // Procurement negotiates against the cost and so reads it; the warehouse clerk counting
+    // stock has no use for it, and `erp_viewer` is the general observer this pack grants least.
+    standard_cost: {
+      read: { roles: ["erp_admin", "inventory_manager", "procurement_manager"] },
+      update: { roles: INV_WRITERS },
+    },
+  },
 };
 
 export const WAREHOUSE_PERMISSIONS: EntityPermissions = {
@@ -86,13 +94,26 @@ export const STOCK_MOVEMENT_PERMISSIONS: EntityPermissions = {
 
 const PROC_READERS = ["erp_admin", "erp_viewer", "procurement_manager", "ap_clerk", "inventory_manager"];
 const PROC_WRITERS = ["erp_admin", "procurement_manager"];
+const VENDOR_WRITERS = ["erp_admin", "procurement_manager", "ap_clerk"];
 
 export const VENDOR_PERMISSIONS: EntityPermissions = {
   list: { roles: PROC_READERS },
   read: { roles: PROC_READERS },
-  create: { roles: ["erp_admin", "procurement_manager", "ap_clerk"] },
-  update: { roles: ["erp_admin", "procurement_manager", "ap_clerk"] },
+  create: { roles: VENDOR_WRITERS },
+  update: { roles: VENDOR_WRITERS },
   delete: { roles: ADMIN_ONLY },
+  fields: {
+    // `inventory_manager` reads a vendor to know who supplies an item and `erp_viewer` to see
+    // the master list; neither needs the tax identity or a named person's contact details.
+    // AP owns the tax id it files against — procurement may read it to negotiate but a
+    // correction is a finance act, not a commercial one.
+    tax_id: {
+      read: { roles: VENDOR_WRITERS },
+      update: { roles: ["erp_admin", "ap_clerk"] },
+    },
+    contact_email: { read: { roles: VENDOR_WRITERS }, update: { roles: VENDOR_WRITERS } },
+    contact_phone: { read: { roles: VENDOR_WRITERS }, update: { roles: VENDOR_WRITERS } },
+  },
 };
 
 export const PURCHASE_ORDER_PERMISSIONS: EntityPermissions = {
@@ -131,6 +152,7 @@ export const GOODS_RECEIPT_PERMISSIONS: EntityPermissions = {
 const FIN_READERS = ["erp_admin", "erp_viewer", "controller", "erp_accountant", "ap_clerk"];
 const GL_WRITERS = ["erp_admin", "controller"];
 const AP_WRITERS = ["erp_admin", "ap_clerk"];
+const PAY_WRITERS = ["erp_admin", "ap_clerk", "erp_accountant"];
 
 export const LEDGER_ACCOUNT_PERMISSIONS: EntityPermissions = {
   list: { roles: FIN_READERS },
@@ -163,14 +185,22 @@ export const JOURNAL_LINE_PERMISSIONS: EntityPermissions = {
 export const PAYMENT_PERMISSIONS: EntityPermissions = {
   list: { roles: FIN_READERS },
   read: { roles: FIN_READERS },
-  create: { roles: ["erp_admin", "ap_clerk", "erp_accountant"] },
-  update: { roles: ["erp_admin", "ap_clerk", "erp_accountant"] },
+  create: { roles: PAY_WRITERS },
+  update: { roles: PAY_WRITERS },
   delete: { roles: ADMIN_ONLY },
   transitions: {
-    submit: { roles: ["erp_admin", "ap_clerk", "erp_accountant"] },
-    complete: { roles: ["erp_admin", "ap_clerk", "erp_accountant"] },
+    submit: { roles: PAY_WRITERS },
+    complete: { roles: PAY_WRITERS },
     fail: { roles: ADMIN_ONLY },
     refund: { roles: ["erp_admin", "ap_clerk", "controller"] },
+  },
+  fields: {
+    // The controller reconciles the bank statement against this and so reads it without
+    // writing it; `erp_viewer` sees the payment, not the counterparty's bank handle.
+    bank_reference: {
+      read: { roles: ["erp_admin", "controller", "erp_accountant", "ap_clerk"] },
+      update: { roles: PAY_WRITERS },
+    },
   },
 };
 
@@ -237,6 +267,24 @@ export const EMPLOYEE_PERMISSIONS: EntityPermissions = {
   create: { roles: HR_WRITERS },
   update: { roles: HR_WRITERS },
   delete: { roles: ADMIN_ONLY },
+  fields: {
+    // The employee record is readable by `erp_viewer` for the org chart — the directory entry,
+    // the reporting line, the position. None of the personal or pay fields are part of that, so
+    // every arm below is HR and the admin, which is `HR_WRITERS` read as a population.
+    work_email: { read: { roles: HR_WRITERS }, update: { roles: HR_WRITERS } },
+    personal_email: { read: { roles: HR_WRITERS }, update: { roles: HR_WRITERS } },
+    phone: { read: { roles: HR_WRITERS }, update: { roles: HR_WRITERS } },
+    // Set once: HR records the national id at hire and only the admin corrects it afterwards,
+    // which is the distinction the `create` arm exists for — narrowing `update` alone would
+    // have taken hiring away from HR.
+    national_id: {
+      read: { roles: HR_WRITERS },
+      update: { roles: ADMIN_ONLY },
+      create: { roles: HR_WRITERS },
+    },
+    date_of_birth: { read: { roles: HR_WRITERS }, update: { roles: HR_WRITERS } },
+    annual_salary: { read: { roles: HR_WRITERS }, update: { roles: HR_WRITERS } },
+  },
 };
 
 export const LEAVE_REQUEST_PERMISSIONS: EntityPermissions = {

@@ -16,9 +16,35 @@ export const RoleDefinitionSchema = z.object({
 
 export type RoleDefinition = z.infer<typeof RoleDefinitionSchema>;
 
+/**
+ * The four answers an obligation can get.
+ *
+ * `deferred` is the one that is not about the principal at all: **the obligation needs the record
+ * the act is about and the call site had none.** It is not a statement about this principal's
+ * attributes, and it is not an allow — a caller that cannot supply a record refuses, and one that
+ * can re-asks with it. `ABAC_OUTCOME_ALLOWS` maps it to `false`, so a caller that never re-asks
+ * refuses rather than grants.
+ */
+export const ABAC_OUTCOMES = ["satisfied", "denied", "undischargeable", "deferred"] as const;
+
+export type AbacOutcome = (typeof ABAC_OUTCOMES)[number];
+
+export const MAX_ABAC_POLICY_KEY_LENGTH = 200;
+
+export interface AbacDischarge {
+  readonly policyKey: string;
+  readonly outcome: AbacOutcome;
+}
+
 export const RbacGrantSchema = z.object({
   roles: z.array(RoleNameSchema),
-  abac: z.string().optional(),
+  /**
+   * An opaque **policy key** resolved by the deployment's `AbacEvaluator` — converging with
+   * `@crossengin/workflow-engine`'s `ABAC_CHECK_GUARD.policyKey`, which made this decision first.
+   * This repo never parses it as an expression; an empty key is an obligation naming nothing, and
+   * `"" !== undefined` made it a *live* obligation, so the minimum length is load-bearing.
+   */
+  abac: z.string().min(1).max(MAX_ABAC_POLICY_KEY_LENGTH).optional(),
 });
 
 export type RbacGrant = z.infer<typeof RbacGrantSchema>;
@@ -26,7 +52,59 @@ export type RbacGrant = z.infer<typeof RbacGrantSchema>;
 export const FieldPermissionSchema = z.object({
   read: RbacGrantSchema.optional(),
   update: RbacGrantSchema.optional(),
+  /**
+   * Who may **set** this field on a create, where `update` is who may **change** it afterwards.
+   *
+   * Absent falls back to `update`, so every declaration written before this arm existed keeps its
+   * exact meaning — the arm adds a distinction rather than changing a default. What it makes
+   * expressible is *set once, never changed*: a medical record number, a national id, a tax
+   * identity. Before it, one list answered both moments, so narrowing who may change a **required**
+   * field necessarily narrowed who may create the record — which is why `erp-government` shipped a
+   * `Citizen` that `case_worker` could not create despite holding the entity's `create` grant.
+   *
+   * It is deliberately **not** constrained to be a subset of `read`, where `update` is: a principal
+   * supplying a value already knows it, so writing it discloses nothing, while changing a value you
+   * cannot read destroys one you cannot see. That asymmetry is the whole reason two arms are better
+   * than one wider list.
+   */
+  create: RbacGrantSchema.optional(),
 });
+
+/** The one spelling of the fallback, so no reader re-derives it. */
+export function fieldWriteGrant(
+  perm: FieldPermission | undefined,
+  writeOp: FieldWriteOperation,
+): RbacGrant | undefined {
+  if (perm === undefined) return undefined;
+  return writeOp === "create" ? (perm.create ?? perm.update) : perm.update;
+}
+
+/**
+ * **Which arm** {@link fieldWriteGrant} took, or undefined when it found no grant.
+ *
+ * It exists because the sentence above — "so no reader re-derives it" — was not enough. A refusal
+ * has to name the grant that refused, and `write-mask.ts` derived that from `perm.update` while the
+ * decision was made through `fieldWriteGrant(perm, writeOp)`: so a create refused by a field's own
+ * `create` arm reported the *update* grant, sending an operator to widen a list that already named
+ * them. That is the same mistake `dischargeAbac`'s refusal is reported as itself to avoid, one
+ * branch across.
+ *
+ * Written immediately beside the function it describes and over the same `??`, because the hazard
+ * is not that someone reads the wrong field — it is that the answer lives somewhere the fallback's
+ * author cannot see. A third arm on `FieldPermission` has to be answered here or the arm is
+ * unreportable, which is a compile error at the one reader that maps arms to names.
+ */
+export function fieldWriteGrantArm(
+  perm: FieldPermission | undefined,
+  writeOp: FieldWriteOperation,
+): FieldWriteOperation | undefined {
+  if (perm === undefined) return undefined;
+  if (writeOp === "create" && perm.create !== undefined) return "create";
+  return perm.update !== undefined ? "update" : undefined;
+}
+
+export const FIELD_WRITE_OPERATIONS = ["create", "update"] as const;
+export type FieldWriteOperation = (typeof FIELD_WRITE_OPERATIONS)[number];
 
 export type FieldPermission = z.infer<typeof FieldPermissionSchema>;
 
@@ -56,26 +134,59 @@ export interface Principal {
   readonly userId: UserId | null;
   readonly primaryRole: RoleName;
   readonly secondaryRoles: readonly RoleName[];
-  readonly abacAttributes: Readonly<Record<string, unknown>>;
+  /**
+   * `null` means **not resolved** — no attribute directory was consulted — and is not the same fact
+   * as `{}`, which asserts this principal has no attributes. `dischargeAbac` refuses an obligation
+   * on `null` without calling the evaluator, because an evaluator cannot tell the two apart and the
+   * mistake is in the allowing direction.
+   */
+  readonly abacAttributes: Readonly<Record<string, unknown>> | null;
   readonly mfaProofAgeSeconds: number | null;
 }
 
-export type OperationName = "list" | "read" | "create" | "update" | "delete";
+export const OPERATION_NAMES = ["list", "read", "create", "update", "delete"] as const;
+
+export type OperationName = (typeof OPERATION_NAMES)[number];
 
 export type Operation = OperationName | { readonly kind: "transition"; readonly name: string };
 
 export interface AuthorizationDecision {
   readonly allowed: boolean;
   readonly reason?: string;
-  readonly requiresAbac?: string;
+  /** Absent when the grant carried no policy key: no obligation existed, so none was discharged. */
+  readonly abac?: AbacDischarge;
 }
 
 export interface FieldRedactionResult {
   readonly readable: readonly string[];
   readonly redacted: readonly string[];
+  /**
+   * The redacted fields whose refusal **a record could still change** — a strict subset of
+   * `redacted`, since a deferred field is redacted right now.
+   *
+   * A field is here **iff** the role check passed and the only thing refusing it is an obligation
+   * that answered `deferred`: the policy needs the record the act is about and the caller had none.
+   * A field refused on **roles**, or whose obligation answered `denied` or `undischargeable`, is
+   * **not** here, because re-asking with a record cannot change any of those — `denied` is a
+   * statement about this principal, `undischargeable` says nothing could answer, and a role refusal
+   * is not an obligation at all. The classification default carries no obligation, so it can never
+   * contribute.
+   *
+   * So it answers exactly one question: *would supplying the record possibly change this answer?*
+   * That is what lets a caller holding several records compute the field set once with no record and
+   * stop when this is empty — which is every deployment that declared no record-bearing field
+   * policy — and recompute per record only when it is not.
+   *
+   * **Required, not optional.** A caller that could omit it would compute an empty set, conclude
+   * nothing defers, and serve the record-free answer — which is total redaction — for ever. That is
+   * the silent total denial ADR-0339 found and ADR-0340 closed, and an optional field can be
+   * forgotten with the type still valid (ADR-0330).
+   */
+  readonly deferred: readonly string[];
 }
 
 export interface WriteMaskResult {
   readonly ok: boolean;
   readonly rejectedField?: string;
+  readonly abac?: AbacDischarge;
 }

@@ -1,6 +1,11 @@
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import {
+  assertScopeTenantId,
+  setPlatformWriteSql,
+  type PgConnection,
+} from "@crossengin/kernel-pg";
+import {
   DrillRecordSchema,
   FailoverRecordSchema,
   type DrillRecord,
@@ -187,5 +192,46 @@ export function readinessSnapshotRecordFrom(
     drillBreaches: report.counts.drillBreaches,
     report,
     generatedAt: opts.generatedAt,
+  });
+}
+
+/**
+ * The two session settings a scoped **write** needs, and the wrapper that picks exactly one.
+ *
+ * Until the policy split these stores set nothing at all, which worked only because a table's owner
+ * bypasses its policies. As a non-owner the single `ALL`-scope policy admitted a platform row
+ * (`tenant_id IS NULL` satisfied its `WITH CHECK` unconditionally — the defect) and refused a
+ * tenant row outright, because with no context `current_setting('app.current_tenant_id', true)`
+ * answers NULL or `''` and the comparison is never true. So both arms are needed: the platform one
+ * because the split now demands a grant, and the tenant one because nothing ever supplied a context
+ * for a row the store had always been able to write as the owner.
+ *
+ * Reads are deliberately left unwrapped. They behave the same before and after the split — the
+ * platform read policy is `SELECT`-scoped on `tenant_id IS NULL` and demands no grant — so scoping
+ * them is a separate change about owner-independence, not part of closing this hole.
+ */
+export const SET_TENANT_CONTEXT_SQL =
+  "SELECT set_config('app.current_tenant_id', $1, true)";
+
+export const SET_PLATFORM_RECORD_WRITE_SQL = setPlatformWriteSql("record");
+
+// `async` rather than returning `conn.transaction(...)` directly, so a rejected tenant id arrives
+// as a rejection like every other failure here. A synchronous throw out of a `Promise`-returning
+// function is a trap for a caller that only writes `.catch`.
+export async function scopedWrite<T>(
+  conn: PgConnection,
+  tenantId: string | null,
+  fn: (tx: PgConnection) => Promise<T>,
+): Promise<T> {
+  // `kernel-pg`'s shared guard rather than a third copy of the regex in this package. It is
+  // **looser** than `tenant-context.ts`'s `assertTenantId`, which demands a full UUID — an
+  // asymmetry that predates the move and is left as it was, because tightening a write path is a
+  // behaviour change and not part of consolidating a predicate. Both bind the value as a parameter,
+  // so neither is an injection guard.
+  if (tenantId !== null) assertScopeTenantId(tenantId);
+  return conn.transaction(async (tx) => {
+    if (tenantId === null) await tx.query(SET_PLATFORM_RECORD_WRITE_SQL);
+    else await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
+    return fn(tx);
   });
 }

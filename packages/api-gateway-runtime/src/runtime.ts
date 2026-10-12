@@ -14,8 +14,11 @@ import { sha256 } from "@crossengin/crypto";
 
 import { type OutgoingResponse, outgoingResponseFromJson } from "./adapters.js";
 import {
-  computeRedactedFields,
+  computeResponseRedaction,
+  computeResponseRedactionForRecords,
+  recordsIn,
   redactJsonValue,
+  redactRecords,
   type RedactionRegistry,
 } from "./redaction.js";
 import {
@@ -33,8 +36,8 @@ import { PipelineRecorder } from "./pipeline-runner.js";
 import {
   authenticationRequired,
   forbidden,
-  gatewayTimeout,
   idempotencyMismatch,
+  internalServerError,
   notFound,
   serviceUnavailable,
   tooManyRequests,
@@ -83,6 +86,26 @@ export interface HandleResult {
 const HANDLER_ERROR_PROBLEM_TYPE = "https://crossengin.io/problems/handler-error";
 const HEADER_API_VERSION = "x-api-version";
 const HEADER_IDEMPOTENCY_KEY = "idempotency-key";
+
+/**
+ * What an uncaught handler throw tells the caller: that it failed and that somebody else can find
+ * out why. A constant and not an interpolation, so no future edit can reintroduce a value from the
+ * exception by editing one argument.
+ *
+ * It names the correlation id because that is the caller's handle for a support request — supplied
+ * by the caller through `x-correlation-id`, so a caller who sends none has no handle and this
+ * sentence is the whole of what they get. That is the intended end state: the diagnosis is the
+ * operator's, and a caller who wants to be able to quote one sends the header.
+ */
+const HANDLER_THREW_CLIENT_DETAIL =
+  "the request could not be completed; the failure has been recorded against this request's correlation id";
+
+/**
+ * `StageResultSchema.reason` is `z.string().max(500)`, which is what this budget plus the marker
+ * below is sized for. The marker stays because it is the string an operator greps for, and it was
+ * the *whole* of what the row used to say.
+ */
+const HANDLER_THREW_REASON_BUDGET = 480;
 
 export class GatewayRuntime {
   private readonly routes: RouteRegistry;
@@ -814,8 +837,23 @@ export class GatewayRuntime {
         parsedBody: ctx.parsedBody,
       });
     } catch (err) {
-      const env = gatewayTimeout({
-        reason: err instanceof Error ? err.message.slice(0, 480) : "handler_threw_unknown",
+      // The two destinations are the opposite way round from how this read until ADR-0359, and that
+      // single move is both the disclosure fix and what makes the status change safe. The exception
+      // message went to the response body, where it is the RFC 9457 `detail`; measured on the
+      // at-rest-encryption paths at 190, 391 and 438 characters, all under the slice, so each
+      // reached an anonymous caller in full carrying entity names and tenant UUIDs. Meanwhile the
+      // recorded reason was the bare constant `handler_threw`, so the row an operator reads — what
+      // `--gateway-execution-capture` persists and `GatewayReplayer` reads — said nothing at all
+      // about why. The diagnosis belongs to the operator and the fact of failure to the caller.
+      //
+      // 500 and not 504: an uncaught throw is by definition unclassified, and 500 is the one status
+      // claiming neither "retry this" nor "your request was wrong", where 504 invites the retry a
+      // permanent fault cannot survive. Deliberately *not* a permanent/transient map keyed on error
+      // classes: no error thrown through here declares a disposition, and recognising one by name
+      // would mean the gateway importing the pg or crypto packages. Such a map can only be built
+      // from the other end — by the throwers declaring what they are — so do not attempt it here.
+      const env = internalServerError({
+        reason: HANDLER_THREW_CLIENT_DETAIL,
         correlationId: ctx.request.correlationId ?? undefined,
       });
       rec.record({
@@ -823,7 +861,10 @@ export class GatewayRuntime {
         outcome: "error",
         startedAt,
         completedAt: this.now(),
-        reason: "handler_threw",
+        reason:
+          err instanceof Error
+            ? `handler_threw: ${err.message.slice(0, HANDLER_THREW_REASON_BUDGET)}`
+            : "handler_threw_unknown",
         problemTypeUri: env.body.type,
         responseStatus: env.body.status,
       });
@@ -919,6 +960,25 @@ export class GatewayRuntime {
     return null;
   }
 
+  /**
+   * Two passes, keyed on the deferral (ADR-0342's field-`read` closure).
+   *
+   * The first pass asks with **no record** — today's single evaluation. If nothing deferred, the
+   * old whole-tree walk applies and the stage is byte-identical and costs exactly what it did,
+   * which is every deployment that has declared no record-bearing field policy. Only when a field
+   * answered `deferred` does the response carry an obligation a record could change, and only then
+   * is the set recomputed per record.
+   *
+   * The direction matters and is what makes every fallback safe: a per-record pass can only
+   * **relax** the record-free one (a `deferred` becoming `satisfied`), never tighten it. So any
+   * position where a record cannot be found gets the record-free set, which is the stricter one.
+   *
+   * The per-record pass is **one** evaluation for the whole response, not one per record: the
+   * records are enumerated from the same traversal that will rebuild the body, and their field sets
+   * are computed in a single `computeResponseRedactionForRecords` call. The fast path is untouched
+   * by that — no deferral still means one record-free evaluation and today's whole-tree walk, which
+   * is every deployment that has declared no record-bearing field policy.
+   */
   private applyResponseRedaction(ctx: PipelineState): number {
     if (this.redactionRegistry === null) return 0;
     const route = ctx.routeMatch?.route ?? null;
@@ -928,21 +988,55 @@ export class GatewayRuntime {
     if (!contentType.includes("application/json")) return 0;
     const spec = this.redactionRegistry.specFor(route.operationId);
     if (spec === null) return 0;
-    const redacted = computeRedactedFields(spec, ctx.principal);
-    if (redacted.length === 0) return 0;
+    const base = computeResponseRedaction(spec, ctx.principal);
+    // Still safe as the first gate: without a record every record-bearing obligation answers
+    // `deferred`, which redacts — so `redacted` empty implies `deferred` empty, and the fast path
+    // cannot skip an obligation a record would have changed.
+    if (base.redacted.length === 0) return 0;
     let parsed: unknown;
     try {
       parsed = JSON.parse(new TextDecoder().decode(resp.bodyBytes));
     } catch {
       return 0;
     }
-    const scrubbed = redactJsonValue(parsed, new Set(redacted));
+    const baseSet = new Set(base.redacted);
+    let scrubbed: unknown;
+    if (base.deferred.length === 0) {
+      scrubbed = redactJsonValue(parsed, baseSet);
+    } else {
+      // Enumerated from the traversal that is about to rebuild the body, so the two cannot disagree
+      // about which objects are records — which is what lets the sets be keyed by object identity
+      // below rather than by a position both walks would have to agree on independently.
+      const records = recordsIn(spec.recordShape, parsed);
+      const perRecord = computeResponseRedactionForRecords(spec, ctx.principal, records);
+      const byRecord = new Map<Readonly<Record<string, unknown>>, ReadonlySet<string>>();
+      records.forEach((record, index) => {
+        const result = perRecord[index];
+        if (result !== undefined) byRecord.set(record, new Set(result.redacted));
+      });
+      scrubbed = redactRecords(spec.recordShape, parsed, (record) =>
+        // Fail-closed, both arms. `null` is a position with no record, and a lookup miss degrades to
+        // the same answer: the per-record pass can only ever *relax* the record-free set, so the
+        // fallback is the **stricter** of the two rather than a throw. The miss is unreachable while
+        // enumeration and rebuild share one definition — it is here so that a fourth response shape
+        // added later, or an enumeration that stops reaching one of the rebuild's positions, cannot
+        // fail open.
+        record === null ? baseSet : (byRecord.get(record) ?? baseSet),
+      );
+    }
     ctx.finalResponse = outgoingResponseFromJson({
       status: resp.status,
       headers: resp.headers,
       body: scrubbed,
     });
-    return redacted.length;
+    // The **record-free** count, on both paths. It is the one figure that describes the response as
+    // a whole: on the per-record path the counts differ per row, so a sum would scale with the page
+    // size and a max or min would name a figure true of one row and of no other. The record-free
+    // count is also the honest reading of the stage's claim — "this many classified fields were
+    // withheld from this principal before any record was consulted" — and reporting it keeps the
+    // reason comparable across the two paths rather than making it depend on how many rows came
+    // back.
+    return base.redacted.length;
   }
 
   private async stageApplySecurityHeaders(ctx: PipelineState, rec: PipelineRecorder): Promise<ProblemEnvelope | null> {

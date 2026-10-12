@@ -18,17 +18,16 @@ import {
   IncidentNotFoundError,
   PostgresIncidentStore,
 } from "./incident-store.js";
-import type { StoredIncident } from "./records.js";
+// Re-exported, not redefined: this module owned both until `appendPagedNote` needed them too, and
+// the store cannot import from here without a cycle (ADR-0328). Every existing importer keeps
+// working.
+import {
+  IncidentTimelineRewriteError,
+  assertAppendOnly,
+  type StoredIncident,
+} from "./records.js";
 
-export class IncidentTimelineRewriteError extends Error {
-  constructor(readonly incidentId: string) {
-    super(
-      `a mutation of incident '${incidentId}' altered timeline entries that were already ` +
-        "recorded; the timeline is append-only",
-    );
-    this.name = "IncidentTimelineRewriteError";
-  }
-}
+export { IncidentTimelineRewriteError };
 
 /** What `declare` needs beyond the executor's input: the id comes from the store. */
 export type PersistentDeclareInput = Omit<DeclareIncidentInput, "id">;
@@ -165,13 +164,3 @@ export class PersistentIncidentEngine {
   }
 }
 
-function assertAppendOnly(before: IncidentRecord, after: IncidentRecord): void {
-  if (after.timeline.length < before.timeline.length) {
-    throw new IncidentTimelineRewriteError(before.id);
-  }
-  for (let i = 0; i < before.timeline.length; i++) {
-    if (JSON.stringify(before.timeline[i]) !== JSON.stringify(after.timeline[i])) {
-      throw new IncidentTimelineRewriteError(before.id);
-    }
-  }
-}

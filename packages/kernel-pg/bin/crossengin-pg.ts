@@ -4,7 +4,6 @@ import {
   META_SCHEMA_NAME,
   META_TABLES,
   emitMetaBootstrapSql,
-  emitSchemaCreate,
 } from "@crossengin/kernel/bootstrap";
 
 import { MigrationApplier, formatApplyReport } from "../src/applier.js";
@@ -17,8 +16,11 @@ import { diffSchema, expressionRequestsFor, formatSchemaDiff } from "../src/diff
 import { renderExpressions } from "../src/expression-render.js";
 import { formatReconciliationPlan, planLiveReconciliation } from "../src/reconcile.js";
 import {
+  COLUMN_ENCRYPTION_KEY_ENV,
+  DEFAULT_COLUMN_KEY_REF,
   EncryptionApplier,
   formatEncryptionCoverage,
+  resolveColumnEncryptionKey,
 } from "../src/encryption.js";
 import {
   EncryptionMigrator,
@@ -28,7 +30,6 @@ import { introspectSchema } from "../src/introspection.js";
 import { createNodePgConnection } from "../src/node-pg.js";
 
 const CLI_VERSION = "0.0.0";
-const DEFAULT_KEY_REF = "current_setting('app.column_encryption_key')";
 
 type Command = "apply" | "drift" | "inspect" | "encrypt" | "version" | "help";
 
@@ -68,6 +69,7 @@ function printHelp(): void {
       "  apply                Reconcile the meta-schema with the database",
       "  apply --dry-run      Print the full bootstrap SQL without running it",
       "  apply --plan         Introspect and print the reconciliation plan without running it",
+      "  apply --allow-loosening  Also DROP foreign keys the catalog no longer declares",
       "  drift                Introspect the live schema and report drift vs META_TABLES",
       "  inspect              Print the live schema as JSON",
       "  encrypt --verify     Report at-rest encryption coverage for hinted columns",
@@ -83,12 +85,19 @@ function printHelp(): void {
       "  --json               With drift/inspect, emit JSON instead of human form",
       "  --schema=<name>      With encrypt, the schema to operate on (default: meta)",
       "  --key-ref=<sql>      With encrypt --plan/--apply, the SQL key reference",
-      "                       (default: current_setting('app.column_encryption_key'))",
+      `                       (default: ${DEFAULT_COLUMN_KEY_REF})`,
+      "                       Must be the one-argument current_setting form: the two-argument",
+      "                       form yields NULL when unset and pgp_sym_encrypt(x, NULL) is NULL,",
+      "                       which would store NULL over every PHI value and report success.",
       "  --provision          With encrypt --apply, CREATE EXTENSION pgcrypto first",
       "  --verify|--plan|--apply  encrypt action (default: --plan)",
       "",
       "Environment:",
       "  PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE, PGSSLMODE, PGAPPNAME",
+      `  ${COLUMN_ENCRYPTION_KEY_ENV}  The at-rest column key *value*. Required by`,
+      "                            encrypt --apply with the default --key-ref; claimed",
+      "                            per transaction as set_config(…, true) with the value",
+      "                            bound, never in argv (argv is readable via ps).",
       "",
     ].join("\n"),
   );
@@ -112,7 +121,25 @@ async function runApply(flags: ReadonlySet<string>): Promise<number> {
   try {
     // Same reconciliation path as `crossengin apply`: replaying the bootstrap SQL against a
     // database that already has the schema re-runs CREATE TABLE and halts.
-    const plan = await planLiveReconciliation(conn, META_SCHEMA_NAME, META_TABLES);
+    // `--allow-loosening` is the one reconciliation refusal an operator can override from here
+    // (ADR-0328). It has existed on `ReconciliationOptions` since ADR-0308 and nothing could pass
+    // it, so the four kill-switch `meta.users` foreign keys ADR-0296 removed from the catalog have
+    // been reported as undeclared drift on every existing deployment ever since, with no way to
+    // drop them but by hand. It reaches **foreign keys only** — not a column, table, index, policy
+    // or CHECK — because dropping a foreign key is the one loosening that cannot fail against
+    // existing rows, which is what keeps ADR-0290's "every step is expected to succeed" true.
+    const allowLoosening = flags.has("--allow-loosening");
+    const plan = await planLiveReconciliation(conn, META_SCHEMA_NAME, META_TABLES, {
+      ...(allowLoosening ? { allowLoosening: true } : {}),
+    });
+    if (allowLoosening && !flags.has("--plan")) {
+      // Said out loud before anything runs, because this is the one invocation that *removes* a
+      // constraint the database is currently enforcing, and the plan it prints afterwards is the
+      // only other place it would be visible.
+      process.stderr.write(
+        "--allow-loosening: undeclared foreign keys will be DROPPED rather than reported.\n",
+      );
+    }
     if (flags.has("--plan")) {
       process.stdout.write(formatReconciliationPlan(plan) + "\n");
       return 0;
@@ -120,7 +147,15 @@ async function runApply(flags: ReadonlySet<string>): Promise<number> {
     const applier = new MigrationApplier({
       connection: conn,
       schema: META_SCHEMA_NAME,
-      statements: [emitSchemaCreate(META_SCHEMA_NAME), ...plan.statements],
+      // The plan's own statements, and nothing prepended. `emitSchemaCreate` used to lead this
+      // list and was redundant twice over: `MigrationApplier` calls `ensureMigrationLog` before the
+      // first statement and *its* first DDL is `CREATE SCHEMA IF NOT EXISTS`, and on an empty
+      // database the plan is `emitBootstrapSql`, which already begins with the same statement. The
+      // cost was a report that read as a claim about the schema: on a fully converged database the
+      // plan is empty, so the applier ran exactly that one idempotent statement and printed
+      // `total: 1, executed: 1` — "one change was made" where nothing had changed, which is the
+      // confusion ADR-0331 added the re-plan to remove.
+      statements: [...plan.statements],
       skipApplied: false,
     });
     const report = await applier.apply();
@@ -187,7 +222,25 @@ async function runEncrypt(
   argv: readonly string[],
 ): Promise<number> {
   const schema = flagValue(argv, "schema") ?? META_SCHEMA_NAME;
-  const keyRef = flagValue(argv, "key-ref") ?? DEFAULT_KEY_REF;
+  const keyRef = flagValue(argv, "key-ref") ?? DEFAULT_COLUMN_KEY_REF;
+  const key = resolveColumnEncryptionKey(keyRef, process.env);
+
+  // Before the connection is opened, let alone the first statement. The migration runs one
+  // transaction per column, so raising on statement 1 of N leaves the schema half converted with
+  // nothing recording which half; and `--verify` / `--plan` neither set the key nor need it, so the
+  // refusal is scoped to `--apply`.
+  if (flags.has("--apply") && key.refusal !== null) {
+    process.stderr.write(
+      `Refusing to run the encryption migration: ${key.refusal.reason}\n${key.refusal.message}\n`,
+    );
+    return 2;
+  }
+  if (!flags.has("--apply") && !flags.has("--verify") && key.refusal !== null) {
+    // A plan is SQL an operator pastes, so the defect travels with it. Said, not refused: printing
+    // the plan is how an operator discovers what the migration would do before arranging a key.
+    process.stderr.write(`Warning: ${key.refusal.reason}: ${key.refusal.message}\n`);
+  }
+
   const config = parsePgEnvConfig();
   const conn = createNodePgConnection(config);
   try {
@@ -201,7 +254,7 @@ async function runEncrypt(
       return report.issues.length > 0 && !flags.has("--exit-zero-on-drift") ? 1 : 0;
     }
 
-    const migrator = new EncryptionMigrator(conn);
+    const migrator = new EncryptionMigrator(conn, { sessionSettings: key.sessionSettings });
     if (flags.has("--apply")) {
       if (looksLikeProductionDatabase(config.database) && !flags.has("--confirm")) {
         process.stderr.write(

@@ -43,12 +43,23 @@ describe("PermissionRefSchema", () => {
   });
 
   it("accepts an explicit grant", () => {
-    const r = PermissionRefSchema.parse({ roles: ["pharmacist"], abac: "x" });
-    expect(r).toEqual({ roles: ["pharmacist"], abac: "x" });
+    const r = PermissionRefSchema.parse({ roles: ["pharmacist"] });
+    expect(r).toEqual({ roles: ["pharmacist"] });
   });
 
   it("rejects an empty role list", () => {
     expect(() => PermissionRefSchema.parse({ roles: [] })).toThrow();
+  });
+
+  // A view cannot carry an ABAC obligation, and this pins it rather than merely not testing it.
+  // `surveyAbacObligations` walks `manifest.permissions` and nothing else, and the boot refusal for
+  // an obligation this deployment cannot discharge is built from that survey — so a key here would
+  // be an obligation no deployment could discharge and no boot check could see, served with its
+  // qualifier silently removed. Zero views in any pack ever declared one.
+  it("strips an abac key rather than carrying an obligation nothing surveys", () => {
+    expect(PermissionRefSchema.parse({ roles: ["pharmacist"], abac: "same_department" })).toEqual({
+      roles: ["pharmacist"],
+    });
   });
 });
 

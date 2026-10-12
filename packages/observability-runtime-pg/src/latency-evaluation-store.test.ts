@@ -1,7 +1,30 @@
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import { describe, expect, it, vi } from "vitest";
 import { PostgresSloLatencyEvaluationStore } from "./latency-evaluation-store.js";
-import type { SloLatencyEvaluationRecord } from "./records.js";
+import {
+  SET_PLATFORM_RECORD_WRITE_SQL,
+  SET_TENANT_CONTEXT_SQL,
+  type SloLatencyEvaluationRecord,
+} from "./records.js";
+
+/** `{sql, params}` as the offline fakes in this file record it. */
+interface Captured {
+  readonly sql: string;
+  readonly params: readonly unknown[] | undefined;
+}
+
+/**
+ * The statement under test, found by what it *is* rather than by where it sits.
+ *
+ * `scopedWrite` issues a session setting before the write, so every positional `capture[0]` in a
+ * write test would otherwise have had to shift by one — and would shift again the next time a
+ * statement joins the transaction. Asserting on the session setting itself is a separate test.
+ */
+function written(capture: readonly Captured[]): Captured {
+  const found = capture.find((c) => !c.sql.includes("set_config"));
+  if (found === undefined) throw new Error("no statement other than the session setting was issued");
+  return found;
+}
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 
@@ -14,7 +37,11 @@ function mockConnection(
       if (capture !== undefined) capture.push({ sql, params });
       return result;
     }) as PgConnection["query"],
-    transaction: vi.fn() as PgConnection["transaction"],
+    // `scopedWrite` runs its write inside a transaction, so a fake whose `transaction` returns
+    // undefined silently drops the statement under test.
+    transaction: vi.fn(async <T>(fn: (tx: PgConnection) => Promise<T>) =>
+      fn(mockConnection(capture, result)),
+    ) as PgConnection["transaction"],
     withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
     close: vi.fn() as PgConnection["close"],
   };
@@ -44,15 +71,15 @@ describe("PostgresSloLatencyEvaluationStore.record", () => {
     const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
     const store = new PostgresSloLatencyEvaluationStore(mockConnection(capture));
     await store.record(fixture());
-    expect(capture[0]?.sql).toContain("INSERT INTO meta.slo_latency_evaluations");
-    expect(capture[0]?.sql).toContain("ON CONFLICT (evaluation_id) DO NOTHING");
+    expect(written(capture).sql).toContain("INSERT INTO meta.slo_latency_evaluations");
+    expect(written(capture).sql).toContain("ON CONFLICT (evaluation_id) DO NOTHING");
   });
 
   it("serializes breaches to a JSON string", async () => {
     const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
     const store = new PostgresSloLatencyEvaluationStore(mockConnection(capture));
     await store.record(fixture());
-    const breachesParam = capture[0]?.params?.[9] as string;
+    const breachesParam = written(capture).params?.[9] as string;
     expect(typeof breachesParam).toBe("string");
     expect(JSON.parse(breachesParam)).toHaveLength(1);
   });
@@ -61,8 +88,8 @@ describe("PostgresSloLatencyEvaluationStore.record", () => {
     const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
     const store = new PostgresSloLatencyEvaluationStore(mockConnection(capture));
     await store.record(fixture());
-    expect(capture[0]?.params?.[7]).toBe("p95");
-    expect(capture[0]?.params?.[8]).toBe(30);
+    expect(written(capture).params?.[7]).toBe("p95");
+    expect(written(capture).params?.[8]).toBe(30);
   });
 
   it("rejects a malformed evaluation id", async () => {
@@ -75,5 +102,74 @@ describe("PostgresSloLatencyEvaluationStore.record", () => {
       mockConnection(undefined, { rows: [{ count: "4" }], rowCount: 1 }),
     );
     expect(await store.countBreachesSince("catalog-latency", new Date())).toBe(4);
+  });
+});
+
+describe("the platform write arm", () => {
+  it("claims app.platform_record_write before a platform-scope write", async () => {
+    const capture: Captured[] = [];
+    const store = new PostgresSloLatencyEvaluationStore(mockConnection(capture));
+    await store.record(fixture({ tenantId: null }));
+    expect(capture[0]?.sql).toBe(SET_PLATFORM_RECORD_WRITE_SQL);
+    expect(written(capture).sql).toContain("INSERT INTO meta.slo_latency_evaluations");
+  });
+
+  it("claims the tenant context instead for a tenant-scope write, never both", async () => {
+    const capture: Captured[] = [];
+    await new PostgresSloLatencyEvaluationStore(mockConnection(capture)).record(fixture());
+    const settings = capture.filter((c) => c.sql.includes("set_config"));
+    expect(settings).toHaveLength(1);
+    expect(settings[0]?.sql).toBe(SET_TENANT_CONTEXT_SQL);
+  });
+
+  it("claims nothing at all on a read, which the split left unchanged", async () => {
+    const capture: Captured[] = [];
+    await new PostgresSloLatencyEvaluationStore(mockConnection(capture)).countBreachesSince(
+      "orders-latency",
+      new Date("2026-01-01T00:00:00.000Z"),
+    );
+    expect(capture.some((c) => c.sql.includes("set_config"))).toBe(false);
+  });
+});
+
+describe("the scope predicate a read carries beside RLS", () => {
+  const SINCE = new Date("2026-01-01T00:00:00.000Z");
+
+  it("asks for the platform scope by name on the latency signal too", async () => {
+    const capture: Captured[] = [];
+    await new PostgresSloLatencyEvaluationStore(mockConnection(capture)).countBreachesSince(
+      "catalog-latency",
+      SINCE,
+    );
+    const read = written(capture);
+    expect(read.sql).toContain("tenant_id IS NULL");
+    expect(read.sql).not.toContain("tenant_id = $");
+  });
+
+  it("branches to equality for a tenant, and never to IS NOT DISTINCT FROM", async () => {
+    const capture: Captured[] = [];
+    await new PostgresSloLatencyEvaluationStore(mockConnection(capture)).countBreachesSince(
+      "catalog-latency",
+      SINCE,
+      TENANT,
+    );
+    const read = written(capture);
+    expect(read.sql).toContain("tenant_id = $3");
+    expect(read.sql).not.toContain("IS NOT DISTINCT FROM");
+    expect(read.params).toEqual(["catalog-latency", SINCE.toISOString(), TENANT]);
+    const settings = capture.filter((c) => c.sql.includes("set_config"));
+    expect(settings[0]?.sql).toBe(SET_TENANT_CONTEXT_SQL);
+  });
+
+  it("refuses an implausible tenantId before issuing anything", async () => {
+    const capture: Captured[] = [];
+    await expect(
+      new PostgresSloLatencyEvaluationStore(mockConnection(capture)).countBreachesSince(
+        "catalog-latency",
+        SINCE,
+        "not a uuid at all",
+      ),
+    ).rejects.toThrow(/invalid tenantId/);
+    expect(capture).toEqual([]);
   });
 });

@@ -101,10 +101,24 @@ describe("principalFromJwtClaims", () => {
 
 describe("parseJwksKeySpec", () => {
   it("splits kid:base64 on the first colon", () => {
-    expect(parseJwksKeySpec("key-1:AAAxyz==")).toEqual({ kid: "key-1", publicKeyBase64: "AAAxyz==" });
+    const pub = generateEd25519Keypair().publicKeyBase64;
+    expect(parseJwksKeySpec(`key-1:${pub}`)).toEqual({ kid: "key-1", publicKeyBase64: pub });
   });
   it("rejects a malformed spec", () => {
     expect(() => parseJwksKeySpec("nokey")).toThrow(/invalid --jwks-key/);
+  });
+  it("rejects a value that is not a 32-byte Ed25519 public key", () => {
+    // This fixture used to read `key-1:AAAxyz==`, which the parser accepted. The validator for it
+    // (`isEd25519PublicKeyBase64`) had existed since this module did and had ZERO callers, so a
+    // typo'd or truncated key booted cleanly and turned every Bearer request into an
+    // `invalid_signature` 401 whose body says only "jwt verification failed" -- a deployment-wide
+    // auth outage whose cause is a boot-time measurement nobody took.
+    expect(() => parseJwksKeySpec("key-1:AAAxyz==")).toThrow(/not 32 bytes of standard base64/);
+    expect(() => parseJwksKeySpec("key-1:not!base64!")).toThrow(/invalid --jwks-key/);
+    // The key is public, so naming its expected length discloses nothing.
+    expect(() => parseJwksKeySpec(`key-1:${Buffer.alloc(31).toString("base64")}`)).toThrow(
+      /32 bytes/,
+    );
   });
 });
 

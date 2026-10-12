@@ -14,11 +14,28 @@ import {
 } from "./states.js";
 
 describe("constants", () => {
-  it("TENANT_LIFECYCLE_STATES has 7 entries", () => {
-    expect(TENANT_LIFECYCLE_STATES).toHaveLength(7);
-    expect(TENANT_LIFECYCLE_STATES).toContain("trial");
+  it("TENANT_LIFECYCLE_STATES has 5 entries — what a tenant row can hold", () => {
+    expect(TENANT_LIFECYCLE_STATES).toHaveLength(5);
     expect(TENANT_LIFECYCLE_STATES).toContain("pending_deletion");
     expect(TENANT_LIFECYCLE_STATES).toContain("deleted");
+  });
+
+  it("drops the two billing facts that were duplicated onto the tenant", () => {
+    // `past_due` is a *subscription* status with its own transition map in @crossengin/billing, and
+    // `trial` is a plan tier — neither was storable in `meta.tenants.status` and neither is a fact
+    // about the tenant. Pinned so they cannot drift back in: a tenant in arrears is `active`.
+    expect(TENANT_LIFECYCLE_STATES).not.toContain("past_due");
+    expect(TENANT_LIFECYCLE_STATES).not.toContain("trial");
+  });
+
+  it("is exactly what the catalog's CHECK permits", () => {
+    // The two vocabularies this reconciles: `meta.tenants.status` is CHECK-constrained and the
+    // console transitions it, so a state this enum holds and the column refuses is a state no
+    // tenant can be in. Spelled here rather than imported, because importing @crossengin/kernel
+    // would invert the dependency — the kernel's own test asserts the other direction.
+    expect([...TENANT_LIFECYCLE_STATES].sort()).toEqual(
+      ["active", "archived", "deleted", "pending_deletion", "suspended"],
+    );
   });
 
   it("READ_ONLY_STATES = suspended, archived, pending_deletion", () => {
@@ -41,8 +58,15 @@ describe("constants", () => {
 });
 
 describe("canTransitionLifecycle", () => {
-  it("trial -> active", () => {
-    expect(canTransitionLifecycle("trial", "active")).toBe(true);
+  it("deleted is reachable only from pending_deletion", () => {
+    // Which is what makes the read-only window before an erasure a state rather than a convention:
+    // the Article 17 flow cannot take a serving tenant straight to `deleted`.
+    for (const from of TENANT_LIFECYCLE_STATES) {
+      expect([from, canTransitionLifecycle(from, "deleted")]).toEqual([
+        from,
+        from === "pending_deletion",
+      ]);
+    }
   });
 
   it("active -> suspended", () => {
@@ -55,6 +79,14 @@ describe("canTransitionLifecycle", () => {
 
   it("pending_deletion -> archived (cancel deletion)", () => {
     expect(canTransitionLifecycle("pending_deletion", "archived")).toBe(true);
+  });
+
+  it("pending_deletion -> active, because a verified request can still be rejected", () => {
+    // `DELETION_REQUEST_TRANSITIONS` permits `verified -> rejected`, so the tenant a verification
+    // put here can be let go again, and it must come all the way back rather than stopping at
+    // `archived` — a rejected request must not cost the tenant their write access.
+    expect(canTransitionLifecycle("pending_deletion", "active")).toBe(true);
+    expect(RESTORABLE_STATES.has("pending_deletion")).toBe(true);
   });
 
   it("pending_deletion -> deleted", () => {

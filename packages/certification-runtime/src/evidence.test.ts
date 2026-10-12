@@ -3,6 +3,7 @@ import {
   ControlEvidenceSchema,
   evidenceFromAccessReviewEvidence,
   evidenceFromDrReadiness,
+  ENCRYPTION_SCOPE_ABSENT_FINDING,
   evidenceFromEncryptionCoverage,
   evidenceFromForensicChain,
   type AccessReviewEvidenceLike,
@@ -11,6 +12,44 @@ import {
 const AT = "2026-06-01T00:00:00.000Z";
 
 describe("evidenceFromEncryptionCoverage", () => {
+  it("is NOT satisfied when the schema declares no at-rest column at all", () => {
+    // The defect this closes, verified live: a JSONB-store deployment keeps every field — `phi`
+    // and `regulated` included — inside one `document` JSONB column, so it declares zero at-rest
+    // columns and therefore zero issues, and this control answered `satisfied: true` with the
+    // summary "0 at-rest column(s) in meta are ciphertext; pgcrypto installed". The same
+    // `POST /v1/patients` that 500s on the column store returns 201 on the JSONB store and
+    // `document->>'mrn'` reads back in plaintext. So the control affirmed encryption at rest over
+    // unencrypted PHI. `issues.length === 0` means "no plaintext column was found", which is not
+    // "no column was found".
+    const e = evidenceFromEncryptionCoverage(
+      "data.encryption_at_rest",
+      { schema: "meta", pgcryptoInstalled: true, total: 0, plaintext: 0, issues: [] },
+      AT,
+    );
+    expect(e.satisfied).toBe(false);
+    expect(e.findings).toContain(ENCRYPTION_SCOPE_ABSENT_FINDING);
+    expect(e.summary).toContain("unevidenced, not satisfied");
+    expect(() => ControlEvidenceSchema.parse(e)).not.toThrow();
+  });
+
+  it("keeps the scope_absent finding alongside real plaintext findings", () => {
+    // Zero columns and a pgcrypto problem can co-occur, and neither should mask the other.
+    const e = evidenceFromEncryptionCoverage(
+      "data.encryption_at_rest",
+      {
+        schema: "meta",
+        pgcryptoInstalled: false,
+        total: 0,
+        plaintext: 0,
+        issues: [{ kind: "pgcrypto_missing", detail: "extension not installed" }],
+      },
+      AT,
+    );
+    expect(e.satisfied).toBe(false);
+    expect(e.findings[0]).toBe(ENCRYPTION_SCOPE_ABSENT_FINDING);
+    expect(e.findings).toHaveLength(2);
+  });
+
   it("satisfied when there are no issues", () => {
     const e = evidenceFromEncryptionCoverage(
       "data.encryption_at_rest",

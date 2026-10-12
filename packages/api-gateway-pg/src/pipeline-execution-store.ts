@@ -1,8 +1,112 @@
 import type { PipelineExecution } from "@crossengin/api-gateway";
-import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  assertScopeTenantId,
+  scopeFilter,
+  setPlatformWriteSql,
+  type PgConnection,
+  type ScopeFilter,
+} from "@crossengin/kernel-pg";
 
 const SCHEMA = "meta";
 const TABLE = "gateway_pipeline_executions";
+
+/**
+ * The two session settings a scoped **write** needs, declared here and shared with
+ * `rate-limit-checker.ts` — this package has no `records.ts` to hold them, and the two writers want
+ * one copy rather than two strings that can drift.
+ *
+ * `app.platform_record_write`, because both tables are the deployment's own observational record: a
+ * pipeline execution and a rate-limit decision say what the gateway *did*, never what it should do.
+ * The grant deliberately does not reach `meta.rate_limit_policies` or `meta.quota_definitions`,
+ * which say the latter and sit on `app.platform_config_write` instead.
+ *
+ * Until the policy split neither writer set anything at all, which worked only because a table's
+ * owner bypasses its policies. As a non-owner, the old single `ALL`-scope policy admitted a
+ * *platform* row unconditionally (the defect) while refusing a tenant row, since with no context
+ * `current_setting('app.current_tenant_id', true)` answers NULL and the comparison is never true.
+ * Both arms are needed for that reason: one because the split now demands a grant, the other
+ * because nothing ever supplied the context a tenant row has always needed.
+ */
+export const SET_TENANT_CONTEXT_SQL =
+  "SELECT set_config('app.current_tenant_id', $1, true)";
+
+export const SET_PLATFORM_RECORD_WRITE_SQL = setPlatformWriteSql("record");
+
+/**
+ * `scopeFilter` lives in `kernel-pg` beside `setPlatformWriteSql` and `isoInstant` — eight packages
+ * held a verbatim copy and `kernel-pg` is the only dependency all eight share. The rule that chooses
+ * between the strict and the inclusive spelling, and the two measurements behind the branch, are
+ * written down there once.
+ *
+ * **Which this package reads.** The strict form, for both tables: a pipeline execution and a
+ * rate-limit decision are the deployment's own observational record of one scope's traffic, and a
+ * closed set. Measured live on this schema with three tenant executions beside one platform one,
+ * `countSince` answered **4** as the owner and **1** as a non-owner, for the same call. An aggregate
+ * is the sharp case, because the caller receives a plausible scalar rather than a visibly long list.
+ *
+ * `optionalScopeFilter` below is genuinely local: `undefined` meaning "every scope" exists only for
+ * the replayer, which is a deliberately cross-scope diagnostic, and that is not a third spelling of
+ * the predicate but a decision not to carry one.
+ */
+export { scopeFilter, type ScopeFilter } from "@crossengin/kernel-pg";
+
+function assertTenantId(tenantId: string): void {
+  assertScopeTenantId(tenantId);
+}
+
+/**
+ * The scope an *optionally*-scoped read names: a tenant id, the platform scope (`null`), or every
+ * scope (`undefined`).
+ *
+ * The third member exists only for the replayer, whose `tenantId?: string` has always meant "every
+ * scope" when absent — a deliberately cross-scope diagnostic, and the one read here whose answer is
+ * *meant* to span tenants. What it could not express before was the platform scope: `undefined` was
+ * "all" and there was no way to say "the deployment's own rows". `null` says it now.
+ */
+export type ReadScope = string | null | undefined;
+
+/** `null` when the scope is every scope, so a caller can omit the predicate rather than write TRUE. */
+export function optionalScopeFilter(scope: ReadScope, firstParam = 1): ScopeFilter | null {
+  if (scope === undefined) return null;
+  return scopeFilter(scope, firstParam);
+}
+
+/**
+ * A **read**'s scope: a tenant context, or nothing at all.
+ *
+ * Nothing for the platform scope, because the platform read arm is `SELECT`-scoped on
+ * `tenant_id IS NULL` and demands no grant. A read deliberately does not claim the write elevation
+ * — it does not need it, and a privilege claimed for no reason is one the next statement in the
+ * same transaction inherits. Mirrors `PostgresKeyRegistry.scoped`.
+ */
+export async function scopedRead<T>(
+  conn: PgConnection,
+  tenantId: ReadScope,
+  fn: (tx: PgConnection) => Promise<T>,
+): Promise<T> {
+  if (typeof tenantId === "string") assertTenantId(tenantId);
+  return conn.transaction(async (tx) => {
+    if (typeof tenantId === "string") await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
+    return fn(tx);
+  });
+}
+
+/** A tenant context, or the platform record-write elevation, never both. */
+// `async` rather than returning `conn.transaction(...)` directly, so a rejected tenant id arrives
+// as a rejection like every other failure here. A synchronous throw out of a `Promise`-returning
+// function is a trap for a caller that only writes `.catch`.
+export async function scopedWrite<T>(
+  conn: PgConnection,
+  tenantId: string | null,
+  fn: (tx: PgConnection) => Promise<T>,
+): Promise<T> {
+  if (tenantId !== null) assertTenantId(tenantId);
+  return conn.transaction(async (tx) => {
+    if (tenantId === null) await tx.query(SET_PLATFORM_RECORD_WRITE_SQL);
+    else await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
+    return fn(tx);
+  });
+}
 
 export class PostgresPipelineExecutionStore {
   private readonly conn: PgConnection;
@@ -12,44 +116,59 @@ export class PostgresPipelineExecutionStore {
   }
 
   async record(execution: PipelineExecution): Promise<void> {
-    await this.conn.query(
-      `INSERT INTO ${SCHEMA}.${TABLE} (
-         request_id, tenant_id, started_at, completed_at, total_duration_ms,
-         final_stage, final_outcome, final_response_status, stages,
-         auth_outcome, route_match_outcome, idempotency_outcome,
-         principal_id, route_operation_id, resolved_api_version,
-         correlation_id, rate_limit_decision_id, bytes_in, bytes_out
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
-       ON CONFLICT (request_id) DO NOTHING`,
-      [
-        execution.requestId,
-        execution.tenantId,
-        execution.startedAt,
-        execution.completedAt,
-        execution.totalDurationMs,
-        execution.finalStage,
-        execution.finalOutcome,
-        execution.finalResponseStatus,
-        JSON.stringify(execution.stages),
-        execution.authOutcome,
-        execution.routeMatchOutcome,
-        execution.idempotencyOutcome,
-        execution.principalId,
-        execution.routeOperationId,
-        execution.resolvedApiVersion,
-        execution.correlationId,
-        execution.rateLimitDecisionId,
-        execution.bytesIn,
-        execution.bytesOut,
-      ],
+    await scopedWrite(this.conn, execution.tenantId, (tx) =>
+      tx.query(
+        `INSERT INTO ${SCHEMA}.${TABLE} (
+           request_id, tenant_id, started_at, completed_at, total_duration_ms,
+           final_stage, final_outcome, final_response_status, stages,
+           auth_outcome, route_match_outcome, idempotency_outcome,
+           principal_id, route_operation_id, resolved_api_version,
+           correlation_id, rate_limit_decision_id, bytes_in, bytes_out
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+         ON CONFLICT (request_id) DO NOTHING`,
+        [
+          execution.requestId,
+          execution.tenantId,
+          execution.startedAt,
+          execution.completedAt,
+          execution.totalDurationMs,
+          execution.finalStage,
+          execution.finalOutcome,
+          execution.finalResponseStatus,
+          JSON.stringify(execution.stages),
+          execution.authOutcome,
+          execution.routeMatchOutcome,
+          execution.idempotencyOutcome,
+          execution.principalId,
+          execution.routeOperationId,
+          execution.resolvedApiVersion,
+          execution.correlationId,
+          execution.rateLimitDecisionId,
+          execution.bytesIn,
+          execution.bytesOut,
+        ],
+    
+      ),
     );
   }
 
-  async countSince(since: Date): Promise<number> {
-    const result = await this.conn.query<{ count: string }>(
-      `SELECT COUNT(*)::TEXT AS count FROM ${SCHEMA}.${TABLE} WHERE started_at >= $1`,
-      [since.toISOString()],
+  /**
+   * How many executions one scope recorded since `since`.
+   *
+   * `tenantId` defaults to the platform scope, which is what a non-owner connection with no tenant
+   * context has always been given — the default makes the owner agree with it rather than changing
+   * what either was asked for. A count is not a list: a caller cannot inspect a scalar and notice
+   * that three of its four are another scope's.
+   */
+  async countSince(since: Date, tenantId: string | null = null): Promise<number> {
+    const scope = scopeFilter(tenantId, 2);
+    const result = await scopedRead(this.conn, tenantId, (tx) =>
+      tx.query<{ count: string }>(
+        `SELECT COUNT(*)::TEXT AS count FROM ${SCHEMA}.${TABLE}
+         WHERE started_at >= $1 AND ${scope.sql}`,
+        [since.toISOString(), ...scope.params],
+      ),
     );
     const row = result.rows[0];
     if (row === undefined) return 0;

@@ -1,21 +1,18 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
 import type { ActivityKind, ActivityStatus, WorkflowDefinition, WorkflowEvent } from "@crossengin/workflow-engine";
-import {
-  type EventLog,
-  projectActivities,
-  projectInstance,
-  projectSignals,
-  projectTimers,
-} from "@crossengin/workflow-runtime";
+import { type EventLog, projectInstance } from "@crossengin/workflow-runtime";
 
-import { PostgresActivityStore, type ActivityProjection } from "./activity-store.js";
+import { projectPersistableActivities } from "./activity-provenance.js";
+import { PostgresActivityStore } from "./activity-store.js";
 import {
   WorkflowDefinitionIdResolver,
   WorkflowInstanceIdResolver,
 } from "./id-mapping.js";
 import { PostgresInstanceStore } from "./instance-store.js";
-import { PostgresSignalStore, type SignalProjection } from "./signal-store.js";
-import { PostgresTimerStore, type TimerProjection } from "./timer-store.js";
+import { projectPersistableSignals } from "./signal-provenance.js";
+import { PostgresSignalDeduplicator, PostgresSignalStore } from "./signal-store.js";
+import { projectPersistableTimers } from "./timer-provenance.js";
+import { PostgresTimerStore } from "./timer-store.js";
 
 export interface ProjectingEventLogOptions {
   readonly inner: EventLog;
@@ -104,39 +101,26 @@ export class ProjectingEventLog implements EventLog {
       }
     }
 
-    const activities = projectActivities(events);
-    await this.activityStore.upsertMany(activities as readonly ActivityProjection[]);
-
-    const signals = projectSignals(events);
-    if (signals.length > 0) {
-      const projections: SignalProjection[] = signals.map((s) => ({
-        id: s.id,
-        instanceId: s.instanceId,
-        tenantId: s.tenantId,
-        signalName: s.signalName,
-        correlationKey: s.correlationKey,
-        status: s.status,
-        receivedAt: s.receivedAt,
-        matchedAt: s.matchedAt,
-        consumedAt: s.consumedAt,
-      }));
-      await this.signalStore.upsertMany(projections);
+    // All three child projections refuse rather than persist a row whose required columns cannot be
+    // answered from the log plus the definition. That aborts the append, which is the loud outcome:
+    // the alternative is a row claiming a guarantee nobody promised, a schedule nobody declared, or
+    // a retry ceiling nobody chose — in the very tables those facts are read back from. The casts
+    // these three lines used to carry are gone with them: `ActivityProjection` is no longer
+    // structurally satisfied by what the pure fold produces, so the type system now holds the gap
+    // open instead of letting a cast close it.
+    const activities = projectPersistableActivities(events, definition);
+    if (activities.length > 0) {
+      await this.activityStore.upsertMany(activities);
     }
 
-    const timers = projectTimers(events);
+    const signals = projectPersistableSignals(events, definition);
+    if (signals.length > 0) {
+      await this.signalStore.upsertMany(signals);
+    }
+
+    const timers = projectPersistableTimers(events, definition);
     if (timers.length > 0) {
-      const projections: TimerProjection[] = timers.map((t) => ({
-        id: t.id,
-        instanceId: t.instanceId,
-        tenantId: t.tenantId,
-        timerName: t.timerName,
-        status: t.status,
-        scheduledAt: t.scheduledAt,
-        fireAt: t.fireAt,
-        firedAt: t.firedAt,
-        cancelledAt: t.cancelledAt,
-      }));
-      await this.timerStore.upsertMany(projections);
+      await this.timerStore.upsertMany(timers);
     }
   }
 }
@@ -153,6 +137,11 @@ export interface PersistentStores {
   readonly instanceStore: PostgresInstanceStore;
   readonly activityStore: PostgresActivityStore;
   readonly signalStore: PostgresSignalStore;
+  /**
+   * Beside the store rather than inside it: the store writes one row, while this answers a question
+   * about the whole table — which is `WorkflowEngine`'s to ask, not `ProjectingEventLog`'s.
+   */
+  readonly signalDeduplicator: PostgresSignalDeduplicator;
   readonly timerStore: PostgresTimerStore;
 }
 
@@ -170,6 +159,7 @@ export function buildPersistentStores(input: BuildPersistentStoresInput): Persis
     }),
     activityStore: new PostgresActivityStore({ conn: input.conn, instanceResolver }),
     signalStore: new PostgresSignalStore({ conn: input.conn, instanceResolver }),
+    signalDeduplicator: new PostgresSignalDeduplicator(input.conn),
     timerStore: new PostgresTimerStore({ conn: input.conn, instanceResolver }),
   };
 }

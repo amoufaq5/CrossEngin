@@ -1,6 +1,14 @@
+import { TENANT_LIFECYCLE_STATES, TENANT_LIFECYCLE_TRANSITIONS } from "@crossengin/tenant-lifecycle";
 import { z } from "zod";
 
-export const TENANT_STATUSES = ["active", "suspended", "archived", "deleted"] as const;
+/**
+ * Re-exported from the contract rather than restated, since ADR-0334. This file used to declare its
+ * own four-value enum while `@crossengin/tenant-lifecycle` declared a seven-value one that nothing
+ * read — two vocabularies for one concept, where the authoritative-looking one was unreachable and
+ * the real one was here. There is one now, and it lives in the contracts package where the layering
+ * convention says a state machine belongs.
+ */
+export const TENANT_STATUSES = TENANT_LIFECYCLE_STATES;
 export type TenantStatus = (typeof TENANT_STATUSES)[number];
 
 export const TENANT_TIERS = ["small", "enterprise", "regulated", "on-prem"] as const;
@@ -46,11 +54,35 @@ export const TENANT_STATUS_TRANSITIONS: Readonly<Record<TenantStatus, readonly T
   active: ["suspended", "archived"],
   suspended: ["active", "archived"],
   archived: [],
+  // Neither is a console destination, and for different reasons. `deleted` is the GDPR Article 17
+  // flow's terminus (the comment above). `pending_deletion` is reached by *verifying* a deletion
+  // request — four-eyes, a named verifier, an Article 12(3) deadline (ADR-0321) — so a console
+  // button that set it would be a second path to the same state under weaker controls.
+  pending_deletion: [],
   deleted: [],
 };
 
 export function canTransitionTenant(from: TenantStatus, to: TenantStatus): boolean {
   return TENANT_STATUS_TRANSITIONS[from].includes(to);
+}
+
+/**
+ * Every console transition is also a lifecycle transition — the console's map is a *restriction* of
+ * the contract's, never a widening of it. Checked rather than assumed, because two maps over one
+ * state space is how the two vocabularies this file just stopped duplicating came about: a console
+ * that permitted `archived -> active` while the lifecycle forbade it would be a path to a state the
+ * contract says is unreachable, and nothing would have noticed.
+ */
+export function consoleTransitionsAreLifecycleTransitions(): readonly string[] {
+  const violations: string[] = [];
+  for (const from of TENANT_STATUSES) {
+    for (const to of TENANT_STATUS_TRANSITIONS[from]) {
+      if (!TENANT_LIFECYCLE_TRANSITIONS[from].includes(to)) {
+        violations.push(`${from} -> ${to}`);
+      }
+    }
+  }
+  return violations;
 }
 
 const SLUG_RE = /^[a-z][a-z0-9-]{1,48}$/;

@@ -23,6 +23,7 @@ function invocation(o: Partial<ActivityInvocation> = {}): ActivityInvocation {
     attemptNumber: o.attemptNumber ?? 1,
     input: o.input ?? { foo: "bar" },
     variables: o.variables ?? {},
+    signal: o.signal ?? new AbortController().signal,
   };
 }
 

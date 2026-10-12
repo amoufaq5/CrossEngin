@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import { sha256 } from "./hashing.js";
 import {
   ed25519PublicKeyFingerprint,
+  ed25519PublicKeyFromSeed,
   generateEd25519Keypair,
+  isEd25519PrivateSeedBase64,
   isEd25519PublicKeyBase64,
   signEd25519,
   verifyEd25519,
@@ -119,5 +121,56 @@ describe("isEd25519PublicKeyBase64", () => {
 
   it("rejects non-base64", () => {
     expect(isEd25519PublicKeyBase64("not!base64!")).toBe(false);
+  });
+});
+
+describe("isEd25519PrivateSeedBase64", () => {
+  it("accepts a well-formed seed and rejects the wrong width", () => {
+    const kp = generateEd25519Keypair();
+    expect(isEd25519PrivateSeedBase64(kp.privateKeyBase64)).toBe(true);
+    expect(isEd25519PrivateSeedBase64(Buffer.alloc(31).toString("base64"))).toBe(false);
+    expect(isEd25519PrivateSeedBase64("not!base64!")).toBe(false);
+  });
+});
+
+describe("ed25519PublicKeyFromSeed", () => {
+  it("recovers the public half of a generated pair", () => {
+    // This is what lets a deployment that signs its own tokens hold ONE secret: without it the
+    // public key has to be configured beside the private one, and a pair that can be stated twice
+    // can be stated inconsistently.
+    for (let i = 0; i < 5; i += 1) {
+      const kp = generateEd25519Keypair();
+      expect(ed25519PublicKeyFromSeed(kp.privateKeyBase64)).toBe(kp.publicKeyBase64);
+    }
+  });
+
+  it("the derived key verifies what the seed signed", () => {
+    const kp = generateEd25519Keypair();
+    const derived = ed25519PublicKeyFromSeed(kp.privateKeyBase64);
+    const sig = signEd25519(kp.privateKeyBase64, derived, "jwt.signing.input");
+    expect(verifyEd25519(derived, sig, "jwt.signing.input")).toBe(true);
+  });
+
+  it("is deterministic", () => {
+    const kp = generateEd25519Keypair();
+    expect(ed25519PublicKeyFromSeed(kp.privateKeyBase64)).toBe(
+      ed25519PublicKeyFromSeed(kp.privateKeyBase64),
+    );
+  });
+
+  it("refuses a seed of the wrong width rather than deriving something", () => {
+    expect(() => ed25519PublicKeyFromSeed(Buffer.alloc(31).toString("base64"))).toThrow(
+      /private seed must decode to 32 bytes/,
+    );
+    expect(() => ed25519PublicKeyFromSeed("not-base64!")).toThrow();
+  });
+
+  it("matches a pinned known-answer vector", () => {
+    // An all-0x01 seed is a standard worked example; pinned so a change to the PKCS#8 prefix or
+    // the export path cannot silently start deriving a different key, which would make every
+    // issued token unverifiable at once.
+    expect(ed25519PublicKeyFromSeed(Buffer.alloc(32, 0x01).toString("base64"))).toBe(
+      "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w=",
+    );
   });
 });

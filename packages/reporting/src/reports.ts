@@ -167,8 +167,24 @@ const BaseReportSchema = z.object({
   description: z.string().optional(),
   entity: z.string().min(1),
   filters: z.array(ReportFilterSchema).default([]),
+  /**
+   * Who may run this report. An `RbacGrant`, so it carries its own `abac` policy key — which is
+   * why there is no second `abac` field beside it any more.
+   *
+   * There was one, `abac: z.string().min(1).optional()`, and it was three things at once: a
+   * **duplicate** of `permissions.abac` with no rule for which wins, **unbounded** where the
+   * authoritative spelling is `max(MAX_ABAC_POLICY_KEY_LENGTH)` (200, deliberately, to converge
+   * with `ABAC_CHECK_GUARD.policyKey`), and read by **nothing** — zero readers anywhere in the
+   * workspace, and zero reports declared in any pack. An obligation that no reader discharges and
+   * no survey can see is a trap for a manifest author rather than a capability, so it is deleted
+   * rather than wired: see `PermissionRefSchema` in `@crossengin/views`, where the same key was
+   * removed on the same argument at the same measured cost of zero.
+   *
+   * `surveyAbacObligations` walks `manifest.permissions` and nothing else, so an obligation here
+   * is still outside ADR-0340's boot refusal. `checkAbacObligations` reports that rather than
+   * claiming none is declared.
+   */
   permissions: RbacGrantSchema.optional(),
-  abac: z.string().min(1).optional(),
   engine: z.enum(REPORT_ENGINES).default("auto"),
   materialize: z.boolean().default(false),
   cacheTtlSeconds: z.number().int().min(0).max(3600).default(60),

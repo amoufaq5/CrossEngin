@@ -2,9 +2,7 @@ import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 
 import "./globals.css";
-import { ShellBar } from "@/components/ShellBar";
-import { Sidebar } from "@/components/Sidebar";
-import { SubscriptionBanner } from "@/components/SubscriptionBanner";
+import { AppChrome } from "@/components/AppChrome";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -22,16 +20,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en" className={inter.variable}>
       <body className="font-sans">
-        <div className="flex min-h-screen flex-col">
-          <ShellBar />
-          <div className="flex flex-1 overflow-hidden">
-            <Sidebar />
-            <main className="h-[calc(100vh-3.5rem)] flex-1 overflow-y-auto">
-              <SubscriptionBanner />
-              {children}
-            </main>
-          </div>
-        </div>
+        <AppChrome>{children}</AppChrome>
       </body>
     </html>
   );

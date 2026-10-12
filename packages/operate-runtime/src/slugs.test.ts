@@ -1,11 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  entityCamel,
-  entityReadOperationIds,
-  operationId,
-  resourceSlug,
-  routeId,
-} from "./slugs.js";
+import { entityCamel, operationId, resourceSlug, routeId } from "./slugs.js";
 
 describe("slug + operationId conventions", () => {
   it("camel-cases the entity name for operationIds", () => {
@@ -26,8 +20,12 @@ describe("slug + operationId conventions", () => {
     expect(operationId("SalesOrder", "list")).toMatch(/^[a-z][a-zA-Z0-9._]*$/);
   });
 
-  it("lists the read operationIds for redaction", () => {
-    expect(entityReadOperationIds("Product")).toEqual(["product.list", "product.read"]);
+  // `entityReadOperationIds` is gone; what replaced its test is the assertion that this module
+  // exports no name-derived operation *set* at all, so the redaction mapping cannot be rebuilt
+  // from the entity name again. The real set comes from the derived routes (`compile.test.ts`).
+  it("exports no per-entity operation list (the redaction mapping must come from the routes)", async () => {
+    const slugs = await import("./slugs.js");
+    expect(Object.keys(slugs).filter((k) => /OperationIds$/.test(k))).toEqual([]);
   });
 
   it("derives a valid rt_ route id from an operationId", () => {

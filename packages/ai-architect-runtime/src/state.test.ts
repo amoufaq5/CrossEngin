@@ -65,6 +65,27 @@ describe("SessionCostTracker", () => {
     expect(t.estimateInflation(S)).toBe(2.5);
   });
 
+  it("seeds a session's inflation from a tenant's durably learned factor", () => {
+    const t = new SessionCostTracker();
+    t.seedEstimateInflation(S, 3);
+    expect(t.estimateInflation(S)).toBe(3);
+  });
+
+  it("a seed raises and never lowers, so a late read cannot undo a worse observation", () => {
+    const t = new SessionCostTracker();
+    t.observeEstimateRatio(S, 7);
+    t.seedEstimateInflation(S, 2);
+    expect(t.estimateInflation(S)).toBe(7);
+  });
+
+  it("ignores a seed at or below 1, and a non-finite one", () => {
+    const t = new SessionCostTracker();
+    t.seedEstimateInflation(S, 1);
+    t.seedEstimateInflation(S, 0.2);
+    t.seedEstimateInflation(S, Number.NaN);
+    expect(t.estimateInflation(S)).toBe(1);
+  });
+
   it("keeps the first seal reason — a seal is never re-explained or lifted", () => {
     const t = new SessionCostTracker();
     t.seal(S, "first");

@@ -1,6 +1,6 @@
 import type { Entity, Trait } from "@crossengin/types/meta-schema";
 import { describe, expect, it } from "vitest";
-import { resolvedFieldNames, resolvedFields } from "./resolution.js";
+import { resolvedClassifiedFields, resolvedFieldNames, resolvedFields } from "./resolution.js";
 
 const entity = (over: Partial<Entity> = {}): Entity => ({
   name: "Prescription",
@@ -110,5 +110,84 @@ describe("resolvedFields", () => {
     const e = entity({ traits: ["auditable", "soft_deletable"] });
     const names = new Set(["id", ...resolvedFields(e, []).map((f) => f.name)]);
     expect([...resolvedFieldNames(e, [])].sort()).toEqual([...names].sort());
+  });
+});
+
+describe("resolvedClassifiedFields", () => {
+  const classifiedTrait: Trait = {
+    name: "contact_bearing",
+    fields: [
+      { name: "personal_email", type: { kind: "text", maxLength: 200 }, classification: "pii" },
+      { name: "nickname", type: { kind: "text", maxLength: 40 } },
+    ],
+  };
+
+  it("finds a classified field the entity declares itself", () => {
+    const e = entity({
+      fields: [{ name: "mrn", type: { kind: "text", maxLength: 32 }, classification: "phi" }],
+    });
+    expect(resolvedClassifiedFields(e, [])).toEqual([{ field: "mrn", classification: "phi" }]);
+  });
+
+  // The whole reason this function exists. A reader that asks `entity.fields` answers `[]` here,
+  // and two readers did: the gateway's redaction registry and the write mask, both failing open.
+  it("finds a classified field a CUSTOM TRAIT contributes, which the entity's own fields do not", () => {
+    const e = entity({ traits: ["contact_bearing"], fields: [{ name: "qty", type: { kind: "integer" } }] });
+    expect(resolvedClassifiedFields(e, [classifiedTrait])).toEqual([
+      { field: "personal_email", classification: "pii" },
+    ]);
+  });
+
+  it("orders the entity's own classified fields before a trait's", () => {
+    const e = entity({
+      traits: ["contact_bearing"],
+      fields: [{ name: "mrn", type: { kind: "text", maxLength: 32 }, classification: "phi" }],
+    });
+    expect(resolvedClassifiedFields(e, [classifiedTrait])).toEqual([
+      { field: "mrn", classification: "phi" },
+      { field: "personal_email", classification: "pii" },
+    ]);
+  });
+
+  it("omits a trait's unclassified field", () => {
+    const e = entity({ traits: ["contact_bearing"], fields: [{ name: "qty", type: { kind: "integer" } }] });
+    const names = resolvedClassifiedFields(e, [classifiedTrait]).map((c) => c.field);
+    expect(names).not.toContain("nickname");
+  });
+
+  // No built-in trait field carries a classification today, and this pins that it is a fact about
+  // the table rather than something this function assumes: if one gained a class, it would appear
+  // here and in every reader, which is the behaviour the function exists to guarantee.
+  it("answers empty for built-in traits, none of whose fields are classified today", () => {
+    expect(resolvedClassifiedFields(entity({ traits: ["auditable", "soft_deletable", "versioned"], fields: [{ name: "qty", type: { kind: "integer" } }] }), [])).toEqual([]);
+  });
+
+  it("lets the entity's own classification win over a trait supplying the same field name", () => {
+    const shadowed = entity({
+      traits: ["contact_bearing"],
+      fields: [
+        { name: "personal_email", type: { kind: "text", maxLength: 200 }, classification: "regulated" },
+      ],
+    });
+    expect(resolvedClassifiedFields(shadowed, [classifiedTrait])).toEqual([
+      { field: "personal_email", classification: "regulated" },
+    ]);
+  });
+
+  it("is exactly the classified subset of resolvedFields, so the two cannot disagree", () => {
+    const e = entity({
+      traits: ["contact_bearing", "auditable"],
+      fields: [{ name: "mrn", type: { kind: "text", maxLength: 32 }, classification: "phi" }],
+    });
+    const expected = resolvedFields(e, [classifiedTrait])
+      .filter((f) => f.classification !== undefined)
+      .map((f) => ({ field: f.name, classification: f.classification }));
+    expect(resolvedClassifiedFields(e, [classifiedTrait])).toEqual(expected);
+    expect(expected.length).toBeGreaterThan(1);
+  });
+
+  it("ignores a trait the entity does not name", () => {
+    const e = entity({ fields: [{ name: "qty", type: { kind: "integer" } }] });
+    expect(resolvedClassifiedFields(e, [classifiedTrait])).toEqual([]);
   });
 });

@@ -117,6 +117,13 @@ export const TimelineEntrySchema = z
       "action_taken",
       "comms_sent",
       "runbook_invoked",
+      /**
+       * Somebody was paged, or a page was closed. Beside `comms_sent` and `runbook_invoked`
+       * because it is the same kind of fact: something left the platform. Adding a member only
+       * widens what parses, so no stored row becomes unreadable — which matters here because the
+       * `-pg` store re-parses every row it reads.
+       */
+      "paged",
       "resolved",
     ]),
     message: z.string().min(1),
@@ -124,6 +131,110 @@ export const TimelineEntrySchema = z
   })
   .strict();
 export type TimelineEntry = z.infer<typeof TimelineEntrySchema>;
+
+/**
+ * A channel kind is an identifier — `pagerduty_phone`, `slack`, `sms`. The pattern is the
+ * structural reason an address, a phone number, a `#channel` or a routing key cannot reach a
+ * stored timeline note: none of them is a lower snake_case identifier.
+ */
+const CHANNEL_KIND_PATTERN = /^[a-z][a-z0-9_]*$/;
+const MAX_CHANNEL_KIND_LENGTH = 40;
+const MAX_PAGE_REFERENCE_LENGTH = 200;
+
+/**
+ * What a `paged` timeline entry is allowed to know.
+ *
+ * Deliberately only channel **kinds**, counts and a provider-issued handle. ADR-0310 and ADR-0325
+ * keep tenant data, tombstone ids and defect names out of a page's *content*; the rule here is
+ * narrower — a timeline note is stored next to the incident, not shipped to a lock screen — but it
+ * is the same rule: the note says who was reached over what, never where they were reached or with
+ * which credential. There is no field for an address, a number, a channel name or a key, which is
+ * what makes "it must not carry one" true by construction rather than by review.
+ */
+export interface PagedTimelineFacts {
+  /** The channel kinds this page or close was attempted over, in the order the caller fanned out. */
+  readonly channels: readonly string[];
+  readonly delivered: number;
+  readonly attempted: number;
+  /** The provider's own handle for the alert — e.g. a PagerDuty dedup key. Never a routing key. */
+  readonly reference?: string | null;
+  readonly operation?: "trigger" | "resolve";
+}
+
+function validatePagedFacts(facts: PagedTimelineFacts): void {
+  const { delivered, attempted } = facts;
+  if (
+    !Number.isInteger(delivered) ||
+    !Number.isInteger(attempted) ||
+    delivered < 0 ||
+    attempted < 0 ||
+    delivered > attempted
+  ) {
+    // A programming error, not user input: the dispatcher counted its own fan-out, so a
+    // delivered count above the attempted one means the caller is reporting something else.
+    throw new RangeError(
+      `paged counts must be non-negative integers with delivered <= attempted ` +
+        `(delivered=${String(delivered)}, attempted=${String(attempted)})`,
+    );
+  }
+  facts.channels.forEach((channel, i) => {
+    if (
+      typeof channel !== "string" ||
+      channel.length > MAX_CHANNEL_KIND_LENGTH ||
+      !CHANNEL_KIND_PATTERN.test(channel)
+    ) {
+      // Names the position and not the value: a rejected "channel kind" is exactly the kind of
+      // thing that might be an address or a key, and an error message ends up in a log.
+      throw new TypeError(`channels[${i}] is not a channel kind`);
+    }
+  });
+  const reference = facts.reference;
+  if (reference !== undefined && reference !== null) {
+    if (reference.trim().length === 0 || reference.length > MAX_PAGE_REFERENCE_LENGTH) {
+      throw new TypeError("page reference must be a non-empty handle under 200 characters");
+    }
+  }
+}
+
+/**
+ * The metadata a `paged` entry carries, built once here so the three escalators cannot each
+ * invent a shape an incident review then has to learn three times.
+ */
+export function pagedTimelineMetadata(facts: PagedTimelineFacts): Record<string, unknown> {
+  validatePagedFacts(facts);
+  const reference = facts.reference;
+  return {
+    operation: facts.operation ?? "trigger",
+    channels: [...facts.channels],
+    delivered: facts.delivered,
+    attempted: facts.attempted,
+    ...(reference === undefined || reference === null ? {} : { reference }),
+  };
+}
+
+/** The one line an incident review scans for. */
+export function pagedTimelineMessage(facts: PagedTimelineFacts): string {
+  validatePagedFacts(facts);
+  const resolving = (facts.operation ?? "trigger") === "resolve";
+  if (facts.channels.length === 0) {
+    return resolving
+      ? "closed no alert — no page channel was attempted"
+      : "PAGED NOBODY — no page channel was attempted";
+  }
+  const list = facts.channels.join(", ");
+  if (resolving) {
+    // A close that reached nobody is not an alarm — a Slack message cannot be unposted, so
+    // `unsupported` is the expected answer on most channels (ADR-0326).
+    return facts.delivered === 0
+      ? `closed no alert — 0/${facts.attempted} over ${list}`
+      : `resolved the alert on ${list}`;
+  }
+  // Shouted, because this is the line that says the escalation did not happen. A quiet
+  // "paged 0/2" reads like every other entry when a reviewer scans the timeline.
+  return facts.delivered === 0
+    ? `PAGED NOBODY — 0/${facts.attempted} over ${list}`
+    : `paged ${facts.delivered}/${facts.attempted} over ${list}`;
+}
 
 export const IncidentRecordSchema = z
   .object({

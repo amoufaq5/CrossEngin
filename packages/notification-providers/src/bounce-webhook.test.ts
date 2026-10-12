@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ADDRESS_NORMALIZATION_RULES,
+  BOUNCE_WEBHOOK_SOURCES,
   CHANNEL_ADDRESS_NORMALIZATION,
   DEFAULT_BOUNCE_TOLERANCE_SECONDS,
   normalizeEmailAddress,
@@ -15,15 +16,26 @@ import {
   handleBounceWebhook,
   planSuppression,
   recognizeSesEvent,
+  TWILIO_FAILED_STATUSES,
+  TWILIO_MESSAGE_CALLBACK_STATUSES,
   recognizeTwilioStatusCallback,
+  recognizeTwilioVoiceStatusCallback,
   suppressionIdFor,
   suppressionNotes,
+  TWILIO_ANSWERED_BY_VALUES,
+  TWILIO_CALL_CALLBACK_STATUSES,
   TWILIO_SUPPRESSION_REASONS,
+  TWILIO_VOICE_SUPPRESSION_REASONS,
+  TWILIO_VOICE_TRANSIENT_CODES,
   unwrapSnsEnvelope,
+  VOICE_ANSWERED_BY_VERDICTS,
+  VOICE_NEVER_SUPPRESSIBLE_STATUSES,
+  VOICE_PROGRESS_STATUSES,
   type BounceWebhookOptions,
   type BounceWebhookRequest,
   type BounceWebhookResult,
 } from "./bounce-webhook.js";
+import { TWILIO_CALL_RETRYABLE_STATUSES } from "./voice-twilio.js";
 import {
   sesBounceEvent,
   sesComplaintEvent,
@@ -377,6 +389,519 @@ describe("Twilio status callbacks", () => {
     expect(recognized.ok).toBe(false);
   });
 
+  it("refuses a MessageStatus Twilio does not define as unrecognised, not as a non-failure", () => {
+    // ADR-0329. "Not a failure" is a claim about a status this module understands; a status it has
+    // never seen is a claim it cannot make. If Twilio adds a terminal failure status, the old
+    // answer kept messaging a number that had stopped working, silently and forever — the exact
+    // fail-open shape ADR-0302 removed from the suppression *readers*.
+    expectRefusal(
+      twilio({ MessageStatus: "incinerated", To: "+15551234567", ErrorCode: "21610" }),
+      "payload_unrecognized",
+    );
+  });
+
+  it("names every status Twilio documents, because a missing one costs a retry storm", () => {
+    // The list errs wide on purpose: an unknown status now answers 400 and Twilio retries non-2xx,
+    // so a *missing* legitimate status is a retry storm while an extra value Twilio never sends
+    // costs nothing (it is refused one step later as not a failure). The two mistakes are not
+    // symmetric, which is why this asserts presence rather than an exact set.
+    for (const status of ["queued", "sending", "sent", "delivered", "read", "canceled"]) {
+      expectRefusal(
+        twilio({ MessageStatus: status, To: "+15551234567" }),
+        "event_not_suppressible",
+      );
+    }
+    // And every failure status is in the wider set, or it would be refused before it was read.
+    for (const status of TWILIO_FAILED_STATUSES) {
+      expect(TWILIO_MESSAGE_CALLBACK_STATUSES).toContain(status);
+    }
+  });
+});
+
+describe("Twilio voice status callbacks", () => {
+  const VOICE_NUMBER = "+15551234567";
+
+  function voice(
+    params: Readonly<Record<string, string>>,
+    options: BounceWebhookOptions = OPTIONS,
+  ): BounceWebhookResult {
+    const body = twilioStatusCallback(params);
+    return handleBounceWebhook(
+      signed(body, { source: "twilio_voice" }),
+      options,
+    );
+  }
+
+  /** A `failed` callback carrying one code, with everything else Twilio really sends. */
+  function failedWith(
+    code: string,
+    extra: Readonly<Record<string, string>> = {},
+  ): BounceWebhookResult {
+    return voice({
+      CallStatus: "failed",
+      CallSid: "CA0123456789abcdef0123456789abcdef",
+      To: VOICE_NUMBER,
+      From: "+15550000000",
+      ErrorCode: code,
+      ...extra,
+    });
+  }
+
+  it("is a declared source, alongside — not instead of — the two that existed", () => {
+    expect(BOUNCE_WEBHOOK_SOURCES).toContain("twilio_voice");
+    expect(BOUNCE_WEBHOOK_SOURCES).toContain("twilio");
+    expect(BOUNCE_WEBHOOK_SOURCES).toContain("ses");
+    // The slug is the ProviderKind of TwilioVoiceSender, so `applied_by` and the delivery
+    // attempt's provider column are the same string.
+    expect(BOUNCE_WEBHOOK_SOURCES).not.toContain("voice");
+  });
+
+  it("suppresses an unallocated number, attributed to the voice provider", () => {
+    const result = failedWith("21214");
+    expect(result.accepted).toBe(true);
+    if (!result.accepted) return;
+    expect(result.event.source).toBe("twilio_voice");
+    expect(result.event.channel).toBe("voice_call");
+    expect(result.event.kind).toBe("voice_failure");
+    expect(result.event.providerCode).toBe("21214");
+    expect(result.event.providerMessageId).toBe(
+      "CA0123456789abcdef0123456789abcdef",
+    );
+    expect(result.suppressions).toHaveLength(1);
+    const suppression = result.suppressions[0];
+    expect(suppression?.channel).toBe("voice_call");
+    expect(suppression?.reason).toBe("hard_bounce");
+    expect(suppression?.recipientAddress).toBe(VOICE_NUMBER);
+    expect(suppression?.appliedBy).toBe("provider:twilio_voice");
+    expect(suppression?.expiresAt).toBeNull();
+    expect(suppression?.id).toMatch(/^supp_[0-9a-f]{32}$/);
+    expect(suppression?.notes).toContain("twilio_voice voice_failure");
+    expect(suppression?.notes).toContain("code=21214");
+  });
+
+  it("accounts for every CallStatus, and never accepts one with an empty plan", () => {
+    for (const CallStatus of TWILIO_CALL_CALLBACK_STATUSES) {
+      const result = voice({
+        CallStatus,
+        To: VOICE_NUMBER,
+        CallSid: "CA1",
+        // A permanent code on every status, so only the status can decide.
+        ErrorCode: "21214",
+      });
+      if (result.accepted) {
+        expect(CallStatus).toBe("failed");
+        expect(result.suppressions.length).toBeGreaterThan(0);
+      } else {
+        expect(result.refusal.length).toBeGreaterThan(0);
+        expect(result.reason.length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("never suppresses a busy line, even when a permanent code rides along", () => {
+    // The most important test in the file. A person was there and did not pick up; suppressing
+    // would silence a working number because somebody was on another call, and `hard_bounce` is
+    // unconditional, so it would outrank even a security alert afterwards.
+    expectRefusal(
+      voice({ CallStatus: "busy", To: VOICE_NUMBER, CallSid: "CA1" }),
+      "event_not_suppressible",
+    );
+    expectRefusal(
+      voice({
+        CallStatus: "busy",
+        To: VOICE_NUMBER,
+        ErrorCode: "21214",
+        CallSid: "CA1",
+      }),
+      "event_not_suppressible",
+    );
+  });
+
+  it("never suppresses a no-answer, even when a permanent code rides along", () => {
+    expectRefusal(
+      voice({ CallStatus: "no-answer", To: VOICE_NUMBER, CallSid: "CA1" }),
+      "event_not_suppressible",
+    );
+    // The status is checked before the code table precisely so this cannot route around it.
+    expectRefusal(
+      voice({
+        CallStatus: "no-answer",
+        To: VOICE_NUMBER,
+        ErrorCode: "21211",
+        CallSid: "CA1",
+      }),
+      "event_not_suppressible",
+    );
+  });
+
+  it("holds the never-suppress set to exactly the two reachable-but-unanswered statuses", () => {
+    expect([...VOICE_NEVER_SUPPRESSIBLE_STATUSES].sort()).toEqual([
+      "busy",
+      "no-answer",
+    ]);
+    // A tripwire on the sender, not a coupling: a status the sender decides is worth *retrying* is
+    // by construction not evidence to suppress on, so one appearing there and not here is a bug.
+    for (const status of Object.keys(TWILIO_CALL_RETRYABLE_STATUSES)) {
+      expect(VOICE_NEVER_SUPPRESSIBLE_STATUSES.has(status)).toBe(true);
+    }
+  });
+
+  it("refuses a cancelled call, which is our decision and not a verdict", () => {
+    expectRefusal(
+      voice({ CallStatus: "canceled", To: VOICE_NUMBER, CallSid: "CA1" }),
+      "event_not_suppressible",
+    );
+  });
+
+  it("refuses a completed call: a delivery is not a bounce", () => {
+    expectRefusal(
+      voice({
+        CallStatus: "completed",
+        To: VOICE_NUMBER,
+        CallSid: "CA1",
+        CallDuration: "14",
+      }),
+      "event_not_suppressible",
+    );
+  });
+
+  it("refuses every progress callback, of which there are three per call", () => {
+    for (const CallStatus of VOICE_PROGRESS_STATUSES) {
+      expectRefusal(
+        voice({ CallStatus, To: VOICE_NUMBER, CallSid: "CA1" }),
+        "event_not_suppressible",
+      );
+    }
+  });
+
+  it("suppresses on every permanent code in the table", () => {
+    for (const [code, reason] of Object.entries(
+      TWILIO_VOICE_SUPPRESSION_REASONS,
+    )) {
+      const result = failedWith(code);
+      expect(result.accepted).toBe(true);
+      if (!result.accepted) continue;
+      expect(result.suppressions[0]?.reason).toBe(reason);
+      expect(result.suppressions[0]?.channel).toBe("voice_call");
+    }
+  });
+
+  it("suppresses on nothing for a transient code, not even briefly", () => {
+    for (const code of TWILIO_VOICE_TRANSIENT_CODES) {
+      expectRefusal(failedWith(code), "event_not_suppressible");
+    }
+  });
+
+  it("keeps the two code tables disjoint", () => {
+    for (const code of Object.keys(TWILIO_VOICE_SUPPRESSION_REASONS)) {
+      expect(TWILIO_VOICE_TRANSIENT_CODES.has(code)).toBe(false);
+    }
+    // 13225 is Twilio refusing the number; 21216 is Twilio refusing us. Same English, opposite
+    // sides of the boundary.
+    expect(TWILIO_VOICE_SUPPRESSION_REASONS["13225"]).toBe("hard_bounce");
+    expect(TWILIO_VOICE_TRANSIENT_CODES.has("21216")).toBe(true);
+    // A geo-permission denial is ours, so it never reaches the suppression table.
+    expect(TWILIO_VOICE_SUPPRESSION_REASONS["21215"]).toBeUndefined();
+    expect(TWILIO_VOICE_TRANSIENT_CODES.has("21215")).toBe(true);
+  });
+
+  it("maps every voice code to hard_bounce, because the channel has no STOP and no FBL", () => {
+    for (const reason of Object.values(TWILIO_VOICE_SUPPRESSION_REASONS)) {
+      expect(reason).toBe("hard_bounce");
+    }
+    // SMS 21610 (replied STOP) has no voice analogue: inline TwiML cannot gather a keypress.
+    expect(TWILIO_SUPPRESSION_REASONS["21610"]).toBe("unsubscribe");
+    expect(Object.values(TWILIO_VOICE_SUPPRESSION_REASONS)).not.toContain(
+      "unsubscribe",
+    );
+    expect(Object.values(TWILIO_VOICE_SUPPRESSION_REASONS)).not.toContain(
+      "spam_complaint",
+    );
+  });
+
+  it("refuses a failure whose code is in neither table", () => {
+    expectRefusal(failedWith("99999"), "event_not_suppressible");
+    // The SMS-only codes are not silently inherited.
+    expect(TWILIO_VOICE_SUPPRESSION_REASONS["30007"]).toBeUndefined();
+    expect(TWILIO_VOICE_SUPPRESSION_REASONS["21610"]).toBeUndefined();
+  });
+
+  it("refuses a failure that names no code to attribute it to", () => {
+    expectRefusal(
+      voice({ CallStatus: "failed", To: VOICE_NUMBER, CallSid: "CA1" }),
+      "event_not_suppressible",
+    );
+  });
+
+  it("ignores transientSuppressionHours entirely on this source", () => {
+    // Every voice reason is permanent, and the codes a window would otherwise fit describe our
+    // own configuration rather than a destination.
+    const configured: BounceWebhookOptions = {
+      ...OPTIONS,
+      transientSuppressionHours: 6,
+    };
+    expectRefusal(failedWith("21215", {}), "event_not_suppressible");
+    expect(
+      handleBounceWebhook(
+        signed(
+          twilioStatusCallback({
+            CallStatus: "failed",
+            To: VOICE_NUMBER,
+            ErrorCode: "21215",
+          }),
+          { source: "twilio_voice" },
+        ),
+        configured,
+      ).accepted,
+    ).toBe(false);
+    const permanent = handleBounceWebhook(
+      signed(
+        twilioStatusCallback({
+          CallStatus: "failed",
+          To: VOICE_NUMBER,
+          ErrorCode: "21214",
+        }),
+        { source: "twilio_voice" },
+      ),
+      configured,
+    );
+    expect(permanent.accepted).toBe(true);
+    if (!permanent.accepted) return;
+    expect(permanent.suppressions[0]?.expiresAt).toBeNull();
+  });
+
+  it("refuses a fax, and says so, rather than suppressing on one heuristic sample", () => {
+    const result = voice({
+      CallStatus: "completed",
+      To: VOICE_NUMBER,
+      CallSid: "CA1",
+      AnsweredBy: "fax",
+    });
+    expectRefusal(result, "event_not_suppressible");
+    if (result.accepted) return;
+    expect(result.reason).toContain("AnsweredBy=fax");
+    expect(result.reason).toContain(VOICE_ANSWERED_BY_VERDICTS.fax);
+  });
+
+  it("treats voicemail as a delivery, not a failure", () => {
+    for (const AnsweredBy of ["machine_start", "machine_end_beep", "human"]) {
+      const result = voice({
+        CallStatus: "completed",
+        To: VOICE_NUMBER,
+        CallSid: "CA1",
+        AnsweredBy,
+      });
+      expectRefusal(result, "event_not_suppressible");
+      if (result.accepted) continue;
+      expect(result.reason).toContain(`AnsweredBy=${AnsweredBy}`);
+    }
+  });
+
+  it("refuses an unknown machine-detection verdict as evidence of nothing", () => {
+    const result = voice({
+      CallStatus: "completed",
+      To: VOICE_NUMBER,
+      CallSid: "CA1",
+      AnsweredBy: "unknown",
+    });
+    expectRefusal(result, "event_not_suppressible");
+    if (result.accepted) return;
+    expect(result.reason).toContain("no verdict");
+  });
+
+  it("gives every AnsweredBy value a stated verdict, and none of them a suppression", () => {
+    for (const value of TWILIO_ANSWERED_BY_VALUES) {
+      expect(VOICE_ANSWERED_BY_VERDICTS[value].length).toBeGreaterThan(0);
+      expect(
+        voice({
+          CallStatus: "completed",
+          To: VOICE_NUMBER,
+          CallSid: "CA1",
+          AnsweredBy: value,
+        }).accepted,
+      ).toBe(false);
+    }
+  });
+
+  it("does not echo an AnsweredBy value Twilio does not define", () => {
+    const result = voice({
+      CallStatus: "completed",
+      To: VOICE_NUMBER,
+      CallSid: "CA1",
+      AnsweredBy: "<script>alert(1)</script>",
+    });
+    expectRefusal(result, "event_not_suppressible");
+    if (result.accepted) return;
+    expect(result.reason).not.toContain("script");
+  });
+
+  it("refuses a body carrying no CallStatus", () => {
+    expectRefusal(
+      voice({ To: VOICE_NUMBER, CallSid: "CA1" }),
+      "payload_unrecognized",
+    );
+    expect(recognizeTwilioVoiceStatusCallback("").ok).toBe(false);
+    expect(recognizeTwilioVoiceStatusCallback("garbage").ok).toBe(false);
+  });
+
+  it("names the misroute when a messaging callback arrives on the voice source", () => {
+    const result = voice({
+      MessageStatus: "failed",
+      ErrorCode: "21211",
+      To: VOICE_NUMBER,
+    });
+    expectRefusal(result, "payload_unrecognized");
+    if (result.accepted) return;
+    expect(result.reason).toContain("messaging status callback");
+    const legacy = voice({ SmsStatus: "failed", To: VOICE_NUMBER });
+    expectRefusal(legacy, "payload_unrecognized");
+  });
+
+  it("refuses a CallStatus Twilio does not define, rather than calling it 'not a failure'", () => {
+    // A status we have never seen is a Twilio change or our bug. Answering `event_not_suppressible`
+    // would assert we understood it and found nothing to do, which is how a dead number keeps
+    // being called.
+    for (const CallStatus of ["answered", "delivered", "ok", "FAILED"]) {
+      expectRefusal(
+        voice({ CallStatus, To: VOICE_NUMBER, ErrorCode: "21214" }),
+        "payload_unrecognized",
+      );
+    }
+  });
+
+  it("refuses a callback carrying no destination", () => {
+    expectRefusal(
+      voice({ CallStatus: "failed", ErrorCode: "21214", CallSid: "CA1" }),
+      "recipient_missing",
+    );
+  });
+
+  it("refuses a destination that is not a telephone number at all", () => {
+    // Live, not hypothetical: the recipient directory hands voice_call an email address today, and
+    // 21211 against one would be our own misconfiguration recorded as an unconditional verdict
+    // about the callee.
+    const result = failedWith("21211", { To: "ops@example.test" });
+    expectRefusal(result, "recipient_missing");
+    if (result.accepted) return;
+    expect(result.reason).toContain("16 chars");
+    expect(result.reason).not.toContain("ops@example.test");
+    // A SIP or Client destination lands here too: no code in the table describes one.
+    expectRefusal(
+      failedWith("21214", { To: "client:alice" }),
+      "recipient_missing",
+    );
+    expectRefusal(
+      failedWith("21214", { To: "sip:alice@example.test" }),
+      "recipient_missing",
+    );
+  });
+
+  it("refuses a destination longer than the column allows", () => {
+    expectRefusal(
+      failedWith("21214", { To: `+1${"5".repeat(600)}` }),
+      "recipient_missing",
+    );
+  });
+
+  it("carries the CallSid as the provider message id, and nothing else, into the note", () => {
+    const result = failedWith("21217");
+    expect(result.accepted).toBe(true);
+    if (!result.accepted) return;
+    const notes = result.suppressions[0]?.notes ?? "";
+    expect(notes).toContain("provider_message=CA0123456789abcdef0123456789abcdef");
+    expect(notes).toContain("code=21217");
+    // The number is the row's subject, not its provenance.
+    expect(notes).not.toContain(VOICE_NUMBER);
+    expect(notes).not.toContain("5551234567");
+  });
+
+  it("never puts the destination number in a refusal reason", () => {
+    const refusals = [
+      voice({ CallStatus: "busy", To: VOICE_NUMBER, CallSid: "CA1" }),
+      voice({ CallStatus: "no-answer", To: VOICE_NUMBER }),
+      voice({ CallStatus: "canceled", To: VOICE_NUMBER }),
+      voice({ CallStatus: "completed", To: VOICE_NUMBER, AnsweredBy: "fax" }),
+      voice({ CallStatus: "ringing", To: VOICE_NUMBER }),
+      voice({ CallStatus: "failed", To: VOICE_NUMBER }),
+      voice({ CallStatus: "nonsense", To: VOICE_NUMBER }),
+      voice({ To: VOICE_NUMBER }),
+      failedWith("99999"),
+      failedWith("21215"),
+      failedWith("21211", { To: "ops@example.test" }),
+    ];
+    for (const result of refusals) {
+      expect(result.accepted).toBe(false);
+      if (result.accepted) continue;
+      expect(result.reason).not.toContain(VOICE_NUMBER);
+      expect(result.reason).not.toContain("5551234567");
+      expect(result.reason).not.toContain("ops@example.test");
+    }
+  });
+
+  it("plans the identical record for a re-delivered callback", () => {
+    // Twilio posts per call and may repost; the id commits to the address and the reason, never to
+    // the CallSid, so a repost re-asserts one row instead of adding a second.
+    const first = failedWith("21214");
+    const second = failedWith("21214", {
+      CallSid: "CAffffffffffffffffffffffffffffffff",
+    });
+    expect(first.accepted && second.accepted).toBe(true);
+    if (!first.accepted || !second.accepted) return;
+    expect(first.suppressions[0]?.id).toBe(second.suppressions[0]?.id);
+  });
+
+  it("normalizes a formatted destination before deriving the id", () => {
+    const result = failedWith("21214", { To: "+1 (555) 123-4567" });
+    // `isE164` is applied to the number as Twilio wrote it, so a punctuated To is refused rather
+    // than silently canonicalised — Twilio sends E.164 on the wire.
+    expectRefusal(result, "recipient_missing");
+    const plain = failedWith("21214");
+    expect(plain.accepted).toBe(true);
+    if (!plain.accepted) return;
+    expect(
+      findActiveSuppression(plain.suppressions, "voice_call", VOICE_NUMBER, NOW),
+    ).not.toBeNull();
+  });
+
+  it("suppresses the voice channel only, leaving the same number's sms alone", () => {
+    const result = failedWith("21214");
+    expect(result.accepted).toBe(true);
+    if (!result.accepted) return;
+    expect(
+      findActiveSuppression(result.suppressions, "voice_call", VOICE_NUMBER, NOW),
+    ).not.toBeNull();
+    expect(
+      findActiveSuppression(result.suppressions, "sms", VOICE_NUMBER, NOW),
+    ).toBeNull();
+    // And the two channels' ids differ, so neither row can stand in for the other.
+    expect(result.suppressions[0]?.id).not.toBe(
+      suppressionIdFor({
+        tenantId: TEST_TENANT_ID,
+        channel: "sms",
+        recipientAddress: VOICE_NUMBER,
+        reason: "hard_bounce",
+      }),
+    );
+  });
+
+  it("refuses an empty body on the voice source before reading it", () => {
+    expectRefusal(
+      handleBounceWebhook(signed("", { source: "twilio_voice" }), OPTIONS),
+      "body_unparseable",
+    );
+  });
+
+  it("does not parse a voice callback with the messaging recognizer", () => {
+    // The source is the deployment's declaration of which sender it configured; the channel is
+    // never sniffed out of the payload.
+    const body = twilioStatusCallback({
+      CallStatus: "failed",
+      To: VOICE_NUMBER,
+      ErrorCode: "21214",
+    });
+    expect(recognizeTwilioStatusCallback(body).ok).toBe(false);
+    expect(recognizeTwilioVoiceStatusCallback(body).ok).toBe(true);
+  });
 });
 
 describe("planning a suppression", () => {

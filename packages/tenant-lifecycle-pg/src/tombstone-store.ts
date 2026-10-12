@@ -45,6 +45,14 @@ const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0
 /** The chain's `deletion_event` kind, which is what a tombstone is. */
 export const TOMBSTONE_LOG_KIND = "deletion_event";
 
+/**
+ * The most rows one `scanAll` page may hold.
+ *
+ * Exported because the cap has to be the caller's too: a sweep that asks for more than this gets a
+ * short page, and a caller reading a short page as the end of the table would stop mid-sweep.
+ */
+export const TOMBSTONE_SCAN_MAX_LIMIT = 500;
+
 export const TOMBSTONE_COLUMNS = [
   "tombstone_id",
   "kind",
@@ -62,6 +70,26 @@ export const TOMBSTONE_COLUMNS = [
   "retained_data_reference",
   "invalidation_of_prior_tombstone_id",
   "attestations",
+  // ADR-0329. These two are load-bearing in a way the other columns are not: the proof version
+  // selects which domain tag the content manifest was hashed under, so a v2 row written and read
+  // back as v1 recomputes a *different* digest and `verifyStoredEvidence` reports `scope_tampered`
+  // on a perfectly honest proof. The pre-insert `verifyTombstoneHashes` in `assertWritable` passes,
+  // because the record is correct at that point — the forgery would be introduced by the read.
+  "proof_version",
+  "capability_declaration",
+  // ADR-0331, and load-bearing for the same reason as the two above: a v3 row read back without its
+  // obligations is a v3 label with nothing to hash, so `contentManifestSubjectOf` yields no subject,
+  // `verifyTombstoneHashes` answers `contentManifestOk: false`, and `verifyStoredEvidence` reports
+  // `scope_tampered` on an honest proof — then escalates it at `sev1` (ADR-0324). The forgery would be
+  // introduced by the read; `assertWritable` passes, because the record is correct when it is written.
+  "retained_obligations",
+  // ADR-0351, and load-bearing for the same reason as the three above, with one difference worth
+  // naming: there is no column default that could stand in for it. `proof_version` defaults to
+  // `'v1'`, which is the honest reading of a row written before that column existed; a
+  // record-storage declaration has no such reading, because every value of it is a claim. So a v4
+  // row read back without this column is a v4 label with nothing to hash — `scope_tampered` on an
+  // honest proof, escalated at `sev1` (ADR-0324) — and the only way to avoid that is to read it.
+  "record_storage",
   "chain_entry_hash",
   "chain_sequence_number",
 ] as const;
@@ -287,7 +315,15 @@ export class PostgresTombstoneStore {
         // are cast. The same reasoning as the suppression store's cast map.
         if (c === "tenant_id") return `${n}::uuid`;
         if (c === "deleted_at") return `${n}::timestamptz`;
-        if (c === "scope" || c === "anchors" || c === "attestations") return `${n}::jsonb`;
+        if (
+          c === "scope" ||
+          c === "anchors" ||
+          c === "attestations" ||
+          c === "capability_declaration" ||
+          c === "retained_obligations" ||
+          c === "record_storage"
+        )
+          return `${n}::jsonb`;
         if (c === "chain_sequence_number") return `${n}::integer`;
         return n;
       }).join(", ");
@@ -311,6 +347,15 @@ export class PostgresTombstoneStore {
           stored.retainedDataReference ?? null,
           stored.invalidationOfPriorTombstoneId,
           jsonOf(attestations),
+          stored.proofVersion,
+          stored.capabilityDeclaration === undefined
+            ? null
+            : jsonOf(stored.capabilityDeclaration),
+          // `null` and `'[]'` are different facts, so the empty array is written as an array. NULL
+          // means this record's bytes do not cover a retention claim; `[]` is the v3 claim that
+          // nothing was lawfully kept.
+          stored.retainedObligations === undefined ? null : jsonOf(stored.retainedObligations),
+          stored.recordStorage === undefined ? null : jsonOf(stored.recordStorage),
           entry.entryHash,
           entry.sequenceNumber,
         ],
@@ -356,6 +401,73 @@ export class PostgresTombstoneStore {
         `SELECT ${TOMBSTONE_COLUMNS.join(", ")} FROM ${this.table}` +
           " WHERE tenant_id = $1::uuid ORDER BY deleted_at DESC, tombstone_id",
         [tenantId],
+      );
+      return result.rows.map((row) => rowToStoredTombstone(row));
+    });
+  }
+
+  /**
+   * Every tombstone naming one deletion request.
+   *
+   * This is the evidence a stranded request is reconciled from (ADR-0322). The pipeline writes the
+   * tombstone in the **same transaction** as the `DROP SCHEMA` (ADR-0319) and ADR-0321 put the
+   * request's id on it, so a tombstone naming a request exists if and only if that request's
+   * deletion committed. Returning every match rather than the first is the point: two would mean the
+   * premise is broken, and a `LIMIT 1` would hide that instead of reporting it.
+   */
+  async findForRequest(requestId: string): Promise<readonly StoredTombstone[]> {
+    return this.conn.transaction(async (tx) => {
+      await tx.query("SELECT set_config('app.platform_audit', 'on', true)");
+      const result = await tx.query<Record<string, unknown>>(
+        `SELECT ${TOMBSTONE_COLUMNS.join(", ")} FROM ${this.table}` +
+          " WHERE related_deletion_request_id = $1 ORDER BY deleted_at, tombstone_id",
+        [requestId],
+      );
+      return result.rows.map((row) => rowToStoredTombstone(row));
+    });
+  }
+
+  /**
+   * Every tombstone in the table, a page at a time — the one reader that does **not** start from
+   * something already naming a tombstone.
+   *
+   * That is the whole reason it exists (ADR-0327). `read` takes an id, `findForRequest` takes a
+   * request id, and `listForTenant` takes a tenant; a tombstone written by the synchronous deletion
+   * route names no request, so no audit that walks requests ever reaches it — and
+   * `verifyStoredEvidence` is the only detector for a tampered `scope`, because neither
+   * `proofSha256` nor the chain entry commits to it (ADR-0323).
+   *
+   * **Keyset-paged on a key that cannot tie.** `tombstone_id` is `NOT NULL` and uniquely
+   * constrained, so the ordering is total and the cursor is exact. `deleted_at` was the natural
+   * choice and is wrong: two tombstones can share it, and a sweep ordered on a key with ties either
+   * re-reads a row or steps over one at every page boundary. Stepping over one is the failure that
+   * matters here — the row skipped is a row nothing else will ever verify, so a tie is the
+   * difference between an audit and an audit with holes in it. `OFFSET` has the same defect for a
+   * different reason: a row inserted mid-sweep shifts every later page.
+   *
+   * Reads under the platform grant, like `read` and `listForTenant` and for a stronger version of
+   * their reason: this is a cross-tenant sweep, so under the isolation policy it would see only
+   * whichever tenant's context the connection happened to hold — which for a tombstone is usually
+   * none at all. `tenant_tombstones_platform_audit_read` is `SELECT`-only at the policy, so the
+   * elevation cannot write (ADR-0318).
+   */
+  async scanAll(input: {
+    readonly limit: number;
+    readonly afterTombstoneId?: string | null;
+  }): Promise<readonly StoredTombstone[]> {
+    const limit = Math.max(1, Math.min(TOMBSTONE_SCAN_MAX_LIMIT, Math.trunc(input.limit)));
+    const after = input.afterTombstoneId ?? null;
+    // The cursor predicate is omitted rather than written `($1 IS NULL OR tombstone_id > $1)`: that
+    // form makes the planner pick one path for both shapes and gives up the unique index.
+    const where = after === null ? "" : " WHERE tombstone_id > $1";
+    const limitPlaceholder = after === null ? "$1" : "$2";
+    const params: readonly unknown[] = after === null ? [limit] : [after, limit];
+    return this.conn.transaction(async (tx) => {
+      await tx.query("SELECT set_config('app.platform_audit', 'on', true)");
+      const result = await tx.query<Record<string, unknown>>(
+        `SELECT ${TOMBSTONE_COLUMNS.join(", ")} FROM ${this.table}${where}` +
+          ` ORDER BY tombstone_id LIMIT ${limitPlaceholder}`,
+        params,
       );
       return result.rows.map((row) => rowToStoredTombstone(row));
     });
@@ -431,6 +543,27 @@ export function rowToStoredTombstone(row: Record<string, unknown>): StoredTombst
   if (reason !== undefined) candidate["retainedReason"] = reason;
   const reference = textOrUndefined(row["retained_data_reference"]);
   if (reference !== undefined) candidate["retainedDataReference"] = reference;
+  // The version is read back **explicitly** rather than inferred from whether a declaration came
+  // with the row (ADR-0329): inference would read a *deleted* declaration as an older record, which
+  // is a tamper that covers its own tracks. A row written before this column existed reads `v1`
+  // from its column default, so the two agree.
+  const proofVersion = textOrUndefined(row["proof_version"]);
+  if (proofVersion !== undefined) candidate["proofVersion"] = proofVersion;
+  const declaration = parseJson(row["capability_declaration"]);
+  if (declaration !== null && declaration !== undefined) {
+    candidate["capabilityDeclaration"] = declaration;
+  }
+  // `Array.isArray` and not a truthiness test (ADR-0331): `[]` is a v3 record's signed claim that
+  // nothing was retained, and dropping it would relabel the record as carrying no claim — which the
+  // schema then refuses, and which a verifier that tolerated it would hash under the wrong tag.
+  const obligations = parseJson(row["retained_obligations"]);
+  if (Array.isArray(obligations)) candidate["retainedObligations"] = obligations;
+  // Handed to the schema unexamined, which is deliberate: `TombstoneRecordStorageDeclarationSchema`
+  // is the one place that decides whether a stored declaration is coherent, and a second opinion
+  // here — "does it look like a model?" — would be a shape check that can disagree with the one the
+  // digest was computed over. A row whose column holds something else fails the parse by name.
+  const storage = parseJson(row["record_storage"]);
+  if (storage !== null && storage !== undefined) candidate["recordStorage"] = storage;
 
   const record = TombstoneRecordSchema.parse(candidate);
   const attestations = parseJson(row["attestations"]);

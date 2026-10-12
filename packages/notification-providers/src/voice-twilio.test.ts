@@ -269,7 +269,12 @@ describe("send", () => {
     expect(form.get("StatusCallback")).toBe(
       "https://api.example.test/v1/webhooks/twilio-voice",
     );
-    expect(form.get("StatusCallbackEvent")).toContain("answered");
+    // Exactly one event, and the terminal one (ADR-0329). The three progress events can never
+    // produce a suppression, so the webhook answers 422 and Twilio retries non-2xx — four callbacks
+    // per call, each retried, for information the consumer discards. `completed` carries the
+    // terminal `CallStatus` and is the only status `AnsweredBy` is read on.
+    expect(form.get("StatusCallbackEvent")).toBe("completed");
+    expect(form.get("StatusCallbackEvent")).not.toContain("ringing");
     expect(form.get("MachineDetection")).toBe("DetectMessageEnd");
   });
 

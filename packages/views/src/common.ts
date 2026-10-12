@@ -106,11 +106,31 @@ export type ViewSort = z.infer<typeof ViewSortSchema>;
 
 export const PERMISSION_INHERIT = "inherit" as const;
 
+/**
+ * Which roles a view is presented to: `"inherit"` (the entity's own grants decide) or an explicit
+ * role list.
+ *
+ * It carries **no `abac` key**, and that absence is deliberate. An ABAC obligation is an
+ * authorization qualifier that something has to *discharge*, and the only surface that discharges
+ * one is the entity grant path — `surveyAbacObligations` walks `manifest.permissions` and nothing
+ * else, which is what the boot refusal for an undischargeable obligation is built from. A key here
+ * would therefore be an obligation no deployment could discharge *and* no boot check could see: a
+ * manifest declaring one would be approved by a reviewer, hashed into `manifestHash`, and served
+ * with its qualifier silently removed. That is the exact defect the boot refusal exists to prevent,
+ * at the one position the refusal cannot reach.
+ *
+ * Deleting it rather than surveying it is the proportionate answer because the measured count of
+ * views declaring one, across all seven packs, is **zero** — so nothing is taken away — and because
+ * a view's permission declaration is served by nothing at all today (`listConfigForEntity` is the
+ * only serve-time reader of `manifest.views` and reads `columns`, `sort` and `pageSize`). Modelling
+ * an obligation on an unserved surface would be a trap for a manifest author rather than a
+ * capability. The `roles` half stays: it is validated against `manifest.roles`, it says something
+ * coherent about presentation, and a boot survey now reports that this deployment does not read it.
+ */
 export const PermissionRefSchema = z.union([
   z.literal(PERMISSION_INHERIT),
   z.object({
     roles: z.array(z.string().min(1)).min(1),
-    abac: z.string().min(1).optional(),
   }),
 ]);
 export type PermissionRef = z.infer<typeof PermissionRefSchema>;

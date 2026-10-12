@@ -21,8 +21,10 @@ and **Caddy** for automatic HTTPS.
 git clone <your-fork-url> crossengin && cd crossengin/deploy
 
 cp .env.example .env
-# Edit .env: set POSTGRES_PASSWORD, DOMAIN, ACME_EMAIL, and a strong token in
-# OPERATE_ADMIN_API_KEY + OPERATE_WEB_API_KEY (same token in both).
+# Edit .env: set POSTGRES_PASSWORD, DOMAIN, ACME_EMAIL, a strong token in
+# OPERATE_ADMIN_API_KEY, and the two login secrets (CREDENTIAL_PEPPER and
+# OPERATE_TOKEN_SIGNING_KEY). The UI has a login now, so the first user is a
+# shell step -- see "The UI has a login" below.
 
 docker compose up -d --build          # build images + start everything
 docker compose logs -f migrate        # watch the schema apply, then exit 0
@@ -37,14 +39,70 @@ When `migrate` has exited successfully and `caddy` has obtained certificates
 > The `migrate` job is idempotent (hash-tracked in `_meta_migrations`), so it is safe
 > to run on every `up`. It applies the full meta-schema before the API starts.
 
-## Create your first tenant
+### If `migrate` exits 1
 
-Once up, use the platform console you just launched. In the UI go to **Platform →
-New tenant**, or via the API:
+Read the reason first — it is printed, and there are only a few:
 
 ```bash
+docker compose logs migrate
+```
+
+**`PRECONDITIONS FAILED — no statements were executed … [MISSING_EXTENSION]
+uuid_generate_v7() is required but is neither an installed extension nor a defined function`**
+
+The database has no `uuid_generate_v7()`. Every `meta.*` id defaults to it, so the applier refuses
+before executing anything — nothing is half-applied.
+
+It happens on a `db-data` volume that was created **before** the image could install the extension,
+and the arm64 build defect guaranteed a population of those: `postgres/init/00-extension.sql` runs
+from `/docker-entrypoint-initdb.d`, which the entrypoint fires **only on the first initialisation of
+an empty data directory**, so fixing the image does not repair a database created before it. initdb
+is skipped, `db` reports healthy, and `migrate` fails identically on every `up`.
+
+The one-shot `extensions` service now issues `CREATE EXTENSION IF NOT EXISTS pg_uuidv7` on **every**
+`up` for exactly this reason, so the repair is just:
+
+```bash
+git pull && docker compose up -d --build
+```
+
+If you are on a stack without that service, the same statement by hand (keeps all data):
+
+```bash
+docker compose exec db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c 'CREATE EXTENSION IF NOT EXISTS pg_uuidv7' \
+  -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto'
+docker compose up -d
+```
+
+If `CREATE EXTENSION` answers `extension "pg_uuidv7" is not available … Could not open extension
+control file`, the **server** does not have the `.so` and the image needs rebuilding
+(`docker compose build --no-cache db`) — that is the arm64 case, and it is a build defect rather
+than a database one.
+
+Starting over instead, **which destroys every row**:
+
+```bash
+docker compose down -v && docker compose up -d --build
+```
+
+Other reasons `migrate` exits 1, in rough order of likelihood: `.env` not present or
+`POSTGRES_PASSWORD` disagreeing with the volume's stored password (the password is set at initdb and
+changing `.env` afterwards does not change it); and individual statements failing, which the report
+lists with an index and a message — the applier continues past a failure and re-runs it next time,
+so a partial apply is recoverable.
+
+## Create your first tenant
+
+Once up, use the platform console you just launched — which now needs a login, so do
+**The UI has a login** below first. Via the API instead:
+
+```bash
+# The token half of OPERATE_ADMIN_API_KEY, i.e. everything before the first colon.
+ADMIN_TOKEN=${OPERATE_ADMIN_API_KEY%%:*}
+
 curl -sS -X POST https://api.erp.example.com/v1/platform/tenants \
-  -H "x-api-key: $OPERATE_WEB_API_KEY" -H 'content-type: application/json' \
+  -H "x-api-key: $ADMIN_TOKEN" -H 'content-type: application/json' \
   -d '{"slug":"acme","name":"Acme Inc.","tier":"small","region":"eu"}'
 ```
 
@@ -52,9 +110,89 @@ The console can list / create / suspend / archive / reactivate tenants; the `sch
 is auto-derived from the slug. (Hard deletion is intentionally not exposed — that's the
 audited GDPR flow.)
 
+## Create your first user
+
+An api-key spec is `token:role:tenant[:principalId]`, and the optional 4th field is what
+makes the key a **person** rather than a service account:
+
+- `token:platform_admin:<tenant-uuid>` — no principal named. Every such key shares one
+  placeholder principal id, so it resolves as a `service_account`: the read-state and
+  preference routes refuse it outright rather than handing two keys one shared identity,
+  and the notification inbox is per-recipient so it comes back empty. This is the right
+  shape for the bootstrap key in `.env.example`: an operator, not a tenant user.
+- `token:cashier:<tenant-uuid>:<user-uuid>` — names a principal, resolves as a `user`, and
+  the per-person surfaces work. That `<user-uuid>` must be a real `meta.users.id`.
+
+To create one, mount the registry: add `--platform-user-routes` and at least one
+`--platform-user-role` to the `api` command in `docker-compose.yml` (the grant is
+fail-closed — with no role nothing is mounted at all, and the API says so at boot).
+It is deliberately a *different* grant from `--platform-admin-role`: the people who may
+create tenants need not be the people who may mint the identities inside them. The calls
+below use the bootstrap key, so they assume `--platform-user-role platform_admin`.
+
+```bash
+# Provision the principal and its tenant membership in one call. `id` is accepted — and is
+# the point — because the id that needs a row is one the deployment has already committed
+# to in an --api-key spec.
+curl -sS -X POST https://api.erp.example.com/v1/platform/users \
+  -H "x-api-key: $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"user":{"id":"<user-uuid>","email":"ana@acme.example","displayName":"Ana"},
+       "membership":{"tenantId":"<tenant-uuid>","primaryRole":"cashier","status":"active"}}'
+
+# Or grant a membership to an existing principal (the tenant comes from the path, never
+# the body). `status` has no default: "active" grants access now, "invited" only promises
+# it, and only an active membership resolves as a notification recipient.
+curl -sS -X POST https://api.erp.example.com/v1/platform/tenants/<tenant-uuid>/members \
+  -H "x-api-key: $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"userId":"<user-uuid>","primaryRole":"cashier","status":"active"}'
+```
+
+The rest of the surface is `GET /v1/platform/users` and `/users/{id}`,
+`POST /users/{id}/suspend` / `/reactivate` / `/retire`,
+`GET /v1/platform/tenants/{tenantId}/members`, and
+`POST .../members/{userId}/activate` / `/revoke`. Every one of them is recorded in the
+audit log before it lands; a change that cannot be recorded is refused with a 503 rather
+than made quietly.
+
+**What actually needs a row.** Most columns that used to demand one no longer do — the six
+`created_by` / `requested_by` / `decided_by_user_id` references on `pack_installations`,
+`notification_templates`, `access_review_campaigns`, `access_review_decisions`,
+`workflow_definitions` and `gateway_routes` are plain TEXT now, so those stores record
+whichever principal acted without a registry row existing first. What still needs one is
+the set where the reference is right — a user's own per-viewer state, which must go when
+the user does, and the two tables that are *about* the user:
+
+`notification_digests`, `notification_preferences`, `notification_read_states`,
+`notification_read_watermarks`, `user_tenant_membership`.
+
+**The boot survey.** `operate-server` checks, at every boot, whether the principal ids its
+own `--api-key` specs name have a `meta.users` row — unconditionally, because the writers of
+those five tables fail at their first `INSERT` whether or not the registry is mounted:
+
+```sh
+docker compose logs api | grep '\[platform-users\]'
+# [platform-users] meta.users readiness: readable — 1 of 1 principals have no meta.users row; ...
+#   unprovisioned principal: 7f3a...
+#   will raise 23503: notification_read_states.user_id
+```
+
+Nothing is printed when every named principal is provisioned. When it does fire, there are
+two correct fixes and you pick per key: provision that exact id through the route above, or
+drop the 4th field so the key is honestly a service account. Specs that name no principal
+are deliberately *not* listed — provisioning the shared placeholder would make it satisfy
+the per-person guards again, which is the whole thing those guards prevent.
+
+The line also names three states that are *not* "not provisioned", and the difference
+matters because none of them is fixed by creating a row: `unreadable` (the API's role has
+no `SELECT` on `meta.users` — grant it, and note that without `INSERT` the registry routes
+cannot fix anything either), `unreachable` (the database was not up yet) and `absent` (no
+`meta.users` at all — the `migrate` job has not applied). JWT-authenticated
+principals are outside the survey entirely: their ids come from the IdP's `sub` at request
+time, so there is no set to check at boot.
+
 ## Going to production (auth)
 
-The `--api-key` above is a simple shared secret — fine to bootstrap, but for real
+The api-key above is a simple shared secret — fine to bootstrap, but for real
 end-users switch `operate-server` to JWT/JWKS by adding these args to the `api`
 service `command` in `docker-compose.yml`:
 
@@ -67,16 +205,172 @@ Keep a single `platform_admin` API key only for the console. See
 `operate-server --help` for the full flag surface (SLO enforcement, audit chain,
 checkpoints, billing, marketplace, etc.) — add the flags you want to the `api` command.
 
+Three things the boot log tells you about this deployment's exposure, which are worth
+reading once after the first `up`:
+
+- **`[auth] api-key specs: …`** — where the specs came from. A spec's token *is* a
+  credential and argv is readable by anyone who can run `ps`, so the compose file passes
+  them as `OPERATE_API_KEY_SPECS` in the `environment:` block. If this line names argv,
+  something is still passing `--api-key`. Both sources are read and concatenated, so
+  moving one does not lose the other.
+- **`[pg] database channel: PGSSLMODE=…`** — what the database wire promises. It carries
+  `app.current_tenant_id`, which is the whole tenant-isolation boundary, on every query.
+  Inside this compose stack the hop is a private Docker network and the default `prefer`
+  is reasonable; the moment the database is anywhere else, `PGSSLMODE=verify-full` is the
+  only mode that validates its certificate. `require` encrypts and authenticates nothing.
+- **`[cursor] cursor disclosure: …`** — whether a caller can read a classified field's
+  value out of an entity-list cursor. The keyset cursor carries the plaintext of every
+  declared sort key, and the response body's redaction is a different code path that does
+  consult the caller's grants — so `?sort=<classified field>` returns in `nextCursor` what
+  the same response just withheld. `erp-core` has one such field
+  (`Employee.work_email`, `pii`), so this line says `plaintext_disclosing` until
+  `CURSOR_ENCRYPTION_SECRET` is set, and names the field either way.
+
+### The UI has a login
+
+It did not until ADR-0358. `operate-web`'s proxy sent one fixed `OPERATE_WEB_API_KEY` on
+every request, so **every browser that could reach `$DOMAIN` was that principal** — on the
+shipped compose, a `platform_admin` who can provision and delete tenants — and Caddy
+terminates TLS and forwards without checking a credential. That variable no longer exists.
+
+What is there now: a `/login` form, an `httpOnly; Secure; SameSite=strict` session cookie,
+a `middleware.ts` that redirects a cookie-less page request and answers a cookie-less
+`/api/*` request with a 401, and a proxy that forwards **the viewer's own** token. The
+cookie is only a hint — the API verifies the token on every request, so a forged or expired
+one is a 401 from the API rather than something the browser layer decides.
+
+Three things to know before you expose it.
+
+**Set the two secrets.** `CREDENTIAL_PEPPER` and `OPERATE_TOKEN_SIGNING_KEY` are required,
+and `.env.example` says what each is for and how to generate it. The boot line is
+`[auth] credential login: enabled (kid login-v1, public key …)`; if it says `refused`,
+nobody can log in and the reason names the variable.
+
+**Create the first user by hand.** There is no mail channel in a fresh deployment, so there
+is no "forgot password" and no self-service sign-up. `.env.example` has the three commands:
+provision a user, grant it a membership in a tenant — which is what decides the role every
+session of theirs carries — then `set-credential`. The password comes from the environment
+and never from argv; the subcommand refuses `--password` by name and says why.
+
+**A session's role is frozen until it expires.** The role is read from the membership at
+login and stamped into the token, and nothing re-reads the directory per request. So
+revoking or downgrading a membership takes effect at the next login, within
+`--session-token-ttl` (one hour by default; lower it if that window matters to you). The
+same is true of suspending a user. If you need a session cut off now, rotate
+`OPERATE_TOKEN_SIGNING_KEY` — that invalidates every session at once.
+
+A wrong password locks the account after `--login-lockout-attempts` tries (10 by default)
+for `--login-lockout-seconds` (15 minutes). That bounds guessing against one account and
+deliberately does **not** address credential stuffing — one password tried across many
+accounts — for which there is no per-IP limit available here: behind Caddy every request
+arrives from the same container address. It also means anyone who knows an email address can
+lock that user out for the window, which is why the window lapses rather than being
+permanent and why `set-credential` clears a lock.
+
+## Rate limiting
+
+Out of the box the gateway limits at 10,000 requests per 60s window, in memory — so the
+window is per replica and per restart, and nothing is written down. Declare a real policy to
+change both:
+
+```
+--rate-limit-policy rlp_conservativedefault:600:60
+```
+
+The spec is `<rlp_id>:<limit>:<windowSeconds>`, the id must match `rlp_` + 8–40 lowercase
+alphanumerics, and the flag is repeatable. Declaring more than one requires
+`--rate-limit-default-policy <rlp_id>` to say which governs a route that names none, and a
+default naming a policy you did not declare is refused rather than falling back — a decision
+row that names one policy while applying another's limit is the thing this avoids. Nothing
+defaults the ceiling: which limit a deployment permits is not something silence may answer,
+and switching an existing deployment from 10,000/60s on upgrade would refuse traffic that
+works today. Needs a Postgres store, since the point is that every decision is written to
+`meta.rate_limit_decisions` naming the policy whose terms were applied.
+
+The window itself is still counted in each process, so with several `api` replicas the
+effective ceiling is the limit times the replica count, and a restart starts a fresh window.
+What the flag buys is the limit being *yours* and every decision being on the record.
+
 ## Day-2 operations
 
 - **Update to a new version:** `git pull && docker compose up -d --build`
-  (the `migrate` job re-applies any new schema before the API restarts).
+  (the `migrate` job re-applies any new schema before the API restarts). After the upgrade
+  that landed the user registry, read
+  [Clearing the foreign-key drift](#clearing-the-foreign-key-drift-after-an-upgrade) once —
+  until you do, `migrate` reports the same 29 findings on every `up`.
 - **Backups:** the data lives in the `db-data` volume. Dump regularly, e.g.
   `docker compose exec db pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" > backup.sql`.
 - **Logs:** `docker compose logs -f api` / `web` / `caddy`.
 - **Stop / start:** `docker compose down` (keeps volumes) / `docker compose up -d`.
 - **Scale the API:** the API is stateless — run several `api` replicas behind Caddy
   and they share Postgres safely (idempotency, advisory locks, RLS all hold).
+
+### Clearing the foreign-key drift after an upgrade
+
+A **fresh** database is unaffected by this section: it gets the patched shape straight out of
+the bootstrap SQL and reports nothing. An **existing** one will report the same drift on every
+`up`, forever, until an operator clears it once.
+
+What the drift is: the catalog stopped declaring **29 foreign keys** that your database is
+still enforcing — **14** into `meta.users` and **15** into `meta.tenants`. Both removals are
+deliberate, and each closed a live defect:
+
+- A column recording *who performed an act* is a record of the past, and a `RESTRICT`
+  reference on it made the actor undeletable as a consequence of having acted. Those nine
+  actor columns are plain `TEXT` now, which is why the stores above can record whichever
+  principal acted without a registry row existing first. Three references were *kept* and
+  strengthened to `CASCADE` instead — a user's own per-viewer state, which must go when the
+  user does.
+- A table whose purpose is to outlive the tenant it describes cannot be a `CASCADE` child of
+  that tenant's row. Fifteen of the sixteen tables the GDPR Article 17 erasure protects by
+  name were exactly that, so retiring the `meta.tenants` row destroyed the platform's record
+  of the deletion one statement after the erasure had carefully preserved it.
+
+`migrate` reports all 29 and does not act, because the reconciliation planner will not drop a
+foreign key unless it is told to. Each appears as an `unreconciled` finding with reason
+`foreign_key_removed` and the SQL beside it. To see the list without touching anything:
+
+```sh
+docker compose run --rm migrate \
+  node apps/architect-cli/dist/bin/crossengin.js apply --plan
+```
+
+To clear it, run the applier **once** with `--allow-loosening`:
+
+```sh
+docker compose run --rm migrate \
+  node apps/architect-cli/dist/bin/crossengin.js apply --confirm --allow-loosening
+```
+
+It says so on stderr before anything runs: this is the one invocation that removes a
+constraint the database is currently enforcing.
+
+**Do not add `--allow-loosening` to the `migrate` command in `docker-compose.yml`.** It is a
+one-time invocation on purpose. Left in place it converts every *future* undeclared-foreign-key
+refusal into a silent drop, and that refusal is the only guardrail between a typo in the
+catalog and a dropped constraint on a live database.
+
+The nine actor columns also change type (`UUID` → `TEXT`). The planner changes a column's type
+only on an **empty** table, under a guard that re-checks emptiness in its own transaction;
+these tables are empty in every deployment today precisely because nothing could write them,
+which is the cheapest moment this change will ever have. If one of yours is not empty, the plan
+reports the `ALTER` rather than running it — the exact statements are in ADR-0335's
+implementation notes (`docs/adr/0335-the-record-nobody-could-write.md`).
+
+**One statement stays manual, forever.** `meta.rate_limit_decisions` also lost a *column* —
+`quota_definition_id`, whose `rlq_` ids have no declaration site anywhere, so re-typing it to
+`TEXT` would have been the same hole in a different type. `--allow-loosening` reaches foreign
+keys only, by design: dropping a foreign key is the single loosening that cannot fail against
+existing rows, which is what keeps every step in a plan expected to succeed. So `column_removed`
+is never planned, with or without the flag, and the catalog will report that column as drift
+until you run this once as the table owner:
+
+```sql
+ALTER TABLE meta.rate_limit_decisions DROP COLUMN IF EXISTS quota_definition_id;
+```
+
+`DROP COLUMN` takes `idx_rate_limit_decisions_quota_definition` with it, so the accompanying
+`index_removed` finding needs no statement of its own.
 
 ## Sending email and SMS
 
@@ -98,6 +392,17 @@ docker compose logs api | grep '\[notify\]'
 
 A channel you configured but that is missing from that line is reported on the next line with what
 it still needs. A half-configured channel is never guessed at.
+
+**Per-user preferences.** Until you add `--preference-routes` plus at least one
+`--preference-role`, every user's notification preferences are the built-in defaults for ever, so
+nobody can opt out of a channel. The routes are `GET /v1/notifications/preferences` and
+`PUT`/`DELETE /v1/notifications/preferences/{category}/{channel}`, and the viewer is always the
+credential — a body naming somebody else is refused rather than ignored. `--preference-admin-role`
+is additive on top and mounts one further route
+(`PUT /v1/notifications/preferences/users/{userId}/{category}/{channel}`) for support staff; it is
+recorded before the write, so an unrecordable on-behalf change is refused. Note that a preference
+belongs to a **person**, so this needs a principal with a `meta.users` row — see
+[Create your first user](#create-your-first-user).
 
 **Bounces.** Add `--bounce-webhook` and set `NOTIFICATION_BOUNCE_SECRET` (32+ characters) to serve
 `POST /v1/notifications/bounces/{tenantId}/{ses|twilio}`, which records a hard bounce or a
@@ -127,10 +432,11 @@ retried forever.
   Without it, nothing calls a model; the dev-time `crossengin chat` CLI remains
   available either way.
 - **API keys and the notification inbox.** The 4th field of an api-key spec
-  (`token:role:tenant:user`) is the principal's `meta.users.id`. The notification
-  inbox is per-recipient, so a key without it gets an empty one. That is correct
-  for the platform-admin bootstrap key — it is an operator, not a tenant user —
-  but any key belonging to a real person should carry their user id.
+  (`token:role:tenant:user`) is the principal's `meta.users.id`, and a key without
+  it is a service account whose notification inbox is empty by construction. That
+  is correct for the platform-admin bootstrap key — it is an operator, not a tenant
+  user — but a key belonging to a real person needs the field *and* a registry row:
+  see [Create your first user](#create-your-first-user).
 
 ## Running the model here too
 
@@ -192,6 +498,7 @@ those never fire. Vercel and friends can host `operate-web`, never the API.
 
 | Path | Provider | Best when |
 |---|---|---|
+| One VM, everything, **free** | **Oracle Cloud** Always Free (Ampere A1) | You want the whole stack running at zero cost. Step-by-step: [`ORACLE.md`](./ORACLE.md) |
 | One VM, everything | **Hetzner Cloud** (CCX + volume) | Pre-revenue, cost matters. Runs this compose file unchanged |
 | Managed database, less ops | **Railway** / **Render** | You would rather not run Postgres yourself |
 | Room to grow | **Fly.io** (apps + Managed Postgres + GPU machines) | Multi-region later — see the `residency` package |
@@ -206,3 +513,153 @@ Two notes that matter more than price:
 - **Managed Postgres usually forbids C extensions**, so `pg_uuidv7` is unavailable.
   That is already handled: run `supabase/00-uuidv7.sql` once to define the pure-SQL
   `uuid_generate_v7()`. The migration applier accepts either.
+
+## On Oracle Cloud (Always Free)
+
+**A complete step-by-step runbook is [`ORACLE.md`](./ORACLE.md).** What follows is the summary and
+the one architectural thing that is different there.
+
+Of the free options this is the only one that can host the **whole** stack, and the
+reason is the sentence above: the API needs a long-running process, and Always Free
+gives you a real VM rather than a function. Vercel's free tier cannot host
+`operate-server` at any price point — not a quota problem, a runtime-model one — so a
+"free" Vercel deployment is always a partial one. Here nothing is split.
+
+What the tier gives you, with one caveat worth checking before you plan around it:
+
+| | Always Free |
+|---|---|
+| Compute | **Ampere A1 (arm64)**, 1–4 instances sharing the quota |
+| | Oracle cut that quota from 4 OCPU / 24 GB to **2 OCPU / 12 GB** in June 2026 with no announcement, and reports of enforcement are inconsistent — check Oracle's [Always Free Resources](https://docs.oracle.com/en-us/iaas/Content/FreeTier/resourceref.htm) page, not this table |
+| | Also 2× AMD `E2.1.Micro` (1 OCPU / 1 GB). **Ignore these**: `pnpm -r build` across 87 packages plus `next build` will not complete in 1 GB |
+| Block storage | 200 GB total, boot volumes included; 47 GB is the per-instance minimum |
+| Egress | 10 TB/month |
+
+**2 OCPU / 12 GB runs this comfortably.** The heaviest moment is the image build, not
+serving.
+
+### The one thing that is different on Oracle
+
+Always Free compute is **arm64**, and until this commit `deploy/postgres/Dockerfile`
+could not produce a working database image on it. It installed `pg_uuidv7` from the
+project's GitHub release, which ships a single prebuilt `.so` built for x86_64 only —
+and because installing it is a file copy, the build *succeeded* and produced an image
+whose `CREATE EXTENSION` then failed at `initdb` time with a wrong-ELF-class error.
+`ON_ERROR_STOP=1` turns that into an aborted initialisation, so the `db` container
+never came up and nothing in the output pointed at the architecture.
+
+It now installs `postgresql-$PG_MAJOR-pg-uuidv7` from the PGDG apt repository, which
+publishes amd64 and arm64 and which the official `postgres` image already leaves
+configured. No architecture is named anywhere, so the same Dockerfile builds on your
+laptop and on the A1. The other three images (`node:20-bookworm-slim`, `caddy:2`,
+`postgres:16-bookworm`) are already multi-arch.
+
+### Step by step
+
+**1 — Account and region.** Sign up at `cloud.oracle.com`. A card is required for
+identity verification and Always Free resources are not billed against it. Pick your
+home region carefully: it cannot be changed, and A1 capacity varies by region.
+
+**2 — Network.** *Networking → Virtual Cloud Networks → Start VCN Wizard → VCN with
+Internet Connectivity.* Accept the defaults. This gives you a public subnet, an
+internet gateway and a route table, which is all this needs.
+
+**3 — Instance.** *Compute → Instances → Create instance.*
+
+- Image: **Canonical Ubuntu 24.04** — make sure you pick the **aarch64** build.
+- Shape: *Change shape → Ampere → `VM.Standard.A1.Flex`* → 2 OCPU, 12 GB.
+- Networking: the VCN and public subnet from step 2, **assign a public IPv4 address**.
+- Boot volume: raise it to **50 GB** (the 47 GB default leaves little room for images).
+- Add your SSH public key.
+
+If you get **"Out of host capacity"** you have not done anything wrong — A1 is heavily
+subscribed. Try another availability domain, then retry on a loop; capacity is released
+continuously.
+
+**4 — Open 80 and 443, in both places.** This is the step that catches everyone,
+because Oracle filters twice and fixing one half looks like the fix having failed.
+
+*Networking:* open the subnet's security list and add two ingress rules — source
+`0.0.0.0/0`, protocol TCP, destination port 80, then the same for 443.
+
+*On the instance:* Oracle's Ubuntu images ship with `iptables` rules that reject
+everything else, and they persist across reboots:
+
+```bash
+sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 80  -j ACCEPT
+sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 443 -j ACCEPT
+sudo netfilter-persistent save
+```
+
+**5 — Docker.**
+
+```bash
+sudo apt-get update && sudo apt-get install -y ca-certificates curl git
+curl -fsSL https://get.docker.com | sudo sh
+sudo usermod -aG docker "$USER" && exec sg docker newgrp
+```
+
+**6 — Swap, if you took the 12 GB shape and want the build to be dull.** The image
+build is the only memory-hungry step; 4 GB of swap means it cannot be the thing that
+fails.
+
+```bash
+sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile
+sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+```
+
+**7 — DNS.** Point two A records at the instance's public IP: `yourdomain.com` and
+`api.yourdomain.com`. Both are needed — the `Caddyfile` serves the UI on the apex and
+the API on `api.`, and Let's Encrypt will not issue until they resolve.
+
+**8 — Bring it up.** Exactly the [First launch](#first-launch) steps above; nothing
+here is Oracle-specific.
+
+```bash
+git clone <your fork> crossengin && cd crossengin/deploy
+cp .env.example .env    # then set POSTGRES_PASSWORD, DOMAIN, ACME_EMAIL,
+                        # OPERATE_ADMIN_API_KEY, CREDENTIAL_PEPPER,
+                        # OPERATE_TOKEN_SIGNING_KEY and CURSOR_ENCRYPTION_SECRET
+docker compose up -d --build
+docker compose logs -f api
+```
+
+The first build takes 10–20 minutes on 2 A1 cores. Then read the boot lines the
+[Going to production (auth)](#going-to-production-auth) section lists — `[auth]` twice,
+`[pg]` and `[cursor]` — and create your first tenant and user with
+[Create your first tenant](#create-your-first-tenant) and
+[Create your first user](#create-your-first-user). There is no sign-up page and no
+forgot-password, so the first user is a shell step; that is deliberate and
+[The UI has a login](#the-ui-has-a-login) explains why.
+
+**9 — Backups.** *Block Volume → your boot volume → Create Backup Policy.* Always Free
+includes 5 volume backups, which is a snapshot story and not a PITR one. A volume
+snapshot of a running Postgres is crash-consistent rather than transaction-consistent,
+so pair it with a logical dump:
+
+```bash
+docker compose exec -T db pg_dump -U crossengin crossengin | gzip > dump-$(date +%F).sql.gz
+```
+
+This repository models DR tiers with RPO/RTO targets and does not yet ship a backup
+scheduler, so until it does, that cron line is the deployment's real recovery point.
+
+### Should the UI go on Vercel instead?
+
+You can: `operate-web` is a Next.js app and Vercel hosts it happily. On Oracle there is
+little reason to, and two reasons not to.
+
+What splitting costs you: the browser → UI → API hop stops being a private Docker
+network and crosses the public internet, so it needs its own TLS and its own thinking
+about who may reach `api.yourdomain.com`; and you lose the compose dependency that
+makes `web` wait for the API's `/readyz`, which is what currently stops Caddy serving
+502s from a UI pointed at an API that refused to boot.
+
+What it buys you: a CDN edge and preview deployments. The UI is 15 pages of which 11
+are statically prerendered, so the edge wins little, and every page is a proxy call to
+the API on the Oracle box regardless.
+
+So: **all on Oracle.** Put the UI on Vercel only if you want preview deployments for
+UI work, and then set `OPERATE_API_URL` to `https://api.yourdomain.com` and keep the
+API where it is.

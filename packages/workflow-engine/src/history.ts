@@ -1,9 +1,21 @@
 import { z } from "zod";
 
+/**
+ * The append-only history's vocabulary.
+ *
+ * **Additive only.** A kind added here is one no stored row carries, so every existing log re-folds
+ * unchanged and a `-pg` replayer re-parses every row it already holds. Removing or renaming one is
+ * not available: a row written yesterday would stop parsing.
+ */
 export const EVENT_KINDS = [
   "instance_started",
   "instance_completed",
   "instance_failed",
+  // The fence, and then the finalization. `instance_cancellation_requested` is the moment from which
+  // no further work may be *started* (ADR-0315's promise, lifted into the log); `instance_cancelled`
+  // is the terminal event. They are two kinds because an in-flight activity sits between them and
+  // cannot be preempted — one kind would make "told, not yet finished" unrepresentable.
+  "instance_cancellation_requested",
   "instance_cancelled",
   "instance_suspended",
   "instance_resumed",
@@ -13,6 +25,10 @@ export const EVENT_KINDS = [
   "activity_completed",
   "activity_failed",
   "activity_timed_out",
+  // `ACTIVITY_TRANSITIONS` has permitted `scheduled → cancelled` and `running → cancelled` since
+  // Phase 1; only the event recording it was missing. Its payload carries the checkpoint, so which
+  // of the two guarantees applies is readable from the row rather than inferred from ordering.
+  "activity_cancelled",
   "activity_compensated",
   "signal_received",
   "signal_consumed",
@@ -45,7 +61,21 @@ export const ACTIVITY_EVENTS: ReadonlySet<EventKind> = new Set([
   "activity_completed",
   "activity_failed",
   "activity_timed_out",
+  "activity_cancelled",
   "activity_compensated",
+]);
+
+/**
+ * Every kind that records a cancellation, at either scope. `instance_cancellation_requested` is
+ * deliberately **not** in `STATE_CHANGING_EVENTS`: it changes what the instance *promises* and
+ * nothing about where it stands, and the status still moves only at `instance_cancelled`. A reader
+ * that wants "has a cancellation begun?" asks the projection's `cancellationRequestedAt`, not a set.
+ */
+export const CANCELLATION_EVENTS: ReadonlySet<EventKind> = new Set([
+  "instance_cancellation_requested",
+  "instance_cancelled",
+  "activity_cancelled",
+  "timer_cancelled",
 ]);
 
 export const SIGNAL_EVENTS: ReadonlySet<EventKind> = new Set([

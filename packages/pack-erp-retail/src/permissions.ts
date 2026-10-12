@@ -41,6 +41,15 @@ export const SALES_ORDER_PERMISSIONS: EntityPermissions = {
     cancel: { roles: SELLERS },
     mark_returned: { roles: MANAGERS },
   },
+  // The analyst is dropped from an otherwise ALL_RETAIL entity: reporting needs
+  // order volumes, not the customer's mailbox. Both arms are SELLERS because the
+  // cashier who takes the address is who corrects a typo in it.
+  fields: {
+    customer_email: {
+      read: { roles: SELLERS },
+      update: { roles: SELLERS },
+    },
+  },
 };
 
 export const ORDER_LINE_PERMISSIONS: EntityPermissions = {

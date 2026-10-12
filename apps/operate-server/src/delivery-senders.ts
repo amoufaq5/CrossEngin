@@ -53,6 +53,18 @@ function messageFromThrown(error: unknown): string {
   return String(error);
 }
 
+/**
+ * The result for a channel this deployment configured no sender for.
+ *
+ * A *function* and deliberately not a `ChannelSender` implementation. There was a
+ * `UnroutableChannelSender` class here and nothing ever constructed it: `drainOnce` asks
+ * `senders.for(channel)` and calls this directly on `null` (`delivery-drain.ts`), so a stand-in
+ * sender object standing where a sender is absent was never needed, and a registry that answers a
+ * sender for every channel would have made `for()` unable to say "nothing is configured" at all.
+ * Removed in ADR-0337 rather than wired, because it was a second spelling of this function and not
+ * a gap — and the comment in `delivery-senders-env.ts` that credited the class with this refusal
+ * was simply wrong about which code performs it.
+ */
 export function unroutedResult(channel: NotificationChannel): SendResult {
   return {
     outcome: "failed",
@@ -65,19 +77,6 @@ export function unroutedResult(channel: NotificationChannel): SendResult {
       `no sender configured for channel ${channel}`,
     ),
   };
-}
-
-export class UnroutableChannelSender implements ChannelSender {
-  readonly channel: NotificationChannel;
-  readonly provider: ProviderKind = INTERNAL_PROVIDER;
-
-  constructor(channel: NotificationChannel) {
-    this.channel = channel;
-  }
-
-  async send(request: SendRequest): Promise<SendResult> {
-    return unroutedResult(request.channel);
-  }
 }
 
 export class InAppSender implements ChannelSender {

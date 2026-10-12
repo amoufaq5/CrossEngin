@@ -33,12 +33,46 @@ services:
       retries: 30
     restart: unless-stopped
 
+  # One-shot, on EVERY `up`: makes sure uuid_generate_v7() exists before the migrate step needs it.
+  #
+  # `postgres/init/00-extension.sql` is mounted into `db` as well, but the entrypoint runs
+  # /docker-entrypoint-initdb.d ONLY on the first initialisation of an empty data directory — so a
+  # `db-data` volume that already holds a cluster never sees it again. That is not a hypothetical:
+  # the previous postgres image installed pg_uuidv7 from a GitHub release whose only prebuilt .so is
+  # x86_64, so on arm64 (every Apple-silicon laptop, every Oracle Ampere A1 shape) `CREATE EXTENSION`
+  # failed under ON_ERROR_STOP=1 *after* initdb had written PG_VERSION. Fixing the image does not
+  # repair such a volume: initdb is skipped, the container reports healthy, and `crossengin apply`
+  # exits 1 with `PRECONDITIONS FAILED — no statements were executed … [MISSING_EXTENSION]` on every
+  # `up`, forever. A precondition the migrate step needs on every run cannot live only in a hook that
+  # runs once.
+  #
+  # The same file, run by both, rather than a second copy of the SQL: `CREATE EXTENSION IF NOT
+  # EXISTS` is idempotent, and pgcrypto stays inside its DO block there so a server without it still
+  # exits 0 (see that file for why the two extensions are deliberately asymmetric). Built from
+  # ./postgres because that image is the one carrying psql; the extension's .so has to be on the
+  # *server*, which is `db`, so this container only issues the statement.
+  extensions:
+    build:
+      context: ./postgres
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      <<: *pg-env
+    volumes:
+      - ./postgres/init:/init:ro
+    entrypoint: ["psql"]
+    command: ["-v", "ON_ERROR_STOP=1", "-f", "/init/00-extension.sql"]
+    restart: "no"
+
   # One-shot: applies the meta-schema (idempotent — safe to re-run on every `up`).
   migrate:
     build: *app-build
     depends_on:
       db:
         condition: service_healthy
+      extensions:
+        condition: service_completed_successfully
     environment:
       <<: *pg-env
     command: ["node", "apps/architect-cli/dist/bin/crossengin.js", "apply", "--confirm"]
@@ -77,10 +111,60 @@ services:
       TWILIO_STATUS_CALLBACK_URL: ${TWILIO_STATUS_CALLBACK_URL:-}
       TWILIO_BASE_URL: ${TWILIO_BASE_URL:-}
       NOTIFICATION_BOUNCE_SECRET: ${NOTIFICATION_BOUNCE_SECRET:-}
-    # Args in list form so the api-key (token:role:tenant) is never shell-split.
+      # The master secret at-rest column encryption derives each tenant's key from (HKDF-SHA256,
+      # salted with the tenant id). Needed only by a pack declaring phi/regulated fields, and only
+      # on --store pg-columns; see the OPERATE_PACK note below. In the environment and never in
+      # `command:` below, because argv is readable via ps.
+      COLUMN_ENCRYPTION_SECRET: ${COLUMN_ENCRYPTION_SECRET:-}
+      # Seals the entity-list keyset cursor (AES-256-GCM under a per-tenant HKDF key). Set this on
+      # ANY deployment whose manifest classifies a sortable field: the cursor carries the plaintext
+      # of every declared sort key, so `?sort=<classified field>` hands back in `nextCursor` what
+      # the response body redacts from the same caller. That includes THIS deployment --
+      # erp-core's `Employee.work_email` is `pii` and sortable, reproduced live as a caller holding
+      # the list grant and not the field's read grant -- so the boot log says
+      # `cursor disclosure: plaintext_disclosing` until this is set. Unset, a cursor is reversible
+      # base64url JSON. 32+ random bytes; changing it only costs cursors in flight (one 400 and a
+      # restarted page walk).
+      CURSOR_ENCRYPTION_SECRET: ${CURSOR_ENCRYPTION_SECRET:-}
+      # The api-key specs (`token:role:tenant[:principal]`), newline- or comma-separated. A spec's
+      # token IS the credential, so it belongs here and not in `command:` below — argv is readable
+      # via `ps` by any user on the host. Until this variable existed the flag was the only route,
+      # which is why the comment two lines above said one thing and the command said another.
+      OPERATE_API_KEY_SPECS: ${OPERATE_ADMIN_API_KEY}
+      # The pepper HMAC'd into a password before scrypt stretches it, and the Ed25519 seed this
+      # deployment signs session tokens with. Both here and never in `command:` for the reason
+      # above. `meta.users` carries no tenant_id and so no RLS, which means the password hashes are
+      # readable by anything holding the serving role's grant -- the pepper is what makes reading
+      # that table insufficient, because it is not in the database.
+      #
+      # The signing key is ONE variable: the public half is DERIVED from the seed and registered in
+      # the gateway's own JWKS, so there is no second value to keep in step. 32 bytes of base64
+      # (`node -e 'console.log(require("node:crypto").randomBytes(32).toString("base64"))'`).
+      # Changing it invalidates every session in flight -- one 401 and a re-login.
+      CREDENTIAL_PEPPER: ${CREDENTIAL_PEPPER:-}
+      OPERATE_TOKEN_SIGNING_KEY: ${OPERATE_TOKEN_SIGNING_KEY:-}
+    # Args in list form so no value is ever shell-split.
     command:
       - node
       - apps/operate-server/dist/bin/operate-server.js
+      # erp-core declares no phi/regulated field, so this default serves on the JSONB store below.
+      # erp-healthcare (4 such fields) and erp-government (Citizen.national_id) do, and the JSONB
+      # store cannot encrypt a column -- it would hold them as plaintext -- so setting OPERATE_PACK
+      # to either one is REFUSED at boot. To serve one, switch `--store` to `pg-columns` and set
+      # COLUMN_ENCRYPTION_SECRET above. `--allow-plaintext-phi` overrides the refusal and is what
+      # its name says: the fields are stored in the clear.
+      #
+      # On such a deployment, `--column-key-mode envelope` stores each tenant's column key as a
+      # random data key, wrapped under a key derived from COLUMN_ENCRYPTION_SECRET, so destroying
+      # that row is expressible -- which is what bounds the recovery horizon after an Article 17
+      # erasure. Note what it does NOT buy: the wrapped key and the ciphertext are in this same
+      # database, so one backup holds both, and the bound is this deployment's backup retention
+      # rather than the destruction itself. A tenant that already holds ciphertext written under
+      # the derived key is SEEDED from it (so their data stays readable) and its row records
+      # `seeded_from_derived`, which is still recomputable from the secret -- so destroying it
+      # destroys nothing until that tenant is rekeyed. `operate-server rekey --tenant <id>
+      # --confirm-tenant <id>` is that executor: it mints a random key, re-encrypts that tenant's
+      # columns under it and retires the old generation, in one transaction.
       - --pack
       - ${OPERATE_PACK:-erp-core}
       - --store
@@ -90,22 +174,79 @@ services:
       - --scheme
       - https
       - --platform-admin
-      - --api-key
-      - ${OPERATE_ADMIN_API_KEY}
+      # The replay guard defaults to a Map in one process, so a retried mutation re-executes after
+      # a restart and on a second replica — including on the deletion route, the one route that
+      # *requires* an Idempotency-Key. Durable here (ADR-0336, which measured a retry after a
+      # restart reading `replay_hit_match` with this flag and `first_seen` without it); the reaper
+      # is mounted by the store and needs no second flag. The guarantee is bounded and stated:
+      # there is no reserve step, so two *concurrent* retries of one key both execute and only the
+      # sequential case is closed, which is what clients actually produce.
+      - --idempotency-store
+      - pg
+      # Mounts POST /v1/auth/token, which is what makes the UI's login work. Needs CREDENTIAL_PEPPER
+      # and OPERATE_TOKEN_SIGNING_KEY above, and the issuer/audience below -- the minted token
+      # asserts both and the gateway beside it verifies both, so they are one declaration.
+      #
+      # The first password is not set from here. There is no mail channel in a fresh deployment, so
+      # an operator with shell access is the only principal that exists before the first password
+      # does:
+      #
+      #   docker compose exec -e OPERATE_NEW_PASSWORD='<password>' api \
+      #     node apps/operate-server/dist/bin/operate-server.js set-credential \
+      #     --user <meta.users id> --confirm-user <the same id>
+      #
+      # and the user itself comes from POST /v1/platform/users under --platform-user-routes. The
+      # password is read from the environment and never from argv, for the `ps` reason above; the
+      # subcommand refuses `--password` by name and says so.
+      - --credential-login
+      # The issuer and audience the token asserts and the gateway checks. They are this
+      # deployment's own names -- nothing external resolves them -- but they must agree, and
+      # without them the runtime falls back to `https://crossengin.io` and refuses a token minted
+      # under any other issuer.
+      - --jwt-issuer
+      - https://${DOMAIN:-localhost}/
+      - --jwt-audience
+      - crossengin-operate
     expose:
       - "8787"
+    # `/readyz`, not `/health`: this check's job is to decide whether `web` and `caddy` may be
+    # pointed at the API, which is a readiness question. The API's boot is full of deliberate
+    # refusals (a classified pack with no COLUMN_ENCRYPTION_SECRET, an undischargeable ABAC
+    # obligation, `envelope` on a deployment that encrypts nothing) and every one exits the
+    # process — and without this, compose reported the container `started` the moment it was
+    # spawned, Caddy was pointed at it regardless, and the public domain served 502 while nothing
+    # in the stack held the opinion that anything was wrong.
+    #
+    # `start_period` covers a cold boot: the catalog admission survey and the per-tenant key
+    # provisioning both run before the listener binds.
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:8787/readyz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 40s
     restart: unless-stopped
 
   web:
     build: *app-build
     depends_on:
       api:
-        condition: service_started
+        # `service_healthy` and not `service_started`: the UI's every page is a proxy call to the
+        # API, so starting it against an API that is still booting — or that refused to boot — just
+        # moves the 502 one hop.
+        condition: service_healthy
     environment:
       NODE_ENV: production
       # The web app's server-side proxy calls the API over the internal network.
+      #
+      # There is no OPERATE_API_KEY here any more, and that is the point of this increment. The
+      # proxy used to stamp one shared `platform_admin` key on every request, so every browser that
+      # resolved the domain WAS that principal -- it could provision and delete tenants, and Caddy
+      # forwards without checking a credential. It now reads the viewer's own session cookie and
+      # sends their token, and with no cookie it answers 401 without calling the API at all. The
+      # variable is gone rather than defaulted, because `?? "devkey"` meant deleting it did not
+      # fail closed.
       OPERATE_API_URL: http://api:8787
-      OPERATE_API_KEY: ${OPERATE_WEB_API_KEY}
     # next start binds 0.0.0.0:3000 by default; Caddy reaches it as web:3000.
     command: ["pnpm", "--filter", "@crossengin/operate-web", "start"]
     expose:

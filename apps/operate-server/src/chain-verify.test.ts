@@ -21,11 +21,11 @@ const PUB = "cHVibGljLWtleS1iYXNlNjQ=";
 /** A structural stand-in for PostgresKeyRegistry — only getByFingerprint is exercised by the resolver. */
 function fakeRegistry(
   byFp: Record<string, { publicKeyBase64: string | null }>,
-  spy?: (fp: string) => void,
+  spy?: (fp: string, tenantId: string | null) => void,
 ): PostgresKeyRegistry {
   return {
-    getByFingerprint: async (fp: string) => {
-      spy?.(fp);
+    getByFingerprint: async (fp: string, tenantId: string | null = null) => {
+      spy?.(fp, tenantId);
       return byFp[fp] ?? null;
     },
   } as unknown as PostgresKeyRegistry;
@@ -33,25 +33,39 @@ function fakeRegistry(
 
 describe("keyRegistryResolver", () => {
   it("resolves a known fingerprint to its registered public key", async () => {
-    const resolver = keyRegistryResolver(fakeRegistry({ [FP]: { publicKeyBase64: PUB } }));
+    const resolver = keyRegistryResolver(fakeRegistry({ [FP]: { publicKeyBase64: PUB } }), null);
     expect(await resolver.resolveByFingerprint(FP)).toBe(PUB);
   });
 
   it("returns null for an unknown fingerprint", async () => {
-    const resolver = keyRegistryResolver(fakeRegistry({}));
+    const resolver = keyRegistryResolver(fakeRegistry({}), null);
     expect(await resolver.resolveByFingerprint(FP)).toBeNull();
   });
 
   it("returns null when a registered key has no public material", async () => {
-    const resolver = keyRegistryResolver(fakeRegistry({ [FP]: { publicKeyBase64: null } }));
+    const resolver = keyRegistryResolver(fakeRegistry({ [FP]: { publicKeyBase64: null } }), null);
     expect(await resolver.resolveByFingerprint(FP)).toBeNull();
   });
 
   it("delegates to the registry's getByFingerprint", async () => {
     const spy = vi.fn();
-    const resolver = keyRegistryResolver(fakeRegistry({ [FP]: { publicKeyBase64: PUB } }, spy));
+    const resolver = keyRegistryResolver(fakeRegistry({ [FP]: { publicKeyBase64: PUB } }, spy), null);
     await resolver.resolveByFingerprint(FP);
-    expect(spy).toHaveBeenCalledWith(FP);
+    expect(spy).toHaveBeenCalledWith(FP, null);
+  });
+
+  it("resolves against the scope of the chain being verified, not against the connection's role", async () => {
+    // A platform chain entry must not be verifiable by a key a tenant registered — the forgery
+    // route `app.platform_key_write` exists to close, which an unscoped read handed back as the
+    // table's owner.
+    const spy = vi.fn();
+    const tenant = "11111111-1111-1111-1111-111111111111";
+    const resolver = keyRegistryResolver(
+      fakeRegistry({ [FP]: { publicKeyBase64: PUB } }, spy),
+      tenant,
+    );
+    await resolver.resolveByFingerprint(FP);
+    expect(spy).toHaveBeenCalledWith(FP, tenant);
   });
 });
 

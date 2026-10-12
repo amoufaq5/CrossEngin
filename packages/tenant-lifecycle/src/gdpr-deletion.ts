@@ -85,6 +85,19 @@ export const GdprDeletionRequestSchema = z
     retentionObligations: z.array(z.enum(RETENTION_OBLIGATIONS)).default(["none"]),
     retainedDataCategories: z.array(z.string().min(1)).default([]),
     notes: z.string().min(1).optional(),
+    /**
+     * The tombstone that completed this request (ADR-0321).
+     *
+     * `completionSha256` commits to the proof and cannot find it — a digest is not a lookup key — so
+     * without this a `completed` request and the record of the deletion it asked for could not be
+     * joined. The superRefine below makes the pair load-bearing in both directions: a completed
+     * request must name its tombstone, and an uncompleted one must not.
+     */
+    tombstoneId: z
+      .string()
+      .regex(/^tomb_[A-Za-z0-9_-]{12,40}$/)
+      .nullable()
+      .default(null),
   })
   .superRefine((v, ctx) => {
     const submittedMs = new Date(v.submittedAt).getTime();
@@ -94,6 +107,22 @@ export const GdprDeletionRequestSchema = z
         code: z.ZodIssueCode.custom,
         path: ["deadlineAt"],
         message: "deadlineAt must be after submittedAt",
+      });
+    }
+    if (v.status === "completed" && v.tombstoneId === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["tombstoneId"],
+        message: "a completed deletion request must name the tombstone that completed it",
+      });
+    }
+    if (v.status !== "completed" && v.tombstoneId !== null) {
+      // A request that names a tombstone it has not been completed by is claiming a proof it does not
+      // have, which is the ADR-0317 defect in a different record.
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["tombstoneId"],
+        message: `status '${v.status}' must not name a tombstone`,
       });
     }
     const oneMonthMs = 30 * 86_400_000;

@@ -46,6 +46,24 @@ export class PostgresIncidentDeclarer implements IncidentDeclarer {
   }
 
   /**
+   * The stored incident with this id, so a recovery reads the grade its declaration paged at
+   * instead of guessing one — which is what lets a restart between a breach and its recovery
+   * resolve the alert on the route its trigger used (ADR-0326, ADR-0327).
+   *
+   * A row that does not parse **throws** rather than answering null, because the two are different
+   * facts. Null means no incident was ever stored under that id; a parse failure means one was and
+   * has since been edited into a state the contract forbids — the class of fault `rowToIncident`
+   * exists to catch and a CHECK constraint cannot (ADR-0289). Collapsing it into null would make
+   * the recovery path the one read in this package that absorbs a tampered row in silence. A caller
+   * treats the throw the way it treats null — leave the alert for a human — with the difference
+   * that a throw also says why.
+   */
+  async findById(incidentId: string): Promise<IncidentRecord | null> {
+    const stored = await this.engine.load(incidentId);
+    return stored === null ? null : stored.record;
+  }
+
+  /**
    * Cancels the stored incident when nobody has taken it, and reports `human_owned` when somebody
    * has. Cancelling rather than resolving is not a shortcut: `triaged` requires the on-call roles to
    * be assigned, so an automated recovery that resolved the record would claim a response that

@@ -1,9 +1,10 @@
 // AI design (setup wizard) API helpers. Like lib/platform.ts, every request
-// goes to this Next app's /api proxy, which forwards to operate-server with the
-// server's credentials — same-origin, so no CORS. All paths hit /api/v1/ai/...
+// goes to this Next app's /api proxy, which turns the caller's session cookie into
+// the API's bearer token — same-origin, so no CORS. All paths hit /api/v1/ai/...
 
 import type { ManifestDiffView } from "@/components/DiffView";
 import type { ManifestView } from "@/components/SchemaView";
+import { handleUnauthorized } from "@/lib/unauthorized";
 
 export type { ManifestDiffView, ManifestView };
 
@@ -139,6 +140,8 @@ const NO_PROVIDER = "No AI provider is configured on the server.";
 const NO_ASYNC = "Background design is not enabled on this server.";
 
 async function throwDesignError(res: Response): Promise<never> {
+  // The single error path of this module's six requests, so one call covers all of them.
+  handleUnauthorized(res);
   let message = res.statusText || `Request failed (${res.status})`;
   let kind: DesignErrorKind = res.status === 503 ? "ai_unavailable" : "http";
   let issues: string[] = [];

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { PgConnection, PgQueryResult } from "./connection.js";
 import type { EncryptedColumnRow } from "./encryption.js";
+import { DEFAULT_COLUMN_KEY_REF } from "./encryption.js";
 import {
   EncryptionMigrator,
   emitDecryptingViewSql,
@@ -9,7 +10,9 @@ import {
   planColumnEncryption,
 } from "./encryption-migration.js";
 
-const KEY_REF = "current_setting('app.column_encryption_key')";
+// The canonical ref, imported rather than respelled: this literal used to be written out here, in
+// `crossengin-pg.ts` and in `operate-runtime-pg`'s column store, agreeing by coincidence.
+const KEY_REF = DEFAULT_COLUMN_KEY_REF;
 
 describe("emitEncryptColumnSql", () => {
   const sql = emitEncryptColumnSql({
@@ -99,19 +102,36 @@ describe("formatEncryptionPlan", () => {
   });
 });
 
+interface Recorded {
+  readonly sql: string;
+  readonly params: readonly unknown[] | undefined;
+  /** Whether the statement was issued on a `transaction()` handle rather than the bare connection. */
+  readonly inTransaction: boolean;
+}
+
 function mockConn(
   rows: EncryptedColumnRow[],
   observed: string[],
+  recorded: Recorded[] = [],
 ): PgConnection {
+  let depth = 0;
   const conn: PgConnection = {
-    query: vi.fn(async (sql: string) => {
+    query: vi.fn(async (sql: string, params?: readonly unknown[]) => {
       observed.push(sql);
+      recorded.push({ sql, params, inTransaction: depth > 0 });
       if (sql.includes("col_description")) {
         return { rows, rowCount: rows.length } satisfies PgQueryResult<EncryptedColumnRow>;
       }
       return { rows: [], rowCount: 0 } satisfies PgQueryResult<EncryptedColumnRow>;
     }) as PgConnection["query"],
-    transaction: vi.fn(async <T,>(fn: (tx: PgConnection) => Promise<T>) => fn(conn)) as PgConnection["transaction"],
+    transaction: vi.fn(async <T,>(fn: (tx: PgConnection) => Promise<T>) => {
+      depth += 1;
+      try {
+        return await fn(conn);
+      } finally {
+        depth -= 1;
+      }
+    }) as PgConnection["transaction"],
     withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
     close: vi.fn() as PgConnection["close"],
   };
@@ -157,5 +177,60 @@ describe("EncryptionMigrator", () => {
     const plans = await migrator.migrateSchema("t_clinic", KEY_REF);
     expect(plans).toEqual([]);
     expect(observed.some((s) => s.startsWith("ALTER TABLE"))).toBe(false);
+  });
+
+  it("takes no options argument — three call sites use the one-argument form", async () => {
+    const observed: string[] = [];
+    const migrator = new EncryptionMigrator(mockConn([plaintextRow], observed));
+    await expect(migrator.migrateSchema("t_clinic", KEY_REF)).resolves.toHaveLength(1);
+    expect(observed.some((s) => s.includes("set_config"))).toBe(false);
+  });
+});
+
+describe("EncryptionMigrator session settings", () => {
+  const plaintextRow: EncryptedColumnRow = {
+    schema: "t_clinic",
+    table_name: "patient",
+    column_name: "mrn",
+    data_type: "text",
+    comment: "crossengin.data_class=phi; crossengin.encrypt=at_rest",
+  };
+
+  function run(): Promise<{ recorded: Recorded[] }> {
+    const observed: string[] = [];
+    const recorded: Recorded[] = [];
+    const migrator = new EncryptionMigrator(mockConn([plaintextRow], observed, recorded), {
+      sessionSettings: new Map([["app.column_encryption_key", "s3cret"]]),
+    });
+    return migrator.migrateSchema("t_clinic", KEY_REF).then(() => ({ recorded }));
+  }
+
+  it("issues set_config with the name and value both bound, never interpolated", async () => {
+    const { recorded } = await run();
+    const setConfig = recorded.filter((r) => r.sql.includes("set_config"));
+    expect(setConfig).toHaveLength(1);
+    expect(setConfig[0]?.sql).toBe(`SELECT set_config($1, $2, true)`);
+    expect(setConfig[0]?.params).toEqual(["app.column_encryption_key", "s3cret"]);
+  });
+
+  it("issues it inside the transaction", async () => {
+    // `set_config(…, is_local => true)` is transaction-local, so a setting claimed outside is
+    // discarded with the implicit single-statement transaction before the statement it was set for.
+    const { recorded } = await run();
+    const setConfig = recorded.find((r) => r.sql.includes("set_config"));
+    expect(setConfig?.inTransaction).toBe(true);
+  });
+
+  it("issues it before the plan's statements", async () => {
+    const { recorded } = await run();
+    const inTx = recorded.filter((r) => r.inTransaction).map((r) => r.sql);
+    expect(inTx[0]).toContain("set_config");
+    expect(inTx[1]).toMatch(/^ALTER TABLE/);
+    expect(inTx).toHaveLength(6); // one set_config + the five conversion statements
+  });
+
+  it("puts the key value in no SQL text", async () => {
+    const { recorded } = await run();
+    for (const r of recorded) expect(r.sql).not.toContain("s3cret");
   });
 });

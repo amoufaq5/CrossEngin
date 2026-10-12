@@ -9,9 +9,11 @@ import {
   STRONG_AUTH_SCHEMES,
   isAuthSuccess,
   isStrongAuthScheme,
+  principalAbacAttributes,
   resolveAuth,
   schemeRequiresHttps,
   type ParsedAuthCredential,
+  type ResolvedPrincipal,
 } from "./auth-resolution.js";
 
 const baseJwt: ParsedAuthCredential = {
@@ -271,6 +273,70 @@ describe("ResolvedPrincipalSchema", () => {
         resolvedAt: "2026-05-16T10:00:00.000Z",
       }),
     ).not.toThrow();
+  });
+});
+
+const PRINCIPAL_FIXTURE = {
+  principalId: "11111111-1111-1111-1111-111111111111",
+  tenantId: "22222222-2222-2222-2222-222222222222",
+  principalKind: "user",
+  authScheme: "bearer_jwt",
+  grantedScopes: [],
+  mfaProofAgeSeconds: null,
+  resolvedAt: "2026-05-16T10:00:00.000Z",
+};
+
+describe("principalAbacAttributes", () => {
+  const PRINCIPAL = {
+    principalId: "11111111-1111-1111-1111-111111111111",
+    tenantId: "22222222-2222-2222-2222-222222222222",
+    principalKind: "user",
+    authScheme: "bearer_jwt",
+    grantedScopes: [],
+    mfaProofAgeSeconds: null,
+    resolvedAt: "2026-05-16T10:00:00.000Z",
+  } as const satisfies ResolvedPrincipal;
+
+  it("maps an absent field to null, not an empty record", () => {
+    // The distinction the whole wire turns on: nobody looked, so no policy over attributes can be
+    // answered. `{}` would assert this principal has none.
+    expect(principalAbacAttributes(PRINCIPAL)).toBeNull();
+  });
+
+  it("maps a null principal to null", () => {
+    expect(principalAbacAttributes(null)).toBeNull();
+  });
+
+  it("passes an empty resolved record through as itself", () => {
+    const attrs = principalAbacAttributes({ ...PRINCIPAL, abacAttributes: {} });
+    expect(attrs).toEqual({});
+    expect(attrs).not.toBeNull();
+  });
+
+  it("passes a populated record through unchanged", () => {
+    expect(
+      principalAbacAttributes({ ...PRINCIPAL, abacAttributes: { department: "clinical" } }),
+    ).toEqual({ department: "clinical" });
+  });
+});
+
+describe("ResolvedPrincipalSchema abacAttributes", () => {
+  it("accepts a principal with no abacAttributes (absent = not resolved)", () => {
+    expect(ResolvedPrincipalSchema.parse(PRINCIPAL_FIXTURE).abacAttributes).toBeUndefined();
+  });
+
+  it("accepts and preserves a resolved attribute record", () => {
+    const parsed = ResolvedPrincipalSchema.parse({
+      ...PRINCIPAL_FIXTURE,
+      abacAttributes: { department: "clinical", clearance: 3 },
+    });
+    expect(parsed.abacAttributes).toEqual({ department: "clinical", clearance: 3 });
+  });
+
+  it("refuses a non-object abacAttributes", () => {
+    expect(() =>
+      ResolvedPrincipalSchema.parse({ ...PRINCIPAL_FIXTURE, abacAttributes: "clinical" }),
+    ).toThrow();
   });
 });
 

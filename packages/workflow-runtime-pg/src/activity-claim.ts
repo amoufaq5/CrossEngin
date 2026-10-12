@@ -8,6 +8,12 @@ const DEFAULT_LIMIT = 20;
 /** A scheduled activity claimed by a worker for execution — what a worker needs to run its handler. */
 export interface ClaimedActivity {
   readonly activityId: string;
+  /**
+   * The instance's **`wfi_…` id**, not `meta.workflow_activities.instance_id`'s UUID — the same fix
+   * as `ClaimedTimer.instanceId`, and for the same reason. `engine.executeScheduledActivity` looks
+   * the instance up through `WorkflowInstanceIdResolver`, which matches the TEXT column, so a UUID
+   * resolved to `null` and the handler ran for no instance at all without raising.
+   */
   readonly instanceId: string;
   readonly tenantId: string;
   readonly definitionActivityKey: string;
@@ -27,6 +33,7 @@ export interface ClaimDueActivitiesOptions {
 
 interface ClaimRow {
   readonly activity_id: unknown;
+  /** `meta.workflow_instances.instance_id`, joined in — see `ClaimedActivity.instanceId`. */
   readonly instance_id: unknown;
   readonly tenant_id: unknown;
   readonly definition_activity_key: unknown;
@@ -78,9 +85,9 @@ export async function claimDueActivities(
      )
      UPDATE ${schema}.workflow_activities a
         SET claimed_by = $3, claim_expires_at = $4::timestamptz
-       FROM due
-      WHERE a.id = due.id
-     RETURNING a.activity_id, a.instance_id, a.tenant_id, a.definition_activity_key, a.kind,
+       FROM due, ${schema}.workflow_instances i
+      WHERE a.id = due.id AND i.id = a.instance_id
+     RETURNING a.activity_id, i.instance_id, a.tenant_id, a.definition_activity_key, a.kind,
                a.attempt_number, a.max_attempts, a.claim_expires_at`,
     [options.now, limit, options.workerId, claimExpiresAt],
   );

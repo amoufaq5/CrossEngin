@@ -9,6 +9,7 @@ import {
   fireTimer,
   isTimerDue,
   isWithinBusinessHours,
+  rearmTimer,
   type WorkflowTimer,
 } from "./timers.js";
 
@@ -257,5 +258,81 @@ describe("isWithinBusinessHours", () => {
         { minutesSinceMidnight: 18 * 60, dayOfWeek: 1 },
       ),
     ).toBe(false);
+  });
+});
+
+describe("rearmTimer", () => {
+  const firedCron: WorkflowTimer = {
+    ...baseTimer,
+    kind: "cron_schedule",
+    cronExpression: "0 2 * * *",
+    relativeSeconds: null,
+    status: "fired",
+    firedAt: "2026-05-17T02:00:00.000Z",
+    fireCount: 1,
+    nextFireAt: "2026-05-18T02:00:00.000Z",
+  };
+  const now = new Date("2026-05-17T02:00:00.000Z");
+
+  it("moves fireAt to the next occurrence and returns to scheduled", () => {
+    const r = rearmTimer(firedCron, "2026-05-18T02:00:00.000Z", now);
+    expect(r.status).toBe("scheduled");
+    expect(r.fireAt).toBe("2026-05-18T02:00:00.000Z");
+    expect(r.nextFireAt).toBeNull();
+  });
+
+  it("keeps fireCount and firedAt, so a re-armed timer is distinguishable from a fresh one", () => {
+    const r = rearmTimer(firedCron, "2026-05-18T02:00:00.000Z", now);
+    expect(r.fireCount).toBe(1);
+    expect(r.firedAt).toBe("2026-05-17T02:00:00.000Z");
+  });
+
+  it("moves scheduledAt to now, because it is the start of this wait", () => {
+    const r = rearmTimer(firedCron, "2026-05-18T02:00:00.000Z", now);
+    expect(r.scheduledAt).toBe("2026-05-17T02:00:00.000Z");
+    expect(Date.parse(r.fireAt)).toBeGreaterThan(Date.parse(r.scheduledAt));
+  });
+
+  it("produces a row its own contract accepts", () => {
+    expect(() =>
+      WorkflowTimerSchema.parse(rearmTimer(firedCron, "2026-05-18T02:00:00.000Z", now)),
+    ).not.toThrow();
+  });
+
+  it("round-trips: the re-armed row fires again with a higher count", () => {
+    const armed = rearmTimer(firedCron, "2026-05-18T02:00:00.000Z", now);
+    const second = fireTimer(armed, new Date("2026-05-18T02:00:00.000Z"), "2026-05-19T02:00:00.000Z");
+    expect(second.fireCount).toBe(2);
+    expect(second.nextFireAt).toBe("2026-05-19T02:00:00.000Z");
+    expect(() => WorkflowTimerSchema.parse(second)).not.toThrow();
+  });
+
+  it("refuses every kind that fires once", () => {
+    for (const kind of TIMER_KINDS.filter((k) => k !== "cron_schedule")) {
+      expect(() =>
+        rearmTimer({ ...firedCron, kind, cronExpression: null, relativeSeconds: 60, nextFireAt: null }, "2026-05-18T02:00:00.000Z", now),
+      ).toThrow(/only cron_schedule recurs/);
+    }
+  });
+
+  it("refuses a timer that has not fired", () => {
+    expect(() =>
+      rearmTimer({ ...firedCron, status: "scheduled" }, "2026-05-18T02:00:00.000Z", now),
+    ).toThrow(/re-arming follows a fire/);
+  });
+
+  it("refuses a cancelled timer", () => {
+    expect(() =>
+      rearmTimer({ ...firedCron, status: "cancelled" }, "2026-05-18T02:00:00.000Z", now),
+    ).toThrow(/re-arming follows a fire/);
+  });
+
+  it("refuses re-arming into the past", () => {
+    expect(() => rearmTimer(firedCron, "2026-05-17T01:00:00.000Z", now)).toThrow(/into the past/);
+  });
+
+  it("does not add an edge to TIMER_TRANSITIONS: recurrence is a kind property, not a status one", () => {
+    expect(TIMER_TRANSITIONS.fired).toEqual([]);
+    expect(canTransitionTimer("fired", "scheduled")).toBe(false);
   });
 });

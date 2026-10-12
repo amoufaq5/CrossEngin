@@ -6,11 +6,32 @@ import { assessIncidentSla, isIncidentOpen } from "@crossengin/incident-response
 
 import { INCIDENT_COLUMNS, rowToIncident } from "./records.js";
 
+/**
+ * `terminal_without_timestamp` is gone, because it could never be reported.
+ *
+ * It fired on `status === "closed" && closedAt === null` (and the `cancelled` pair) — which is
+ * exactly what `IncidentRecordSchema.superRefine` refuses, with the messages *"closed status
+ * requires closedAt"* and *"cancelled status requires cancelledAt"*. `rowToIncident` runs that parse
+ * first and unconditionally in the same loop, so any row reaching the check had already been
+ * reported `unparseable_record` and `continue`d past. Its own comment said it "can only fire on a
+ * row written around it"; there is no writing around it, because the detector is upstream of the
+ * detector.
+ *
+ * This module's test proves it from both ends and the two assertions contradicted each other: one
+ * declares this list to be "every kind the replayer can report", while *"flags a row whose record no
+ * longer satisfies the contract"* sets `row["status"] = "closed"` on a row with no `closedAt` and
+ * asserts the result is **one** finding of kind `unparseable_record`. Nothing asserted the dead kind
+ * ever fired, so a list and a behaviour disagreed for as long as both passed.
+ *
+ * Removed rather than made reachable: reaching it means parsing leniently first, which would trade
+ * this module's whole reason for existing — the re-parse — for a sharper label on one of the things
+ * the re-parse already catches. The information is not lost; `describeError` flattens the
+ * `ZodError` to `closedAt: closed status requires closedAt`, which names the field.
+ */
 export const INCIDENT_DRIFT_KINDS = [
   "unparseable_record",
   "id_sequence_mismatch",
   "timeline_out_of_order",
-  "terminal_without_timestamp",
   "sla_breached_while_open",
   "duplicate_open_for_signal",
 ] as const;
@@ -27,6 +48,23 @@ export interface IncidentReplayReport {
   readonly open: number;
   readonly drift: readonly IncidentDrift[];
   readonly checkedAt: string;
+  /**
+   * Whether this pass saw the whole table, or only the newest `limit` rows.
+   *
+   * Without it a clean report is ambiguous in the direction that matters: "no incident has drifted"
+   * and "none of the 500 newest has drifted" are different claims and only the first is what an
+   * operator reads off `0 finding(s)`. ADR-0328's rule for the tombstone sweep — the coverage
+   * guarantee is per completed lap, so the lap has to be reported — on a smaller table.
+   *
+   * It bites hardest on `sla_breached_while_open`, and in the inverting direction:
+   * `ORDER BY declared_at DESC` keeps the *newest* incidents, while an incident sitting past its
+   * severity's window is by definition an old one, so a truncated pass drops exactly the rows that
+   * check exists to find. `PostgresIncidentStore.listOpen` orders ascending for that reason. The
+   * ordering is left as it is — it is right for the other four kinds, and `unparseable_record` on a
+   * freshly tampered row is what a scheduled pass is mostly for — so the honest move is to say when
+   * the window cut rather than to pick a different set of rows to miss.
+   */
+  readonly windowComplete: boolean;
 }
 
 export interface ReplayIncidentsOptions {
@@ -110,22 +148,9 @@ export async function replayIncidents(
       }
     }
 
-    // The schema pairs `closed`/`cancelled` with their stamps, so this can only fire on a row
-    // written around it — but that is exactly the case a drift report is for.
-    if (record.status === "closed" && record.closedAt === null) {
-      drift.push({
-        incidentId: id,
-        kind: "terminal_without_timestamp",
-        detail: "status is closed but closedAt is null",
-      });
-    }
-    if (record.status === "cancelled" && record.cancelledAt === null) {
-      drift.push({
-        incidentId: id,
-        kind: "terminal_without_timestamp",
-        detail: "status is cancelled but cancelledAt is null",
-      });
-    }
+    // No terminal-timestamp check here: `IncidentRecordSchema` pairs `closed`/`cancelled` with
+    // their stamps, and `rowToIncident` above has already applied it, so such a row left this loop
+    // as `unparseable_record` several lines ago. See `INCIDENT_DRIFT_KINDS`.
 
     if (isIncidentOpen(record)) {
       open++;
@@ -158,7 +183,15 @@ export async function replayIncidents(
     });
   }
 
-  return { scanned: result.rows.length, open, drift, checkedAt: nowIso };
+  return {
+    scanned: result.rows.length,
+    open,
+    drift,
+    checkedAt: nowIso,
+    // A short page is the only evidence available that the table ended: a full page means there may
+    // be more, and `count(*)` beside the read would be a second question answered at another moment.
+    windowComplete: result.rows.length < limit,
+  };
 }
 
 /**
@@ -180,7 +213,8 @@ function describeError(err: unknown): string {
 
 export function formatIncidentReplayReport(report: IncidentReplayReport): string {
   const lines = [
-    `incidents: scanned ${report.scanned}, ${report.open} open, ${report.drift.length} finding(s)`,
+    `incidents: scanned ${report.scanned}${report.windowComplete ? "" : " (window truncated)"}` +
+      `, ${report.open} open, ${report.drift.length} finding(s)`,
   ];
   for (const d of report.drift) {
     lines.push(`  [${d.kind}] ${d.incidentId}: ${d.detail}`);

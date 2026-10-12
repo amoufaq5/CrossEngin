@@ -11,6 +11,20 @@ export const STUDENT_PERMISSIONS: EntityPermissions = {
   create: { roles: REGISTRARS },
   update: { roles: REGISTRARS },
   delete: { roles: ADMIN_ONLY },
+  // Both are FERPA pii and both are REGISTRARS-write — an instructor records
+  // grades, not the student directory. They differ on read: an instructor emails
+  // their own students, so student_email keeps them; a date of birth is not
+  // theirs to see.
+  fields: {
+    student_email: {
+      read: { roles: ALL_EDU },
+      update: { roles: REGISTRARS },
+    },
+    date_of_birth: {
+      read: { roles: ["edu_admin", "registrar", "ferpa_auditor"] },
+      update: { roles: REGISTRARS },
+    },
+  },
 };
 
 export const COURSE_PERMISSIONS: EntityPermissions = {

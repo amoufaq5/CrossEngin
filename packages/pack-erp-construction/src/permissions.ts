@@ -45,6 +45,12 @@ export const SUBCONTRACTOR_PERMISSIONS: EntityPermissions = {
       read: { roles: COST_READERS },
       update: { roles: MANAGERS },
     },
+    // MANAGERS and not COST_READERS, unlike tax_id beside it: the cost analyst
+    // reads the money on a subcontractor, not the pii of who to ring.
+    contact_email: {
+      read: { roles: MANAGERS },
+      update: { roles: MANAGERS },
+    },
   },
 };
 
@@ -54,10 +60,29 @@ export const WORK_ORDER_PERMISSIONS: EntityPermissions = {
   create: { roles: FIELD_CREW },
   update: { roles: FIELD_CREW },
   delete: { roles: MANAGERS },
+  // Grants for this pack's own `work_order_lifecycle`. There were none before, because the
+  // inherited workflow named a state field this entity does not have — so its transitions were
+  // unreachable and granting them would have made a route that could not work. The crew moves the
+  // order through the site; cancelling one is a commercial decision, so it sits with the managers,
+  // matching `PROJECT_PERMISSIONS.cancel` one grade down (ADMIN_ONLY there, because cancelling a
+  // whole project is not the same act as cancelling one order on it).
+  transitions: {
+    schedule: { roles: FIELD_CREW },
+    start: { roles: FIELD_CREW },
+    complete: { roles: FIELD_CREW },
+    cancel: { roles: MANAGERS },
+  },
   fields: {
     cost_estimate: {
       read: { roles: COST_READERS },
       update: { roles: MANAGERS },
+      // Set once by whoever raises the order, revised only by a manager. The
+      // foreman holds the entity's create grant and cost_estimate is required,
+      // so before this arm existed narrowing the revision to MANAGERS also
+      // narrowed the create and no foreman could raise a work order at all
+      // (`field_required_but_uncreatable`; ADR-0348). They still cannot *read*
+      // a cost back — supplying the subcontractor's quote discloses nothing.
+      create: { roles: FIELD_CREW },
     },
   },
 };

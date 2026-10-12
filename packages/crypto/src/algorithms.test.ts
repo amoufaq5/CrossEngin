@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { AEAD_ALGORITHM } from "./aead.js";
 import {
   CRYPTO_VERSION,
   HASH_ALGORITHMS,
@@ -44,6 +45,23 @@ describe("algorithm enumerations", () => {
 
   it("uses CRYPTO_VERSION = 1", () => {
     expect(CRYPTO_VERSION).toBe(1);
+  });
+
+  it("excludes the AEAD cipher, because a derived key is not a handle", () => {
+    // This package has a cipher (`aead.ts`) and `KEY_ALGORITHMS` still does not name
+    // it — not as an omission, but because these three enumerations describe the key
+    // *registry*: which algorithms a registered `KeyHandle` may have, what a handle may
+    // be for, and which key-management acts are audited. Every key the AEAD is used
+    // with is derived on demand from a deployment secret, so it has no material at
+    // rest, no `meta.crypto_keys` row and no lifecycle — there is nothing for the
+    // registry to hold and nothing for the key-management audit to record.
+    // `isCryptoOperation("encrypt")` is pinned false in audit.test.ts for the same
+    // reason. Adding a cipher here would mean a *registered* cipher key, which would
+    // need a private-material column `meta.crypto_keys` does not have.
+    expect(KEY_ALGORITHMS as readonly string[]).not.toContain(AEAD_ALGORITHM);
+    expect(isKeyAlgorithm(AEAD_ALGORITHM)).toBe(false);
+    expect(KEY_PURPOSES as readonly string[]).not.toContain("column_encryption");
+    expect(KEY_PURPOSES as readonly string[]).not.toContain("cursor_encryption");
   });
 });
 

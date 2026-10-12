@@ -1,16 +1,27 @@
 import { describe, expect, it, vi } from "vitest";
 import type { PgConnection } from "./connection.js";
 import {
+  COLUMN_ENCRYPTION_KEY_ENV,
+  COLUMN_ENCRYPTION_KEY_GUC,
+  COLUMN_ENCRYPTION_KEY_OLD_GUC,
+  COLUMN_KEY_REFUSAL_REASONS,
+  DEFAULT_COLUMN_KEY_REF,
   EncryptionApplier,
   ENCRYPTED_COLUMN_QUERY,
+  OLD_COLUMN_KEY_REF,
+  PARTITIONED_ENCRYPTED_TABLE_QUERY,
+  columnKeyRefFor,
   ensurePgcryptoExtension,
   formatEncryptionCoverage,
   introspectEncryptedColumns,
+  introspectPartitionedEncryptedTables,
+  isRaisingKeyRef,
   parseColumnDirectives,
   pgcryptoInstalled,
   pgpSymDecryptExpr,
   pgpSymEncryptExpr,
   pgpSymEncryptLiteral,
+  resolveColumnEncryptionKey,
   summarizeEncryptionCoverage,
   type EncryptedColumn,
   type EncryptedColumnRow,
@@ -103,6 +114,186 @@ describe("pgcrypto provisioning", () => {
     });
     await ensurePgcryptoExtension(conn);
     expect(observed).toContain("CREATE EXTENSION IF NOT EXISTS pgcrypto");
+  });
+});
+
+describe("column key ref vocabulary", () => {
+  it("pins the GUC name the whole stack agrees on", () => {
+    expect(COLUMN_ENCRYPTION_KEY_GUC).toBe("app.column_encryption_key");
+    expect(COLUMN_ENCRYPTION_KEY_ENV).toBe("COLUMN_ENCRYPTION_KEY");
+  });
+
+  it("derives the default ref from the GUC rather than restating it", () => {
+    expect(DEFAULT_COLUMN_KEY_REF).toBe(`current_setting('app.column_encryption_key')`);
+    expect(DEFAULT_COLUMN_KEY_REF).toBe(columnKeyRefFor(COLUMN_ENCRYPTION_KEY_GUC));
+  });
+
+  it("builds a ref for any valid GUC name", () => {
+    expect(columnKeyRefFor("app.other_key")).toBe(`current_setting('app.other_key')`);
+    expect(columnKeyRefFor("_x._y0")).toBe(`current_setting('_x._y0')`);
+  });
+
+  it("emits only the one-argument (raising) form", () => {
+    // The two-argument form is what the house GUC idiom uses for tenant isolation and is exactly
+    // wrong here; see `isRaisingKeyRef`'s measurements.
+    expect(columnKeyRefFor("app.k")).not.toContain(",");
+  });
+
+  it("throws on anything that is not a GUC name — the value is interpolated raw", () => {
+    expect(() => columnKeyRefFor("'; DROP TABLE patient; --")).toThrow(/not a GUC name/);
+    expect(() => columnKeyRefFor("barename")).toThrow(/not a GUC name/);
+    expect(() => columnKeyRefFor("")).toThrow(/not a GUC name/);
+    expect(() => columnKeyRefFor("App.Key")).toThrow(/not a GUC name/);
+    expect(() => columnKeyRefFor("app.key.extra")).toThrow(/not a GUC name/);
+    expect(() => columnKeyRefFor("app. key")).toThrow(/not a GUC name/);
+    expect(() => columnKeyRefFor("9app.key")).toThrow(/not a GUC name/);
+  });
+
+  it("names the old-key GUC a rekey reads from, derived the same way", () => {
+    expect(COLUMN_ENCRYPTION_KEY_OLD_GUC).toBe("app.column_encryption_key_old");
+    expect(OLD_COLUMN_KEY_REF).toBe(columnKeyRefFor(COLUMN_ENCRYPTION_KEY_OLD_GUC));
+  });
+
+  it("keeps the two key refs distinct, which is what makes a rekey expressible", () => {
+    // A rekey decrypts under one and encrypts under the other in a single statement, so both have
+    // to be readable from inside one expression.
+    expect(OLD_COLUMN_KEY_REF).not.toBe(DEFAULT_COLUMN_KEY_REF);
+  });
+
+  it("makes the old-key ref raising too", () => {
+    // Both sides, for the same measured reason: on the new-key side a resolved NULL makes
+    // pgp_sym_encrypt return NULL silently and overwrite every PHI value; on the old-key side
+    // pgp_sym_decrypt(col, NULL) is NULL, which is then encrypted — the same loss one function in.
+    expect(isRaisingKeyRef(OLD_COLUMN_KEY_REF)).toBe(true);
+    expect(OLD_COLUMN_KEY_REF).not.toContain(",");
+  });
+});
+
+describe("introspectPartitionedEncryptedTables", () => {
+  const rows = [
+    { table_name: "observation", comment: "crossengin.encrypt=at_rest" },
+    { table_name: "observation", comment: "crossengin.data_class=phi; crossengin.encrypt=at_rest" },
+    { table_name: "ledger_entry", comment: "crossengin.data_class=phi; crossengin.encrypt=at_rest" },
+  ];
+
+  it("asks for partitioned parents only, and binds the schema", async () => {
+    let observed = "";
+    let params: readonly unknown[] | undefined;
+    const conn = mockConn((sql, boundParams) => {
+      observed = sql;
+      params = boundParams;
+      return { rows: [], rowCount: 0 };
+    });
+    await introspectPartitionedEncryptedTables(conn, "t_clinic");
+    expect(observed).toBe(PARTITIONED_ENCRYPTED_TABLE_QUERY);
+    expect(observed).toContain("c.relkind = 'p'");
+    expect(params).toEqual(["t_clinic"]);
+  });
+
+  it("names each partitioned table once, however many of its columns are hinted", async () => {
+    const conn = mockConn(() => ({ rows, rowCount: rows.length }));
+    expect(await introspectPartitionedEncryptedTables(conn, "t_clinic")).toEqual([
+      "observation",
+      "ledger_entry",
+    ]);
+  });
+
+  it("applies the directive parser rather than trusting the LIKE", async () => {
+    const conn = mockConn(() => ({
+      rows: [{ table_name: "note", comment: "see crossengin.encrypt=at_rest_later for the plan" }],
+      rowCount: 1,
+    }));
+    expect(await introspectPartitionedEncryptedTables(conn, "t_clinic")).toEqual([]);
+  });
+
+  it("answers empty for a schema that partitions nothing", async () => {
+    const conn = mockConn(() => ({ rows: [], rowCount: 0 }));
+    expect(await introspectPartitionedEncryptedTables(conn, "public")).toEqual([]);
+  });
+
+  it("is a different statement from the one that finds ordinary tables", () => {
+    // Separate on purpose: widening ENCRYPTED_COLUMN_QUERY's relkind filter would make an UPDATE on
+    // a partitioned parent double-encrypt every leaf that also carries the hint.
+    expect(PARTITIONED_ENCRYPTED_TABLE_QUERY).not.toBe(ENCRYPTED_COLUMN_QUERY);
+    expect(ENCRYPTED_COLUMN_QUERY).toContain("c.relkind = 'r'");
+  });
+});
+
+describe("isRaisingKeyRef", () => {
+  it("is true for the single-argument current_setting form", () => {
+    expect(isRaisingKeyRef(DEFAULT_COLUMN_KEY_REF)).toBe(true);
+    expect(isRaisingKeyRef(`current_setting( 'app.k' )`)).toBe(true);
+    expect(isRaisingKeyRef(`  current_setting('app.k')  `)).toBe(true);
+  });
+
+  it("is false for the two-argument form", () => {
+    // Measured on PG 16: current_setting('app.foo', true) unset returns NULL (and '' once used and
+    // reset on that connection), and pgp_sym_encrypt(x, NULL) returns NULL *silently* — so the
+    // two-argument form turns a missing key into a PHI column storing NULL, reported as success.
+    // The one-argument form raises `unrecognized configuration parameter` instead, and
+    // pgp_sym_encrypt(x, '') raises `Illegal argument to function`.
+    expect(isRaisingKeyRef(`current_setting('app.column_encryption_key', true)`)).toBe(false);
+    expect(isRaisingKeyRef(`current_setting('app.k',true)`)).toBe(false);
+    expect(isRaisingKeyRef(`current_setting('app.k', false)`)).toBe(false);
+    expect(isRaisingKeyRef(`NULLIF(current_setting('app.k', true), '')`)).toBe(false);
+  });
+
+  it("is false for anything else, including a bind parameter", () => {
+    // Not a judgement that `$1` is malformed — it answers "cannot be shown to raise", and `$1`
+    // bound to null is the silent-NULL path one layer out.
+    expect(isRaisingKeyRef("$1")).toBe(false);
+    expect(isRaisingKeyRef("'literal-key'")).toBe(false);
+    expect(isRaisingKeyRef("")).toBe(false);
+  });
+});
+
+describe("resolveColumnEncryptionKey", () => {
+  it("claims the GUC from the environment with the default ref", () => {
+    const resolved = resolveColumnEncryptionKey(DEFAULT_COLUMN_KEY_REF, {
+      COLUMN_ENCRYPTION_KEY: "s3cret",
+    });
+    expect(resolved.refusal).toBeNull();
+    expect([...resolved.sessionSettings]).toEqual([["app.column_encryption_key", "s3cret"]]);
+  });
+
+  it("refuses the default ref when the environment variable is absent", () => {
+    const resolved = resolveColumnEncryptionKey(DEFAULT_COLUMN_KEY_REF, {});
+    expect(resolved.refusal?.reason).toBe("key_value_absent");
+    expect(resolved.refusal?.message).toContain("COLUMN_ENCRYPTION_KEY is not set");
+    expect(resolved.refusal?.message).toContain("unrecognized configuration parameter");
+    expect(resolved.sessionSettings.size).toBe(0);
+  });
+
+  it("refuses an empty variable too — pgp_sym_encrypt(x, '') raises", () => {
+    const resolved = resolveColumnEncryptionKey(DEFAULT_COLUMN_KEY_REF, {
+      COLUMN_ENCRYPTION_KEY: "",
+    });
+    expect(resolved.refusal?.reason).toBe("key_value_absent");
+  });
+
+  it("requires nothing when the deployment names its own raising ref", () => {
+    const resolved = resolveColumnEncryptionKey(`current_setting('app.other_key')`, {});
+    expect(resolved.refusal).toBeNull();
+    expect(resolved.sessionSettings.size).toBe(0);
+  });
+
+  it("refuses a caller-supplied ref that can yield NULL", () => {
+    const resolved = resolveColumnEncryptionKey(`current_setting('app.other_key', true)`, {
+      COLUMN_ENCRYPTION_KEY: "s3cret",
+    });
+    expect(resolved.refusal?.reason).toBe("key_ref_can_yield_null");
+    expect(resolved.refusal?.message).toContain("store NULL");
+  });
+
+  it("never puts the key value in the refusal message", () => {
+    const resolved = resolveColumnEncryptionKey(`current_setting('app.k', true)`, {
+      COLUMN_ENCRYPTION_KEY: "s3cret",
+    });
+    expect(resolved.refusal?.message).not.toContain("s3cret");
+  });
+
+  it("has a refusal reason enum with no duplicates", () => {
+    expect(new Set(COLUMN_KEY_REFUSAL_REASONS).size).toBe(COLUMN_KEY_REFUSAL_REASONS.length);
   });
 });
 

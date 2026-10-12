@@ -1,6 +1,7 @@
 import type { PathSegment, ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { Handler, HandlerInput, HandlerOutput } from "@crossengin/api-gateway-runtime";
 import type { AuditLogEntry, ClassifiedField, RoleDefinition, RoleName } from "@crossengin/auth";
+import type { Entity, Trait } from "@crossengin/types/meta-schema";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -19,6 +20,7 @@ import {
   type AuditReadRoutesContext,
   type AuditReadScopeLike,
   type AuditReadSourceLike,
+  type EntityFieldLookup,
 } from "./audit-read-routes.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
@@ -49,6 +51,42 @@ const PATIENT_FIELDS: readonly ClassifiedField[] = [
   { name: "given_name", classification: "pii" },
   { name: "status" },
 ];
+
+/**
+ * A `Patient` whose `discharge_note` is `phi` and arrives from a **custom trait**.
+ *
+ * Reachable only from an authored manifest: none of the seven shipped packs declares a custom
+ * trait, and none of the eight built-in trait fields carries a classification — so this case has
+ * zero members on every pack today and is exactly the one the Architect feature opens.
+ *
+ * Typed to include `traits` so the fixture is manifest-shaped, and passed as a variable rather than
+ * an object literal because `entityFieldLookupFrom`'s parameter names only `entities` and an excess
+ * property on a fresh literal would be a compile error. That the extra key is simply *ignored* is
+ * the point: the lookup has no way to resolve a trait and the type says so.
+ */
+const TRAIT_MANIFEST: {
+  readonly traits: readonly Trait[];
+  readonly entities: readonly Entity[];
+} = {
+  traits: [
+    {
+      name: "discharge_audited",
+      fields: [
+        { name: "discharge_note", type: { kind: "long_text" }, classification: "phi" },
+      ],
+    },
+  ],
+  entities: [
+    {
+      name: "Patient",
+      traits: ["discharge_audited"],
+      fields: [
+        { name: "mrn", type: { kind: "text", maxLength: 32 }, classification: "phi" },
+        { name: "status", type: { kind: "text", maxLength: 20 } },
+      ],
+    },
+  ],
+};
 
 function entryFor(overrides: Partial<AuditLogEntry> = {}): AuditLogEntry {
   return {
@@ -426,6 +464,88 @@ describe("entityFieldLookupFrom", () => {
     ]);
     // An entity the manifest does not have is unknown, which is not "has nothing sensitive".
     expect(lookup("Ledger")).toBeNull();
+  });
+
+  /**
+   * The trait limitation, pinned as a decision rather than left as an accident.
+   *
+   * This lookup reads the entity's **own** fields for both halves, so a trait-contributed field is
+   * in neither the classification map nor the key list. The consequence is a *drop*: the key lands
+   * in `undescribedFields` and leaves the payload. These three tests exist so that someone who
+   * "completes" the lookup from `resolvedFields` without doing the classification half fails here
+   * rather than shipping the disclosure — the trap the doc comment on `entityFieldLookupFrom`
+   * spells out.
+   */
+  it("omits a trait-contributed field, classified or not", () => {
+    const lookup = entityFieldLookupFrom(TRAIT_MANIFEST);
+    expect(lookup("Patient")).toEqual([
+      { name: "mrn", classification: "phi" },
+      { name: "status" },
+    ]);
+  });
+
+  it("drops a trait-contributed classified field from the payload, for every reader", () => {
+    const lookup = entityFieldLookupFrom(TRAIT_MANIFEST);
+    const { ctx } = makeCtx({
+      classification: { fieldsFor: lookup, roles: ROLES, policy: { privilegedRoles: [PHI_ROLE] } },
+    });
+    const entry = entryFor({
+      before: { mrn: MRN, status: "active", discharge_note: "suspected sepsis" },
+      after: { mrn: "MRN-000999", status: "discharged", discharge_note: "resolved" },
+      diff: { discharge_note: { from: "suspected sepsis", to: "resolved" } },
+    });
+
+    const unprivileged = redactAuditPayloads(ctx, entry, principal([TENANT_ROLE]));
+    expect(unprivileged.undescribedFields).toEqual(["discharge_note"]);
+    expect(unprivileged.before).toEqual({ status: "active" });
+    expect(unprivileged.after).toEqual({ status: "discharged" });
+    expect(unprivileged.diff).toEqual({});
+    expect(unprivileged.withheld).toBeNull();
+
+    // The sharp half: a reader privileged for every sensitive class does not get it either. That is
+    // what proves the key left on the undescribed path rather than on the classification one — a
+    // redaction would have handed this reader the value.
+    const privileged = redactAuditPayloads(ctx, entry, principal([TENANT_ROLE, PHI_ROLE]));
+    expect(privileged.undescribedFields).toEqual(["discharge_note"]);
+    expect(privileged.after).toEqual({ mrn: "MRN-000999", status: "discharged" });
+    expect(privileged.redactedFields).toEqual([]);
+  });
+
+  /**
+   * The control that makes the doc comment's "worse than doing nothing" checkable rather than
+   * asserted: a lookup that widened the **key list** to the resolved fields and left the
+   * classification half reading `entity.fields` describes the trait field with no classification —
+   * and the value is then served, in the clear, to the reader who may not see PHI.
+   *
+   * Hand-built rather than produced by the production function, because the production function is
+   * correct and this is the shape of the half-fix it must not become.
+   */
+  it("would serve the trait field in the clear if only the key list were widened", () => {
+    const halfFixed: EntityFieldLookup = (entity) =>
+      entity === "Patient"
+        ? [
+            { name: "mrn", classification: "phi" },
+            { name: "status" },
+            // Described, and carrying no classification, because the classification half still read
+            // the entity's own fields. There is nothing left to withhold it for.
+            { name: "discharge_note" },
+          ]
+        : null;
+    const { ctx } = makeCtx({
+      classification: { fieldsFor: halfFixed, roles: ROLES, policy: { privilegedRoles: [PHI_ROLE] } },
+    });
+    const payloads = redactAuditPayloads(
+      ctx,
+      entryFor({
+        before: null,
+        after: { mrn: "MRN-000999", status: "discharged", discharge_note: "resolved" },
+        diff: null,
+      }),
+      principal([TENANT_ROLE]),
+    );
+    expect(payloads.undescribedFields).toEqual([]);
+    expect(payloads.after).toEqual({ status: "discharged", discharge_note: "resolved" });
+    expect(payloads.redactedFields).toEqual(["mrn"]);
   });
 });
 

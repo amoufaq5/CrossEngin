@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 
+import { handleUnauthorized } from "@/lib/unauthorized";
+
 export type UiInputType =
   | "text"
   | "textarea"
@@ -25,6 +27,18 @@ export interface UiFieldSchema {
   readonly readOnly?: boolean;
   /** The server auto-fills this on create — a required-but-defaulted field needs no client input. */
   readonly defaulted?: boolean;
+  /**
+   * Present iff the field is a `decimal`. Its value travels as a canonical decimal **string**:
+   * the control is still numeric, but the draft text must be posted verbatim — `Number()` here
+   * would discard precision the server kept (more than half the shipped catalog's decimal fields
+   * declare more digits than a double holds).
+   */
+  readonly decimal?: { readonly precision: number; readonly scale: number };
+}
+
+/** Whether a form may hand this field's draft text to `Number()` before posting it. */
+export function postsAsNumber(field: UiFieldSchema): boolean {
+  return field.input === "number" && field.decimal === undefined;
 }
 
 export interface UiTransitionSchema {
@@ -113,6 +127,9 @@ export async function fetchSchema(): Promise<UiSchema> {
   if (inflight !== null) return inflight;
   inflight = (async () => {
     const res = await fetch("/api/v1/meta/schema", { headers: { accept: "application/json" } });
+    // This module's only request, and the one the whole app waits on — so a 401 here is the
+    // first thing an expired session hits, and the redirect has to start from here too.
+    handleUnauthorized(res);
     if (!res.ok) throw new Error(`schema ${res.status}: ${await res.text().catch(() => res.statusText)}`);
     const schema = (await res.json()) as UiSchema;
     cache = schema;

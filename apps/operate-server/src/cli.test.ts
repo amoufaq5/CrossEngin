@@ -1,6 +1,20 @@
+import { generateEd25519Keypair } from "@crossengin/crypto";
 import { describe, expect, it } from "vitest";
 
-import { CliUsageError, parsePruneArgs, parseServeArgs, parseVerifyChainArgs } from "./cli.js";
+import { COLUMN_KEY_TTL_BOUNDS, DEFAULT_COLUMN_KEY_TTL_MS } from "./data-key-envelope.js";
+import {
+  CliUsageError,
+  helpText,
+  parsePruneArgs,
+  parseRekeyArgs,
+  parseServeArgs,
+  parseSetCredentialArgs,
+  parseVerifyChainArgs,
+  rekeyHelpText,
+  setCredentialCliHelpText,
+} from "./cli.js";
+
+const JWKS_PUB = generateEd25519Keypair().publicKeyBase64;
 
 describe("parseServeArgs", () => {
   it("parses a pack + port + repeated api-keys", () => {
@@ -112,19 +126,21 @@ describe("parseServeArgs", () => {
       "--pack",
       "erp-core",
       "--jwks-key",
-      "key-1:AAAbase64",
+      `key-1:${JWKS_PUB}`,
       "--jwt-issuer",
       "https://idp/",
       "--jwt-audience",
       "https://api/",
     ]);
-    expect(opts.jwksKeys).toEqual(["key-1:AAAbase64"]);
+    expect(opts.jwksKeys).toEqual([`key-1:${JWKS_PUB}`]);
     expect(opts.jwtIssuer).toBe("https://idp/");
     expect(opts.jwtAudience).toBe("https://api/");
   });
 
   it("requires issuer + audience when a JWKS is configured", () => {
-    expect(() => parseServeArgs(["--pack", "erp-core", "--jwks-key", "k:v"])).toThrow(/issuer.*audience/);
+    expect(() => parseServeArgs(["--pack", "erp-core", "--jwks-key", `k:${JWKS_PUB}`])).toThrow(
+      /issuer.*audience/,
+    );
     expect(() => parseServeArgs(["--pack", "erp-core", "--jwks-url", "https://idp/jwks"])).toThrow(/issuer.*audience/);
   });
 
@@ -760,6 +776,132 @@ describe("parseVerifyChainArgs", () => {
   });
 });
 
+describe("parseRekeyArgs", () => {
+  const TENANT = "00000000-0000-4000-8000-000000000001";
+  const OTHER = "00000000-0000-4000-8000-000000000002";
+  const REQUIRED = ["--tenant", TENANT, "--confirm-tenant", TENANT];
+
+  it("parses the required pair, the two schemas and the flags", () => {
+    const opts = parseRekeyArgs([
+      ...REQUIRED,
+      "--plan",
+      "--schema",
+      "custom_meta",
+      "--data-schema",
+      "t_abc",
+      "--allow-live-rekey",
+      "--format",
+      "json",
+    ]);
+    expect(opts.tenantId).toBe(TENANT);
+    expect(opts.confirmTenantId).toBe(TENANT);
+    expect(opts.plan).toBe(true);
+    expect(opts.schema).toBe("custom_meta");
+    expect(opts.dataSchema).toBe("t_abc");
+    expect(opts.allowLiveRekey).toBe(true);
+    expect(opts.format).toBe("json");
+  });
+
+  it("defaults both schemas to null and every flag to off", () => {
+    const opts = parseRekeyArgs(REQUIRED);
+    expect(opts.schema).toBeNull();
+    expect(opts.dataSchema).toBeNull();
+    expect(opts.plan).toBe(false);
+    expect(opts.allowLiveRekey).toBe(false);
+    expect(opts.format).toBe("human");
+    expect(opts.help).toBe(false);
+  });
+
+  it("requires the tenant id twice, including under --plan", () => {
+    expect(() => parseRekeyArgs([])).toThrow(/rekey requires --tenant/);
+    expect(() => parseRekeyArgs(["--tenant", TENANT])).toThrow(/requires --confirm-tenant/);
+    // Required under `--plan` too, so the invocation an operator reviews is the one they then
+    // re-run without the flag.
+    expect(() => parseRekeyArgs(["--tenant", TENANT, "--plan"])).toThrow(
+      /requires --confirm-tenant/,
+    );
+    expect(() => parseRekeyArgs(["--tenant", TENANT, "--confirm-tenant", OTHER])).toThrow(
+      /--confirm-tenant must equal --tenant/,
+    );
+  });
+
+  it("rejects a malformed tenant, a bad format and unknown args", () => {
+    expect(() => parseRekeyArgs(["--tenant", "nope!", "--confirm-tenant", "nope!"])).toThrow(
+      /invalid --tenant/,
+    );
+    expect(() => parseRekeyArgs([...REQUIRED, "--format", "yaml"])).toThrow(/invalid --format/);
+    expect(() => parseRekeyArgs([...REQUIRED, "--yes"])).toThrow(CliUsageError);
+  });
+
+  it("--help skips required-flag validation", () => {
+    expect(parseRekeyArgs(["--help"]).help).toBe(true);
+    expect(parseRekeyArgs(["-h"]).help).toBe(true);
+  });
+});
+
+describe("parseRekeyArgs — --column-key-ttl-ms", () => {
+  const TENANT = "00000000-0000-4000-8000-000000000001";
+  const REQUIRED = ["--tenant", TENANT, "--confirm-tenant", TENANT];
+
+  it("parses the fleet's value, in both flag forms", () => {
+    // The flag this subcommand did not parse at all, while printing the default beside its name —
+    // so the stale-key window read as a measurement and understated the hazard by up to 10x for a
+    // fleet on the ceiling, in the direction where an operator resumes writes too early.
+    expect(parseRekeyArgs([...REQUIRED, "--column-key-ttl-ms", "60000"]).columnKeyTtlMs).toBe(
+      60_000,
+    );
+    expect(parseRekeyArgs([...REQUIRED, "--column-key-ttl-ms=60000"]).columnKeyTtlMs).toBe(60_000);
+  });
+
+  it("is null when omitted, so the report can say the figure is a default and unread", () => {
+    // Null and not `DEFAULT_COLUMN_KEY_TTL_MS`: the absence is the fact the stale-key line reports,
+    // and defaulting it here would make "stated" unanswerable downstream.
+    expect(parseRekeyArgs(REQUIRED).columnKeyTtlMs).toBeNull();
+    expect(DEFAULT_COLUMN_KEY_TTL_MS).toBeGreaterThanOrEqual(COLUMN_KEY_TTL_BOUNDS.min);
+  });
+
+  it("accepts both bounds and refuses a value outside them, naming them", () => {
+    const min = COLUMN_KEY_TTL_BOUNDS.min;
+    const max = COLUMN_KEY_TTL_BOUNDS.max;
+    expect(
+      parseRekeyArgs([...REQUIRED, "--column-key-ttl-ms", String(min)]).columnKeyTtlMs,
+    ).toBe(min);
+    expect(
+      parseRekeyArgs([...REQUIRED, "--column-key-ttl-ms", String(max)]).columnKeyTtlMs,
+    ).toBe(max);
+    for (const bad of [String(min - 1), String(max + 1), "0", "-1"]) {
+      const thrown = (): unknown => parseRekeyArgs([...REQUIRED, "--column-key-ttl-ms", bad]);
+      expect(thrown).toThrow(CliUsageError);
+      expect(thrown).toThrow(
+        new RegExp(`must be an integer between ${String(min)} and ${String(max)} ms`),
+      );
+    }
+  });
+
+  it("refuses a non-integer rather than coercing it", () => {
+    for (const bad of ["abc", "1.5", "30s", ""]) {
+      expect(() => parseRekeyArgs([...REQUIRED, "--column-key-ttl-ms", bad])).toThrow(
+        /must be an integer between/,
+      );
+    }
+  });
+
+  it("requires a value", () => {
+    expect(() => parseRekeyArgs([...REQUIRED, "--column-key-ttl-ms"])).toThrow(
+      /--column-key-ttl-ms requires a value/,
+    );
+  });
+
+  it("is documented in the help text, with what it is for", () => {
+    // A flag the report points at has to be a flag the help mentions, or an operator reading
+    // "pass it here" has nowhere to look.
+    expect(rekeyHelpText).toContain("--column-key-ttl-ms");
+    expect(rekeyHelpText).toContain("does not run");
+    expect(rekeyHelpText).toContain("--confirm-tenant");
+    expect(rekeyHelpText).toContain("--data-schema");
+  });
+});
+
 describe("parseServeArgs — manifest refresh + AI budget flags", () => {
   const BASE = ["--pack", "erp-core"];
   it("defaults both to null", () => {
@@ -796,5 +938,1178 @@ describe("parseServeArgs — notification audit roles", () => {
       "--notification-audit-role", "compliance_officer",
     ]);
     expect(opts.notificationAuditRoles).toEqual(["platform_admin", "compliance_officer"]);
+  });
+});
+
+describe("parseServeArgs — the GDPR deletion handle", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg"];
+
+  it("defaults every grant to nobody", () => {
+    const opts = parseServeArgs([...PG, "--deletion-request-routes"]);
+    expect(opts.deletionRequestSubmitRoles).toEqual([]);
+    expect(opts.deletionRequestVerifyRoles).toEqual([]);
+    expect(opts.deletionRequestReadRoles).toEqual([]);
+  });
+
+  it("a role implies the routes, like every sibling flag", () => {
+    const opts = parseServeArgs([...PG, "--deletion-request-submit-role", "support"]);
+    expect(opts.deletionRequestRoutes).toBe(true);
+    expect(opts.deletionRequestSubmitRoles).toEqual(["support"]);
+  });
+
+  it("caps the deadline at Article 12(3)'s three months", () => {
+    expect(parseServeArgs([...PG, "--deletion-request-deadline-days=90"]).deletionRequestDeadlineDays).toBe(90);
+    expect(() => parseServeArgs([...PG, "--deletion-request-deadline-days", "91"])).toThrow(/Article 12\(3\)/);
+    expect(() => parseServeArgs([...PG, "--deletion-request-deadline-days", "0"])).toThrow();
+  });
+
+  it("rejects a sub-second runner interval and a batch size outside 1..100", () => {
+    expect(parseServeArgs([...PG, "--deletion-runner-ms=2000"]).deletionRunnerMs).toBe(2000);
+    expect(() => parseServeArgs([...PG, "--deletion-runner-ms", "999"])).toThrow();
+    expect(() => parseServeArgs([...PG, "--deletion-runner-batch-size", "101"])).toThrow();
+  });
+
+  it("refuses the memory store, rather than booting a surface that cannot work", () => {
+    expect(() => parseServeArgs(["--pack", "erp-core", "--deletion-request-routes"])).toThrow(/Postgres/);
+    expect(() => parseServeArgs(["--pack", "erp-core", "--deletion-runner-ms", "2000"])).toThrow(/Postgres/);
+  });
+
+  it("checks four-eyes against the RESOLVED actor pair, not just the flags", () => {
+    // Passing only one of them, set to the other's default, would otherwise pass here and throw at
+    // the runner's construction — which is at boot.
+    expect(() =>
+      parseServeArgs([...PG, "--deletion-runner-executed-by", "system:retention-policy"]),
+    ).toThrow(/four-eyes/);
+    expect(() =>
+      parseServeArgs([...PG, "--deletion-runner-approved-by", "system:deletion-runner"]),
+    ).toThrow(/four-eyes/);
+    expect(() =>
+      parseServeArgs([...PG, "--deletion-runner-executed-by", "a", "--deletion-runner-approved-by", "a"]),
+    ).toThrow(/four-eyes/);
+    expect(
+      parseServeArgs([...PG, "--deletion-runner-executed-by", "a", "--deletion-runner-approved-by", "b"])
+        .deletionRunnerExecutedBy,
+    ).toBe("a");
+  });
+});
+
+describe("parseServeArgs — reconciling a stranded deletion", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg"];
+
+  it("defaults the reconcile grant to nobody and the window to unset", () => {
+    const opts = parseServeArgs([...PG, "--deletion-request-routes"]);
+    expect(opts.deletionRequestReconcileRoles).toEqual([]);
+    expect(opts.deletionStrandedAfterMs).toBeNull();
+  });
+
+  it("a reconcile role implies the routes", () => {
+    const opts = parseServeArgs([...PG, "--deletion-request-reconcile-role=platform_admin"]);
+    expect(opts.deletionRequestRoutes).toBe(true);
+    expect(opts.deletionRequestReconcileRoles).toEqual(["platform_admin"]);
+  });
+
+  it("floors the staleness window at a minute", () => {
+    expect(parseServeArgs([...PG, "--deletion-stranded-after-ms", "60000"]).deletionStrandedAfterMs).toBe(60_000);
+    // The window exists to be far longer than any pipeline run; a shorter one would read "still
+    // running" as "never committed".
+    expect(() => parseServeArgs([...PG, "--deletion-stranded-after-ms", "5000"])).toThrow(/60000/);
+    expect(() => parseServeArgs([...PG, "--deletion-stranded-after-ms", "nope"])).toThrow();
+  });
+});
+
+describe("parseServeArgs — deletion-evidence escalation", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg"];
+
+  it("is off unless a config is given, and implies the routes", () => {
+    expect(parseServeArgs([...PG, "--deletion-request-routes"]).deletionEscalationConfig).toBeNull();
+    const opts = parseServeArgs([...PG, "--deletion-escalation-config=/tmp/esc.json"]);
+    expect(opts.deletionEscalationConfig).toBe("/tmp/esc.json");
+    expect(opts.deletionRequestRoutes).toBe(true);
+  });
+});
+
+describe("parseServeArgs — the reverse-direction audit cadence", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg"];
+
+  it("is off unless asked for", () => {
+    expect(parseServeArgs([...PG, "--deletion-runner-ms=3000"]).deletionAuditEveryTicks).toBeNull();
+  });
+
+  it("takes a tick multiple and refuses zero or a fraction", () => {
+    expect(parseServeArgs([...PG, "--deletion-audit-every-ticks=20"]).deletionAuditEveryTicks).toBe(20);
+    // A multiple of the tick, not a duration: 0 would mean "every tick", which is what the flag
+    // exists to avoid.
+    expect(() => parseServeArgs([...PG, "--deletion-audit-every-ticks", "0"])).toThrow();
+    expect(() => parseServeArgs([...PG, "--deletion-audit-every-ticks", "1.5"])).toThrow();
+  });
+});
+
+/**
+ * Per-class sensitive grants on the audit trail (ADR-0329).
+ *
+ * `--audit-read-sensitive-role` is wholesale — pii *and* phi — so a HIPAA deployment wanting
+ * support staff to read contact details had to expose patient records or redact everything.
+ */
+describe("parseServeArgs — --audit-read-sensitive-class", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg", "--audit-read-routes"];
+
+  it("is empty unless asked for", () => {
+    expect(parseServeArgs([...PG]).auditReadSensitiveClasses).toEqual({});
+  });
+
+  it("grants one class to one role", () => {
+    const o = parseServeArgs([...PG, "--audit-read-sensitive-class=pii=support"]);
+    expect(o.auditReadSensitiveClasses).toEqual({ pii: ["support"] });
+  });
+
+  it("accumulates roles for one class and keeps classes apart", () => {
+    const o = parseServeArgs([
+      ...PG,
+      "--audit-read-sensitive-class=pii=support",
+      "--audit-read-sensitive-class=pii=billing",
+      "--audit-read-sensitive-class",
+      "phi=clinician",
+    ]);
+    expect(o.auditReadSensitiveClasses).toEqual({
+      pii: ["support", "billing"],
+      phi: ["clinician"],
+    });
+  });
+
+  it("takes a class with NO role, which is how a class is withheld from everyone", () => {
+    // Not an error: naming a class makes it authoritative, so an empty list withholds it even from
+    // a wholesale `--audit-read-sensitive-role` grantee. That is the narrowing the flag exists for.
+    const o = parseServeArgs([
+      ...PG,
+      "--audit-read-sensitive-role=auditor",
+      "--audit-read-sensitive-class=phi=",
+    ]);
+    expect(o.auditReadSensitiveRoles).toEqual(["auditor"]);
+    expect(o.auditReadSensitiveClasses).toEqual({ phi: [] });
+  });
+
+  it("refuses a value with no '=' at all", () => {
+    expect(() => parseServeArgs([...PG, "--audit-read-sensitive-class=pii"])).toThrow(
+      /<class>=<role>/,
+    );
+    expect(() => parseServeArgs([...PG, "--audit-read-sensitive-class==support"])).toThrow();
+  });
+
+  it("refuses a class that is not a sensitive classification", () => {
+    // Checked against `SENSITIVE_DATA_CLASSIFICATIONS`, not a copy: a typo'd class would otherwise
+    // be accepted, apply to nothing, and leave the wholesale grant quietly reaching the class the
+    // operator meant to withhold — a narrowing that does not narrow.
+    expect(() => parseServeArgs([...PG, "--audit-read-sensitive-class=pll=support"])).toThrow(
+      /unknown sensitive class/,
+    );
+    // `public` is a real classification and deliberately not a sensitive one, so granting it is
+    // meaningless and is refused rather than silently ignored.
+    expect(() => parseServeArgs([...PG, "--audit-read-sensitive-class=public=support"])).toThrow(
+      /unknown sensitive class/,
+    );
+  });
+
+  it("names the accepted classes in the refusal, so the operator can fix it", () => {
+    let message = "";
+    try {
+      parseServeArgs([...PG, "--audit-read-sensitive-class=nope=x"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    for (const cls of ["commercial_sensitive", "phi", "pii", "regulated"]) {
+      expect(message).toContain(cls);
+    }
+  });
+});
+
+/** Per-viewer notification read state over HTTP (ADR-0331), closing ADR-0309's never-read tables. */
+describe("parseServeArgs — --read-state-routes", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg"];
+
+  it("is off, ungranted and default-scanned unless asked for", () => {
+    const o = parseServeArgs([...PG]);
+    expect(o.readStateRoutes).toBe(false);
+    expect(o.readStateRoles).toEqual([]);
+    expect(o.readStateBackfillRoles).toEqual([]);
+    expect(o.readStateUnreadScan).toBe(200);
+  });
+
+  it("a role turns the routes on, the way every sibling flag does", () => {
+    const o = parseServeArgs([...PG, "--read-state-role=cashier", "--read-state-role", "manager"]);
+    expect(o.readStateRoutes).toBe(true);
+    expect(o.readStateRoles).toEqual(["cashier", "manager"]);
+  });
+
+  it("refuses the routes on the memory store", () => {
+    expect(() => parseServeArgs(["--pack", "erp-core", "--read-state-routes"])).toThrow(
+      /--read-state-routes requires a Postgres store/,
+    );
+  });
+
+  it("refuses a backfill role that is not also granted the base role", () => {
+    // Additive, not a substitute. The base grant is checked first, so a backfill role missing from
+    // it is refused there and the backfill grant never comes into play — which reads as the backfill
+    // grant not working. Said at boot instead.
+    expect(() =>
+      parseServeArgs([...PG, "--read-state-role=staff", "--read-state-backfill-role=migrator"]),
+    ).toThrow(/additive on top of --read-state-role: migrator/);
+  });
+
+  it("accepts a backfill role that holds both grants", () => {
+    const o = parseServeArgs([
+      ...PG,
+      "--read-state-role=migrator",
+      "--read-state-role=staff",
+      "--read-state-backfill-role=migrator",
+    ]);
+    expect(o.readStateBackfillRoles).toEqual(["migrator"]);
+  });
+
+  it("takes a scan limit in band and refuses one out of it, rather than clamping", () => {
+    // ADR-0312's rule: a deployment that asked for 5000 and silently got 1000 would render a badge
+    // it believes is exact.
+    expect(parseServeArgs([...PG, "--read-state-unread-scan=750"]).readStateUnreadScan).toBe(750);
+    expect(() => parseServeArgs([...PG, "--read-state-unread-scan=0"])).toThrow(/1–1000/);
+    expect(() => parseServeArgs([...PG, "--read-state-unread-scan=5000"])).toThrow(/1–1000/);
+    expect(() => parseServeArgs([...PG, "--read-state-unread-scan=1.5"])).toThrow(/1–1000/);
+  });
+});
+
+/** The consecutive-fax counter (ADR-0332), closing ADR-0310's named-but-inert `fax` verdict. */
+describe("parseServeArgs — --bounce-fax-observations", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg", "--bounce-webhook"];
+
+  it("is off, unthresholded and default-windowed unless asked for", () => {
+    const o = parseServeArgs([...PG]);
+    expect(o.bounceFaxObservations).toBe(false);
+    expect(o.bounceFaxSuppressAfter).toBeNull();
+    expect(o.bounceFaxWindowHours).toBeNull();
+  });
+
+  it("counts without suppressing, which is the designed default and not a degradation", () => {
+    // One `AnsweredBy=fax` is a detector's guess from a few hundred ms of audio, so the one
+    // suppression derived from an inference is the one a deployment opts into (ADR-0302).
+    const o = parseServeArgs([...PG, "--bounce-fax-observations"]);
+    expect(o.bounceFaxObservations).toBe(true);
+    expect(o.bounceFaxSuppressAfter).toBeNull();
+  });
+
+  it("refuses a threshold of 1 by name rather than clamping it", () => {
+    // Clamping would impose a policy the operator did not choose, and 1 is exactly the
+    // suppress-on-one-sample behaviour the count exists to prevent.
+    let message = "";
+    try {
+      parseServeArgs([...PG, "--bounce-fax-observations", "--bounce-fax-suppress-after=1"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("single detector sample");
+    expect(parseServeArgs([...PG, "--bounce-fax-observations", "--bounce-fax-suppress-after=2"])
+      .bounceFaxSuppressAfter).toBe(2);
+  });
+
+  it("refuses the counter without the webhook, and on the memory store", () => {
+    expect(() => parseServeArgs(["--pack", "erp-core", "--store", "pg", "--bounce-fax-observations"]))
+      .toThrow(/requires --bounce-webhook/);
+    expect(() => parseServeArgs(["--pack", "erp-core", "--bounce-webhook", "--bounce-fax-observations"]))
+      .toThrow(/requires a Postgres store/);
+  });
+
+  it("refuses a threshold or a window with no counter to configure", () => {
+    // A threshold that silently counts nothing is the shape of misconfiguration this family refuses.
+    expect(() => parseServeArgs([...PG, "--bounce-fax-suppress-after=3"]))
+      .toThrow(/requires --bounce-fax-observations/);
+    expect(() => parseServeArgs([...PG, "--bounce-fax-window-hours=24"]))
+      .toThrow(/requires --bounce-fax-observations/);
+  });
+
+  it("takes a window in hours", () => {
+    const o = parseServeArgs([...PG, "--bounce-fax-observations", "--bounce-fax-window-hours", "24"]);
+    expect(o.bounceFaxWindowHours).toBe(24);
+    expect(() => parseServeArgs([...PG, "--bounce-fax-observations", "--bounce-fax-window-hours=0"]))
+      .toThrow(/>= 1/);
+  });
+});
+
+describe("parseServeArgs — per-route body limits", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg", "--audit-read-routes"];
+
+  it("parses per-route body limits, longest prefix independent of argv order", () => {
+    const out = parseServeArgs([
+      ...PG,
+      "--max-request-body",
+      "64kb",
+      "--max-request-body-route=/v1/platform/manifests=8mb",
+      "--max-request-body-route",
+      "/v1/platform=256kb",
+    ]);
+    // The point of the feature: the default can finally be *small*, with the large routes named.
+    expect(out.maxRequestBodyBytes).toBe(64 * 1024);
+    expect(out.maxRequestBodyRoutes).toHaveLength(2);
+  });
+
+  it("refuses a per-route spec that could never match", () => {
+    // A relative prefix matches no request URL, so the operator would believe a limit was in force
+    // and none would be.
+    expect(() =>
+      parseServeArgs([...PG, "--max-request-body-route=v1/platform=2mb"]),
+    ).toThrow(CliUsageError);
+  });
+
+  it("refuses a duplicated prefix rather than letting one silently win", () => {
+    expect(() =>
+      parseServeArgs([
+        ...PG,
+        "--max-request-body-route=/v1/a=2mb",
+        "--max-request-body-route=/v1/a=3mb",
+      ]),
+    ).toThrow(CliUsageError);
+  });
+
+  it("names every bad spec in one refusal, so an operator fixes them in one pass", () => {
+    let message = "";
+    try {
+      parseServeArgs([
+        ...PG,
+        "--max-request-body-route=nope",
+        "--max-request-body-route=/v1/b=notasize",
+      ]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("nope");
+    expect(message).toContain("/v1/b");
+  });
+
+  it("defaults to no overrides, which is every deployment today", () => {
+    expect(parseServeArgs([...PG]).maxRequestBodyRoutes).toEqual([]);
+  });
+
+  it("accepts --workflow-cancel-role now that definitions have a writer", () => {
+    // ADR-0330 refused this flag outright and the premise it named was true: no WorkflowEngine was
+    // instantiated, because `meta.workflow_definitions` had no writer and so there was no source of
+    // definitions. ADR-0331 built the writer, so the refusal's reason has expired.
+    expect(parseServeArgs([...PG, "--workflow-cancel-role", "ops"]).workflowCancelRoles).toEqual([
+      "ops",
+    ]);
+  });
+
+  it("still refuses it on the memory store, which has neither table", () => {
+    // The refusal narrows rather than disappearing. ADR-0329's rule holds: a cancellation route
+    // that can find no instance is worse than an absent one, because its 404 reads as "no such
+    // instance" rather than "this server has no engine".
+    let message = "";
+    try {
+      parseServeArgs(["--pack", "erp-core", "--workflow-cancel-role=ops"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("requires a Postgres store");
+    // And it names both tables, so the reason is the data and not the flag.
+    expect(message).toContain("meta.workflow_definitions");
+    expect(message).toContain("meta.workflow_instances");
+  });
+
+  it("boots fine without it", () => {
+    expect(parseServeArgs([...PG]).workflowCancelRoles).toEqual([]);
+  });
+});
+
+describe("--workflow-workers", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg"];
+
+  it("mounts the three workers that drive the queues", () => {
+    // ADR-0331 made the engine mountable and nothing polled it, so a due timer never fired. The
+    // workers and their supervisor already existed, tested, exported, and unreachable from the
+    // binary — which is the same silence in a new place.
+    const o = parseServeArgs([...PG, "--workflow-workers"]);
+    expect(o.workflowWorkers).toBe(true);
+    expect(o.workflowDeferActivities).toBe(false);
+    expect(o.workflowWorkerConfig).toBeNull();
+  });
+
+  it("defaults off, so no existing deployment starts claiming", () => {
+    expect(parseServeArgs([...PG]).workflowWorkers).toBe(false);
+  });
+
+  it("refuses the memory store, which has none of the three claim tables", () => {
+    let message = "";
+    try {
+      parseServeArgs(["--pack", "erp-core", "--workflow-workers"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("requires a Postgres store");
+    // Names the tables rather than the flag, so the reason is the data. Three poll loops against
+    // tables that do not exist throw on a cadence rather than once, which is why this refuses.
+    expect(message).toContain("meta.workflow_timers");
+    expect(message).toContain("meta.workflow_activities");
+    expect(message).toContain("meta.job_runs");
+  });
+
+  it("refuses a config for a fleet that is not mounted", () => {
+    // A tuning block read, validated and then ignored is the silence this whole family of flags
+    // keeps producing. The operator who passed it believes they changed a lease.
+    let message = "";
+    try {
+      parseServeArgs([...PG, "--workflow-worker-config", "/tmp/nope.json"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("--workflow-worker-config has no effect");
+    expect(message).toContain("--workflow-workers");
+  });
+
+  it("parses the entity sensitive-field grant with the audit flag's grammar", () => {
+    const o = parseServeArgs([
+      ...PG,
+      "--sensitive-field-role",
+      "support",
+      "--sensitive-field-class",
+      "phi=clinician",
+      "--sensitive-field-class",
+      "phi=clinical_admin",
+    ]);
+    expect(o.sensitiveFieldRoles).toEqual(["support"]);
+    expect(o.sensitiveFieldClasses).toEqual({ phi: ["clinician", "clinical_admin"] });
+  });
+
+  it("reads `<class>=` with no role as a refusal, not an error", () => {
+    // ADR-0329's rule, and the whole reason the per-class map exists: a class named here is
+    // authoritative for it, so an empty list withholds that class from everyone including a
+    // wholesale grantee. Identical to --audit-read-sensitive-class by design.
+    const o = parseServeArgs([...PG, "--sensitive-field-role", "support", "--sensitive-field-class", "phi="]);
+    expect(o.sensitiveFieldClasses).toEqual({ phi: [] });
+    expect(o.sensitiveFieldRoles).toEqual(["support"]);
+  });
+
+  it("refuses an unknown sensitive class rather than letting a typo narrow nothing", () => {
+    let message = "";
+    try {
+      parseServeArgs([...PG, "--sensitive-field-class", "phj=clinician"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("unknown sensitive class 'phj'");
+  });
+
+  it("does not let the declaration imply the write mask", () => {
+    // Where this parser departs from the audit one, which does imply its feature flag. The
+    // declaration says who may see a class; the mask says writes are enforced against it. A
+    // deployment declaring a grant to make PHI readable must not silently acquire a write refusal.
+    const declared = parseServeArgs([...PG, "--sensitive-field-class", "phi=clinician"]);
+    expect(declared.classifiedWriteMask).toBe(false);
+    expect(parseServeArgs([...PG]).classifiedWriteMask).toBe(false);
+    expect(parseServeArgs([...PG, "--classified-write-mask"]).classifiedWriteMask).toBe(true);
+  });
+
+  it("documents both halves and why the mask is off by default", () => {
+    expect(helpText).toContain("--sensitive-field-role");
+    expect(helpText).toContain("--sensitive-field-class");
+    expect(helpText).toContain("--classified-write-mask");
+    // The figures are the argument for the default; a help entry that said only "off by default"
+    // would leave an operator unable to tell whether turning it on is safe.
+    expect(helpText).toContain("12 required fields");
+    expect(helpText).toContain("writable by nobody");
+  });
+
+  it("defaults --allow-plaintext-phi off, so a classified field is refused rather than stored bare", () => {
+    expect(parseServeArgs([...PG]).allowPlaintextPhi).toBe(false);
+    expect(parseServeArgs([...PG, "--allow-plaintext-phi"]).allowPlaintextPhi).toBe(true);
+  });
+
+  it("defaults --allow-cursor-disclosure off, so a filtered list's cursor is sealed or refused", () => {
+    expect(parseServeArgs([...PG]).allowCursorDisclosure).toBe(false);
+    expect(parseServeArgs([...PG, "--allow-cursor-disclosure"]).allowCursorDisclosure).toBe(true);
+  });
+
+  it("does not refuse --allow-cursor-disclosure beside a store, unlike --allow-plaintext-phi", () => {
+    // The asymmetry is deliberate and is about *where the question can be answered*. Whether
+    // plaintext PHI is even reachable is decidable from argv (`--store pg-columns` cannot produce
+    // it), so that flag is refused here. Whether this one is redundant depends on
+    // CURSOR_ENCRYPTION_SECRET, which `parseServeArgs` deliberately cannot read — so the
+    // set-and-unused case is a warning in `node.ts`, where both halves are in hand, and every
+    // store parses the flag without complaint.
+    for (const store of ["memory", "pg", "pg-columns"]) {
+      expect(
+        parseServeArgs(["--pack", "erp-core", "--store", store, "--allow-cursor-disclosure"])
+          .allowCursorDisclosure,
+      ).toBe(true);
+    }
+  });
+
+  it("documents the cursor disclosure the flag accepts, not only that it exists", () => {
+    // The help entry has to carry the mechanism, for the sensitive-field entry's reason: an
+    // operator cannot tell whether accepting a disclosure is safe from the words "off by default".
+    expect(helpText).toContain("--allow-cursor-disclosure");
+    expect(helpText).toContain("CURSOR_ENCRYPTION_SECRET");
+    expect(helpText).toContain("never argv");
+  });
+
+  it("refuses --allow-plaintext-phi on pg-columns, where plaintext is not an outcome", () => {
+    // Not ignored, on this file's standing rule: a phi column is BYTEA on the typed store, so the
+    // write is encrypted or refused for a missing secret — never the plaintext the flag claims to
+    // authorise. Accepting it would let an operator believe they had opted into something.
+    let message = "";
+    try {
+      parseServeArgs(["--pack", "erp-core", "--store", "pg-columns", "--allow-plaintext-phi"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("--allow-plaintext-phi is not applicable to --store pg-columns");
+    expect(message).toContain("BYTEA");
+    expect(message).toContain("COLUMN_ENCRYPTION_SECRET");
+  });
+
+  it("never reads the column-encryption secret from argv", () => {
+    // ADR-0301's rule: argv is readable via `ps`, so a credential may only arrive by environment.
+    // The secret feeds HKDF for PHI, which makes it the last thing that should ever be a flag.
+    expect(helpText).toContain("COLUMN_ENCRYPTION_SECRET");
+    expect(helpText).not.toContain("--column-encryption-secret");
+    // And the flag that *is* a flag is documented, since one reachable only by reading cli.ts is
+    // the same defect as an undocumented refusal.
+    expect(helpText).toContain("--allow-plaintext-phi");
+  });
+
+  it("refuses deferral without the workers, which is the load-bearing one", () => {
+    // `deferActivities` is a biconditional and its own contract says so. Deferring with no worker
+    // claiming leaves every scheduled activity at rest, so the instance stalls at its first
+    // activity and nothing anywhere reports it — strictly worse than both alternatives.
+    let message = "";
+    try {
+      parseServeArgs([...PG, "--workflow-defer-activities"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("--workflow-defer-activities requires --workflow-workers");
+    expect(message).toContain("stalls");
+  });
+
+  it("accepts the pair, which is the only configuration deferral is correct in", () => {
+    const o = parseServeArgs([...PG, "--workflow-workers", "--workflow-defer-activities"]);
+    expect(o.workflowWorkers).toBe(true);
+    expect(o.workflowDeferActivities).toBe(true);
+  });
+
+  it("takes a config path in both spellings", () => {
+    expect(
+      parseServeArgs([...PG, "--workflow-workers", "--workflow-worker-config", "/tmp/w.json"])
+        .workflowWorkerConfig,
+    ).toBe("/tmp/w.json");
+    expect(
+      parseServeArgs([...PG, "--workflow-workers", "--workflow-worker-config=/tmp/w.json"])
+        .workflowWorkerConfig,
+    ).toBe("/tmp/w.json");
+  });
+
+  it("documents all four flags in the help text", () => {
+    // `--workflow-cancel-role` had shipped with no help entry at all, which this adds alongside —
+    // a flag that exists and is undocumented is reachable only by reading cli.ts.
+    for (const flag of [
+      "--workflow-cancel-role",
+      "--workflow-workers",
+      "--workflow-worker-config",
+      "--workflow-defer-activities",
+    ]) {
+      expect(helpText).toContain(flag);
+    }
+    // And the help says what the workers are *for*, since the reason they matter is that nothing
+    // polled the queues before — and that each one refuses by name rather than polling uselessly.
+    expect(helpText).toContain("a due timer never fires");
+    for (const refusal of ["no_definitions", "activities_run_inline", "no_job_handlers"]) {
+      expect(helpText).toContain(refusal);
+    }
+  });
+});
+
+describe("--tenant-status-gate", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg"];
+
+  it("is off by default, which is what every deployment has had", () => {
+    const o = parseServeArgs([...PG]);
+    expect(o.tenantStatusGate).toBe(false);
+    expect(o.tenantStatusTtlMs).toBeNull();
+  });
+
+  it("mounts the gate", () => {
+    const o = parseServeArgs([...PG, "--tenant-status-gate"]);
+    expect(o.tenantStatusGate).toBe(true);
+  });
+
+  it("takes a TTL in both spellings", () => {
+    expect(parseServeArgs([...PG, "--tenant-status-gate", "--tenant-status-ttl-ms", "5000"]).tenantStatusTtlMs).toBe(5000);
+    expect(parseServeArgs([...PG, "--tenant-status-gate", "--tenant-status-ttl-ms=60000"]).tenantStatusTtlMs).toBe(60_000);
+  });
+
+  it("refuses a TTL outside the floor and the ceiling", () => {
+    for (const bad of ["999", "300001", "0", "-1", "1.5", "soon"]) {
+      expect(() =>
+        parseServeArgs([...PG, "--tenant-status-gate", "--tenant-status-ttl-ms", bad]),
+      ).toThrow(/invalid --tenant-status-ttl-ms/);
+    }
+  });
+
+  it("refuses the memory store, because every request would be a 503", () => {
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "memory", "--tenant-status-gate"]),
+    ).toThrow(/requires a Postgres store/);
+  });
+
+  it("refuses a TTL with no gate mounted", () => {
+    expect(() => parseServeArgs([...PG, "--tenant-status-ttl-ms", "5000"])).toThrow(
+      /no effect without --tenant-status-gate/,
+    );
+  });
+
+  it("documents the gate and its exemption in the help text", () => {
+    expect(helpText).toContain("--tenant-status-gate");
+    expect(helpText).toContain("--tenant-status-ttl-ms");
+    expect(helpText).toContain("/v1/platform routes are exempt");
+  });
+});
+
+describe("--rate-limit-policy", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg"];
+
+  it("is undeclared by default, which keeps the in-memory 10,000/60s every deployment has had", () => {
+    expect(parseServeArgs([...PG]).rateLimitPolicies).toBeNull();
+  });
+
+  it("declares one policy and infers the default from it", () => {
+    const o = parseServeArgs([...PG, "--rate-limit-policy", "rlp_standard:600:60"]);
+    expect(o.rateLimitPolicies?.defaultPolicy).toEqual({
+      policyId: "rlp_standard",
+      limit: 600,
+      windowSeconds: 60,
+    });
+    expect(Object.keys(o.rateLimitPolicies?.byPolicyId ?? {})).toEqual(["rlp_standard"]);
+  });
+
+  it("takes several policies with a named default, in both spellings", () => {
+    const o = parseServeArgs([
+      ...PG,
+      "--rate-limit-policy",
+      "rlp_standard:600:60",
+      "--rate-limit-policy=rlp_burstlimit:5000:60",
+      "--rate-limit-default-policy=rlp_burstlimit",
+    ]);
+    expect(o.rateLimitPolicies?.defaultPolicy.policyId).toBe("rlp_burstlimit");
+    expect(Object.keys(o.rateLimitPolicies?.byPolicyId ?? {}).sort()).toEqual([
+      "rlp_burstlimit",
+      "rlp_standard",
+    ]);
+  });
+
+  it("refuses a default with no policy declared", () => {
+    // The declaration needs a policy for the routes that name none — which today is every route —
+    // so there is nothing for the named default to be.
+    expect(() =>
+      parseServeArgs([...PG, "--rate-limit-default-policy", "rlp_standard"]),
+    ).toThrow(/--rate-limit-default-policy requires at least one/);
+  });
+
+  it("refuses an unnamed default once more than one policy is declared", () => {
+    expect(() =>
+      parseServeArgs([
+        ...PG,
+        "--rate-limit-policy",
+        "rlp_standard:600:60",
+        "--rate-limit-policy",
+        "rlp_burstlimit:5000:60",
+      ]),
+    ).toThrow(/--rate-limit-default-policy is required when more than one/);
+  });
+
+  it("refuses a default naming a policy nobody declared, and names the ones that were", () => {
+    // Falling back would apply terms the operator did not write down and then record the fallback's
+    // id in the decision row — the defect this flag family exists to end.
+    let message = "";
+    try {
+      parseServeArgs([
+        ...PG,
+        "--rate-limit-policy",
+        "rlp_standard:600:60",
+        "--rate-limit-default-policy",
+        "rlp_notdeclared",
+      ]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("rlp_notdeclared is not among the declared policies");
+    expect(message).toContain("rlp_standard");
+  });
+
+  it("refuses the memory store, which has no meta.rate_limit_decisions to name the policy in", () => {
+    let message = "";
+    try {
+      parseServeArgs(["--pack", "erp-core", "--rate-limit-policy", "rlp_standard:600:60"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("requires a Postgres store");
+    expect(message).toContain("meta.rate_limit_decisions");
+  });
+
+  it("refuses a malformed spec by name rather than coercing it", () => {
+    // `Number()` accepts "0x10", "1e3" and " 10 ", so a limit silently read as 16 from "0x10" is a
+    // ceiling the operator never configured.
+    for (const bad of ["rlp_standard:600", "rlp_standard:0x10:60", "rlp_standard:600:0"]) {
+      expect(() => parseServeArgs([...PG, "--rate-limit-policy", bad])).toThrow(
+        /invalid --rate-limit-policy/,
+      );
+    }
+    expect(() => parseServeArgs([...PG, "--rate-limit-policy", "standard:600:60"])).toThrow(
+      /policy_id_malformed/,
+    );
+  });
+
+  it("refuses two declarations of one policy id", () => {
+    expect(() =>
+      parseServeArgs([
+        ...PG,
+        "--rate-limit-policy",
+        "rlp_standard:600:60",
+        "--rate-limit-policy",
+        "rlp_standard:900:60",
+        "--rate-limit-default-policy",
+        "rlp_standard",
+      ]),
+    ).toThrow(/invalid rate-limit declaration.*duplicate_policy_id/);
+  });
+
+  it("documents both flags in the help text", () => {
+    expect(helpText).toContain("--rate-limit-policy");
+    expect(helpText).toContain("--rate-limit-default-policy");
+    // And offers a starting point, since the whole point is that nothing defaults the ceiling.
+    expect(helpText).toContain("rlp_conservativedefault:600:60");
+  });
+});
+
+describe("--platform-user-routes", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg"];
+
+  it("is off and ungranted unless asked for", () => {
+    const o = parseServeArgs([...PG]);
+    expect(o.platformUserRoutes).toBe(false);
+    expect(o.platformUserRoles).toEqual([]);
+  });
+
+  it("mounts the registry, fail-closed on the grant", () => {
+    const o = parseServeArgs([...PG, "--platform-user-routes"]);
+    expect(o.platformUserRoutes).toBe(true);
+    expect(o.platformUserRoles).toEqual([]);
+  });
+
+  it("collects repeatable roles in both spellings", () => {
+    const o = parseServeArgs([
+      ...PG,
+      "--platform-user-routes",
+      "--platform-user-role",
+      "platform_admin",
+      "--platform-user-role=identity_admin",
+    ]);
+    expect(o.platformUserRoles).toEqual(["platform_admin", "identity_admin"]);
+  });
+
+  it("refuses a grant with no surface, rather than implying the routes", () => {
+    // The opposite of `--deletion-request-role` and its siblings, which turn their routes on. A
+    // registry grant is a licence to mint principals, so inferring the surface from it would mount
+    // the one surface an operator should have to ask for by name.
+    expect(() => parseServeArgs([...PG, "--platform-user-role", "ops"])).toThrow(
+      /--platform-user-role requires --platform-user-routes/,
+    );
+  });
+
+  it("refuses the memory store, which has neither registry table", () => {
+    let message = "";
+    try {
+      parseServeArgs(["--pack", "erp-core", "--platform-user-routes"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("requires a Postgres store");
+    expect(message).toContain("meta.users");
+    expect(message).toContain("meta.user_tenant_membership");
+  });
+
+  it("documents both flags in the help text", () => {
+    expect(helpText).toContain("--platform-user-routes");
+    expect(helpText).toContain("--platform-user-role");
+    expect(helpText).toContain("/v1/platform/users");
+    // And says it is a different grant from the tenant administrator's, which is the mistake an
+    // operator reading only the flag names would make.
+    expect(helpText).toContain("Separate from --platform-admin-role, which administers tenants");
+  });
+});
+
+describe("--preference-routes", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg"];
+
+  it("is off and ungranted unless asked for", () => {
+    const o = parseServeArgs([...PG]);
+    expect(o.preferenceRoutes).toBe(false);
+    expect(o.preferenceRoles).toEqual([]);
+    expect(o.preferenceAdminRoles).toEqual([]);
+  });
+
+  it("mounts the routes with both grants, in both spellings", () => {
+    const o = parseServeArgs([
+      ...PG,
+      "--preference-routes",
+      "--preference-role",
+      "erp_user",
+      "--preference-role=cashier",
+      "--preference-admin-role=tenant_admin",
+    ]);
+    expect(o.preferenceRoutes).toBe(true);
+    expect(o.preferenceRoles).toEqual(["erp_user", "cashier"]);
+    expect(o.preferenceAdminRoles).toEqual(["tenant_admin"]);
+  });
+
+  it("refuses either grant with no surface mounted", () => {
+    expect(() => parseServeArgs([...PG, "--preference-role", "erp_user"])).toThrow(
+      /--preference-role requires --preference-routes/,
+    );
+    expect(() => parseServeArgs([...PG, "--preference-admin-role", "tenant_admin"])).toThrow(
+      /--preference-admin-role requires --preference-routes/,
+    );
+  });
+
+  it("takes the admin grant without the base grant, which leaves the own-preference path closed", () => {
+    // Unlike `--read-state-backfill-role`, the admin grant is not asserted to be a subset: a
+    // deployment may well want a support role that can set somebody else's preferences and has no
+    // preferences of its own to read.
+    const o = parseServeArgs([...PG, "--preference-routes", "--preference-admin-role", "support"]);
+    expect(o.preferenceRoles).toEqual([]);
+    expect(o.preferenceAdminRoles).toEqual(["support"]);
+  });
+
+  it("refuses the memory store, which has no meta.notification_preferences", () => {
+    let message = "";
+    try {
+      parseServeArgs(["--pack", "erp-core", "--preference-routes"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("requires a Postgres store");
+    expect(message).toContain("meta.notification_preferences");
+  });
+
+  it("documents all three flags in the help text", () => {
+    expect(helpText).toContain("--preference-routes");
+    expect(helpText).toContain("--preference-role");
+    expect(helpText).toContain("--preference-admin-role");
+    // The reason the surface matters: without it the defaults are permanent.
+    expect(helpText).toContain("built-in defaults for ever");
+    expect(helpText).toContain("A body naming another user is refused, not ignored");
+  });
+});
+
+describe("--idempotency-store", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg"];
+
+  it("defaults to the in-memory guard, which is what every deployment has had", () => {
+    expect(parseServeArgs([...PG]).pgIdempotencyStore).toBe(false);
+  });
+
+  it("takes pg and memory, in both spellings", () => {
+    expect(parseServeArgs([...PG, "--idempotency-store", "pg"]).pgIdempotencyStore).toBe(true);
+    expect(parseServeArgs([...PG, "--idempotency-store=pg"]).pgIdempotencyStore).toBe(true);
+    expect(parseServeArgs([...PG, "--idempotency-store", "memory"]).pgIdempotencyStore).toBe(false);
+  });
+
+  it("refuses an unknown kind by name rather than falling back to memory", () => {
+    // Falling back would mount the per-process guard on a deployment that asked for durability and
+    // report success, which is the class this flag exists to close.
+    expect(() => parseServeArgs([...PG, "--idempotency-store", "postgres"])).toThrow(
+      /must be 'memory' or 'pg'/,
+    );
+  });
+
+  it("refuses the memory store, which has no meta.gateway_idempotency_records", () => {
+    let message = "";
+    try {
+      parseServeArgs(["--pack", "erp-core", "--idempotency-store", "pg"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("requires a Postgres store");
+    expect(message).toContain("meta.gateway_idempotency_records");
+  });
+
+  it("permits memory with the memory store, since that is the existing behaviour spelled out", () => {
+    expect(
+      parseServeArgs(["--pack", "erp-core", "--idempotency-store", "memory"]).pgIdempotencyStore,
+    ).toBe(false);
+  });
+});
+
+describe("--gateway-execution-capture", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg"];
+
+  it("captures nothing by default, as today", () => {
+    expect(parseServeArgs([...PG]).gatewayExecutionCapture).toBeNull();
+  });
+
+  it("takes a rate in both spellings and carries no default", () => {
+    expect(
+      parseServeArgs([...PG, "--gateway-execution-capture", "0.01"]).gatewayExecutionCapture,
+    ).toEqual({ sampleRate: 0.01 });
+    expect(
+      parseServeArgs([...PG, "--gateway-execution-capture=1"]).gatewayExecutionCapture?.sampleRate,
+    ).toBe(1);
+  });
+
+  it("refuses a rate of 0 and names the remedy", () => {
+    // 0 is spelled by omitting the flag. A sink that is mounted and writes nothing reads as
+    // configured and records nothing, which is the class this increment closes, not a setting.
+    let message = "";
+    try {
+      parseServeArgs([...PG, "--gateway-execution-capture", "0"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("must be in (0, 1]");
+    expect(message).toContain("omit the flag");
+  });
+
+  it("refuses a rate above 1 and a non-number, rather than coercing", () => {
+    // `Number("")` is 0 and `Number("1e3")` is 1000: a rate read as a thousand would be clamped by
+    // nothing and a rate read as 0 would mount a sink that writes nothing.
+    for (const bad of ["1.5", "2", "abc", ""]) {
+      expect(() => parseServeArgs([...PG, "--gateway-execution-capture", bad])).toThrow();
+    }
+  });
+
+  it("narrows to operations, and refuses a narrowing with no capture mounted", () => {
+    const o = parseServeArgs([
+      ...PG,
+      "--gateway-execution-capture",
+      "0.1",
+      "--gateway-execution-capture-operation",
+      "invoice.create",
+      "--gateway-execution-capture-operation=invoice.post",
+    ]);
+    expect(o.gatewayExecutionCapture?.operations).toEqual(["invoice.create", "invoice.post"]);
+    expect(() =>
+      parseServeArgs([...PG, "--gateway-execution-capture-operation", "invoice.create"]),
+    ).toThrow(/requires --gateway-execution-capture/);
+  });
+
+  it("refuses the memory store, which has no meta.gateway_pipeline_executions", () => {
+    let message = "";
+    try {
+      parseServeArgs(["--pack", "erp-core", "--gateway-execution-capture", "0.1"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("requires a Postgres store");
+    expect(message).toContain("meta.gateway_pipeline_executions");
+  });
+});
+
+describe("--credential-login", () => {
+  const base = ["--pack", "erp-core", "--store", "pg", "--jwt-issuer", "https://i.test", "--jwt-audience", "a"];
+
+  it("parses with its three companion flags", () => {
+    const opts = parseServeArgs([
+      ...base,
+      "--credential-login",
+      "--session-token-ttl",
+      "1800",
+      "--login-lockout-attempts",
+      "5",
+      "--login-lockout-seconds",
+      "600",
+    ]);
+    expect(opts.credentialLogin).toBe(true);
+    expect(opts.sessionTokenTtl).toBe(1800);
+    expect(opts.loginLockoutAttempts).toBe(5);
+    expect(opts.loginLockoutSeconds).toBe(600);
+  });
+
+  it("defaults to off, with every companion null", () => {
+    const opts = parseServeArgs(["--pack", "erp-core"]);
+    expect(opts.credentialLogin).toBe(false);
+    expect(opts.sessionTokenTtl).toBeNull();
+    expect(opts.loginLockoutAttempts).toBeNull();
+    expect(opts.loginLockoutSeconds).toBeNull();
+  });
+
+  it("requires --jwt-issuer and --jwt-audience, because the token asserts both", () => {
+    // The minted token carries `iss` and `aud` and the verifier beside it checks both. Without
+    // them the runtime falls back to `https://crossengin.io`, so a minter using any other issuer
+    // answers `issuer_mismatch` for a token it had just signed.
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--credential-login"]),
+    ).toThrow(CliUsageError);
+    expect(() =>
+      parseServeArgs([
+        "--pack",
+        "erp-core",
+        "--store",
+        "pg",
+        "--credential-login",
+        "--jwt-issuer",
+        "https://i.test",
+      ]),
+    ).toThrow(/requires --jwt-issuer and --jwt-audience/);
+  });
+
+  it("requires a Postgres store", () => {
+    expect(() =>
+      parseServeArgs([
+        "--pack",
+        "erp-core",
+        "--credential-login",
+        "--jwt-issuer",
+        "https://i.test",
+        "--jwt-audience",
+        "a",
+      ]),
+    ).toThrow(/requires a Postgres store/);
+  });
+
+  it("is mutually exclusive with --jwks-url", () => {
+    // `node.ts` branches on the URL and DISCARDS the static key specs, so the key derived from the
+    // signing seed would never be registered and every minted token would come back
+    // `invalid_signature` -- at the gateway, not at the mint, so the mint looks fine in testing.
+    expect(() =>
+      parseServeArgs([...base, "--credential-login", "--jwks-url", "https://idp.test/jwks"]),
+    ).toThrow(/mutually exclusive/);
+  });
+
+  it("refuses a lockout threshold below the floor rather than raising it", () => {
+    // ADR-0332's rule: a threshold of 1 locks a real user out on one typo, and silently clamping
+    // would leave the deployment believing it configured something it did not.
+    for (const bad of ["0", "1", "2", "-1", "1.5", "x"]) {
+      expect(() =>
+        parseServeArgs([...base, "--credential-login", "--login-lockout-attempts", bad]),
+        bad,
+      ).toThrow(/invalid --login-lockout-attempts/);
+    }
+    expect(() =>
+      parseServeArgs([...base, "--credential-login", "--login-lockout-attempts", "3"]),
+    ).not.toThrow();
+  });
+
+  it("refuses a session ttl outside the bounds", () => {
+    for (const bad of ["0", "59", "86401", "1.5", "x"]) {
+      expect(() =>
+        parseServeArgs([...base, "--credential-login", "--session-token-ttl", bad]),
+        bad,
+      ).toThrow(/invalid --session-token-ttl/);
+    }
+  });
+
+  it("refuses each companion flag without --credential-login", () => {
+    // A flag that silently does nothing is worse than one that refuses: an operator who set a
+    // 5-minute session and got an hour would have no way to tell.
+    for (const [flag, value] of [
+      ["--session-token-ttl", "600"],
+      ["--login-lockout-attempts", "5"],
+      ["--login-lockout-seconds", "60"],
+    ] as const) {
+      expect(() => parseServeArgs([...base, flag, value]), flag).toThrow(
+        /requires --credential-login/,
+      );
+    }
+  });
+});
+
+describe("parseSetCredentialArgs", () => {
+  const USER = "22222222-2222-4222-8222-222222222222";
+
+  it("parses a matching pair", () => {
+    const opts = parseSetCredentialArgs(["--user", USER, "--confirm-user", USER]);
+    expect(opts).toEqual({
+      userId: USER,
+      confirmUserId: USER,
+      schema: null,
+      format: "human",
+      help: false,
+    });
+  });
+
+  it("requires --confirm-user and refuses a mismatch", () => {
+    // `rekey`'s `--confirm-tenant` rule: this overwrites a credential, so naming the wrong user
+    // both locks that person out and hands their account to whoever typed the password.
+    expect(() => parseSetCredentialArgs(["--user", USER])).toThrow(/requires --confirm-user/);
+    expect(() =>
+      parseSetCredentialArgs(["--user", USER, "--confirm-user", "22222222-2222-4222-8222-222222222223"]),
+    ).toThrow(/differ/);
+  });
+
+  it("requires --user", () => {
+    expect(() => parseSetCredentialArgs(["--confirm-user", USER])).toThrow(/requires --user/);
+  });
+
+  it("refuses --password by name, and says where the password goes instead", () => {
+    // Named explicitly rather than falling through to "unknown option", so an operator is told why
+    // rather than left thinking they mistyped it.
+    expect(() =>
+      parseSetCredentialArgs(["--user", USER, "--confirm-user", USER, "--password", "hunter2"]),
+    ).toThrow(/readable by anyone who can run 'ps'/);
+    expect(() =>
+      parseSetCredentialArgs(["--user", USER, "--confirm-user", USER, "--password=hunter2"]),
+    ).toThrow(/OPERATE_NEW_PASSWORD/);
+  });
+
+  it("has no --yes", () => {
+    expect(() =>
+      parseSetCredentialArgs(["--user", USER, "--confirm-user", USER, "--yes"]),
+    ).toThrow(/unknown option/);
+  });
+
+  it("answers --help without requiring the ids", () => {
+    expect(parseSetCredentialArgs(["--help"]).help).toBe(true);
+  });
+
+  it("is named in the subcommand list and documents both variables", () => {
+    expect(helpText).toContain("set-credential");
+    expect(setCredentialCliHelpText).toContain("OPERATE_NEW_PASSWORD");
+    expect(setCredentialCliHelpText).toContain("CREDENTIAL_PEPPER");
+    expect(setCredentialCliHelpText).toContain("never from argv");
+  });
+});
+
+describe("--jwks-key validation", () => {
+  it("refuses a value that is not a 32-byte Ed25519 public key, as a USAGE error", () => {
+    // Exit 2 with the help text, rather than a boot stack trace. Until this increment nothing
+    // validated the value at all: `isEd25519PublicKeyBase64` existed with zero callers while
+    // `parseJwksKeySpec` checked only for a colon, so a typo'd key booted cleanly and turned every
+    // Bearer request into an `invalid_signature` 401 whose body names nothing an operator can act
+    // on. Both ends are closed now -- here for argv, and in `resolveJwtConfig` for a programmatic
+    // `ServeOptions` that bypassed this parser.
+    for (const bad of ["key-1:AAAbase64", "key-1:AAAxyz==", "key-1:not!base64!"]) {
+      expect(
+        () =>
+          parseServeArgs([
+            "--pack",
+            "erp-core",
+            "--jwks-key",
+            bad,
+            "--jwt-issuer",
+            "https://i.test",
+            "--jwt-audience",
+            "a",
+          ]),
+        bad,
+      ).toThrow(CliUsageError);
+    }
+  });
+
+  it("accepts a real key", () => {
+    const opts = parseServeArgs([
+      "--pack",
+      "erp-core",
+      "--jwks-key",
+      `k:${JWKS_PUB}`,
+      "--jwt-issuer",
+      "https://i.test",
+      "--jwt-audience",
+      "a",
+    ]);
+    expect(opts.jwksKeys).toEqual([`k:${JWKS_PUB}`]);
   });
 });

@@ -134,6 +134,7 @@ export const TENANT_SCHEMA_CHANGE_KINDS = [
   "not_null_relaxation",
   "undeclared_column",
   "undeclared_table",
+  "unservable_field_type",
 ] as const;
 
 export type TenantSchemaChangeKind = (typeof TENANT_SCHEMA_CHANGE_KINDS)[number];
@@ -149,6 +150,17 @@ export type TenantSchemaChangeKind = (typeof TENANT_SCHEMA_CHANGE_KINDS)[number]
  * through the plan's type, so a column that disagrees makes every read of it
  * wrong, and a classification change silently moves a field between ciphertext
  * and plaintext. The rest are reported and the migration proceeds.
+ *
+ * `unservable_field_type` is the one kind the *diff* never produces, because it is decided before
+ * there is a plan to diff: a field whose Postgres type this store has no wire form for — a
+ * `duration`, today the only one. It is blocking and its `sql` is null, since the only remedy is a
+ * human decision about the manifest. It exists as a change rather than as a thrown error for a
+ * reason that is particular to this path: a *deployment's own* pack manifest declaring one is a
+ * configuration error and `ColumnMappedEntityStore`'s constructor throws for it at boot, which is
+ * where that belongs; a *tenant's authored* manifest arrives at runtime through
+ * `TenantColumnStoreRegistry`, which is built to degrade a refused application to the JSONB
+ * fallback (ADR-0314) and cannot degrade an exception. Same fact, two situations, and the situation
+ * decides whether it stops the process.
  */
 export interface TenantSchemaChange {
   readonly kind: TenantSchemaChangeKind;

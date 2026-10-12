@@ -1,4 +1,10 @@
-import type { RoleDefinition, RoleName, SensitiveFieldPolicy } from "@crossengin/auth";
+import type {
+  AbacBatchEvaluator,
+  AbacEvaluator,
+  RoleDefinition,
+  RoleName,
+  SensitiveFieldPolicy,
+} from "@crossengin/auth";
 import type { ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { PathSegment, RouteDefinition } from "@crossengin/api-gateway";
 import type { Manifest } from "@crossengin/kernel/manifest";
@@ -18,6 +24,8 @@ import {
   type PrincipalResolver,
   type PrincipalRoles,
   type RateLimitChecker,
+  type RedactedOperation,
+  type ResponseRecordShape,
 } from "@crossengin/api-gateway-runtime";
 
 import {
@@ -26,7 +34,8 @@ import {
   type AdminContext,
 } from "./admin-handlers.js";
 import { buildSpecHandler, type HandlerContext } from "./handlers.js";
-import { manifestRouteSpecs, routeFromSpec, type RouteSpec } from "./operations.js";
+import type { CursorSealer } from "./cursor-seal.js";
+import { manifestRouteSpecs, routeFromSpec, type RouteAction, type RouteSpec } from "./operations.js";
 import {
   associationCountRouteFromSpec,
   associationRouteFromSpec,
@@ -72,15 +81,80 @@ import { buildWhtReconciliationHandler } from "./wht-reconciliation-handler.js";
 import { buildJobInvokeHandler, type JobInvoker } from "./job-invoke-handler.js";
 import { withEntitlement, withRecordLimit, type EntitlementResolver } from "./entitlement.js";
 import type { SettingsStore, TenantSettings } from "./settings.js";
-import { entityReadOperationIds } from "./slugs.js";
+import { operationId, type CrudOperation } from "./slugs.js";
 import type { EntityStore } from "./store.js";
+import { temporalFieldIndexFromManifest, withDatetimeWireType } from "./datetime-store.js";
+import { decimalFieldIndexFromManifest, withDecimalWireType } from "./decimal-store.js";
+import { listValueTypesForManifest, withListValueTypes } from "./list-value-types.js";
 import { buildUiSchema, buildUiSchemaHandler } from "./ui-schema.js";
+import { buildClassifiedFieldIndex, type WriteMaskMode } from "./write-mask.js";
 
 export interface OperateRuntimeOptions {
   readonly store: EntityStore;
   /** Bridges the gateway's scope-bearing principal to its effective roles. */
   readonly principalRoles: (principal: ResolvedPrincipal | null) => PrincipalRoles;
   readonly policyForEntity?: (entity: string) => SensitiveFieldPolicy | undefined;
+  /**
+   * Which half of the field-level write rule the handlers enforce. Defaults to `explicit_only`,
+   * which honours the per-field `update` grants the manifest already declares and nothing more —
+   * 7 fields across the seven packs, each one a pack author's deliberate restriction, and a set
+   * that cannot make an entity uncreatable because a declared grant names a role that holds it.
+   *
+   * `classified` additionally applies ADR-0329's symmetric default (a sensitive field with no
+   * `update` grant needs a role privileged for its class) and is opt-in: nothing in
+   * `apps/operate-server` produces a `policyForEntity` yet, so the policy is `{}` and the default
+   * would refuse the 12 `required: true` sensitive fields in the packs for every role, making
+   * `Patient`, `Lead`, `Employee`, `Opportunity`, `FixedAsset`, `Student` and `Permit`
+   * uncreatable. See `write-mask.ts`.
+   */
+  readonly writeMaskMode?: WriteMaskMode;
+  /**
+   * Discharges an ABAC obligation — a `RbacGrant.abac` policy key — on an entity grant, a
+   * transition grant or a per-field `read`/`update` grant. One evaluator for the whole manifest
+   * and threaded from here rather than per reader, because this is the only place that holds all
+   * five of them: the two handler families' `rbacCheck` calls, the write mask, and the response
+   * redaction registry. Two evaluators would let the read side and the write side disagree about
+   * one grant, which is the divergence ADR-0329 put `privilegedForClass` behind one definition to
+   * prevent and ADR-0339 found had happened anyway.
+   *
+   * Absent, an obligation resolves `undischargeable` and the grant is refused. That is the
+   * fail-closed answer and not an opt-out: `apps/operate-server` refuses at boot rather than
+   * serving a manifest whose declared obligations it would silently deny on every request.
+   */
+  readonly abacEvaluator?: AbacEvaluator;
+  /**
+   * The optional **sibling** of `abacEvaluator` — never a replacement — for the one reader with a
+   * fan-out. Since ADR-0343 response redaction computes a field set per record, so a page of N
+   * records with F obligated fields asks N×F questions; this lets the deployment be asked once.
+   *
+   * It is forwarded to the redaction registry **and to the handler context**. ADR-0344 forwarded it
+   * to the registry alone and said the handler path had no reader with a fan-out, which was true of
+   * the readers that existed: `rbacCheck` asks one question per call, and the write mask stops at
+   * the first refusing field, so batching it would evaluate past the rejection — more work, and it
+   * would hand the policy layer questions whose answers were never needed (ADR-0340's reason
+   * `rbacCheck` consults the evaluator only after the role check). Row filtering added the reader
+   * that was missing: `rbacCheckForRecords` decides one `list` grant for a whole page, so the list
+   * handler now has exactly the fan-out the registry had.
+   *
+   * Absent is not an opt-out and needs no refusal: the obligation is still enforced, through N
+   * single calls, which is exactly what every deployment did before this existed.
+   */
+  readonly abacBatchEvaluator?: AbacBatchEvaluator;
+  /**
+   * Seals the keyset cursor an entity list hands back, and opens the one it is given (ADR-0346).
+   *
+   * Absent serves the cursor as the plaintext `base64url(JSON.stringify({k, id}))` it has always
+   * been, which is every deployment without a cursor secret. That is a disclosure rather than a
+   * degradation — ADR-0345's row filtering derives `nextCursor` from the last row of the *store's*
+   * slice, so under filtering it names rows the caller is never shown — so the choice is made where
+   * a deployment can be told about it: `apps/operate-server` refuses to boot when a list grant
+   * filters rows and no sealer is configured.
+   *
+   * It reaches the handler context and nothing else. The stores are deliberately untouched: a
+   * cursor is opaque to the **client**, not to the store, so sealing is an envelope at the request
+   * boundary and `encodeKeyset` / `decodeKeyset` keep producing and consuming the plaintext keyset.
+   */
+  readonly cursorSealer?: CursorSealer;
   /** Allocates document numbers for sequence-defaulted fields on create. */
   readonly allocator?: SequenceAllocator;
   /** Backs the admin settings endpoints + runtime numbering overrides. */
@@ -493,11 +567,101 @@ function buildSettingsDefaultPlans(manifest: Manifest): Map<string, SettingsDefa
   return plans;
 }
 
+/**
+ * Entity → every operationId whose response can carry that entity's records,
+ * read off the derived routes rather than computed from a list of action names.
+ * That is the only form that can be right: a lifecycle transition's operationId
+ * comes from the *manifest's workflow*, so a `(name: string) => string[]`
+ * cannot name it, and the read-only convention this replaced
+ * (`[<camel>.list, <camel>.read]`) left `create`, `update`, `delete` and every
+ * transition out of the redaction registry — so a credential with update
+ * permission read any record's `phi` fields by issuing a no-op PATCH.
+ *
+ * **Every** operation serving the entity goes in, with no exclusions. Redaction
+ * is a no-op on a body that has no such key, so a 204 delete and an
+ * association `{count}` cost nothing, while deciding per action whether its
+ * response carries a record is the judgement call that produced the defect.
+ */
+/**
+ * Which shape each entity action's response carries its records in, as a **total map** over
+ * `RouteAction` so a seventh action is a compile error rather than a member inheriting whichever
+ * answer a condition happened to give it — and the answer it would inherit is `record`, which on a
+ * list would answer a per-field record policy against the *page wrapper* instead of a row.
+ *
+ * `delete` is `none` rather than `record`: it answers 204 with no body at all, so there is nothing
+ * to locate and nothing to redact. A transition answers the updated record, like `update`.
+ */
+const ACTION_RECORD_SHAPE: Readonly<Record<RouteAction, ResponseRecordShape>> = {
+  list: "page",
+  read: "record",
+  create: "record",
+  update: "record",
+  delete: "none",
+  transition: "record",
+};
+
+/**
+ * Entity → the operations whose responses can carry its records, each with the shape it carries
+ * them in. The shape is **declared from the action**, never probed from the body: a heuristic over
+ * the response (`"if it has a data array…"`) would misread a record that happens to carry one, and
+ * this decides an authorization answer (ADR-0328's rule, ADR-0343).
+ */
+function entityOperationIndex(
+  specs: readonly {
+    readonly entity: string;
+    readonly operationId: string;
+    readonly recordShape: ResponseRecordShape;
+  }[],
+): ReadonlyMap<string, readonly RedactedOperation[]> {
+  const index = new Map<string, RedactedOperation[]>();
+  for (const spec of specs) {
+    const ops = index.get(spec.entity);
+    const op: RedactedOperation = {
+      operationId: spec.operationId,
+      recordShape: spec.recordShape,
+    };
+    if (ops === undefined) index.set(spec.entity, [op]);
+    else if (!ops.some((o) => o.operationId === op.operationId)) ops.push(op);
+  }
+  return index;
+}
+
+/**
+ * Fail closed when the index names no operation for an entity the manifest
+ * declares: register the spec against the statically derivable CRUD ids, which
+ * is less than the real set (it cannot know transitions) and far more than the
+ * nothing an empty list would register. Unreachable today — `manifestRouteSpecs`
+ * and `redactionRegistryFromManifest` both walk `manifest.entities`, so every
+ * entity has at least its five CRUD specs — and here because "the index has no
+ * entry" must never be the one path that serves classified fields in the clear.
+ */
+function fallbackOperationIds(entityName: string): readonly RedactedOperation[] {
+  const actions: readonly CrudOperation[] = ["list", "create", "read", "update", "delete"];
+  return actions.map((action) => ({
+    operationId: operationId(entityName, action),
+    recordShape: ACTION_RECORD_SHAPE[action],
+  }));
+}
+
 export interface CompiledOperateServer {
   readonly routes: InMemoryRouteRegistry;
   readonly handlers: HandlerRegistry;
   readonly redactionRegistry: MapRedactionRegistry;
   readonly routeSpecs: readonly RouteSpec[];
+  /**
+   * The entity → operationIds mapping the redaction registry was keyed off.
+   * Exposed because `MapRedactionRegistry` answers only `specFor(id)`, so
+   * without it the mapping can be checked in one direction — "is this id
+   * covered" — and never the other, "is every id covered one the route
+   * derivation actually emits". The absence of that second direction is what
+   * let a phantom `<entity>.get` and a lower-cased id sit in the old mapping
+   * unnoticed, matching nothing.
+   *
+   * Each entry carries the shape its response holds records in (ADR-0343), so the mapping is
+   * checkable in a third direction as well: not only that every covered id is one the derivation
+   * emits, but that each is covered with the shape its own action produces.
+   */
+  readonly redactionOperationIds: ReadonlyMap<string, readonly RedactedOperation[]>;
 }
 
 /**
@@ -513,8 +677,41 @@ export function compileOperateServer(
   const routes = new InMemoryRouteRegistry();
   const handlers = new HandlerRegistry();
   const roles = new Map<RoleName, RoleDefinition>(Object.entries(manifest.roles ?? {}));
+  // Every `decimal` field crossing the store carries the canonical wire form from here on. The
+  // wrap happens at compile time because this is the one place that holds both the store and the
+  // manifest that declares each field's precision and scale — so a deployment cannot forget it,
+  // and the write effects, which create journal lines through the store they are handed, are
+  // covered by the same seam as a client request.
+  //
+  // `withListValueTypes` rides the same seam for the same reason, and goes **inside**: it adds
+  // nothing to a record, only per-field comparison types to a list query, so the wire-type
+  // decorator's record mapping still runs over whatever page comes back. Without it a
+  // text-holding store orders a `decimal` or an `integer` lexicographically, and since the keyset
+  // cursor is built from that ordering, a list does not merely come back in the wrong order — it
+  // skips and repeats rows at page boundaries.
+  //
+  // `withDatetimeWireType` is the third layer and the same seam: before it the two Postgres stores
+  // disagreed about a timestamp's *spelling* before they could disagree about its order (the column
+  // store canonicalises through `isoInstant`, the JSONB store echoes whatever the write put in its
+  // document), and `validateBody` had no rule for a `datetime` field at all, so a client could
+  // store any string and four spellings of one instant sorted into three positions. It goes
+  // outside `withListValueTypes` and beside the decimal decorator because the two are independent:
+  // no field is both a `decimal` and a `datetime`, so their record mappings cannot interact.
+  const store = withDatetimeWireType(
+    withDecimalWireType(
+      withListValueTypes(options.store, listValueTypesForManifest(manifest)),
+      decimalFieldIndexFromManifest(manifest),
+    ),
+    temporalFieldIndexFromManifest(manifest),
+  );
+  // Built once and read by both halves of ADR-0329 — the write mask on the handler context below,
+  // and the response-redaction registry's `classifiedFieldsForEntity`. The gateway cannot derive
+  // it: `api-gateway-runtime` does not depend on `@crossengin/kernel`, so it cannot resolve a
+  // trait, which is exactly why its resolver is a required option rather than a read it performs
+  // itself. One value, two readers, no second resolution to drift.
+  const classifiedFieldIndex = buildClassifiedFieldIndex(manifest);
   const ctx: HandlerContext = {
-    store: options.store,
+    store,
     permissions: manifest.permissions ?? {},
     roles,
     principalRoles: options.principalRoles,
@@ -522,6 +719,19 @@ export function compileOperateServer(
     defaultPlans: buildDefaultPlans(manifest),
     settingsDefaultPlans: buildSettingsDefaultPlans(manifest),
     validationPlans: buildValidationPlans(manifest),
+    // Field-level write authorization. Keyed by **entity**, deliberately not off
+    // `entityOperationIndex` below: that index is a *response* mapping keyed by operationId, and
+    // a write mask answers "may this principal write this field of this entity" — reusing it
+    // would be a category error.
+    //
+    // This is `classifiedFieldIndex`, the **same value** the redaction registry below is given.
+    // It used to say "the same *function* the redaction registry reads, so one declaration drives
+    // both halves of ADR-0329" — which was true and bought nothing, because both read the
+    // entity's own fields and so agreed *in being wrong*: a trait-contributed classified field was
+    // invisible to the mask and to the redaction alike. One index read twice is the property that
+    // comment wanted; the same narrow function called twice was not.
+    classifiedFields: classifiedFieldIndex,
+    writeMaskMode: options.writeMaskMode ?? "explicit_only",
     writeGuards: options.writeGuards ?? defaultWriteGuards(manifest),
     writeEffects: [
       ...(options.writeEffects ?? defaultWriteEffects(manifest, options.clock, options.settingsStore)),
@@ -529,6 +739,12 @@ export function compileOperateServer(
     ],
     ...(options.allocator !== undefined ? { allocator: options.allocator } : {}),
     ...(options.settingsStore !== undefined ? { settingsStore: options.settingsStore } : {}),
+    ...(options.policyForEntity !== undefined ? { policyForEntity: options.policyForEntity } : {}),
+    ...(options.abacEvaluator !== undefined ? { abacEvaluator: options.abacEvaluator } : {}),
+    ...(options.abacBatchEvaluator !== undefined
+      ? { abacBatchEvaluator: options.abacBatchEvaluator }
+      : {}),
+    ...(options.cursorSealer !== undefined ? { cursorSealer: options.cursorSealer } : {}),
     ...(options.clock !== undefined ? { clock: options.clock } : {}),
   };
 
@@ -547,23 +763,26 @@ export function compileOperateServer(
     // the status-only gate (read for GET, write otherwise).
     const handler =
       resolver !== undefined && spec.action === "create"
-        ? withRecordLimit(base, { resolver, store: options.store, entity: spec.entity })
+        ? withRecordLimit(base, { resolver, store, entity: spec.entity })
         : gate(base, spec.method === "GET" ? "read" : "write");
     handlers.register(spec.operationId, handler);
   }
 
   // Association read routes: GET /v1/<owner>/{id}/<related> lists the m2m-linked related records.
-  for (const spec of manifestAssociationRoutes(manifest)) {
+  const associationListSpecs = manifestAssociationRoutes(manifest);
+  for (const spec of associationListSpecs) {
     routes.register(associationRouteFromSpec(spec));
     handlers.register(spec.operationId, gate(buildAssociationListHandler(spec, ctx), "read"));
   }
   // Association write routes: PUT/DELETE /v1/<owner>/{id}/<related>/{relatedId} link/unlink.
-  for (const spec of manifestAssociationWriteRoutes(manifest)) {
+  const associationWriteSpecs = manifestAssociationWriteRoutes(manifest);
+  for (const spec of associationWriteSpecs) {
     routes.register(associationWriteRouteFromSpec(spec));
     handlers.register(spec.operationId, gate(buildAssociationWriteHandler(spec, ctx), "write"));
   }
   // Association count routes: GET /v1/<owner>/{id}/<related>/count counts the m2m-linked related records.
-  for (const spec of manifestAssociationCountRoutes(manifest)) {
+  const associationCountSpecs = manifestAssociationCountRoutes(manifest);
+  for (const spec of associationCountSpecs) {
     routes.register(associationCountRouteFromSpec(spec));
     handlers.register(spec.operationId, gate(buildAssociationCountHandler(spec, ctx), "read"));
   }
@@ -608,7 +827,7 @@ export function compileOperateServer(
     routes.register(literalRoute("meta.usage.read", "GET", ["v1", "meta", "usage"]));
     handlers.register(
       "meta.usage.read",
-      buildUsageHandler({ resolver, store: options.store, entities: (manifest.entities ?? []).map((e) => e.name) }),
+      buildUsageHandler({ resolver, store, entities: (manifest.entities ?? []).map((e) => e.name) }),
     );
   }
 
@@ -660,7 +879,7 @@ export function compileOperateServer(
       "meta.aging.read",
       gate(
         buildAgingHandler({
-          store: options.store,
+          store,
           principalRoles: options.principalRoles,
           viewerRoles: new Set(options.financeRoles ?? DEFAULT_FINANCE_ROLES),
           sections: agingSections,
@@ -679,7 +898,7 @@ export function compileOperateServer(
       "meta.whtReconciliation.read",
       gate(
         buildWhtReconciliationHandler({
-          store: options.store,
+          store,
           principalRoles: options.principalRoles,
           viewerRoles: new Set(options.financeRoles ?? DEFAULT_FINANCE_ROLES),
         }),
@@ -688,13 +907,62 @@ export function compileOperateServer(
     );
   }
 
+  // Every operationId whose response can carry an entity's records, taken from the routes this
+  // compile actually derived — the entity routes above (CRUD *and* one per lifecycle transition,
+  // whose ids come out of the manifest's workflows) plus the association routes, where the
+  // records served belong to the *related* entity and the link/unlink pair belongs to the owner.
+  //
+  // The three association families carry their own shapes rather than an action: the list answers
+  // `{data, page}` like an entity list, the count answers `{count}` and so carries no record at
+  // all, and link/unlink answer a link summary and not the owner record — which is why that pair is
+  // `none` even though its *attribution* is the owner entity. Attribution answers "whose fields
+  // could appear here" and the shape answers "where"; a route can be attributed to an entity and
+  // still return none of its records.
+  const operationIdsByEntity = entityOperationIndex([
+    ...routeSpecs.map((s) => ({
+      entity: s.entity,
+      operationId: s.operationId,
+      recordShape: ACTION_RECORD_SHAPE[s.action],
+    })),
+    ...associationListSpecs.map((s) => ({
+      entity: s.relatedEntity,
+      operationId: s.operationId,
+      recordShape: "page" as const,
+    })),
+    ...associationCountSpecs.map((s) => ({
+      entity: s.relatedEntity,
+      operationId: s.operationId,
+      recordShape: "none" as const,
+    })),
+    ...associationWriteSpecs.map((s) => ({
+      entity: s.ownerEntity,
+      operationId: s.operationId,
+      recordShape: "none" as const,
+    })),
+  ]);
   const redactionRegistry = redactionRegistryFromManifest(manifest, {
     rolesForPrincipal: options.principalRoles,
-    operationsForEntity: (name) => [...entityReadOperationIds(name)],
+    // The same index the write mask holds, so the read half and the write half of ADR-0329 cannot
+    // answer differently about which fields of an entity are classified. `?? []` is the honest
+    // answer for an entity the index omits — `buildClassifiedFieldIndex` omits entities with no
+    // classified field, and an empty set is the same statement as an absent one here, which is why
+    // `redactionSpecForEntity` still correctly returns `null` for it.
+    classifiedFieldsForEntity: (name) => classifiedFieldIndex.get(name) ?? [],
+    operationsForEntity: (name) => operationIdsByEntity.get(name) ?? fallbackOperationIds(name),
     ...(options.policyForEntity !== undefined ? { policyForEntity: options.policyForEntity } : {}),
+    ...(options.abacEvaluator !== undefined ? { abacEvaluator: options.abacEvaluator } : {}),
+    ...(options.abacBatchEvaluator !== undefined
+      ? { abacBatchEvaluator: options.abacBatchEvaluator }
+      : {}),
   });
 
-  return { routes, handlers, redactionRegistry, routeSpecs };
+  return {
+    routes,
+    handlers,
+    redactionRegistry,
+    routeSpecs,
+    redactionOperationIds: operationIdsByEntity,
+  };
 }
 
 export interface OperateGatewayOptions extends OperateRuntimeOptions {

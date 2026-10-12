@@ -59,7 +59,18 @@ interface StubCalls {
   generatedFor: string[];
   listedFor: string[];
   revocationsFor: string[];
+  closedFor: string[];
+  ensuredFor: string[];
 }
+
+const noCalls = (): StubCalls => ({
+  started: [],
+  generatedFor: [],
+  listedFor: [],
+  revocationsFor: [],
+  closedFor: [],
+  ensuredFor: [],
+});
 
 function stubRuntime(
   calls: StubCalls,
@@ -68,6 +79,10 @@ function stubRuntime(
     generated?: readonly AccessReviewItem[];
     listItems?: readonly AccessReviewItem[];
     decisions?: readonly AccessReviewDecision[];
+    /** Whether the stub's items count as settled, i.e. whether the close is allowed to fire. */
+    completable?: boolean;
+    closed?: { campaign: AccessReviewCampaign; evidence: { id: string } | null };
+    ensured?: { outcome: "sealed" | "already_sealed"; evidence: { id: string } };
   } = {},
 ): PersistentAccessReviewRuntime {
   const stub = {
@@ -94,6 +109,22 @@ function stubRuntime(
     ) => {
       calls.revocationsFor.push(campaign.id);
       return opts.decisions ?? [];
+    },
+    runtime: {
+      isCampaignCompletable: () => opts.completable ?? false,
+    },
+    closeCampaign: async (input: { campaign: AccessReviewCampaign }) => {
+      calls.closedFor.push(input.campaign.id);
+      return (
+        opts.closed ?? {
+          campaign: { ...input.campaign, status: "completed" as const },
+          evidence: { id: "arv_sealed0001" },
+        }
+      );
+    },
+    ensureSealedEvidenceForCampaign: async (input: { campaign: AccessReviewCampaign }) => {
+      calls.ensuredFor.push(input.campaign.id);
+      return opts.ensured ?? { outcome: "already_sealed", evidence: { id: "arv_sealed0001" } };
     },
   };
   return stub as unknown as PersistentAccessReviewRuntime;
@@ -131,7 +162,7 @@ describe("AccessReviewCampaignScheduler tick", () => {
   });
 
   it("starts a due campaign and generates its items", async () => {
-    const calls: StubCalls = { started: [], generatedFor: [], listedFor: [], revocationsFor: [] };
+    const calls: StubCalls = noCalls();
     const fakeItem = {} as AccessReviewItem;
     const lifecycle = buildAccessReviewsLifecycle(dummyConn, config, {
       runtime: stubRuntime(calls, { generated: [fakeItem, fakeItem] }),
@@ -146,7 +177,7 @@ describe("AccessReviewCampaignScheduler tick", () => {
   });
 
   it("plans auto-revocations for an already-in-progress campaign", async () => {
-    const calls: StubCalls = { started: [], generatedFor: [], listedFor: [], revocationsFor: [] };
+    const calls: StubCalls = noCalls();
     const decision = { id: "ard_revoke01" } as AccessReviewDecision;
     const lifecycle = buildAccessReviewsLifecycle(dummyConn, config, {
       runtime: stubRuntime(calls, {
@@ -160,12 +191,14 @@ describe("AccessReviewCampaignScheduler tick", () => {
     expect(report?.startedCampaigns).toEqual([]);
     expect(report?.autoRevocations).toEqual(["ard_revoke01"]);
     expect(calls.started).toEqual([]);
-    expect(calls.listedFor).toEqual(["arc_q22026adm"]);
+    // Twice: the second read is after the auto-revocations, which resolve items the first list is
+    // stale about, and the close may only fire when nothing is outstanding.
+    expect(calls.listedFor).toEqual(["arc_q22026adm", "arc_q22026adm"]);
     expect(calls.revocationsFor).toEqual(["arc_q22026adm"]);
   });
 
   it("does nothing for a not-yet-due scheduled campaign", async () => {
-    const calls: StubCalls = { started: [], generatedFor: [], listedFor: [], revocationsFor: [] };
+    const calls: StubCalls = noCalls();
     const lifecycle = buildAccessReviewsLifecycle(dummyConn, config, {
       runtime: stubRuntime(calls),
       clock: () => new Date("2026-01-01T00:00:00.000Z"),
@@ -178,7 +211,7 @@ describe("AccessReviewCampaignScheduler tick", () => {
   });
 
   it("sources grants from an injected grantSource instead of the config", async () => {
-    const calls: StubCalls = { started: [], generatedFor: [], listedFor: [], revocationsFor: [] };
+    const calls: StubCalls = noCalls();
     let grantsSeen = -1;
     const runtime = {
       campaignStore: { getByCampaignId: async () => null },
@@ -228,5 +261,145 @@ describe("AccessReviewCampaignScheduler tick", () => {
     const report = await lifecycle.scheduler.tickOnce();
     expect(report).toBeNull();
     expect((captured as Error).message).toBe("boom");
+  });
+});
+
+describe("AccessReviewCampaignScheduler: closing a campaign and sealing its pack", () => {
+  const config = parseAccessReviewsConfig({
+    systemActorUserId: SYSTEM_ACTOR,
+    campaigns: [baseCampaign],
+  });
+
+  it("closes an in-progress campaign once nothing is outstanding", async () => {
+    const calls = noCalls();
+    const lifecycle = buildAccessReviewsLifecycle(dummyConn, config, {
+      runtime: stubRuntime(calls, {
+        getByCampaignId: { ...baseCampaign, status: "in_progress" },
+        completable: true,
+      }),
+      clock: () => NOW,
+    });
+    const report = await lifecycle.scheduler.tickOnce();
+    expect(calls.closedFor).toEqual(["arc_q22026adm"]);
+    expect(report?.closedCampaigns).toEqual(["arc_q22026adm"]);
+    expect(report?.sealedEvidence).toEqual(["arv_sealed0001"]);
+  });
+
+  it("does not close while an item is unresolved", async () => {
+    const calls = noCalls();
+    const lifecycle = buildAccessReviewsLifecycle(dummyConn, config, {
+      runtime: stubRuntime(calls, {
+        getByCampaignId: { ...baseCampaign, status: "in_progress" },
+        completable: false,
+      }),
+      clock: () => NOW,
+    });
+    const report = await lifecycle.scheduler.tickOnce();
+    expect(calls.closedFor).toEqual([]);
+    expect(report?.closedCampaigns).toEqual([]);
+  });
+
+  it("re-reads the items after planning auto-revocations, which resolve some of them", async () => {
+    const calls = noCalls();
+    const lifecycle = buildAccessReviewsLifecycle(dummyConn, config, {
+      runtime: stubRuntime(calls, {
+        getByCampaignId: { ...baseCampaign, status: "in_progress" },
+        completable: true,
+      }),
+      clock: () => NOW,
+    });
+    await lifecycle.scheduler.tickOnce();
+    expect(calls.listedFor).toEqual(["arc_q22026adm", "arc_q22026adm"]);
+  });
+
+  it("retries an unsealed pack on a campaign that is already completed", async () => {
+    const calls = noCalls();
+    const lifecycle = buildAccessReviewsLifecycle(dummyConn, config, {
+      runtime: stubRuntime(calls, {
+        getByCampaignId: {
+          ...baseCampaign,
+          status: "completed",
+          completedAt: "2026-05-01T00:00:00.000Z",
+        },
+        ensured: { outcome: "sealed", evidence: { id: "arv_retried0001" } },
+      }),
+      clock: () => NOW,
+    });
+    const report = await lifecycle.scheduler.tickOnce();
+    expect(calls.ensuredFor).toEqual(["arc_q22026adm"]);
+    expect(report?.sealedEvidence).toEqual(["arv_retried0001"]);
+  });
+
+  it("reports nothing newly sealed when the pack was already sealed", async () => {
+    const calls = noCalls();
+    const lifecycle = buildAccessReviewsLifecycle(dummyConn, config, {
+      runtime: stubRuntime(calls, {
+        getByCampaignId: {
+          ...baseCampaign,
+          status: "completed",
+          completedAt: "2026-05-01T00:00:00.000Z",
+        },
+      }),
+      clock: () => NOW,
+    });
+    const report = await lifecycle.scheduler.tickOnce();
+    expect(calls.ensuredFor).toEqual(["arc_q22026adm"]);
+    expect(report?.sealedEvidence).toEqual([]);
+  });
+
+  it("closeCompletedCampaigns: false leaves both paths alone", async () => {
+    const calls = noCalls();
+    const lifecycle = buildAccessReviewsLifecycle(
+      dummyConn,
+      parseAccessReviewsConfig({
+        systemActorUserId: SYSTEM_ACTOR,
+        campaigns: [baseCampaign],
+        closeCompletedCampaigns: false,
+      }),
+      {
+        runtime: stubRuntime(calls, {
+          getByCampaignId: { ...baseCampaign, status: "in_progress" },
+          completable: true,
+        }),
+        clock: () => NOW,
+      },
+    );
+    await lifecycle.scheduler.tickOnce();
+    expect(calls.closedFor).toEqual([]);
+    expect(calls.ensuredFor).toEqual([]);
+  });
+
+  it("defaults closeCompletedCampaigns on, because off is the broken status quo", () => {
+    const parsed = parseAccessReviewsConfig({
+      systemActorUserId: SYSTEM_ACTOR,
+      campaigns: [baseCampaign],
+    });
+    expect(parsed.closeCompletedCampaigns).toBe(true);
+    expect(parsed.evidenceStorageUriPrefix).toBeUndefined();
+  });
+
+  it("reports an evidence failure through onEvidenceError rather than failing the tick", async () => {
+    const calls = noCalls();
+    const errors: unknown[] = [];
+    const runtime = stubRuntime(calls, {
+      getByCampaignId: {
+        ...baseCampaign,
+        status: "completed",
+        completedAt: "2026-05-01T00:00:00.000Z",
+      },
+    }) as unknown as {
+      ensureSealedEvidenceForCampaign: () => Promise<never>;
+    };
+    runtime.ensureSealedEvidenceForCampaign = () =>
+      Promise.reject(new Error("evidence store unreachable"));
+    const lifecycle = buildAccessReviewsLifecycle(dummyConn, config, {
+      runtime: runtime as unknown as PersistentAccessReviewRuntime,
+      clock: () => NOW,
+      onEvidenceError: (e) => errors.push(e),
+    });
+    const report = await lifecycle.scheduler.tickOnce();
+    expect(report).not.toBeNull();
+    expect(report?.sealedEvidence).toEqual([]);
+    expect(errors).toHaveLength(1);
   });
 });

@@ -1,4 +1,4 @@
-import type { RouteDefinition } from "@crossengin/api-gateway";
+import { RouteDefinitionSchema, type RouteDefinition } from "@crossengin/api-gateway";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import { describe, expect, it, vi } from "vitest";
 
@@ -86,6 +86,33 @@ describe("PostgresRouteRegistry — after loading", () => {
     await registry.ensureLoaded();
     const result = registry.lookup({ method: "GET", path: "/v1/tenants/acme", apiVersion: "v1" });
     expect(result?.params).toEqual({ tenantId: "acme" });
+  });
+
+  // node-postgres hands these back as `Date`s. Left raw, `sunsetAt` reached `matchRoute`'s
+  // `Date.parse` comparison and the RFC 8594 `Sunset` header as `Mon Oct 05 2026 …`.
+  it("renders Date sunset_at / deprecated_since as ISO text a RouteDefinition can hold", async () => {
+    const conn = mockConnection([
+      routeRow({
+        is_deprecated: true,
+        deprecated_since: new Date("2026-01-01T00:00:00.000Z"),
+        sunset_at: new Date("2026-06-30T23:59:59.250Z"),
+      }),
+    ]);
+    const registry = new PostgresRouteRegistry({ conn });
+    await registry.ensureLoaded();
+    const result = registry.lookup({ method: "POST", path: "/v1/tenants", apiVersion: "v1" });
+    expect(result?.route.sunsetAt).toBe("2026-06-30T23:59:59.250Z");
+    expect(result?.route.deprecatedSince).toBe("2026-01-01T00:00:00.000Z");
+    expect(RouteDefinitionSchema.safeParse(result?.route).success).toBe(true);
+  });
+
+  it("leaves an absent sunset_at null rather than inventing an instant", async () => {
+    const conn = mockConnection([routeRow()]);
+    const registry = new PostgresRouteRegistry({ conn });
+    await registry.ensureLoaded();
+    const result = registry.lookup({ method: "POST", path: "/v1/tenants", apiVersion: "v1" });
+    expect(result?.route.sunsetAt).toBeNull();
+    expect(result?.route.deprecatedSince).toBeNull();
   });
 
   it("rejects mismatched api version", async () => {

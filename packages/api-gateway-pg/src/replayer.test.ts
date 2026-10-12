@@ -1,9 +1,15 @@
-import type { PipelineExecution, StageResult } from "@crossengin/api-gateway";
+import {
+  PipelineExecutionSchema,
+  type PipelineExecution,
+  type StageResult,
+} from "@crossengin/api-gateway";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  GATEWAY_DRIFT_CODES,
   GatewayReplayer,
+  UNSCOPED_READ_IS_OWNER_ONLY,
   verifyPipelineExecutionShape,
 } from "./replayer.js";
 
@@ -62,11 +68,17 @@ interface MockState {
   readonly executions: Map<string, PipelineExecution>;
   readonly decisionIds: Set<string>;
   readonly recentIds: string[];
+  /**
+   * Hand `started_at` / `completed_at` back as `Date`s, which is what node-postgres actually does
+   * for a `TIMESTAMPTZ`. Default off so the existing cases keep exercising the libpq-text path.
+   */
+  readonly timestampsAsDates?: boolean;
 }
 
 function buildMock(state: MockState): PgConnection {
-  return {
+  const conn: PgConnection = {
     query: vi.fn(async (sql: string, params?: readonly unknown[]): Promise<PgQueryResult> => {
+      if (sql.includes("set_config")) return { rows: [], rowCount: 0 };
       if (sql.includes("FROM meta.gateway_pipeline_executions") && sql.includes("WHERE request_id")) {
         const id = params?.[0] as string;
         const ex = state.executions.get(id);
@@ -76,8 +88,9 @@ function buildMock(state: MockState): PgConnection {
             {
               request_id: ex.requestId,
               tenant_id: ex.tenantId,
-              started_at: ex.startedAt,
-              completed_at: ex.completedAt,
+              started_at: state.timestampsAsDates === true ? new Date(ex.startedAt) : ex.startedAt,
+              completed_at:
+                state.timestampsAsDates === true ? new Date(ex.completedAt) : ex.completedAt,
               total_duration_ms: ex.totalDurationMs,
               final_stage: ex.finalStage,
               final_outcome: ex.finalOutcome,
@@ -118,10 +131,15 @@ function buildMock(state: MockState): PgConnection {
       }
       return { rows: [], rowCount: 0 };
     }) as PgConnection["query"],
-    transaction: vi.fn() as PgConnection["transaction"],
+    // Every read runs inside `scopedRead` now, so the fake has to actually run the callback — a
+    // `vi.fn()` returning undefined made each read throw on `result.rows`, which is itself a small
+    // demonstration of why ADR-0307 typechecks the tests.
+    transaction: (async <T,>(fn: (tx: PgConnection) => Promise<T>): Promise<T> =>
+      fn(conn)) as PgConnection["transaction"],
     withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
     close: vi.fn() as PgConnection["close"],
   };
+  return conn;
 }
 
 function emptyState(): MockState {
@@ -274,6 +292,178 @@ describe("verifyPipelineExecutionShape", () => {
   });
 });
 
+/**
+ * The two halves of a stage log that could not be checked, and were reported as if it had been.
+ */
+describe("an unreadable or unknown stage is reported, never skipped", () => {
+  it("names an entry whose stage is not a pipeline stage", () => {
+    const issues = verifyPipelineExecutionShape({
+      ...fixtureExecution(),
+      stages: [
+        { stage: "receive", outcome: "pass", durationMs: 1 },
+        // A hand-written UPDATE, or a future version's stage name. The walk used to `continue`.
+        { stage: "frobnicate", outcome: "pass", durationMs: 1 },
+      ] as unknown as PipelineExecution["stages"],
+      finalStage: "receive",
+      finalOutcome: "pass",
+    });
+    const unknown = issues.filter((i) => i.code === "unknown_stage");
+    expect(unknown).toHaveLength(1);
+    expect(unknown[0]?.detail).toContain("frobnicate");
+    expect(unknown[0]?.detail).toContain("position 1");
+  });
+
+  it("reports every unknown entry rather than stopping at the first", () => {
+    const issues = verifyPipelineExecutionShape({
+      ...fixtureExecution(),
+      stages: [
+        { stage: "nope_one", outcome: "pass", durationMs: 1 },
+        { stage: "nope_two", outcome: "pass", durationMs: 1 },
+      ] as unknown as PipelineExecution["stages"],
+    });
+    expect(issues.filter((i) => i.code === "unknown_stage")).toHaveLength(2);
+  });
+
+  it("no longer reports an all-unknown stage array as clean", () => {
+    // The regression this closes: every entry skipped, so order, repeats and the terminating check
+    // all had nothing to look at, and `empty_stages` did not fire because length was non-zero.
+    const issues = verifyPipelineExecutionShape({
+      ...fixtureExecution(),
+      stages: [{ stage: "invented", outcome: "pass", durationMs: 0 }] as unknown as
+        PipelineExecution["stages"],
+    });
+    expect(issues.length).toBeGreaterThan(0);
+  });
+
+  it("still orders the stages it does recognise around an unknown one", () => {
+    const issues = verifyPipelineExecutionShape({
+      ...fixtureExecution(),
+      stages: [
+        { stage: "emit_audit", outcome: "pass", durationMs: 1 },
+        { stage: "invented", outcome: "pass", durationMs: 1 },
+        { stage: "receive", outcome: "pass", durationMs: 1 },
+      ] as unknown as PipelineExecution["stages"],
+      finalStage: "receive",
+      finalOutcome: "pass",
+    });
+    expect(issues.map((i) => i.code)).toContain("unknown_stage");
+    expect(issues.map((i) => i.code)).toContain("stages_out_of_order");
+  });
+
+  it("reports stages_unreadable rather than empty_stages, and nothing else", () => {
+    // "This request recorded no stages" is a claim about the gateway; "this row's stage log is
+    // unreadable" is a claim about the row, and it sends an operator somewhere else entirely.
+    const issues = verifyPipelineExecutionShape(
+      { ...fixtureExecution(), stages: [] },
+      { stagesUnreadable: true },
+    );
+    expect(issues.map((i) => i.code)).toEqual(["stages_unreadable"]);
+  });
+
+  it("still reports empty_stages for a readable but empty array", () => {
+    const issues = verifyPipelineExecutionShape({ ...fixtureExecution(), stages: [] });
+    expect(issues.map((i) => i.code)).toEqual(["empty_stages"]);
+  });
+
+  it("verifyExecution reports stages_unreadable for a stages column that is not an array", async () => {
+    const state = emptyState();
+    state.executions.set("req_test00000001", fixtureExecution());
+    const conn = buildMock(state);
+    const original = conn.query as (
+      sql: string,
+      params?: readonly unknown[],
+    ) => Promise<PgQueryResult>;
+    conn.query = (async (sql: string, params?: readonly unknown[]) => {
+      const result = await original(sql, params);
+      if (sql.includes("FROM meta.gateway_pipeline_executions") && sql.includes("WHERE request_id")) {
+        return {
+          rows: result.rows.map((r) => ({ ...r, stages: "{not json" })),
+          rowCount: result.rowCount,
+        };
+      }
+      return result;
+    }) as PgConnection["query"];
+    const report = await new GatewayReplayer({ conn }).verifyExecution("req_test00000001");
+    expect(report.drifted).toBe(true);
+    expect(report.issues.map((i) => i.code)).toEqual(["stages_unreadable"]);
+  });
+});
+
+describe("GATEWAY_DRIFT_CODES", () => {
+  it("names every code the module can report", () => {
+    expect([...GATEWAY_DRIFT_CODES]).toEqual([
+      "stages_out_of_order",
+      "stage_repeated",
+      "final_stage_mismatch",
+      "final_outcome_mismatch",
+      "pass_with_4xx_or_5xx",
+      "deny_without_4xx_or_5xx",
+      "duration_inconsistent",
+      "rate_limit_decision_not_found",
+      "empty_stages",
+      "stages_unreadable",
+      "unknown_stage",
+      "terminating_not_last",
+    ]);
+  });
+
+  it("has no duplicate member", () => {
+    expect(new Set(GATEWAY_DRIFT_CODES).size).toBe(GATEWAY_DRIFT_CODES.length);
+  });
+});
+
+/**
+ * Every report names the scope of the row it is about, which is what makes a per-tenant sweep
+ * composable: findings from two tenants in one list with no way to tell them apart are unusable.
+ */
+describe("a report names its scope", () => {
+  it("carries the row's own tenant id", async () => {
+    const state = emptyState();
+    state.executions.set("req_test00000001", fixtureExecution());
+    const report = await new GatewayReplayer({ conn: buildMock(state) }).verifyExecution(
+      "req_test00000001",
+    );
+    expect(report.tenantId).toBe(TENANT);
+  });
+
+  it("carries null for a platform-scope execution", async () => {
+    const state = emptyState();
+    state.executions.set("req_platform0001", fixtureExecution({
+      requestId: "req_platform0001",
+      tenantId: null,
+    }));
+    const report = await new GatewayReplayer({ conn: buildMock(state) }).verifyExecution(
+      "req_platform0001",
+    );
+    expect(report.tenantId).toBeNull();
+    expect(report.hasExecution).toBe(true);
+  });
+
+  it("carries null with hasExecution=false when no row established a scope", async () => {
+    const report = await new GatewayReplayer({ conn: buildMock(emptyState()) }).verifyExecution(
+      "req_missing",
+    );
+    expect(report).toMatchObject({ tenantId: null, hasExecution: false });
+  });
+
+  it("bulkVerify names the scope on every report it returns", async () => {
+    const state = emptyState();
+    state.recentIds.push("req_test00000001");
+    state.executions.set("req_test00000001", fixtureExecution());
+    const reports = await new GatewayReplayer({ conn: buildMock(state) }).bulkVerify({
+      scope: TENANT,
+    });
+    expect(reports.map((r) => r.tenantId)).toEqual([TENANT]);
+  });
+
+  it("states that an unscoped read is owner-only rather than leaving it implied", () => {
+    // A sweep that reads one of seven rows and reports six clean by never looking is the
+    // `rls_would_confine_this_session` shape; the constant is what a caller is pointed at.
+    expect(UNSCOPED_READ_IS_OWNER_ONLY).toContain("owner");
+    expect(UNSCOPED_READ_IS_OWNER_ONLY).toContain("per tenant");
+  });
+});
+
 describe("GatewayReplayer.getExecution", () => {
   it("returns null when execution does not exist", async () => {
     const replayer = new GatewayReplayer({ conn: buildMock(emptyState()) });
@@ -288,6 +478,19 @@ describe("GatewayReplayer.getExecution", () => {
     expect(ex?.requestId).toBe("req_test00000001");
     expect(ex?.stages).toHaveLength(2);
     expect(ex?.tenantId).toBe(TENANT);
+  });
+
+  // `started_at` / `completed_at` arrive as `Date`s from a real connection, and this read hands them
+  // straight out inside a `PipelineExecution`, whose schema declares ISO text.
+  it("renders Date timestamps as ISO text a PipelineExecution can hold", async () => {
+    const state: MockState = { ...emptyState(), timestampsAsDates: true };
+    state.executions.set("req_test00000001", fixtureExecution());
+    const replayer = new GatewayReplayer({ conn: buildMock(state) });
+    const ex = await replayer.getExecution("req_test00000001");
+    expect(typeof ex?.startedAt).toBe("string");
+    expect(ex?.startedAt).toBe(fixtureExecution().startedAt);
+    expect(ex?.completedAt).toBe(fixtureExecution().completedAt);
+    expect(PipelineExecutionSchema.safeParse(ex).success).toBe(true);
   });
 
   it("converts numeric strings for bytesIn/bytesOut", async () => {
@@ -373,7 +576,7 @@ describe("GatewayReplayer.listRecentExecutions", () => {
 describe("GatewayReplayer.bulkVerify", () => {
   it("returns [] when no executions match", async () => {
     const replayer = new GatewayReplayer({ conn: buildMock(emptyState()) });
-    expect(await replayer.bulkVerify()).toEqual([]);
+    expect(await replayer.bulkVerify({ scope: undefined })).toEqual([]);
   });
 
   it("verifies each execution returned by listRecentExecutions", async () => {
@@ -381,7 +584,11 @@ describe("GatewayReplayer.bulkVerify", () => {
     state.recentIds.push("req_test00000001");
     state.executions.set("req_test00000001", fixtureExecution());
     const replayer = new GatewayReplayer({ conn: buildMock(state) });
-    const reports = await replayer.bulkVerify({ batchSize: 10, maxExecutions: 5 });
+    const reports = await replayer.bulkVerify({
+      scope: undefined,
+      batchSize: 10,
+      maxExecutions: 5,
+    });
     expect(reports).toHaveLength(1);
     expect(reports[0]?.drifted).toBe(false);
   });
@@ -393,7 +600,11 @@ describe("GatewayReplayer.bulkVerify", () => {
       state.executions.set(id, fixtureExecution({ requestId: id }));
     }
     const replayer = new GatewayReplayer({ conn: buildMock(state) });
-    const reports = await replayer.bulkVerify({ batchSize: 10, maxExecutions: 2 });
+    const reports = await replayer.bulkVerify({
+      scope: undefined,
+      batchSize: 10,
+      maxExecutions: 2,
+    });
     expect(reports.length).toBeLessThanOrEqual(2);
   });
 });
@@ -432,5 +643,121 @@ describe("GatewayReplayer.summarize", () => {
     const summary = await replayer.summarize();
     expect(summary.p50LatencyMs).toBeGreaterThanOrEqual(80);
     expect(summary.p95LatencyMs).toBeGreaterThanOrEqual(180);
+  });
+});
+
+describe("the scope a read names, and the three things it can be", () => {
+  /** Every statement the replayer issued, bar the session setting. */
+  function reads(conn: PgConnection): { sql: string; params: readonly unknown[] | undefined }[] {
+    const mock = conn.query as unknown as {
+      mock: { calls: [string, readonly unknown[] | undefined][] };
+    };
+    return mock.mock.calls
+      .map(([sql, params]) => ({ sql, params }))
+      .filter((c) => !c.sql.includes("set_config"));
+  }
+
+  function settings(conn: PgConnection): readonly unknown[][] {
+    const mock = conn.query as unknown as {
+      mock: { calls: [string, readonly unknown[] | undefined][] };
+    };
+    return mock.mock.calls
+      .filter(([sql]) => sql.includes("set_config"))
+      .map(([, params]) => [...(params ?? [])]);
+  }
+
+  it("leaves getExecution unscoped when no scope is named, because absent has always meant every scope", async () => {
+    // `bulkVerify` collects ids across scopes and asks for each in turn, so a platform default here
+    // would report every tenant execution as `hasExecution: false`.
+    const conn = buildMock(emptyState());
+    await new GatewayReplayer({ conn }).getExecution("req_anything");
+    // `tenant_id` is in the projection either way, so the assertion has to be about the predicate.
+    const where = reads(conn)[0]?.sql.slice(reads(conn)[0]?.sql.indexOf("WHERE") ?? 0) ?? "";
+    expect(where).not.toContain("tenant_id");
+    expect(settings(conn)).toEqual([]);
+  });
+
+  it("asks for the platform scope with null, which was previously inexpressible", async () => {
+    const conn = buildMock(emptyState());
+    await new GatewayReplayer({ conn }).getExecution("req_anything", null);
+    expect(reads(conn)[0]?.sql).toContain("tenant_id IS NULL");
+    expect(settings(conn)).toEqual([]);
+  });
+
+  it("branches to equality plus a tenant context for a tenant", async () => {
+    const conn = buildMock(emptyState());
+    await new GatewayReplayer({ conn }).getExecution("req_anything", TENANT);
+    const read = reads(conn)[0];
+    expect(read?.sql).toContain("tenant_id = $2");
+    expect(read?.sql).not.toContain("IS NOT DISTINCT FROM");
+    expect(read?.params).toEqual(["req_anything", TENANT]);
+    expect(settings(conn)).toEqual([[TENANT]]);
+  });
+
+  it("scopes listRecentExecutions before the LIMIT, so another scope cannot displace the page", async () => {
+    const conn = buildMock(emptyState());
+    await new GatewayReplayer({ conn }).listRecentExecutions({ tenantId: null, limit: 10 });
+    const read = reads(conn)[0];
+    expect(read?.sql).toContain("WHERE tenant_id IS NULL");
+    expect(read?.params).toEqual([10, 0]);
+
+    const tenantConn = buildMock(emptyState());
+    await new GatewayReplayer({ conn: tenantConn }).listRecentExecutions({
+      tenantId: TENANT,
+      limit: 10,
+    });
+    const tenantRead = reads(tenantConn)[0];
+    expect(tenantRead?.sql).toContain("WHERE tenant_id = $1");
+    expect(tenantRead?.params).toEqual([TENANT, 10, 0]);
+  });
+
+  it("scopes summarize, whose every field is an aggregate", async () => {
+    const conn = buildMock(emptyState());
+    await new GatewayReplayer({ conn }).summarize({ tenantId: null });
+    expect(reads(conn)[0]?.sql).toContain("WHERE tenant_id IS NULL");
+
+    const bothConn = buildMock(emptyState());
+    await new GatewayReplayer({ conn: bothConn }).summarize({
+      since: new Date("2026-01-01T00:00:00.000Z"),
+      tenantId: TENANT,
+    });
+    const read = reads(bothConn)[0];
+    expect(read?.sql).toContain("started_at >= $1");
+    expect(read?.sql).toContain("tenant_id = $2");
+  });
+
+  it("takes the rate-limit decision's scope from the execution that names it, not from the caller", async () => {
+    // A gateway writes both rows in one request, so the execution's own `tenant_id` is a recorded
+    // fact about where its decision is — stronger than anything the caller could supply.
+    const state = emptyState();
+    const execution = fixtureExecution({
+      requestId: "req_tenantscoped",
+      tenantId: TENANT,
+      rateLimitDecisionId: "rld_abc12345",
+    });
+    state.executions.set(execution.requestId, execution);
+    state.decisionIds.add("rld_abc12345");
+    const conn = buildMock(state);
+    const report = await new GatewayReplayer({ conn }).verifyExecution(execution.requestId);
+    expect(report.hasExecution).toBe(true);
+    const decisionRead = reads(conn).find((c) => c.sql.includes("meta.rate_limit_decisions"));
+    expect(decisionRead?.sql).toContain("tenant_id = $2");
+    expect(decisionRead?.params).toEqual(["rld_abc12345", TENANT]);
+  });
+
+  it("asks for a platform execution's decision in the platform scope", async () => {
+    const state = emptyState();
+    const execution = fixtureExecution({
+      requestId: "req_platformrow",
+      tenantId: null,
+      rateLimitDecisionId: "rld_abc12345",
+    });
+    state.executions.set(execution.requestId, execution);
+    state.decisionIds.add("rld_abc12345");
+    const conn = buildMock(state);
+    await new GatewayReplayer({ conn }).verifyExecution(execution.requestId);
+    const decisionRead = reads(conn).find((c) => c.sql.includes("meta.rate_limit_decisions"));
+    expect(decisionRead?.sql).toContain("tenant_id IS NULL");
+    expect(decisionRead?.params).toEqual(["rld_abc12345"]);
   });
 });

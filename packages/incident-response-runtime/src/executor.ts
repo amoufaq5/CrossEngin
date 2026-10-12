@@ -1,9 +1,12 @@
 import {
   IncidentRecordSchema,
   activeAssignmentFor,
+  pagedTimelineMessage,
+  pagedTimelineMetadata,
   type IncidentCategory,
   type IncidentRecord,
   type IncidentRole,
+  type PagedTimelineFacts,
   type Severity,
   type TimelineEntry,
 } from "@crossengin/incident-response";
@@ -79,6 +82,12 @@ export interface NoteInput {
   readonly actorUserId: string;
   readonly at?: string;
   readonly metadata?: Record<string, unknown>;
+}
+
+export interface NotePageInput {
+  readonly facts: PagedTimelineFacts;
+  readonly actorUserId: string;
+  readonly at?: string;
 }
 
 export interface AttachPostmortemInput {
@@ -237,6 +246,33 @@ export class IncidentExecutor {
       kind: input.kind,
       message: input.message,
       metadata: input.metadata ?? {},
+    });
+  }
+
+  /**
+   * Records that somebody was paged, or that a page was closed, on the incident's own timeline.
+   *
+   * Appends and changes nothing else: a page is a fact about the incident, not a step in its
+   * lifecycle, so it must not move the status, stamp a timestamp or touch the severity. ADR-0326
+   * made a page's delivery evidence by writing an audit row; this is the half an incident review
+   * actually opens. It was for a time the *only* witness for a platform-scope page, because
+   * `meta.audit_log.tenant_id` was NOT NULL and an SLO surface is never a tenant; ADR-0331 made
+   * that row expressible, so the two are now a pair rather than a fallback — and this one still
+   * lands when the emitter is unreachable, which is the condition a compromise finding escalates
+   * for in the first place.
+   *
+   * Callable on an incident in **any** status, `closed` and `cancelled` included. A resolve's note
+   * arrives after the close-out by construction, so refusing on a terminal status would drop
+   * precisely the note that says the alert was closed.
+   */
+  notePage(record: IncidentRecord, input: NotePageInput): IncidentRecord {
+    const at = input.at ?? this.clock.nowIso();
+    return this.withEntry(record, {
+      occurredAt: at,
+      actorUserId: input.actorUserId,
+      kind: "paged",
+      message: pagedTimelineMessage(input.facts),
+      metadata: pagedTimelineMetadata(input.facts),
     });
   }
 

@@ -124,4 +124,41 @@ describe("WorkflowActivityWorker loop", () => {
     await worker.stop(); // never started → no-op
     expect(worker.isRunning).toBe(false);
   });
+  it("stop() releases the rest of the in-flight batch instead of executing it", async () => {
+    const released: string[] = [];
+    const processed: string[] = [];
+    const skipped: string[] = [];
+    let firstStarted!: () => void;
+    const started = new Promise<void>((r) => (firstStarted = r));
+    let finishFirst!: () => void;
+    const held = new Promise<void>((r) => (finishFirst = r));
+    const worker = new WorkflowActivityWorker({
+      workerId: "w",
+      claimer: {
+        claim: async () => [activity("a"), activity("b")],
+        release: async ({ activityId }) => void released.push(activityId),
+      },
+      processor: {
+        process: async (a) => {
+          processed.push(a.activityId);
+          if (a.activityId === "a") {
+            firstStarted();
+            await held;
+          }
+        },
+      },
+      idlePollMs: 0,
+      activePollMs: 0,
+      sleep: async () => undefined,
+      onSkipped: (a, reason) => void skipped.push(`${a.activityId}:${reason}`),
+    });
+    worker.start();
+    await started;
+    const stopping = worker.stop();
+    finishFirst();
+    await stopping;
+    expect(processed).toEqual(["a"]);
+    expect(skipped).toEqual(["b:worker_stopping"]);
+    expect(released).toEqual(["b"]);
+  });
 });

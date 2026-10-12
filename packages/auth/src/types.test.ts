@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   EntityPermissionsSchema,
+  FIELD_WRITE_OPERATIONS,
+  fieldWriteGrant,
+  fieldWriteGrantArm,
   FieldPermissionSchema,
   PermissionMapSchema,
   RbacGrantSchema,
@@ -67,13 +70,21 @@ describe("RbacGrantSchema", () => {
     ).not.toThrow();
   });
 
-  it("accepts a role + abac grant", () => {
+  it("accepts a role + abac policy key", () => {
+    // The key is opaque and nothing here parses it, so this expression-shaped string is accepted as
+    // a *key* rather than as an expression. It read as an expression before the meaning was
+    // declared; `abac.test.ts` pins both readings parsing for the same reason.
     expect(() =>
       RbacGrantSchema.parse({
         roles: ["doctor"],
-        abac: "user.department == record.department",
+        abac: "patient.same_department",
       }),
     ).not.toThrow();
+  });
+
+  it("rejects an empty abac policy key", () => {
+    // `"" !== undefined`, so an empty key was a live obligation naming nothing.
+    expect(() => RbacGrantSchema.parse({ roles: ["doctor"], abac: "" })).toThrow();
   });
 
   it("rejects missing roles", () => {
@@ -155,5 +166,76 @@ describe("PermissionMapSchema", () => {
         patient: "invalid",
       }),
     ).toThrow();
+  });
+});
+
+describe("fieldWriteGrant / fieldWriteGrantArm", () => {
+  const CREATE = { roles: ["registrar"] };
+  const UPDATE = { roles: ["admin"] };
+
+  it("takes the create arm on a create when one is declared", () => {
+    const perm = FieldPermissionSchema.parse({ create: CREATE, update: UPDATE });
+    expect(fieldWriteGrant(perm, "create")).toEqual(CREATE);
+    expect(fieldWriteGrantArm(perm, "create")).toBe("create");
+  });
+
+  // The arm is what a refusal must name, and it is `update` here even though the write op is
+  // `create`: an absent `create` inherits `update`, so the update grant genuinely is what decided
+  // and widening it genuinely is the remedy. A rule derived from the write op would say "create"
+  // and send an operator to add an arm they do not need.
+  it("falls back to the update arm on a create, and names update as the arm that decided", () => {
+    const perm = FieldPermissionSchema.parse({ update: UPDATE });
+    expect(fieldWriteGrant(perm, "create")).toEqual(UPDATE);
+    expect(fieldWriteGrantArm(perm, "create")).toBe("update");
+  });
+
+  it("never takes the create arm on an update, because create says who may SET not who may CHANGE", () => {
+    const perm = FieldPermissionSchema.parse({ create: CREATE });
+    expect(fieldWriteGrant(perm, "update")).toBeUndefined();
+    expect(fieldWriteGrantArm(perm, "update")).toBeUndefined();
+  });
+
+  it("reads the update arm on an update even when a create arm sits beside it", () => {
+    const perm = FieldPermissionSchema.parse({ create: CREATE, update: UPDATE });
+    expect(fieldWriteGrant(perm, "update")).toEqual(UPDATE);
+    expect(fieldWriteGrantArm(perm, "update")).toBe("update");
+  });
+
+  it("answers undefined for a perm with neither write arm, on both operations", () => {
+    const perm = FieldPermissionSchema.parse({ read: { roles: ["auditor"] } });
+    for (const op of FIELD_WRITE_OPERATIONS) {
+      expect(fieldWriteGrant(perm, op)).toBeUndefined();
+      expect(fieldWriteGrantArm(perm, op)).toBeUndefined();
+    }
+  });
+
+  it("answers undefined for an absent perm, on both operations", () => {
+    for (const op of FIELD_WRITE_OPERATIONS) {
+      expect(fieldWriteGrant(undefined, op)).toBeUndefined();
+      expect(fieldWriteGrantArm(undefined, op)).toBeUndefined();
+    }
+  });
+
+  // The property that makes the arm reportable: the arm is named iff a grant was found, and the
+  // named arm is the one holding that exact grant. Written over every shape so a third arm on
+  // `FieldPermission` cannot satisfy it by accident.
+  it("names an arm exactly when a grant was found, and that arm holds it", () => {
+    const shapes = [
+      {},
+      { read: { roles: ["auditor"] } },
+      { update: UPDATE },
+      { create: CREATE },
+      { create: CREATE, update: UPDATE },
+      { read: { roles: ["auditor"] }, create: CREATE },
+    ];
+    for (const raw of shapes) {
+      const perm = FieldPermissionSchema.parse(raw);
+      for (const op of FIELD_WRITE_OPERATIONS) {
+        const grant = fieldWriteGrant(perm, op);
+        const arm = fieldWriteGrantArm(perm, op);
+        expect(arm === undefined).toBe(grant === undefined);
+        if (arm !== undefined) expect(perm[arm]).toEqual(grant);
+      }
+    }
   });
 });

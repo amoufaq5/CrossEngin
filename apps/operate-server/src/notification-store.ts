@@ -52,6 +52,13 @@ export interface NotificationRecord {
 export interface NotificationListQuery {
   readonly channel?: string;
   readonly templateId?: string;
+  /**
+   * One notice by its `disp_…` id, still inside the tenant filter and whatever recipient filter is
+   * in force. A read-state write needs to know the notice is *this viewer's* before it records that
+   * they read it, and the read-state table's foreign key cannot answer that: it references
+   * `notification_dispatches.dispatch_id` alone, so another tenant's dispatch satisfies it.
+   */
+  readonly dispatchId?: string;
   readonly limit?: number;
   readonly cursor?: string;
   /** Restrict to dispatches delivered to one of these recipient address hashes. */
@@ -270,6 +277,10 @@ export class PostgresNotificationStore implements NotificationStore {
       if (query.templateId !== undefined) {
         params.push(query.templateId);
         conditions.push(`template_id = $${params.length}`);
+      }
+      if (query.dispatchId !== undefined) {
+        params.push(query.dispatchId);
+        conditions.push(`dispatch_id = $${params.length}`);
       }
       if (recipients !== undefined) {
         params.push([...recipients]);

@@ -1,8 +1,18 @@
 import { sha256 } from "@crossengin/crypto";
 import {
+  InstanceCancellationRequestSchema,
   TERMINAL_STATE_KINDS,
+  TIMER_KIND_SCHEDULING,
+  planInstanceCancellation,
+  resolveNextTimerFireAt,
+  resolveTimerFireAt,
   type ActionKind,
+  type ActivityCancellationCheckpoint,
+  type InstanceCancellationCompensationOutcome,
+  type InstanceCancellationOutcome,
+  type InstanceCancellationRequestInput,
   type StateAction,
+  type TimerDefinition,
   type TransitionDefinition,
   type WorkflowDefinition,
   type WorkflowEvent,
@@ -16,7 +26,16 @@ import {
 } from "./activity-handlers.js";
 import { type Clock, type IdGenerator, SystemClock, RandomIdGenerator } from "./clock.js";
 import { type EventLog } from "./event-log.js";
-import { type ProjectedInstance, projectInstance } from "./projection.js";
+import {
+  type OutstandingTimer,
+  outstandingTimersFromLog,
+  surveyCancellableWork,
+} from "./instance-cancellation.js";
+import {
+  type ProjectedInstance,
+  isInstanceCancellationRequested,
+  projectInstance,
+} from "./projection.js";
 import {
   type CompensationStep,
   compensationKindByActivityId,
@@ -46,6 +65,15 @@ export const WORKFLOW_ACTION_FAILURES = [
   "unresolved_correlation_key",
   "child_depth_exceeded",
   "signal_depth_exceeded",
+  /** `schedule_timer` names a timer the definition does not declare. */
+  "undeclared_timer",
+  /**
+   * The declared timer cannot be turned into a fire instant — the eleven
+   * `TIMER_SCHEDULE_DEFECTS`, surfaced as one action failure carrying the defect in its detail.
+   * One member rather than eleven because the caller's remedy is the same for all of them (fix the
+   * declaration) and the defect name is already in the message.
+   */
+  "unschedulable_timer",
 ] as const;
 export type WorkflowActionFailure = (typeof WORKFLOW_ACTION_FAILURES)[number];
 
@@ -74,6 +102,27 @@ export class WorkflowActionError extends Error {
   }
 }
 
+/**
+ * The signal id this instance already received under `(signalName, idempotencyKey)`, or `null`.
+ *
+ * Read from the instance's own history, which is the only authority that cannot be stale: a
+ * deduplicator's read happens before the appends it is meant to prevent, so two concurrent submits
+ * of one key can both get past it.
+ */
+export function priorReceiptSignalId(
+  events: readonly WorkflowEvent[],
+  signalName: string,
+  idempotencyKey: string,
+): string | null {
+  for (const event of events) {
+    if (event.kind !== "signal_received" || event.signalId === null) continue;
+    if (event.payload["signalName"] !== signalName) continue;
+    if (event.payload["idempotencyKey"] !== idempotencyKey) continue;
+    return event.signalId;
+  }
+  return null;
+}
+
 /** A non-empty string action parameter, or `null` when absent or of another type. */
 function stringParam(action: StateAction, key: string): string | null {
   const value = action.parameters[key];
@@ -100,10 +149,26 @@ function compareDefinitionVersions(left: string, right: string): number {
   return 0;
 }
 
-interface ScheduledTimer {
-  readonly id: string;
-  readonly name: string;
-  readonly fireAt: number;
+export interface CancelInstanceResult {
+  readonly outcome: InstanceCancellationOutcome;
+  /** Unfired timers dropped, each with a `timer_cancelled` in the log. */
+  readonly cancelledTimerIds: readonly string[];
+  /** Scheduled activities whose handler was never entered. */
+  readonly beforeHandlerActivityIds: readonly string[];
+  /**
+   * In-flight activities recorded cancelled at `cooperative_abort`. A subset of these had their
+   * `AbortSignal` actually tripped — see `signalDeliveredActivityIds`.
+   */
+  readonly cooperativeAbortActivityIds: readonly string[];
+  /**
+   * The in-flight activities this process could really tell. An activity started by *another*
+   * process is recorded cancelled but cannot be signalled from here, and claiming otherwise would
+   * overstate the one guarantee that is already the weakest.
+   */
+  readonly signalDeliveredActivityIds: readonly string[];
+  readonly compensationOutcome: InstanceCancellationCompensationOutcome;
+  readonly compensatedActivityIds: readonly string[];
+  readonly unreversedActivityIds: readonly string[];
 }
 
 /**
@@ -157,6 +222,11 @@ export interface EngineOptions {
   readonly guardEvaluator?: GuardEvaluator;
   readonly systemActorId?: string;
   /**
+   * Who answers a duplicate submit. Defaults to `InMemorySignalDeduplicator`, which is correct for
+   * one process; `buildPersistentEngine` supplies the one that reads the signal table.
+   */
+  readonly signalDeduplicator?: SignalDeduplicator;
+  /**
    * When true, `schedule_activity` records the activity as `scheduled` (persisting its input) but
    * does NOT run the handler inline — a distributed worker claims + executes it later via
    * `executeScheduledActivity`. Default false (activities run inline, as before).
@@ -183,10 +253,107 @@ export interface SubmitSignalInput {
   readonly sourceSystem?: string;
 }
 
+/**
+ * One instance's copy of a submitted signal.
+ *
+ * This pair is what the contract calls a `WorkflowSignal`: `instanceId` is singular there and
+ * `matchSignalToInstance` returns one id, so a submit that fans out to N instances is N signals and
+ * not one signal seen N times. `meta.workflow_signals.signal_id` is UNIQUE, so minting one id for
+ * the whole fan-out collapsed the N rows into one — attributed to whichever instance was projected
+ * last, with every earlier delivery invisible in the projection table.
+ */
+export interface SignalDelivery {
+  readonly instanceId: string;
+  readonly signalId: string;
+}
+
+/** The three fields `meta.workflow_signals`' unique key is on, as one value. */
+export interface SignalIdempotency {
+  readonly tenantId: string;
+  readonly signalName: string;
+  readonly idempotencyKey: string;
+}
+
+/**
+ * Who answers "has this idempotency key already been accepted, and what did it deliver?".
+ *
+ * A seam rather than a field because the honest answer lives wherever the signals do: in this
+ * package that is process memory, and in `workflow-runtime-pg` it is the `(tenant_id, signal_name,
+ * idempotency_key)` unique key on `meta.workflow_signals` — which is the only answer that survives
+ * a restart or reaches a second replica. `lookup` distinguishes **unseen** (`null`) from **seen and
+ * delivered nothing** (`[]`), and `remember` is a no-op for a deduplicator whose ledger is the rows
+ * the projection already writes.
+ */
+export interface SignalDeduplicator {
+  lookup(key: SignalIdempotency): Promise<readonly SignalDelivery[] | null>;
+  remember(key: SignalIdempotency, deliveries: readonly SignalDelivery[]): Promise<void>;
+}
+
+/** `tenantId|signalName|idempotencyKey`, the key both deduplicators agree on. */
+export function signalIdempotencyCacheKey(key: SignalIdempotency): string {
+  return `${key.tenantId}|${key.signalName}|${key.idempotencyKey}`;
+}
+
+/**
+ * The offline deduplicator: correct for one process and for nothing else, which is why it is a
+ * default rather than the mechanism.
+ *
+ * **A submit that matched no instance is not remembered.** The persistent deduplicator cannot
+ * remember one — nothing was written, so there is no row to find — and the two must agree, because
+ * the pure engine's tests are the contract. The reading that makes them agree is also the right
+ * one: "no instance matched" is not a delivery, and a retry once an instance exists should deliver.
+ */
+export class InMemorySignalDeduplicator implements SignalDeduplicator {
+  private readonly seen: Map<string, readonly SignalDelivery[]> = new Map();
+
+  async lookup(key: SignalIdempotency): Promise<readonly SignalDelivery[] | null> {
+    return this.seen.get(signalIdempotencyCacheKey(key)) ?? null;
+  }
+
+  async remember(
+    key: SignalIdempotency,
+    deliveries: readonly SignalDelivery[],
+  ): Promise<void> {
+    if (deliveries.length === 0) return;
+    this.seen.set(signalIdempotencyCacheKey(key), deliveries);
+  }
+}
+
+/**
+ * A signal whose definition promises `exactly_once_idempotent` and whose submission carried no key.
+ *
+ * Refused before the `signal_received` event is appended, not after: the stored row would satisfy
+ * every CHECK on `meta.workflow_signals` — `idempotency_key` is nullable — and fail
+ * `WorkflowSignalSchema`, whose `superRefine` requires the key for that guarantee. That is an
+ * ADR-0289-class row, and the only place it can be stopped for good is where it is submitted.
+ */
+export class SignalIdempotencyRequired extends Error {
+  readonly signalName: string;
+  readonly instanceId: string;
+  readonly definitionId: string;
+
+  constructor(input: {
+    readonly signalName: string;
+    readonly instanceId: string;
+    readonly definitionId: string;
+  }) {
+    super(
+      `signal ${input.signalName} is declared exactly_once_idempotent by definition ${input.definitionId}; ` +
+        `submitting it to instance ${input.instanceId} requires an idempotencyKey`,
+    );
+    this.name = "SignalIdempotencyRequired";
+    this.signalName = input.signalName;
+    this.instanceId = input.instanceId;
+    this.definitionId = input.definitionId;
+  }
+}
+
 export interface SubmitSignalResult {
   readonly deduplicated: boolean;
+  /** One entry per instance the signal reached, each with its own signal id. */
+  readonly deliveries: readonly SignalDelivery[];
+  /** `deliveries` projected to instance ids, in delivery order. */
   readonly matchedInstanceIds: readonly string[];
-  readonly signalId: string | null;
 }
 
 export interface TickTimersResult {
@@ -210,9 +377,16 @@ export class WorkflowEngine {
   private readonly guardEvaluator: GuardEvaluator;
   private readonly systemActorId: string;
   private readonly deferActivities: boolean;
-  private readonly seenSignalIdempotency: Set<string> = new Set();
+  private readonly signalDedup: SignalDeduplicator;
   private readonly instanceTenant: Map<string, string> = new Map();
   private readonly instanceCorrelation: Map<string, string> = new Map();
+  /**
+   * The `AbortController` of every activity handler this process currently has running, so a
+   * cancellation can *tell* one. Keyed by instance then activity; an entry exists only for the
+   * window between `activity_started` and the handler settling, which is exactly the window in
+   * which `in_flight_activity`'s weaker guarantee applies.
+   */
+  private readonly inFlightActivities: Map<string, Map<string, AbortController>> = new Map();
   /** Nesting of in-flight `send_signal` dispatches, so a signal cycle is refused, not recursed. */
   private signalDispatchDepth = 0;
 
@@ -224,6 +398,7 @@ export class WorkflowEngine {
     this.ids = opts.idGenerator ?? new RandomIdGenerator();
     this.guardEvaluator = opts.guardEvaluator ?? defaultGuardEvaluator;
     this.systemActorId = opts.systemActorId ?? "workflow-engine";
+    this.signalDedup = opts.signalDeduplicator ?? new InMemorySignalDeduplicator();
     this.deferActivities = opts.deferActivities ?? false;
   }
 
@@ -298,17 +473,46 @@ export class WorkflowEngine {
     return state;
   }
 
+  /**
+   * Delivers one submitted signal to every instance correlated to it.
+   *
+   * **The signal id is minted per delivery**, inside the loop. One id for the fan-out made N
+   * deliveries one row (see `SignalDelivery`), which is why the result reports `deliveries` rather
+   * than a single `signalId`: with N instances there is no such thing.
+   *
+   * **Dedup is asked, not assumed, and asked twice.** A `SignalDeduplicator` answers whether this
+   * key has already been accepted anywhere, and a duplicate returns *the deliveries it originally
+   * produced* instead of an empty match list — a caller retrying a webhook wants the instances it
+   * already reached, and the old answer gave it nothing to hold. Then each instance's **own log**
+   * is asked again before its receipt is appended, because the first answer can be stale: two
+   * concurrent submits of one key both read "unseen", and without this the loser would append a
+   * second receipt whose row the unique key refuses — leaving an instance whose projection can
+   * never be rebuilt. The log is the authority, the deduplicator is the fast path.
+   *
+   * `deduplicated` therefore means **this submit delivered nothing new**, which both paths satisfy.
+   */
   async submitSignal(input: SubmitSignalInput): Promise<SubmitSignalResult> {
-    if (input.idempotencyKey !== undefined) {
-      const key = `${input.tenantId}|${input.signalName}|${input.idempotencyKey}`;
-      if (this.seenSignalIdempotency.has(key)) {
-        return { deduplicated: true, matchedInstanceIds: [], signalId: null };
+    const idempotency: SignalIdempotency | null =
+      input.idempotencyKey === undefined
+        ? null
+        : {
+            tenantId: input.tenantId,
+            signalName: input.signalName,
+            idempotencyKey: input.idempotencyKey,
+          };
+    if (idempotency !== null) {
+      const prior = await this.signalDedup.lookup(idempotency);
+      if (prior !== null) {
+        return {
+          deduplicated: true,
+          deliveries: prior,
+          matchedInstanceIds: prior.map((d) => d.instanceId),
+        };
       }
-      this.seenSignalIdempotency.add(key);
     }
 
-    const signalId = this.ids.generate("wfs");
-    const matched: string[] = [];
+    const deliveries: SignalDelivery[] = [];
+    let appended = 0;
     // Snapshot the registry: delivering a signal can run a `spawn_child_workflow` action, which
     // registers the child mid-loop — a live Map iteration would then deliver this same signal to an
     // instance that did not exist when it was submitted.
@@ -318,10 +522,34 @@ export class WorkflowEngine {
       if (corr !== input.correlationKey) continue;
       const state = await this.getInstanceState(instanceId);
       if (state === null) continue;
+      // Driver fence 3 of 4. As with timers, the status check does not cover it: between the fence
+      // and the finalizing event the instance is still `running`, and a delivered signal would
+      // transition it — running on-entry actions, scheduling activities, spawning children.
+      if (isInstanceCancellationRequested(state)) continue;
       if (state.status !== "running" && state.status !== "waiting_for_signal") continue;
       const definition = this.definitions.get(state.definitionId);
       if (definition === undefined) continue;
+      // Before this instance's own append, so the refusal is what stops the unparseable row rather
+      // than something downstream noticing it after the fact.
+      this.assertIdempotencyKeyStorable(
+        definition,
+        input.signalName,
+        instanceId,
+        idempotency,
+      );
+      if (idempotency !== null) {
+        const already = priorReceiptSignalId(
+          await this.eventLog.listByInstance(instanceId),
+          input.signalName,
+          idempotency.idempotencyKey,
+        );
+        if (already !== null) {
+          deliveries.push({ instanceId, signalId: already });
+          continue;
+        }
+      }
 
+      const signalId = this.ids.generate("wfs");
       const nextSeq = (await this.eventLog.latestSequence(instanceId)) ?? -1;
       const occurredAt = this.clock.nowIso();
       await this.appendEvent({
@@ -343,6 +571,10 @@ export class WorkflowEngine {
           signalName: input.signalName,
           correlationKey: input.correlationKey,
           payload: input.payload ?? {},
+          // On the receipt because the key is a fact of *arrival*, like the source system beside
+          // it: `resolveSignalProvenance` reads both off this event, so the stored row carries the
+          // key the submitter sent and the unique index finally enforces something.
+          idempotencyKey: idempotency?.idempotencyKey ?? null,
         },
         correlationId: input.correlationKey,
         causationEventId: null,
@@ -380,10 +612,40 @@ export class WorkflowEngine {
       });
 
       await this.runStepLoop(instanceId, definition);
-      matched.push(instanceId);
+      deliveries.push({ instanceId, signalId });
+      appended += 1;
     }
 
-    return { deduplicated: false, matchedInstanceIds: matched, signalId };
+    if (idempotency !== null) await this.signalDedup.remember(idempotency, deliveries);
+    return {
+      deduplicated: deliveries.length > 0 && appended === 0,
+      deliveries,
+      matchedInstanceIds: deliveries.map((d) => d.instanceId),
+    };
+  }
+
+  /**
+   * Refuses a submission the signal table could only store as a row the contract forbids.
+   *
+   * The guarantee is the *definition's*, never the submitter's, so this reads it off the declared
+   * `SignalDefinition` — and an undeclared signal is left alone, because
+   * `WorkflowDefinitionSchema` already refuses a `signal_received` transition naming one, so
+   * nothing can be delivered under a name the definition does not hold.
+   */
+  private assertIdempotencyKeyStorable(
+    definition: WorkflowDefinition,
+    signalName: string,
+    instanceId: string,
+    idempotency: SignalIdempotency | null,
+  ): void {
+    if (idempotency !== null) return;
+    const declared = definition.signals.find((s) => s.name === signalName);
+    if (declared?.deliveryGuarantee !== "exactly_once_idempotent") return;
+    throw new SignalIdempotencyRequired({
+      signalName,
+      instanceId,
+      definitionId: definition.id,
+    });
   }
 
   async tickTimers(nowMs: number): Promise<TickTimersResult> {
@@ -409,6 +671,12 @@ export class WorkflowEngine {
   async fireDueTimersForInstance(instanceId: string, nowMs: number): Promise<TickTimersResult> {
     const state = await this.getInstanceState(instanceId);
     if (state === null) return { firedTimerIds: [], affectedInstanceIds: [] };
+    // Driver fence 1 of 4. The status check below does not cover this: a cancellation leaves the
+    // instance `running` until its finalizing event, so without this a timer could fire into an
+    // instance that is on its way out — and a cancellation that fires timers is worse than none.
+    if (isInstanceCancellationRequested(state)) {
+      return { firedTimerIds: [], affectedInstanceIds: [] };
+    }
     if (state.status !== "waiting_for_timer" && state.status !== "running") {
       return { firedTimerIds: [], affectedInstanceIds: [] };
     }
@@ -418,6 +686,13 @@ export class WorkflowEngine {
     const firedTimerIds: string[] = [];
     for (const timer of scheduled) {
       if (timer.fireAt > nowMs) continue;
+      const declared = definition.timers.find((t) => t.name === timer.name);
+      // A fired timer the definition does not declare cannot be re-armed and cannot be told apart
+      // from a one-shot, so it fires once and nothing recurs — the honest answer for a log written
+      // against a definition that has since been superseded. `applyScheduleTimer` refuses to arm one,
+      // so this is unreachable from the write path.
+      const nextFireAt =
+        declared === undefined ? null : this.nextOccurrenceFor(instanceId, declared, nowMs);
       const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
       await this.appendEvent({
         instanceId,
@@ -434,7 +709,13 @@ export class WorkflowEngine {
         timerId: timer.id,
         childInstanceId: null,
         variableName: null,
-        payload: { timerName: timer.name },
+        // `nextFireAt` is in the *firing* event and not only in the re-arm, because the projection
+        // has to be able to answer "when does this next fire" for a timer that fired and was not
+        // re-armed — which is every recurring timer on an instance that ended in the same fire.
+        payload: {
+          timerName: timer.name,
+          ...(nextFireAt === null ? {} : { nextFireAt }),
+        },
         correlationId: null,
         causationEventId: null,
       });
@@ -452,58 +733,255 @@ export class WorkflowEngine {
         await this.applyTransition(instanceId, definition, transition, liveState, null, timer.id);
       }
       await this.runStepLoop(instanceId, definition);
+      // Re-armed **after** the transition and the step loop, and only while the instance can still
+      // act on the next occurrence. Re-arming unconditionally would leave a `scheduled` row on a
+      // completed instance, which `fireDueTimersForInstance` refuses to advance on its status check —
+      // so a worker would claim it, fire nothing, let the lease lapse and claim it again forever.
+      // That is the hot loop ADR-0333 found on the UUID/TEXT mismatch, rebuilt deliberately.
+      if (declared !== null && declared !== undefined && nextFireAt !== null) {
+        const after = await this.getInstanceState(instanceId);
+        if (after !== null && (after.status === "running" || after.status === "waiting_for_timer")) {
+          await this.appendTimerRearm(
+            instanceId,
+            state.tenantId,
+            declared,
+            timer.id,
+            nowMs,
+            nextFireAt,
+          );
+        }
+      }
     }
     return { firedTimerIds, affectedInstanceIds: firedTimerIds.length > 0 ? [instanceId] : [] };
   }
 
-  /**
-   * The instance's timers that are still outstanding, derived from the log alone: scheduled and not
-   * yet fired or cancelled. Both the firing path and `cancel_timer` read from here, so an already
-   * fired or cancelled timer is invisible to both and a re-delivered claim or a repeated cancel is a
-   * no-op rather than a second terminal event for one timer.
-   */
-  private async outstandingTimers(instanceId: string): Promise<readonly ScheduledTimer[]> {
-    const events = await this.eventLog.listByInstance(instanceId);
-    const scheduled = new Map<string, ScheduledTimer>();
-    for (const e of events) {
-      if (e.kind === "timer_scheduled" && e.timerId !== null) {
-        const name = typeof e.payload["timerName"] === "string" ? (e.payload["timerName"] as string) : "";
-        const fireAt = typeof e.payload["fireAt"] === "string" ? Date.parse(e.payload["fireAt"] as string) : Number.MAX_SAFE_INTEGER;
-        scheduled.set(e.timerId, { id: e.timerId, name, fireAt });
-      } else if ((e.kind === "timer_fired" || e.kind === "timer_cancelled") && e.timerId !== null) {
-        scheduled.delete(e.timerId);
-      }
-    }
-    return [...scheduled.values()];
+  /** This instance's still-scheduled timers, from the log (see `outstandingTimersFromLog`). */
+  private async outstandingTimers(instanceId: string): Promise<readonly OutstandingTimer[]> {
+    return outstandingTimersFromLog(await this.eventLog.listByInstance(instanceId));
   }
 
-  async cancelInstance(input: {
-    instanceId: string;
-    reason: string;
-    cancelledByUserId?: string | null;
-  }): Promise<void> {
-    const state = await this.getInstanceState(input.instanceId);
-    if (state === null) throw new Error(`unknown instance ${input.instanceId}`);
-    if (state.status === "completed" || state.status === "cancelled" || state.status === "compensated") {
-      throw new Error(`cannot cancel instance in terminal status ${state.status}`);
+  /**
+   * Cancels a workflow instance: drops its unfired timers, refuses to start anything further, tells
+   * whatever is already running, optionally rolls the instance back, and finalizes it.
+   *
+   * **The order of the appends is the guarantee.** `instance_cancellation_requested` goes first and
+   * is the fence every driver loop reads, so from that moment no timer fires, no activity starts and
+   * no automatic transition runs — and that is true *before* any of the slower work below, which is
+   * why the fence is an event and not the terminal status. `instance_cancelled` goes last, because
+   * it seals the projection: once folded, nothing moves the status, which is what lets a handler
+   * that ignored its signal report afterwards without resurrecting the instance.
+   *
+   * **Nothing is thrown for a refusal.** The five outcomes are reported distinctly, as ADR-0315's
+   * route does, because "the instance does not exist", "somebody already cancelled it" and "it
+   * failed, compensate it instead" are three different answers a caller has to act on differently.
+   */
+  async cancelInstance(input: InstanceCancellationRequestInput): Promise<CancelInstanceResult> {
+    const request = InstanceCancellationRequestSchema.parse(input);
+    const state = await this.getInstanceState(request.instanceId);
+    const events =
+      state === null ? [] : await this.eventLog.listByInstance(request.instanceId);
+    const definition =
+      state === null ? undefined : this.definitions.get(state.definitionId);
+    const plan = planInstanceCancellation({
+      status: state?.status ?? null,
+      cancellationAlreadyRequested:
+        state !== null && isInstanceCancellationRequested(state),
+      disposition: request.disposition,
+      // An unregistered definition cannot name a rollback strategy, so the honest reading is that no
+      // compensation is available here — not that the caller's `compensate` silently did nothing.
+      strategy: definition?.compensationStrategy ?? "no_compensation",
+      work: surveyCancellableWork(events),
+    });
+    if (plan.outcome !== "cancelled" || state === null) {
+      return {
+        outcome: plan.outcome,
+        cancelledTimerIds: [],
+        beforeHandlerActivityIds: [],
+        cooperativeAbortActivityIds: [],
+        signalDeliveredActivityIds: [],
+        compensationOutcome: plan.compensationOutcome,
+        compensatedActivityIds: [],
+        unreversedActivityIds: [],
+      };
     }
-    const nextSeq = (await this.eventLog.latestSequence(input.instanceId))!;
-    await this.appendEvent({
-      instanceId: input.instanceId,
-      tenantId: state.tenantId,
-      sequenceNumber: nextSeq + 1,
+
+    const tenantId = state.tenantId;
+    await this.appendInstanceEvent(request.instanceId, tenantId, {
+      kind: "instance_cancellation_requested",
+      actorPrincipalId: request.requestedByUserId,
+      actorSystemId: request.requestedBySystem ?? this.systemActorId,
+      payload: {
+        reason: request.reason,
+        disposition: request.disposition,
+        compensationOutcome: plan.compensationOutcome,
+      },
+    });
+
+    for (const timerId of plan.dropTimerIds) {
+      const timer = (await this.outstandingTimers(request.instanceId)).find(
+        (t) => t.id === timerId,
+      );
+      if (timer === undefined) continue;
+      await this.appendInstanceEvent(request.instanceId, tenantId, {
+        kind: "timer_cancelled",
+        timerId,
+        // The projection keys `awaitingTimerNames` by name, so the drop has to carry the name the
+        // schedule carried or the instance stays recorded as waiting on a timer that cannot fire.
+        payload: { timerName: timer.name, cancelledBy: "instance_cancellation" },
+      });
+    }
+
+    for (const activityId of plan.cancelBeforeHandlerActivityIds) {
+      await this.appendActivityCancelled(
+        request.instanceId,
+        tenantId,
+        activityId,
+        "before_handler",
+        false,
+      );
+    }
+
+    const signalDelivered: string[] = [];
+    for (const activityId of plan.signalActivityIds) {
+      const controller = this.inFlightActivities.get(request.instanceId)?.get(activityId);
+      if (controller !== undefined && !controller.signal.aborted) {
+        controller.abort();
+        signalDelivered.push(activityId);
+      }
+      await this.appendActivityCancelled(
+        request.instanceId,
+        tenantId,
+        activityId,
+        "cooperative_abort",
+        controller !== undefined,
+      );
+    }
+
+    const compensatedActivityIds =
+      plan.compensationOutcome === "executed" && definition !== undefined
+        ? await this.compensateForCancellation(request.instanceId, definition, state)
+        : [];
+
+    await this.appendInstanceEvent(request.instanceId, tenantId, {
       kind: "instance_cancelled",
+      actorPrincipalId: request.requestedByUserId,
+      actorSystemId: request.requestedBySystem ?? this.systemActorId,
+      payload: {
+        reason: request.reason,
+        disposition: request.disposition,
+        compensationOutcome: plan.compensationOutcome,
+        compensatedActivityIds,
+        // What this cancellation leaves standing. On the record rather than only in a return value,
+        // because the caller's process is not what a later reader has.
+        unreversedActivityIds: plan.unreversedActivityIds,
+      },
+    });
+
+    return {
+      outcome: "cancelled",
+      cancelledTimerIds: plan.dropTimerIds,
+      beforeHandlerActivityIds: plan.cancelBeforeHandlerActivityIds,
+      cooperativeAbortActivityIds: plan.signalActivityIds,
+      signalDeliveredActivityIds: signalDelivered,
+      compensationOutcome: plan.compensationOutcome,
+      compensatedActivityIds,
+      unreversedActivityIds: plan.unreversedActivityIds,
+    };
+  }
+
+  /**
+   * Runs the saga rollback as part of a cancellation, emitting `activity_compensated` per step and
+   * **not** the `compensation_started` / `compensation_completed` bracket the failure path uses.
+   *
+   * Those two move the instance to `compensating` and then `compensated`, and `INSTANCE_TRANSITIONS`
+   * offers no `compensated → cancelled` edge — so using them would either leave the instance ending
+   * `compensated` (indistinguishable from a saga unwinding a *failure*, losing the fact that a human
+   * cancelled it) or write a path the state machine forbids. The instance ends `cancelled` in both
+   * dispositions; the rollback is part of that act, not a state the instance passes through.
+   */
+  private async compensateForCancellation(
+    instanceId: string,
+    definition: WorkflowDefinition,
+    state: ProjectedInstance,
+  ): Promise<readonly string[]> {
+    const events = await this.eventLog.listByInstance(instanceId);
+    const plan = planCompensation({ definition, events });
+    if (plan.steps.length === 0) return [];
+    const kindByActivityId = compensationKindByActivityId(events);
+    const inputByActivityId = new Map<string, Record<string, unknown>>();
+    for (const e of events) {
+      if (e.kind === "activity_scheduled" && e.activityId !== null) {
+        inputByActivityId.set(
+          e.activityId,
+          (e.payload["input"] as Record<string, unknown> | undefined) ?? {},
+        );
+      }
+    }
+    const compensated: string[] = [];
+    for (const step of plan.steps) {
+      await this.compensateStep(
+        instanceId,
+        definition,
+        state.tenantId,
+        state.variables,
+        step,
+        kindByActivityId.get(step.originalActivityId) ?? "compensation",
+        inputByActivityId.get(step.originalActivityId) ?? {},
+      );
+      compensated.push(step.originalActivityId);
+    }
+    return compensated;
+  }
+
+  /** Appends one `activity_cancelled`, carrying which of the two guarantees applied. */
+  private async appendActivityCancelled(
+    instanceId: string,
+    tenantId: string,
+    activityId: string,
+    checkpoint: ActivityCancellationCheckpoint,
+    signalDelivered: boolean,
+  ): Promise<void> {
+    await this.appendInstanceEvent(instanceId, tenantId, {
+      kind: "activity_cancelled",
+      activityId,
+      payload: { checkpoint, signalDelivered },
+    });
+  }
+
+  /**
+   * Appends one event at the instance's next sequence number, defaulting every field a cancellation
+   * does not set. The sequence is read immediately before the append so a run of appends stays
+   * dense, which `isHistoryDense` asserts.
+   */
+  private async appendInstanceEvent(
+    instanceId: string,
+    tenantId: string,
+    input: {
+      readonly kind: WorkflowEvent["kind"];
+      readonly payload: Record<string, unknown>;
+      readonly actorPrincipalId?: string | null;
+      readonly actorSystemId?: string | null;
+      readonly activityId?: string | null;
+      readonly timerId?: string | null;
+    },
+  ): Promise<void> {
+    const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
+    await this.appendEvent({
+      instanceId,
+      tenantId,
+      sequenceNumber: nextSeq + 1,
+      kind: input.kind,
       occurredAt: this.clock.nowIso(),
-      actorPrincipalId: input.cancelledByUserId ?? null,
-      actorSystemId: this.systemActorId,
+      actorPrincipalId: input.actorPrincipalId ?? null,
+      actorSystemId: input.actorSystemId ?? this.systemActorId,
       previousState: null,
       newState: null,
-      activityId: null,
+      activityId: input.activityId ?? null,
       signalId: null,
-      timerId: null,
+      timerId: input.timerId ?? null,
       childInstanceId: null,
       variableName: null,
-      payload: { reason: input.reason },
+      payload: input.payload,
       correlationId: null,
       causationEventId: null,
     });
@@ -538,6 +1016,9 @@ export class WorkflowEngine {
     for (let i = 0; i < MAX_STEP_ITERATIONS; i++) {
       const state = await this.getInstanceState(instanceId);
       if (state === null) return;
+      // Driver fence 2 of 4, and it is placed above the terminal-state-kind check on purpose: a
+      // cancelled instance sitting in a `terminal_success` state must not emit `instance_completed`.
+      if (isInstanceCancellationRequested(state)) return;
       if (
         state.status === "completed" ||
         state.status === "failed" ||
@@ -648,7 +1129,7 @@ export class WorkflowEngine {
         await this.applyScheduleActivity(instanceId, definition, action, tenantId);
         return;
       case "schedule_timer":
-        await this.applyScheduleTimer(instanceId, tenantId, action);
+        await this.applyScheduleTimer(instanceId, definition, tenantId, action);
         return;
       case "cancel_timer":
         await this.applyCancelTimer(instanceId, tenantId, action);
@@ -907,6 +1388,13 @@ export class WorkflowEngine {
         detail: `signal dispatch is already ${this.signalDispatchDepth.toString()} deep (limit ${MAX_SIGNAL_DISPATCH_DEPTH.toString()}); signal ${signalName} is part of a cycle`,
       });
     }
+    // An internal dispatch can carry a key too, and must be able to: a target signal declared
+    // `exactly_once_idempotent` is refused without one, so without this parameter a workflow could
+    // address every signal in the catalog except the ones with the strongest guarantee. It is read
+    // from `parameters` rather than synthesised, because a key the engine invents is either a
+    // nonce (which deduplicates nothing) or a function of the send site (which deduplicates two
+    // legitimately distinct sends into one).
+    const idempotencyKey = stringParam(action, "idempotencyKey");
     this.signalDispatchDepth += 1;
     try {
       await this.submitSignal({
@@ -915,6 +1403,7 @@ export class WorkflowEngine {
         tenantId,
         payload: recordParam(action, "payload"),
         sourceSystem: this.systemActorId,
+        ...(idempotencyKey !== null ? { idempotencyKey } : {}),
       });
     } finally {
       this.signalDispatchDepth -= 1;
@@ -1033,6 +1522,12 @@ export class WorkflowEngine {
     availableAt: string | null,
     compensationActivityKey: string | null = null,
   ): Promise<void> {
+    // Driver fence 4a of 4. The single choke point through which every activity attempt passes —
+    // the first one and every retry — so a cancelled instance neither records a new scheduled
+    // activity nor leaves one claimable by a worker in another process.
+    const fenceState = await this.getInstanceState(instanceId);
+    if (fenceState !== null && isInstanceCancellationRequested(fenceState)) return;
+
     const activityId = this.ids.generate("wfa");
     const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
     await this.appendEvent({
@@ -1072,6 +1567,27 @@ export class WorkflowEngine {
     await this.runActivityHandler(instanceId, definition, activityId, activityKey, kind, inputData, attemptNumber, maxAttempts, tenantId, backoff, compensationActivityKey);
   }
 
+  /** Registers a running handler's abort channel, so a cancellation can tell it. */
+  private registerInFlight(
+    instanceId: string,
+    activityId: string,
+    controller: AbortController,
+  ): void {
+    const existing = this.inFlightActivities.get(instanceId);
+    if (existing === undefined) {
+      this.inFlightActivities.set(instanceId, new Map([[activityId, controller]]));
+      return;
+    }
+    existing.set(activityId, controller);
+  }
+
+  private clearInFlight(instanceId: string, activityId: string): void {
+    const byActivity = this.inFlightActivities.get(instanceId);
+    if (byActivity === undefined) return;
+    byActivity.delete(activityId);
+    if (byActivity.size === 0) this.inFlightActivities.delete(instanceId);
+  }
+
   /**
    * Runs a scheduled activity's handler: appends `activity_started`, invokes the resolved handler,
    * appends the outcome (`activity_completed` / `_failed` / `_timed_out`), and applies the resulting
@@ -1090,7 +1606,7 @@ export class WorkflowEngine {
     tenantId: string,
     backoff: ActivityRetryBackoff = null,
     compensationActivityKey: string | null = null,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const handler =
       this.registry.resolve({
         kind: kind as never,
@@ -1098,6 +1614,10 @@ export class WorkflowEngine {
         activityKey,
       }) ?? unsupportedHandler;
     const state = await this.getInstanceState(instanceId);
+    // Driver fence 4b of 4. 4a stops a *new* attempt being recorded; this stops an attempt already
+    // sitting `scheduled` in the log from being entered, which is the case a distributed worker
+    // reaches through `executeScheduledActivity` — the one path that does not come via 4a.
+    if (state !== null && isInstanceCancellationRequested(state)) return false;
     const startedSeq = (await this.eventLog.latestSequence(instanceId))!;
     await this.appendEvent({
       instanceId,
@@ -1120,6 +1640,8 @@ export class WorkflowEngine {
     });
 
     let outcome;
+    const controller = new AbortController();
+    this.registerInFlight(instanceId, activityId, controller);
     try {
       outcome = await handler({
         activityId,
@@ -1131,6 +1653,7 @@ export class WorkflowEngine {
         attemptNumber,
         input: inputData,
         variables: state?.variables ?? {},
+        signal: controller.signal,
       });
     } catch (err) {
       outcome = {
@@ -1139,6 +1662,10 @@ export class WorkflowEngine {
         errorMessage: err instanceof Error ? err.message : String(err),
         retryable: false,
       };
+    } finally {
+      // Deregistered the moment the handler settles, so no cancellation ever aborts a controller
+      // whose work is already over — the same rule as `abortWhile`'s watcher not outliving its task.
+      this.clearInFlight(instanceId, activityId);
     }
 
     const completionSeq = (await this.eventLog.latestSequence(instanceId))!;
@@ -1165,7 +1692,11 @@ export class WorkflowEngine {
         causationEventId: null,
       });
       const liveState = await this.getInstanceState(instanceId);
-      if (liveState !== null) {
+      // A handler that ignored its signal is allowed to *report* — the outcome above is a fact and
+      // ADR-0315 says so out loud. It is not allowed to *move* the instance: applying its trigger
+      // would run the next state's on-entry actions, which is new work starting after a
+      // cancellation. The projection's seal keeps the status right; this keeps the log right.
+      if (liveState !== null && !isInstanceCancellationRequested(liveState)) {
         const transition = evaluateNextTransition({
           definition,
           fromState: liveState.currentState,
@@ -1216,7 +1747,7 @@ export class WorkflowEngine {
         await this.scheduleActivity(instanceId, definition, activityKey, kind, inputData, attemptNumber + 1, maxAttempts, tenantId, backoff, availableAt, compensationActivityKey);
       } else {
         const liveState = await this.getInstanceState(instanceId);
-        if (liveState !== null) {
+        if (liveState !== null && !isInstanceCancellationRequested(liveState)) {
           const transition = evaluateNextTransition({
             definition,
             fromState: liveState.currentState,
@@ -1250,6 +1781,7 @@ export class WorkflowEngine {
         causationEventId: null,
       });
     }
+    return true;
   }
 
   /**
@@ -1302,7 +1834,7 @@ export class WorkflowEngine {
     if (state === null) return { executed: false };
     const definition = this.definitions.get(state.definitionId);
     if (definition === undefined) return { executed: false };
-    await this.runActivityHandler(
+    const handlerRan = await this.runActivityHandler(
       instanceId,
       definition,
       activityId,
@@ -1315,6 +1847,9 @@ export class WorkflowEngine {
       scheduled.backoff,
       scheduled.compensationActivityKey,
     );
+    // `executed` has to mean the handler ran. A cancellation refuses it at fence 4b, and reporting
+    // `true` there would tell a worker its claim was honoured when nothing was invoked.
+    if (!handlerRan) return { executed: false };
     // The inline path runs inside the step loop; the distributed entry point must drive it itself
     // so a terminal transition emits instance_completed / runs the next state's on-entry actions.
     await this.runStepLoop(instanceId, definition);
@@ -1457,6 +1992,9 @@ export class WorkflowEngine {
           attemptNumber: 1,
           input,
           variables,
+          // A compensating handler is never registered as in-flight and gets a signal that cannot
+          // trip: it is the *undo*, so the cancellation that asked for it must not then abort it.
+          signal: new AbortController().signal,
         });
       } catch (err) {
         outcome = {
@@ -1497,20 +2035,69 @@ export class WorkflowEngine {
     });
   }
 
+  /**
+   * Arms a declared timer **at the instant its own kind says**, which is what this did not do.
+   *
+   * It used to read `parameters.relativeSeconds` (defaulting to 60) and ignore the declared `kind`
+   * entirely, so a definition declaring `cron_schedule`, `absolute_at` or `business_hours` got a
+   * fire-once timer at `now + 60s` — while `timer-provenance.ts` wrote the **declared** kind into
+   * `meta.workflow_timers`. The row said `cron_schedule` and the behaviour was `relative_after`,
+   * which is the sharpest shape of this family's defect: the record is right, the behaviour is
+   * wrong, and so nothing disagrees with anything.
+   *
+   * The declaration is the only input. An undeclared timer name is a named refusal rather than the
+   * old `"timer"` fallback — which armed a timer no transition could ever be triggered by, because
+   * `evaluateNextTransition` matches a `timer_fired` trigger by name. `WorkflowDefinitionSchema`
+   * refuses both at publication now; this is the second fence, for a definition stored before it.
+   */
   private async applyScheduleTimer(
     instanceId: string,
+    definition: WorkflowDefinition,
     tenantId: string,
     action: StateAction,
   ): Promise<void> {
-    const timerName =
-      typeof action.parameters["timerName"] === "string"
-        ? (action.parameters["timerName"] as string)
-        : "timer";
-    const relativeSeconds =
-      typeof action.parameters["relativeSeconds"] === "number"
-        ? (action.parameters["relativeSeconds"] as number)
-        : 60;
-    const fireAt = new Date(this.clock.now().getTime() + relativeSeconds * 1000).toISOString();
+    const timerName = stringParam(action, "timerName");
+    if (timerName === null) {
+      throw new WorkflowActionError({
+        actionKind: "schedule_timer",
+        failure: "missing_parameter",
+        instanceId,
+        detail: "parameters.timerName must be a non-empty string naming a declared timer",
+      });
+    }
+    const declared = definition.timers.find((t) => t.name === timerName);
+    if (declared === undefined) {
+      throw new WorkflowActionError({
+        actionKind: "schedule_timer",
+        failure: "undeclared_timer",
+        instanceId,
+        detail:
+          `definition ${definition.id} declares no timer named ${JSON.stringify(timerName)} ` +
+          `(declared: ${definition.timers.map((t) => t.name).join(", ") || "none"})`,
+      });
+    }
+    // `absolute_at` reads its instant out of an instance variable, so the projection is an input to
+    // scheduling — log-driven like every other read here, so this works for an instance this engine
+    // never started. The extra read is taken only for the kinds that need it, decided by reading
+    // `TIMER_KIND_SCHEDULING` rather than by naming the kind here: a fifth kind that reads a
+    // variable would otherwise get an empty variable bag and refuse `absolute_variable_unset`.
+    const needsVariables = TIMER_KIND_SCHEDULING[declared.kind].reads.includes(
+      "absoluteTimestampVariable",
+    );
+    const projected = needsVariables ? await this.getInstanceState(instanceId) : null;
+    const resolution = resolveTimerFireAt(declared, {
+      now: this.clock.now(),
+      variables: projected?.variables ?? {},
+    });
+    if (!resolution.ok) {
+      throw new WorkflowActionError({
+        actionKind: "schedule_timer",
+        failure: "unschedulable_timer",
+        instanceId,
+        detail: `timer ${timerName} (${declared.kind}): ${resolution.defect} — ${resolution.detail}`,
+      });
+    }
+    const fireAt = resolution.fireAt;
     const timerId = this.ids.generate("wft");
     const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
     await this.appendEvent({
@@ -1528,7 +2115,86 @@ export class WorkflowEngine {
       timerId,
       childInstanceId: null,
       variableName: null,
-      payload: { timerName, fireAt },
+      // `timerKind` rides along so the log alone says what schedule this arming came from. Nothing
+      // reads it back for scheduling (the definition is the authority and is immutable once
+      // published), but a `timer_scheduled` that does not name its kind cannot be told from one
+      // written by the engine that scheduled everything as `relative_after`.
+      payload: { timerName, fireAt, timerKind: declared.kind },
+      correlationId: null,
+      causationEventId: null,
+    });
+  }
+
+  /**
+   * The instant a recurring timer next fires after this one, or `null` when the kind fires once.
+   *
+   * `null` is the contract rather than a gap: `WorkflowTimerSchema` requires `nextFireAt` to be null
+   * for every kind but `cron_schedule`. A *recurring* timer whose next occurrence cannot be computed
+   * throws instead, because a `fired` cron row with no next occurrence is a recurring timer that has
+   * silently stopped recurring — the row `timer-provenance.ts` refuses to store.
+   */
+  private nextOccurrenceFor(
+    instanceId: string,
+    declared: TimerDefinition,
+    firedAtMs: number,
+  ): string | null {
+    const resolution = resolveNextTimerFireAt(declared, { after: new Date(firedAtMs) });
+    if (resolution === null) return null;
+    if (!resolution.ok) {
+      throw new WorkflowActionError({
+        actionKind: "schedule_timer",
+        failure: "unschedulable_timer",
+        instanceId,
+        detail:
+          `timer ${declared.name} (${declared.kind}) fired but its next occurrence could not be ` +
+          `computed: ${resolution.defect} — ${resolution.detail}`,
+      });
+    }
+    return resolution.fireAt;
+  }
+
+  /**
+   * Arms a recurring timer's next occurrence on the **same timer id**.
+   *
+   * One row per schedule, moving — not one row per occurrence — because that is what the contract
+   * already models: `projectTimers` *counts* fires rather than setting a flag, `WorkflowTimerSchema`
+   * caps `fireCount` at a million for `cron_schedule` and at one for every other kind, and
+   * `meta.workflow_timers` carries `fire_count` and `next_fire_at` on one row.
+   *
+   * It must be appended **after** the `timer_fired` it follows: `outstandingTimersFromLog` drops a
+   * timer id on `timer_fired` and re-admits it on a later `timer_scheduled`, so the other order
+   * would arm the next occurrence and then immediately cancel it out.
+   */
+  private async appendTimerRearm(
+    instanceId: string,
+    tenantId: string,
+    declared: TimerDefinition,
+    timerId: string,
+    firedAtMs: number,
+    nextFireAt: string,
+  ): Promise<void> {
+    const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
+    await this.appendEvent({
+      instanceId,
+      tenantId,
+      sequenceNumber: nextSeq + 1,
+      kind: "timer_scheduled",
+      occurredAt: new Date(firedAtMs).toISOString(),
+      actorPrincipalId: null,
+      actorSystemId: this.systemActorId,
+      previousState: null,
+      newState: null,
+      activityId: null,
+      signalId: null,
+      timerId,
+      childInstanceId: null,
+      variableName: null,
+      payload: {
+        timerName: declared.name,
+        fireAt: nextFireAt,
+        timerKind: declared.kind,
+        rearm: true,
+      },
       correlationId: null,
       causationEventId: null,
     });

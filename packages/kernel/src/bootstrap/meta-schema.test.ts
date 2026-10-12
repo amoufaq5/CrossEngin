@@ -107,6 +107,9 @@ import {
   META_TENANT_DATA_EXPORTS,
   META_TENANT_LIFECYCLE_EVENTS,
   META_TENANT_STORAGE_USAGE,
+  META_ARCHITECT_ESTIMATE_INFLATION,
+  META_NOTIFICATION_READ_STATES,
+  META_WORKFLOW_INSTANCES,
   META_TENANT_TOMBSTONES,
   META_TENANT_UNIT_ECONOMICS,
   META_TENANTS,
@@ -118,7 +121,6 @@ import {
   META_WORKFLOW_ACTIVITIES,
   META_WORKFLOW_DEFINITIONS,
   META_WORKFLOW_EVENTS,
-  META_WORKFLOW_INSTANCES,
   META_WORKFLOW_SIGNALS,
   META_WORKFLOW_TIMERS,
 } from "./meta-schema.js";
@@ -134,9 +136,144 @@ function uniqueConstraintName(column: ColumnDefinition | undefined): string | un
 }
 
 
+/**
+ * The isolation predicate every tenant-scoped policy carries. Spelled here rather than exported
+ * from the catalog: it is module-private there for a reason, and a test that imports it could not
+ * then catch the catalog changing it. "The two agree" is asserted over the whole catalog instead.
+ */
+const TENANT_ISOLATION_USING =
+  "tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID";
+
+/**
+ * A table's platform read arm, which since ADR-0332 is a `SELECT`-scoped policy of its own rather
+ * than an `OR` inside the isolation one. Found by its predicate, not by its name, so a renamed
+ * policy still satisfies the assertions that use this.
+ */
+function platformReadOf(t: TableDefinition) {
+  return (t.rls?.policies ?? []).find((p) => (p.using ?? "").trim() === "tenant_id IS NULL");
+}
+
+/**
+ * The four grants an `INSERT`- or `UPDATE`-scoped platform policy may check (ADR-0332).
+ *
+ * Spelled here rather than imported from `@crossengin/kernel-pg`, which would invert the package
+ * dependency. The other direction is asserted in `kernel-pg`'s `connection.test.ts`, which reads
+ * the real catalog and refuses a GUC the vocabulary does not spell — both directions are wanted,
+ * because a name with two copies is exactly what ADR-0288 is the standing lesson about.
+ */
+const PLATFORM_WRITE_GRANTS_IN_CATALOG = [
+  "app.platform_audit_write",
+  "app.platform_record_write",
+  "app.platform_config_write",
+  "app.platform_key_write",
+] as const;
+
+interface PolicyClause {
+  readonly table: string;
+  readonly name: string;
+  readonly command: string;
+  readonly clause: string;
+}
+
+function policyClauses(): readonly PolicyClause[] {
+  return META_TABLES.flatMap((t) =>
+    (t.rls?.policies ?? []).flatMap((pol) =>
+      [pol.using, pol.check]
+        .filter((c): c is string => c !== undefined)
+        .map((clause) => ({ table: t.name, name: pol.name, command: pol.command ?? "ALL", clause })),
+    ),
+  );
+}
+
+function grantedClauses(): readonly PolicyClause[] {
+  return policyClauses().filter((c) =>
+    PLATFORM_WRITE_GRANTS_IN_CATALOG.some((g) => c.clause.includes(g)),
+  );
+}
+
+describe("the platform write grants", () => {
+  it("is checked by every one of the four, so none is declared with nothing behind it", () => {
+    const all = policyClauses()
+      .map((c) => c.clause)
+      .join(" ");
+    for (const guc of PLATFORM_WRITE_GRANTS_IN_CATALOG) expect(all).toContain(guc);
+  });
+
+  it("is checked only by INSERT- and UPDATE-scoped policies", () => {
+    // On an `ALL`-scope policy the `USING` expression also serves as the `WITH CHECK`, which is the
+    // defect this increment closes — and it would hand the grant a DELETE besides. Nothing in the
+    // catalog deletes a platform row (retirement is a status column in every one of these
+    // contracts), so `DELETE` is deliberately reachable by no policy at all.
+    for (const c of grantedClauses()) {
+      expect(`${c.table}.${c.name}: ${c.command}`).toMatch(/: (INSERT|UPDATE)$/);
+    }
+  });
+
+  it("is always ANDed with `tenant_id IS NULL` in the clause that checks it", () => {
+    // So holding a write elevation buys no access to any *tenant's* rows: the isolation policy is
+    // still the only route to one, and it still demands that tenant's context.
+    for (const c of grantedClauses()) {
+      expect(`${c.table}.${c.name}: ${c.clause}`).toContain("tenant_id IS NULL");
+    }
+  });
+
+  it("never appears on a SELECT policy", () => {
+    // ADR-0313's rule as a catalog-wide assertion: a grant that authorises a write must never also
+    // be a route to another tenant's rows. The cross-tenant *read* grant is `app.platform_audit`,
+    // which has no `_write` suffix and so is not in this list at all.
+    for (const c of policyClauses()) {
+      if (c.command !== "SELECT") continue;
+      for (const guc of PLATFORM_WRITE_GRANTS_IN_CATALOG) {
+        expect(`${c.table}.${c.name}: ${c.clause}`).not.toContain(guc);
+      }
+    }
+  });
+});
+
+describe("no table carries the permissive platform arm any more", () => {
+  const PERMISSIVE =
+    "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID";
+
+  it("is spelled by no policy in the catalog", () => {
+    // It was spelled by 29, and on every one `tenant_id IS NULL` satisfied the `WITH CHECK`
+    // unconditionally, so any tenant session could insert, update or delete a platform-wide row.
+    // Demonstrated live as a non-owner role before the split: an `INSERT 0 1` of a platform-wide
+    // quota definition, an `UPDATE 1` of the platform flag gating JWT audience checking, and a
+    // `DELETE 1` of it — three statements, three successes, from a plain tenant session.
+    const offenders = META_TABLES.flatMap((t) =>
+      (t.rls?.policies ?? [])
+        .filter((pol) => pol.using === PERMISSIVE || pol.check === PERMISSIVE)
+        .map((pol) => `${t.name}.${pol.name}`),
+    );
+    expect(offenders).toEqual([]);
+  });
+
+  it("gives a platform read arm the SELECT scope and never a wider one", () => {
+    // The replacement shape, asserted as a rule rather than as a list of 29: a platform row stays
+    // readable by anyone (an integrity pass and a template resolver both need that) and is writable
+    // only under an elevation.
+    for (const t of META_TABLES) {
+      const arm = platformReadOf(t);
+      if (arm === undefined) continue;
+      expect(`${t.name}.${arm.name}`).toBe(`${t.name}.${arm.name}`);
+      expect(arm.command).toBe("SELECT");
+    }
+  });
+
+  it("pairs every platform read arm with exactly one INSERT arm", () => {
+    // A read arm with no write arm would be a table whose platform row nothing can create; a second
+    // write arm would be a second route to one. Both are findings rather than configurations.
+    for (const t of META_TABLES) {
+      if (platformReadOf(t) === undefined) continue;
+      const inserts = (t.rls?.policies ?? []).filter((pol) => pol.command === "INSERT");
+      expect(`${t.name}: ${inserts.length.toString()} INSERT arm(s)`).toBe(`${t.name}: 1 INSERT arm(s)`);
+    }
+  });
+});
+
 describe("META_TABLES", () => {
-  it("contains 143 tables", () => {
-    expect(META_TABLES).toHaveLength(143);
+  it("contains 146 tables", () => {
+    expect(META_TABLES).toHaveLength(146);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -162,6 +299,7 @@ describe("META_TABLES", () => {
       "ai_conversations",
       "ai_provider_calls",
       "api_keys",
+      "architect_estimate_inflation",
       "architect_messages",
       "architect_proposals",
       "architect_sessions",
@@ -234,6 +372,7 @@ describe("META_TABLES", () => {
       "notification_digest_items",
       "notification_digests",
       "notification_dispatches",
+      "notification_fax_observations",
       "notification_preferences",
       "notification_read_states",
       "notification_read_watermarks",
@@ -276,6 +415,7 @@ describe("META_TABLES", () => {
       "tenant_ai_settings",
       "tenant_credits",
       "tenant_data_exports",
+      "tenant_data_keys",
       "tenant_lifecycle_events",
       "tenant_residency_profiles",
       "tenant_storage_usage",
@@ -366,10 +506,69 @@ describe("table column shapes", () => {
     expect(cols).toContain("schema_name");
   });
 
+  it("META_TENANTS.status permits exactly the five states a tenant can be in", () => {
+    // The other half of ADR-0334's reconciliation. `@crossengin/tenant-lifecycle` declared a
+    // seven-state lifecycle that nothing read, while this column's CHECK was what could actually be
+    // stored — so three of those states were unreachable and `READ_ONLY_STATES`, which names the
+    // policy for a suspended or pending-deletion tenant, could not be consulted for two of them.
+    //
+    // The five are spelled here rather than imported, because the kernel must not depend on a
+    // contracts package that depends on it; `tenant-lifecycle`'s own test asserts the same list
+    // from its side, so the pair of them is what keeps one vocabulary from drifting into two again.
+    const status = META_TENANTS.columns.find((c) => c.name === "status");
+    for (const state of [
+      "active",
+      "suspended",
+      "archived",
+      "pending_deletion",
+      "deleted",
+    ]) {
+      expect([state, status?.check?.includes(`'${state}'`)]).toEqual([state, true]);
+    }
+    // And not the two that were billing facts duplicated onto the tenant: `past_due` is a
+    // subscription status with its own transition map, `trial` a plan tier. A tenant in arrears is
+    // `active`, and storing the arrears here would let two records disagree about one fact.
+    for (const notAState of ["past_due", "trial"]) {
+      expect([notAState, status?.check?.includes(`'${notAState}'`)]).toEqual([notAState, false]);
+    }
+  });
+
   it("META_USERS has email + status", () => {
     const cols = META_USERS.columns.map((c) => c.name);
     expect(cols).toContain("email");
     expect(cols).toContain("status");
+  });
+
+  // Adding a column to this table touches no other assertion in this file -- the count and the
+  // sorted-names list only move for a new *table* -- so the credential columns would otherwise
+  // land with no fence at all. Each of the three properties below is one the login path depends
+  // on and a well-meaning edit could take away.
+  it("META_USERS credential columns are nullable except the counter, which defaults", () => {
+    const byName = new Map(META_USERS.columns.map((c) => [c.name, c]));
+    // Nullable: a provisioned user holds no credential until one is set, and `provision`'s two
+    // literal INSERTs name neither -- a notNull-with-no-default column fails both and the
+    // `missing_required_column` rule with it.
+    for (const name of ["credential_hash", "credential_updated_at", "credential_locked_until"]) {
+      const col = byName.get(name);
+      expect(col, name).toBeDefined();
+      expect(col?.notNull ?? false, name).toBe(false);
+    }
+    // The counter is the one that may be notNull, *because* it has a default: absent and zero are
+    // the same fact for an attempt count, which is not true of the hash beside it.
+    const attempts = byName.get("credential_failed_attempts");
+    expect(attempts?.notNull).toBe(true);
+    expect(attempts?.default).toBe("0");
+  });
+
+  it("META_USERS.credential_hash constrains the KDF that produced it", () => {
+    const check = META_USERS.columns.find((c) => c.name === "credential_hash")?.check ?? "";
+    // The parameters are in the string, so the constraint has to name the KDF. A bare sha256 of a
+    // password is not a password hash, and this is what refuses one.
+    expect(check).toContain("scrypt");
+    expect(check).toContain("credential_hash IS NULL OR");
+    // A value-set CHECK would need a pg-value-set-domains.ts declaration; a pattern does not.
+    expect(check).toContain("~");
+    expect(check).not.toMatch(/\bIN\s*\(/);
   });
 
   it("META_USER_TENANT_MEMBERSHIP enforces (user_id, tenant_id) uniqueness", () => {
@@ -634,11 +833,25 @@ describe("table column shapes", () => {
     expect(region?.check).toContain("ap-south");
   });
 
-  it("META_DEPLOYMENTS check-constrains target to the ten deploy targets", () => {
-    const target = META_DEPLOYMENTS.columns.find((c) => c.name === "target");
-    expect(target?.check).toContain("'vercel_edge'");
-    expect(target?.check).toContain("'fly_machine'");
-    expect(target?.check).toContain("'helm_release'");
+  it("META_DEPLOYMENTS constrains app_kind, environment, target and strategy to what DeploymentRecordSchema emits", () => {
+    // The values are restated here because `packages/kernel` does not depend on
+    // `@crossengin/deploy`; comparing them to that package's own `APP_KINDS` / `ENVIRONMENTS` /
+    // `DEPLOY_TARGETS` / `DEPLOY_STRATEGIES` is `pg-value-set-domains.ts`'s job (ADR-0353). Until
+    // then these four CHECKs had been authored independently of the only record this table stores,
+    // and the assertion that stood here pinned three `target` values no `DeployTarget` has ever
+    // had — a test comparing the catalog with itself.
+    const check = (name: string): string =>
+      META_DEPLOYMENTS.columns.find((c) => c.name === name)?.check ?? "";
+    expect(check("app_kind")).toBe(
+      "app_kind IN ('web', 'marketing', 'docs-site', 'ops', 'cdc-shipper', 'hl7-listener', 'virus-scanner', 'gpu-inference', 'mobile-shell')",
+    );
+    expect(check("environment")).toBe(
+      "environment IN ('local', 'preview', 'staging', 'production')",
+    );
+    expect(check("target")).toBe(
+      "target IN ('vercel', 'fly_machines', 'supabase', 'cloudflare', 'typesense_cloud', 'inngest_cloud', 'clickhouse_cloud', 'ghcr', 'app_store', 'play_store')",
+    );
+    expect(check("strategy")).toBe("strategy IN ('atomic', 'rolling', 'blue_green', 'canary')");
   });
 
   it("META_DEPLOYMENTS triggered_by FK-references META_USERS with RESTRICT", () => {
@@ -992,11 +1205,20 @@ describe("table column shapes", () => {
     expect(action?.check).toContain("'cancel_deletion'");
   });
 
-  it("META_TENANT_LIFECYCLE_EVENTS check-constrains from/to_state to seven lifecycle states", () => {
-    const fromState = META_TENANT_LIFECYCLE_EVENTS.columns.find((c) => c.name === "from_state");
-    expect(fromState?.check).toContain("'trial'");
-    expect(fromState?.check).toContain("'pending_deletion'");
-    expect(fromState?.check).toContain("'deleted'");
+  it("META_TENANT_LIFECYCLE_EVENTS check-constrains from/to_state to the five lifecycle states", () => {
+    // Five since ADR-0335. ADR-0334 narrowed `TENANT_LIFECYCLE_STATES` to five and narrowed
+    // `meta.tenants.status`' CHECK with it, and **missed this table** — so the column accepted
+    // `trial` and `past_due`, two values the contract refuses, which is ADR-0289's class. The states
+    // are spelled locally because the kernel cannot depend on `@crossengin/tenant-lifecycle`.
+    const table = META_TABLES.find((t) => t.name === "tenant_lifecycle_events");
+    for (const column of ["from_state", "to_state"]) {
+      const check = table?.columns.find((c) => c.name === column)?.check ?? "";
+      for (const state of ["active", "suspended", "archived", "pending_deletion", "deleted"]) {
+        expect(check, `${column}/${state}`).toContain(`'${state}'`);
+      }
+      expect(check, column).not.toContain("'trial'");
+      expect(check, column).not.toContain("'past_due'");
+    }
   });
 
   it("META_GDPR_DELETION_REQUESTS check-constrains legal_basis to six bases", () => {
@@ -1148,7 +1370,12 @@ describe("table column shapes", () => {
 
   it("META_SLO_EVALUATIONS is platform-or-tenant scoped with RLS", () => {
     expect(META_SLO_EVALUATIONS.rls?.enabled).toBe(true);
-    expect(META_SLO_EVALUATIONS.rls?.policies?.[0]?.using).toContain("IS NULL OR");
+    // ADR-0332: the platform arm is a SELECT-scoped policy of its own now, not an `OR` inside
+    // the isolation one. The old assertion pinned the defect: on an `ALL`-scope policy the
+    // `USING` also serves as the `WITH CHECK`, so `tenant_id IS NULL` let any tenant session
+    // write a platform-wide row.
+    expect(META_SLO_EVALUATIONS.rls?.policies?.[0]?.using).toBe(TENANT_ISOLATION_USING);
+    expect(platformReadOf(META_SLO_EVALUATIONS)?.command).toBe("SELECT");
   });
 
   it("META_SLO_ENFORCEMENT_ACTIONS constrains decision + cross-links incident/kill-switch/flag", () => {
@@ -1249,16 +1476,47 @@ describe("table column shapes", () => {
     for (const col of [hash, seq, digest]) expect(col?.notNull).toBeUndefined();
   });
 
-  it("META_AUDIT_INTEGRITY_VERDICTS confines a tenant and gates the platform read", () => {
+  it("META_AUDIT_INTEGRITY_VERDICTS confines a tenant and gates the platform read separately", () => {
+    // Three policies rather than one, which is ADR-0313's split arriving at the table ADR-0313
+    // named. The isolation arm must not carry the read grant: on an `ALL`-scope policy the `USING`
+    // expression also serves as the `WITH CHECK`, so a session holding only the cross-tenant read
+    // could forge a `verified` verdict for any tenant, flip a `compromised` one, or delete it.
+    // Twelve such forgeries succeeded live as a non-owner role before the split and none after.
+    const policies = META_AUDIT_INTEGRITY_VERDICTS.rls?.policies ?? [];
+    expect(META_AUDIT_INTEGRITY_VERDICTS.rls?.enabled).toBe(true);
+    expect(policies).toHaveLength(3);
+
+    const isolation = policies[0];
+    expect(isolation?.command).toBeUndefined();
+    expect(isolation?.using).toBe(TENANT_ISOLATION_USING);
     // Not the `feature_flag_kill_switches` `IS NULL OR …` shape: that would show a platform-chain
     // tamper finding to every tenant session. Plain isolation is false for a NULL tenant, so a
-    // platform verdict is invisible without the explicit opt-in — and the flag is its own, because
-    // reading every tenant's verdicts is not the same privilege as reviewing design proposals.
-    const policy = META_AUDIT_INTEGRITY_VERDICTS.rls?.policies?.[0];
-    expect(META_AUDIT_INTEGRITY_VERDICTS.rls?.enabled).toBe(true);
-    expect(policy?.using).not.toContain("tenant_id IS NULL");
-    expect(policy?.using).toContain("app.platform_audit");
-    expect(policy?.using).not.toContain("app.platform_review");
+    // platform verdict is invisible without the explicit opt-in.
+    expect(isolation?.using).not.toContain("tenant_id IS NULL");
+    expect(isolation?.using).not.toContain("app.platform_audit");
+
+    // The read is gated on its own flag — not `app.platform_review`, because reading every
+    // tenant's verdicts is not the same privilege as reviewing design proposals — and it is
+    // `SELECT`-scoped, so it carries no `WITH CHECK` and cannot authorise a write.
+    const read = policies[1];
+    expect(read?.command).toBe("SELECT");
+    expect(read?.using).toContain("app.platform_audit");
+    expect(read?.using).not.toContain("app.platform_review");
+    expect(read?.check).toBeUndefined();
+
+    // The write is on the **record** grant, never the audit one: a grant over the record must not
+    // reach the thing that validates the record, which is why `meta.crypto_audit` is `record` and
+    // not `key`. A verdict is the platform's record of a verification, and the population that may
+    // append to the trail must not also be able to certify that trail verified.
+    const write = policies[2];
+    expect(write?.command).toBe("INSERT");
+    expect(write?.check).toContain("app.platform_record_write");
+    expect(write?.check).toContain("tenant_id IS NULL");
+    expect(write?.check).not.toContain("app.platform_audit_write");
+    // Append-only: no `UPDATE` arm and no `DELETE` arm, so a platform verdict is immutable by
+    // policy once written. `verdict_id` is `aiv_` + the sha256 of the canonical report, so changing
+    // any field yields a different row and there is no stable handle to aim an `UPDATE` at.
+    expect(policies.map((p) => p.command ?? "ALL")).toEqual(["ALL", "SELECT", "INSERT"]);
   });
 
   it("META_TENANT_TOMBSTONES outlives the users and the tenant it names", () => {
@@ -1280,6 +1538,126 @@ describe("table column shapes", () => {
     // itself (ADR-0317).
     expect(col("attestations")?.type).toBe("JSONB");
     expect(col("attestations")?.notNull).toBe(true);
+    // ADR-0329. The version selects which domain tag the digest commits to, so it may not be NULL:
+    // a row whose version is unknown has a digest nothing can be checked against. `DEFAULT 'v1'`
+    // because every row written before this column existed was genuinely a v1 proof.
+    expect(col("proof_version")?.type).toBe("TEXT");
+    expect(col("proof_version")?.notNull).toBe(true);
+    expect(col("proof_version")?.default).toBe("'v1'");
+    // The literal, not a derivation: this file imports nothing outside the kernel, and
+    // `@crossengin/tenant-lifecycle` is not a dependency of this package — so the CHECK and
+    // `TOMBSTONE_PROOF_VERSIONS` are two spellings that must agree, and this is the one that fails
+    // when a tag is added there and not here. A version the contract mints and the column refuses
+    // takes the INSERT, not the parse.
+    expect(col("proof_version")?.check).toBe("proof_version IN ('v1', 'v2', 'v3', 'v4')");
+    // Nullable, and paired with the version by the contract: v2 must carry it, v1 must not.
+    expect(col("capability_declaration")?.type).toBe("JSONB");
+    expect(col("capability_declaration")?.notNull).toBeUndefined();
+    // ADR-0331. Nullable with **no default**: NULL means "these bytes do not cover a retention
+    // claim" (every v1 and v2 row), while `[]` is the v3 claim that nothing was kept. A default
+    // would make every pre-v3 row read back as a signed empty claim — and the contract pairs the
+    // field with the version, so those rows would then fail to parse at all.
+    expect(col("retained_obligations")?.type).toBe("JSONB");
+    expect(col("retained_obligations")?.notNull).toBeUndefined();
+    expect(col("retained_obligations")?.default).toBeUndefined();
+    // ADR-0351, and the *absence* of a default is the assertion rather than a side effect of the
+    // type. Every value this shape can hold is a claim about where a tenant's records were, so there
+    // is no honest filler: a `DEFAULT '{}'::jsonb` or any model literal would make every pre-v4 row
+    // read back as a signed declaration its digest never covered, and the contract pairs the field
+    // with the version, so those rows would then fail to parse at all.
+    expect(col("record_storage")?.type).toBe("JSONB");
+    expect(col("record_storage")?.notNull).toBeUndefined();
+    expect(col("record_storage")?.default).toBeUndefined();
+  });
+
+  it("META_TENANT_CREDITS names its issuer without making that issuer undeletable", () => {
+    const col = META_TENANT_CREDITS.columns.find((c) => c.name === "issued_by");
+    // ADR-0331, applying ADR-0318's fix to the table ADR-0330 found carrying the same defect. It
+    // referenced `meta.users` with `ON DELETE RESTRICT`, so a credit made its issuer undeletable —
+    // latent until ADR-0330 made this table statutorily *retained*, which is exactly when the row
+    // starts outliving the deletion that would have taken it.
+    expect(col?.type).toBe("TEXT");
+    expect(col?.references).toBeUndefined();
+    expect(col?.notNull).toBe(true);
+    // Structured, not free text: an `sla_credit` from a breach handler has no human in it while a
+    // `manual_adjustment` must name one, and free text would let `system:slo` satisfy that. Same
+    // vocabulary as `notification_suppressions.applied_by` (ADR-0302) — one spelling for one idea.
+    expect(col?.check).toContain("user:");
+    expect(col?.check).toContain("system:");
+    expect(col?.check).toContain("provider:");
+    // NOT NULL here where the suppression column is nullable: nothing has ever written this table,
+    // so there are no pre-existing rows an actor requirement would retroactively invalidate — the
+    // one reason ADR-0302 left its own column nullable.
+    expect(col?.check).not.toContain("IS NULL");
+  });
+
+  it("META_ARCHITECT_ESTIMATE_INFLATION cannot hold a factor that deflates an estimate", () => {
+    const col = (n: string) =>
+      META_ARCHITECT_ESTIMATE_INFLATION.columns.find((c) => c.name === n);
+    // The estimate feeds a ceiling, so a factor below 1 would admit a request that should have
+    // been delayed. Refused at the column, not only in the resolver (ADR-0330).
+    expect(col("inflation")?.check).toBe("inflation >= 1");
+    expect(col("worst_observed")?.check).toBe("worst_observed >= 1");
+    expect(col("inflation")?.notNull).toBe(true);
+    // Keyed on the tenant **alone**, which is the point of the table existing: its sibling
+    // `architect_tenant_cost` is keyed `(tenant_id, period_key)`, so a figure stored there would
+    // reset every month — ADR-0311's forgetting on a monthly cadence instead of a per-restart one.
+    expect(META_ARCHITECT_ESTIMATE_INFLATION.primaryKey).toEqual(["tenant_id"]);
+    expect(col("period_key")).toBeUndefined();
+    // No indexes: the primary key is the only access path either statement uses.
+    expect(META_ARCHITECT_ESTIMATE_INFLATION.indexes).toBeUndefined();
+  });
+
+  it("META_WORKFLOW_INSTANCES carries the cancellation fence without letting silence decide", () => {
+    const col = (n: string) => META_WORKFLOW_INSTANCES.columns.find((c) => c.name === n);
+    // The fence itself: nullable with no default, because a non-NULL value *means* "cancellation
+    // requested" and a `DEFAULT now()` would fence every instance at birth (ADR-0329).
+    expect(col("cancellation_requested_at")?.type).toBe("TIMESTAMPTZ");
+    expect(col("cancellation_requested_at")?.notNull).toBeUndefined();
+    expect(col("cancellation_requested_at")?.default).toBeUndefined();
+    // TEXT and unreferenced: the value is a user's uuid *or* a system slug, because a scheduled
+    // cancellation has no human in it — ADR-0318's lesson in a second table.
+    expect(col("cancellation_requested_by")?.type).toBe("TEXT");
+    expect(col("cancellation_requested_by")?.references).toBeUndefined();
+    // Nullable and with no default, so neither disposition is the reading of silence — the same
+    // refusal the contract makes by giving the field no `z.default()`.
+    expect(col("cancellation_disposition")?.notNull).toBeUndefined();
+    expect(col("cancellation_disposition")?.default).toBeUndefined();
+    // NOT NULL, matching its `awaiting_*` siblings: "nothing was signalled" and "we do not know"
+    // are different facts and a nullable column collapses them (ADR-0317).
+    expect(col("cancellation_signalled_activity_ids")?.notNull).toBe(true);
+    expect(col("cancellation_signalled_activity_ids")?.default).toBe("'[]'::jsonb");
+  });
+
+  it("META_WORKFLOW_INSTANCES constrains the disposition where the reconciler can see it", () => {
+    const disposition = META_WORKFLOW_INSTANCES.columns.find(
+      (c) => c.name === "cancellation_disposition",
+    );
+    // Inline on the column, which ADR-0330 made safe: a column-level expression **is** compared
+    // now, so widening it later is planned on an empty table and reported with its SQL on a
+    // populated one. ADR-0329 had to lift two constraints to named table-level forms because this
+    // was not true; both are back inline and the catalog is uniform again.
+    expect(disposition?.check).toBe("cancellation_disposition IN ('compensate', 'abandon')");
+    // And the status vocabulary did *not* grow: `status` carries its own CHECK, so a new value
+    // there is not an additive change the way a new event kind is.
+    const status = META_WORKFLOW_INSTANCES.columns.find((c) => c.name === "status");
+    expect(status?.check).not.toContain("cancellation");
+  });
+
+  it("META_NOTIFICATION_READ_STATES carries the dispatch id the contract carries", () => {
+    const col = (n: string) => META_NOTIFICATION_READ_STATES.columns.find((c) => c.name === n);
+    // Declared UUID and never written, this table had drifted behind its own contract exactly as
+    // `meta.feature_flags` had (ADR-0300): `NotificationReadState.dispatchId` is
+    // `disp_[A-Za-z0-9_-]{8,40}`, which cannot be stored in a UUID column, so the first INSERT
+    // would have failed on a schema that read as correct. Nothing noticed because nothing wrote.
+    expect(col("dispatch_id")?.type).toBe("TEXT");
+    expect(col("dispatch_id")?.check).toBe("dispatch_id ~ '^disp_[A-Za-z0-9_-]{8,40}$'");
+    // The dispatch's own identifier, not its surrogate key — unique-constrained there, so a valid
+    // foreign key target, and the one the contract names.
+    expect(col("dispatch_id")?.references?.table).toBe("notification_dispatches");
+    expect(col("dispatch_id")?.references?.column).toBe("dispatch_id");
+    // CASCADE: a read state has no meaning without the notice it is about.
+    expect(col("dispatch_id")?.references?.onDelete).toBe("CASCADE");
   });
 
   it("META_TENANT_TOMBSTONES is readable after its tenant is gone, by SELECT only", () => {
@@ -1302,9 +1680,51 @@ describe("table column shapes", () => {
     expect(check?.kind === "check" && check.expression).toBe("executed_by <> approved_by");
   });
 
+  it("META_TENANT_TOMBSTONES indexes the question reconciliation asks, partially", () => {
+    const idx = (META_TENANT_TOMBSTONES.indexes ?? []).find((i) =>
+      i.columns.includes("related_deletion_request_id"),
+    );
+    // "Does a tombstone name this request?" is ADR-0322's conclusive evidence that a deletion
+    // committed, and `findForRequest` runs it for every stranded request on every scheduler tick.
+    // It was a sequential scan on a table that only grows (ADR-0327).
+    expect(idx?.name).toBe("idx_tenant_tombstones_related_request");
+    // Partial, because the column is NULL for every tombstone the synchronous route of ADR-0320
+    // writes, and those rows can never match a lookup by request id.
+    expect(idx?.where).toBe("related_deletion_request_id IS NOT NULL");
+  });
+
+  it("META_GDPR_DELETION_REQUESTS outlives the verifier and names its proof", () => {
+    const col = (n: string) => META_GDPR_DELETION_REQUESTS.columns.find((c) => c.name === n);
+    // A deletion erases the tenant's users, and ON DELETE RESTRICT would have made the verifier
+    // undeletable *because they verified the request to delete them* (ADR-0318's finding again).
+    expect(col("verified_by")?.type).toBe("TEXT");
+    expect(col("verified_by")?.references).toBeUndefined();
+    // The contract's own free-text id, so a tombstone's relatedDeletionRequestId can name it.
+    expect(col("request_id")?.type).toBe("TEXT");
+    expect(col("request_id")?.check).toContain("dreq_");
+    // completion_sha256 commits to the proof; this one can find it.
+    expect(col("tombstone_id")?.type).toBe("TEXT");
+    expect(col("tombstone_id")?.check).toContain("tomb_");
+  });
+
+  it("META_GDPR_DELETION_REQUESTS is readable after its tenant is gone, by SELECT only", () => {
+    const policies = META_GDPR_DELETION_REQUESTS.rls?.policies ?? [];
+    expect(policies).toHaveLength(2);
+    const platform = policies.find((p) => p.name === "gdpr_deletion_requests_platform_audit_read");
+    expect(platform?.command).toBe("SELECT");
+    expect(platform?.using).toBe("current_setting('app.platform_audit', true) = 'on'");
+  });
+
+  it("META_GDPR_DELETION_REQUESTS indexes the scheduler's claim partially", () => {
+    const due = META_GDPR_DELETION_REQUESTS.indexes?.find((i) => i.name === "idx_gdpr_deletion_due");
+    // Partial, because the predicate is false for almost every row once requests accumulate.
+    expect(due?.where).toBe("status = 'verified'");
+    expect(due?.columns).toEqual(["status", "deadline_at"]);
+  });
+
   it("META_AUDIT_LOG splits the platform read off as SELECT rather than widening isolation", () => {
     const policies = META_AUDIT_LOG.rls?.policies ?? [];
-    expect(policies).toHaveLength(2);
+    expect(policies).toHaveLength(3);
     const isolation = policies.find((p) => p.name === "audit_log_tenant_isolation");
     const platform = policies.find((p) => p.name === "audit_log_platform_audit_read");
     // The isolation half stays at the `ALL` default and never mentions the flag: an elevated
@@ -1318,6 +1738,38 @@ describe("table column shapes", () => {
     // pooled connection that previously served a tenant — adding the SELECT policy alone does not
     // help, because the other policy's cast still evaluates.
     expect(isolation?.using).toContain("NULLIF(");
+  });
+
+  it("META_AUDIT_LOG opens platform scope by an INSERT policy on its own grant", () => {
+    // ADR-0331. `tenant_id` is nullable now, which is what makes a platform-scope row expressible
+    // at all — three escalators previously wrote nothing because the row could not exist.
+    const tenantId = META_AUDIT_LOG.columns.find((c) => c.name === "tenant_id");
+    expect(tenantId?.notNull).toBeUndefined();
+    // The foreign key is **gone** as of ADR-0335, and ADR-0331's note here ("the foreign key stays:
+    // a NULL satisfies it, and a non-NULL must still name a real tenant") was right about what the
+    // reference does and wrong about whether this table wants it. `ON DELETE CASCADE` into
+    // `meta.tenants` made the one row that matters most impossible: `tenant-deletion-routes.ts`
+    // retires the tenant and *then* records, so inserting `platform.tenant_deleted` raised
+    // `violates foreign key constraint "audit_log_tenant_id_fkey"` and `record()` swallowed it into
+    // `onRecordError` while the route answered 200. A row recording what happened *to* a tenant is
+    // precisely a row whose `tenant_id` names a tenant that no longer exists.
+    expect(tenantId?.references).toBeUndefined();
+
+    const policies = META_AUDIT_LOG.rls?.policies ?? [];
+    const write = policies.find((p) => p.name === "audit_log_platform_audit_write");
+    const platform = policies.find((p) => p.name === "audit_log_platform_audit_read");
+    expect(write?.command).toBe("INSERT");
+    // Postgres refuses `USING` on a `FOR INSERT` policy — there are no existing rows to filter —
+    // so the clause must be absent rather than duplicated from the check.
+    expect(write?.using).toBeUndefined();
+    // Scoped to platform rows, so the write grant buys no access to any tenant's chain.
+    expect(write?.check).toContain("tenant_id IS NULL");
+    // Its own grant. Reusing the read flag would let a reader of the trail forge an entry about
+    // their own conduct, which is ADR-0313's hole arriving from the other direction.
+    expect(write?.check).toContain("app.platform_audit_write");
+    expect(write?.check).not.toContain("'app.platform_audit'");
+    // And the read policy still carries no `WITH CHECK`, which is what keeps it a read.
+    expect(platform?.check).toBeUndefined();
   });
 
   it("META_INCIDENT_COMMUNICATIONS holds its two cross-column rules in the database", () => {
@@ -1409,7 +1861,12 @@ describe("table column shapes", () => {
     expect(pct?.check).toContain("'p95'");
     const sev = META_SLO_LATENCY_EVALUATIONS.columns.find((c) => c.name === "worst_severity");
     expect(sev?.check).toContain("'sev2'");
-    expect(META_SLO_LATENCY_EVALUATIONS.rls?.policies?.[0]?.using).toContain("IS NULL OR");
+    // ADR-0332: the platform arm is a SELECT-scoped policy of its own now, not an `OR` inside
+    // the isolation one. The old assertion pinned the defect: on an `ALL`-scope policy the
+    // `USING` also serves as the `WITH CHECK`, so `tenant_id IS NULL` let any tenant session
+    // write a platform-wide row.
+    expect(META_SLO_LATENCY_EVALUATIONS.rls?.policies?.[0]?.using).toBe(TENANT_ISOLATION_USING);
+    expect(platformReadOf(META_SLO_LATENCY_EVALUATIONS)?.command).toBe("SELECT");
   });
 
   it("META_OPERATE_ENTITY_RECORDS keys documents by (tenant, entity, record) with tenant RLS", () => {
@@ -1661,7 +2118,12 @@ describe("table column shapes", () => {
   it("META_SSO_PROVIDERS allows NULL tenant_id (platform-wide providers)", () => {
     const tenantId = META_SSO_PROVIDERS.columns.find((c) => c.name === "tenant_id");
     expect(tenantId?.notNull).not.toBe(true);
-    expect(META_SSO_PROVIDERS.rls?.policies?.[0]?.using).toContain("IS NULL OR");
+    // ADR-0332: the platform arm is a SELECT-scoped policy of its own now, not an `OR` inside
+    // the isolation one. The old assertion pinned the defect: on an `ALL`-scope policy the
+    // `USING` also serves as the `WITH CHECK`, so `tenant_id IS NULL` let any tenant session
+    // write a platform-wide row.
+    expect(META_SSO_PROVIDERS.rls?.policies?.[0]?.using).toBe(TENANT_ISOLATION_USING);
+    expect(platformReadOf(META_SSO_PROVIDERS)?.command).toBe("SELECT");
   });
 
   it("META_SSO_LOGINS check-constrains outcome to the 8 SSO outcomes", () => {
@@ -1715,9 +2177,9 @@ describe("table column shapes", () => {
       (c) => c.name === "tenant_id",
     );
     expect(tenantId?.notNull).not.toBe(true);
-    expect(
-      META_NOTIFICATION_TEMPLATES.rls?.policies?.[0]?.using,
-    ).toContain("IS NULL OR");
+    // ADR-0332: a SELECT-scoped platform arm of its own, not an `OR` inside isolation.
+    expect(META_NOTIFICATION_TEMPLATES.rls?.policies?.[0]?.using).toBe(TENANT_ISOLATION_USING);
+    expect(platformReadOf(META_NOTIFICATION_TEMPLATES)?.command).toBe("SELECT");
   });
 
   it("META_NOTIFICATION_PREFERENCES enforces (tenant, user, category, channel) uniqueness", () => {
@@ -1787,9 +2249,9 @@ describe("table column shapes", () => {
       (c) => c.name === "tenant_id",
     );
     expect(tenantId?.notNull).not.toBe(true);
-    expect(
-      META_ACCESS_REVIEW_TEMPLATES.rls?.policies?.[0]?.using,
-    ).toContain("IS NULL OR");
+    // ADR-0332: a SELECT-scoped platform arm of its own, not an `OR` inside isolation.
+    expect(META_ACCESS_REVIEW_TEMPLATES.rls?.policies?.[0]?.using).toBe(TENANT_ISOLATION_USING);
+    expect(platformReadOf(META_ACCESS_REVIEW_TEMPLATES)?.command).toBe("SELECT");
   });
 
   it("META_ACCESS_REVIEW_TEMPLATES framework enum covers SOC 2, ISO 27001, HIPAA, PCI, GDPR, CFR 21", () => {
@@ -1881,9 +2343,9 @@ describe("table column shapes", () => {
       (c) => c.name === "tenant_id",
     );
     expect(tenantId?.notNull).not.toBe(true);
-    expect(
-      META_WORKFLOW_DEFINITIONS.rls?.policies?.[0]?.using,
-    ).toContain("IS NULL OR");
+    // ADR-0332: a SELECT-scoped platform arm of its own, not an `OR` inside isolation.
+    expect(META_WORKFLOW_DEFINITIONS.rls?.policies?.[0]?.using).toBe(TENANT_ISOLATION_USING);
+    expect(platformReadOf(META_WORKFLOW_DEFINITIONS)?.command).toBe("SELECT");
   });
 
   it("META_WORKFLOW_DEFINITIONS enforces (tenant, key, version) uniqueness", () => {
@@ -1944,10 +2406,23 @@ describe("table column shapes", () => {
     expect(delivery?.check).toContain("'exactly_once_idempotent'");
   });
 
-  it("META_WORKFLOW_SIGNALS enforces (tenant, name, idempotency_key) uniqueness", () => {
-    expect(
-      META_WORKFLOW_SIGNALS.uniqueConstraints?.[0]?.columns,
-    ).toEqual(["tenant_id", "signal_name", "idempotency_key"]);
+  it("META_WORKFLOW_SIGNALS keys idempotency per DELIVERY, not per submit", () => {
+    // ADR-0332. One submit correlating to N instances is N signals carrying one idempotency key,
+    // because `WorkflowSignal.instanceId` is singular — so the three-column form refused the
+    // *second* delivery of every fan-out, measured live. `instance_id` is the fourth column.
+    expect(META_WORKFLOW_SIGNALS.uniqueConstraints?.[0]?.columns).toEqual([
+      "tenant_id",
+      "signal_name",
+      "idempotency_key",
+      "instance_id",
+    ]);
+  });
+
+  it("keeps submit-level dedup as the PREFIX of that key, so the index still serves it", () => {
+    // The reason the fourth column costs nothing: `PostgresSignalDeduplicator` reads
+    // (tenant, name, key), which is a left prefix of the constraint's index.
+    const cols = META_WORKFLOW_SIGNALS.uniqueConstraints?.[0]?.columns ?? [];
+    expect(cols.slice(0, 3)).toEqual(["tenant_id", "signal_name", "idempotency_key"]);
   });
 
   it("META_WORKFLOW_TIMERS kind enum has 4 kinds", () => {
@@ -1976,9 +2451,9 @@ describe("table column shapes", () => {
       (c) => c.name === "tenant_id",
     );
     expect(tenantId?.notNull).not.toBe(true);
-    expect(
-      META_LINEAGE_NODES.rls?.policies?.[0]?.using,
-    ).toContain("IS NULL OR");
+    // ADR-0332: a SELECT-scoped platform arm of its own, not an `OR` inside isolation.
+    expect(META_LINEAGE_NODES.rls?.policies?.[0]?.using).toBe(TENANT_ISOLATION_USING);
+    expect(platformReadOf(META_LINEAGE_NODES)?.command).toBe("SELECT");
   });
 
   it("META_LINEAGE_NODES kind enum covers 14 node kinds", () => {
@@ -2087,9 +2562,9 @@ describe("table column shapes", () => {
       (c) => c.name === "tenant_id",
     );
     expect(tenantId?.notNull).not.toBe(true);
-    expect(
-      META_RATE_LIMIT_POLICIES.rls?.policies?.[0]?.using,
-    ).toContain("IS NULL OR");
+    // ADR-0332: a SELECT-scoped platform arm of its own, not an `OR` inside isolation.
+    expect(META_RATE_LIMIT_POLICIES.rls?.policies?.[0]?.using).toBe(TENANT_ISOLATION_USING);
+    expect(platformReadOf(META_RATE_LIMIT_POLICIES)?.command).toBe("SELECT");
   });
 
   it("META_RATE_LIMIT_POLICIES algorithm enum has 6 algorithms", () => {
@@ -2221,9 +2696,9 @@ describe("table column shapes", () => {
       (c) => c.name === "tenant_id",
     );
     expect(tenantId?.notNull).not.toBe(true);
-    expect(
-      META_GATEWAY_PIPELINE_EXECUTIONS.rls?.policies?.[0]?.using,
-    ).toContain("IS NULL OR");
+    // ADR-0332: a SELECT-scoped platform arm of its own, not an `OR` inside isolation.
+    expect(META_GATEWAY_PIPELINE_EXECUTIONS.rls?.policies?.[0]?.using).toBe(TENANT_ISOLATION_USING);
+    expect(platformReadOf(META_GATEWAY_PIPELINE_EXECUTIONS)?.command).toBe("SELECT");
   });
 
   it("META_GATEWAY_PIPELINE_EXECUTIONS final_stage enum covers 17 stages", () => {
@@ -2258,9 +2733,9 @@ describe("table column shapes", () => {
       (c) => c.name === "tenant_id",
     );
     expect(tenantId?.notNull).not.toBe(true);
-    expect(
-      META_FEATURE_FLAG_TARGETING_RULES.rls?.policies?.[0]?.using,
-    ).toContain("IS NULL OR");
+    // ADR-0332: a SELECT-scoped platform arm of its own, not an `OR` inside isolation.
+    expect(META_FEATURE_FLAG_TARGETING_RULES.rls?.policies?.[0]?.using).toBe(TENANT_ISOLATION_USING);
+    expect(platformReadOf(META_FEATURE_FLAG_TARGETING_RULES)?.command).toBe("SELECT");
   });
 
   it("META_FEATURE_FLAG_KILL_SWITCHES still does not restrict on flag deletion, and now only one thing blocks it", () => {
@@ -2383,5 +2858,159 @@ describe("emitMetaBootstrapSql", () => {
     ).length;
     const tenantScoped = META_TABLES.filter((t) => t.rls?.enabled === true);
     expect(rlsEnableCount).toBe(tenantScoped.length);
+  });
+});
+
+/**
+ * Both sides of a cross-column comparison are one type, or the constraint is not a constraint.
+ *
+ * The fourth catalog invariant, and it exists because the third defect of this class nearly shipped:
+ * `workflow_definitions.created_by` became TEXT while `published_by` stayed UUID, so
+ * `workflow_definitions_four_eyes_check` rendered `published_by <> created_by` — and Postgres has no
+ * `uuid <> text` operator, so the `CREATE TABLE` raised `operator does not exist` and took the
+ * **entire 609-statement bootstrap** with it, at statement #0.
+ *
+ * Every offline test passed, including this file's: the emitted-SQL assertions compare *strings*, and
+ * a string containing a comparison between two types Postgres cannot relate is a perfectly
+ * well-formed string. So the fence is this, not a more careful reading of the emitted text.
+ *
+ * `IS NULL` / `IS NOT NULL` are unary and deliberately not comparisons: a naive "two columns of
+ * different types appear in one expression" rule reports `status <> 'published' OR (published_at IS
+ * NOT NULL AND published_by IS NOT NULL)` as a disagreement, which is wrong and would train people
+ * to add exemptions.
+ */
+function crossColumnComparisons(): readonly {
+  readonly table: string;
+  readonly constraint: string;
+  readonly left: string;
+  readonly right: string;
+  readonly leftType: string;
+  readonly rightType: string;
+}[] {
+  const COMPARISON = /\b([a-z_][a-z0-9_]*)\s*(=|<>|!=|<=|>=|<|>)\s*([a-z_][a-z0-9_]*)\b/g;
+  const found: {
+    table: string;
+    constraint: string;
+    left: string;
+    right: string;
+    leftType: string;
+    rightType: string;
+  }[] = [];
+  for (const table of META_TABLES) {
+    const types = new Map(table.columns.map((c) => [c.name, c.type]));
+    for (const constraint of table.constraints ?? []) {
+      if (constraint.kind !== "check") continue;
+      for (const match of constraint.expression.matchAll(COMPARISON)) {
+        const [, left, , right] = match;
+        const leftType = left !== undefined ? types.get(left) : undefined;
+        const rightType = right !== undefined ? types.get(right) : undefined;
+        // Both operands must be columns of this table. One column against a literal is a comparison
+        // Postgres resolves by the literal's inferred type, which is not this rule's business.
+        if (left === undefined || right === undefined) continue;
+        if (leftType === undefined || rightType === undefined) continue;
+        found.push({ table: table.name, constraint: constraint.name, left, right, leftType, rightType });
+      }
+    }
+  }
+  return found;
+}
+
+describe("a cross-column CHECK compares two columns of one type", () => {
+  it("finds no disagreement", () => {
+    const disagreements = crossColumnComparisons().filter((c) => c.leftType !== c.rightType);
+    expect(
+      disagreements.map(
+        (c) => `${c.table}.${c.constraint}: ${c.left} (${c.leftType}) vs ${c.right} (${c.rightType})`,
+      ),
+    ).toEqual([]);
+  });
+
+  it("is not vacuous: it really does examine the four-eyes checks", () => {
+    // The guard that matters. If the extractor stopped matching anything — a renamed operator, a
+    // reformatted expression — the rule above would pass having looked at nothing, which is the
+    // failure mode of every fence in this repo that turned out to be wrong.
+    // Five today: two four-eyes inequalities (`tenant_tombstones`, `workflow_definitions`) and three
+    // orderings (a bounce count against a recipient count, a publication against a breach deadline,
+    // a read watermark against its own `updated_at`).
+    const comparisons = crossColumnComparisons();
+    expect(comparisons.length).toBeGreaterThanOrEqual(5);
+    const fourEyes = comparisons.filter((c) => c.constraint.includes("four_eyes"));
+    expect(fourEyes.map((c) => c.table).sort()).toEqual(["tenant_tombstones", "workflow_definitions"]);
+    // Both four-eyes pairs are actor columns, and an actor column is TEXT in this catalog because it
+    // records who did a thing and must outlive the actor. A UUID here means somebody re-added a
+    // `meta.users` reference to one side of a four-eyes rule.
+    for (const c of fourEyes) {
+      expect(c.leftType, `${c.table}.${c.constraint} left`).toBe("TEXT");
+      expect(c.rightType, `${c.table}.${c.constraint} right`).toBe("TEXT");
+    }
+  });
+
+  it("does not read a unary IS NOT NULL as a comparison", () => {
+    // The false positive this rule was deliberately narrowed to avoid, pinned so the narrowing
+    // cannot be undone by somebody widening the regex.
+    const published = crossColumnComparisons().filter(
+      (c) => c.constraint === "workflow_definitions_published_fields_check",
+    );
+    expect(published).toEqual([]);
+  });
+});
+
+describe("the platform's record of a tenant outlives the tenant", () => {
+  /**
+   * The sixteen tables `PLATFORM_RECORD_TABLES` protects from the Article 17 erasure, spelled here
+   * because the kernel cannot depend on `tenant-lifecycle-pg` (that package depends on the kernel).
+   * `packages/testing/src/strategy/pg-record-retention.ts` asserts the two lists agree, reading both
+   * from disk — which is the forcing function; this one is the catalog-side invariant.
+   */
+  const PLATFORM_RECORD = [
+    "audit_log",
+    "audit_integrity_verdicts",
+    "compliance_attestations",
+    "certification_reports",
+    "crypto_keys",
+    "forensic_chain_entries",
+    "forensic_chain_checkpoints",
+    "gdpr_deletion_requests",
+    "tenant_lifecycle_events",
+    "tenant_tombstones",
+    "access_review_templates",
+    "access_review_campaigns",
+    "access_review_items",
+    "access_review_decisions",
+    "access_review_exceptions",
+    "access_review_evidence",
+  ] as const;
+
+  it("names sixteen tables", () => {
+    expect(PLATFORM_RECORD).toHaveLength(16);
+    expect(new Set(PLATFORM_RECORD).size).toBe(16);
+  });
+
+  it("gives none of them a cascading tenant_id, so retiring the tenant cannot erase the record", () => {
+    // The defect this pins: 15 of the 16 carried `ON DELETE CASCADE` into `meta.tenants`, so the
+    // erasure skipped them by name and then ADR-0316's retirement of the tenant row destroyed them
+    // anyway. `forensic_chain_entries` was among them, so the entry a tombstone's anchor names was
+    // deleted — making `verifyStoredEvidence`'s `unwitnessed` defect, a paging `sev1` under
+    // ADR-0324, true of every Article 17 proof the platform had ever produced.
+    const offenders: string[] = [];
+    for (const name of PLATFORM_RECORD) {
+      const table = META_TABLES.find((t) => t.name === name);
+      expect(table, name).toBeDefined();
+      const tenantId = table?.columns.find((c) => c.name === "tenant_id");
+      if (tenantId?.references?.table === "tenants") offenders.push(name);
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("still cascades a tenant DATA table, where the cascade is belt-and-braces", () => {
+    // The rule is per class, not wholesale: a row of the tenant's own data has no meaning once the
+    // tenant is gone, and the cascade backs up `eraseSharedTablesWithin`'s explicit delete.
+    const protectedNames = new Set<string>(PLATFORM_RECORD);
+    const cascading = META_TABLES.filter((t) => {
+      const c = t.columns.find((x) => x.name === "tenant_id");
+      return c?.references?.table === "tenants" && c.references.onDelete === "CASCADE";
+    });
+    expect(cascading.length).toBeGreaterThan(80);
+    for (const t of cascading) expect(protectedNames.has(t.name), t.name).toBe(false);
   });
 });
