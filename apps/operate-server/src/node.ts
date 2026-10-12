@@ -2680,6 +2680,26 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           "answer 503. A local base URL that is set but malformed also lands here, rather than " +
           "falling through to a cloud vendor.",
       );
+    } else {
+      // Said affirmatively, because the absent arm above is the only thing that used to speak: an
+      // operator who configured a key correctly got silence, so the one surface that could confirm
+      // which vendor a tenant's business description is about to be sent to said nothing at all.
+      console.log(`[ai-design] provider: ${providerBuild.providerLabel}`);
+      // And the resolution can DISCARD the operator's own declaration. Both cloud arms gate
+      // `--ai-model` on a pricing catalogue (`isAnthropicModel` / `isOpenAiChatModel`) and fall back
+      // to a priceable default on a miss, which is right in direction — an unpriced model cannot be
+      // held to --ai-max-usd-per-month, so accepting it would silently disable the ceiling the flag
+      // exists to impose — and silent, which is a declaration the runtime drops. Reported rather
+      // than refused, on ADR-0352's split: the fallback serves correctly, it is only named wrongly,
+      // and refusing would refuse a model id the vendor has shipped and this catalogue has not
+      // caught up with. Whether it should refuse instead is an open question, logged in CLAUDE.md.
+      if (options.aiModel !== null && options.aiModel !== providerBuild.model) {
+        console.warn(
+          `[ai-design] --ai-model ${options.aiModel} is not in this provider's pricing catalogue; ` +
+            `serving ${providerBuild.model} instead. Name a catalogued model, or point ` +
+            `LOCAL_LLM_BASE_URL at a self-hosted endpoint, where model ids are not gated.`,
+        );
+      }
     }
     // With review required, a new proposal must enter the queue as `pending` — otherwise it
     // keeps the default `not_required`, the activation gate denies it forever, and it never

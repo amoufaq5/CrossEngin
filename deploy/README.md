@@ -123,12 +123,15 @@ makes the key a **person** rather than a service account:
 - `token:cashier:<tenant-uuid>:<user-uuid>` — names a principal, resolves as a `user`, and
   the per-person surfaces work. That `<user-uuid>` must be a real `meta.users.id`.
 
-To create one, mount the registry: add `--platform-user-routes` and at least one
-`--platform-user-role` to the `api` command in `docker-compose.yml` (the grant is
-fail-closed — with no role nothing is mounted at all, and the API says so at boot).
-It is deliberately a *different* grant from `--platform-admin-role`: the people who may
-create tenants need not be the people who may mint the identities inside them. The calls
-below use the bootstrap key, so they assume `--platform-user-role platform_admin`.
+The registry that creates one is mounted: `--platform-user-routes --platform-user-role
+platform_admin` is on the `api` command. It was *not*, for as long as this section has
+existed — the compose file's own comment named the flag and the command did not pass it,
+so every reader of this page was told to POST to a route their stack did not serve. The
+grant is fail-closed, so with no `--platform-user-role` nothing is mounted at all and the
+API says so at boot; it is deliberately a *different* grant from `--platform-admin-role`,
+because the people who may create tenants need not be the people who may mint the
+identities inside them. The calls below use the bootstrap key, which is why the shipped
+value is `platform_admin`.
 
 ```bash
 # Provision the principal and its tenant membership in one call. `id` is accepted — and is
