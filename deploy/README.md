@@ -445,7 +445,7 @@ those never fire. Vercel and friends can host `operate-web`, never the API.
 
 | Path | Provider | Best when |
 |---|---|---|
-| One VM, everything, **free** | **Oracle Cloud** Always Free (Ampere A1) | You want the whole stack running at zero cost. See [On Oracle Cloud](#on-oracle-cloud-always-free) |
+| One VM, everything, **free** | **Oracle Cloud** Always Free (Ampere A1) | You want the whole stack running at zero cost. Step-by-step: [`ORACLE.md`](./ORACLE.md) |
 | One VM, everything | **Hetzner Cloud** (CCX + volume) | Pre-revenue, cost matters. Runs this compose file unchanged |
 | Managed database, less ops | **Railway** / **Render** | You would rather not run Postgres yourself |
 | Room to grow | **Fly.io** (apps + Managed Postgres + GPU machines) | Multi-region later — see the `residency` package |
@@ -462,6 +462,9 @@ Two notes that matter more than price:
   `uuid_generate_v7()`. The migration applier accepts either.
 
 ## On Oracle Cloud (Always Free)
+
+**A complete step-by-step runbook is [`ORACLE.md`](./ORACLE.md).** What follows is the summary and
+the one architectural thing that is different there.
 
 Of the free options this is the only one that can host the **whole** stack, and the
 reason is the sentence above: the API needs a long-running process, and Always Free
