@@ -39,6 +39,59 @@ When `migrate` has exited successfully and `caddy` has obtained certificates
 > The `migrate` job is idempotent (hash-tracked in `_meta_migrations`), so it is safe
 > to run on every `up`. It applies the full meta-schema before the API starts.
 
+### If `migrate` exits 1
+
+Read the reason first — it is printed, and there are only a few:
+
+```bash
+docker compose logs migrate
+```
+
+**`PRECONDITIONS FAILED — no statements were executed … [MISSING_EXTENSION]
+uuid_generate_v7() is required but is neither an installed extension nor a defined function`**
+
+The database has no `uuid_generate_v7()`. Every `meta.*` id defaults to it, so the applier refuses
+before executing anything — nothing is half-applied.
+
+It happens on a `db-data` volume that was created **before** the image could install the extension,
+and the arm64 build defect guaranteed a population of those: `postgres/init/00-extension.sql` runs
+from `/docker-entrypoint-initdb.d`, which the entrypoint fires **only on the first initialisation of
+an empty data directory**, so fixing the image does not repair a database created before it. initdb
+is skipped, `db` reports healthy, and `migrate` fails identically on every `up`.
+
+The one-shot `extensions` service now issues `CREATE EXTENSION IF NOT EXISTS pg_uuidv7` on **every**
+`up` for exactly this reason, so the repair is just:
+
+```bash
+git pull && docker compose up -d --build
+```
+
+If you are on a stack without that service, the same statement by hand (keeps all data):
+
+```bash
+docker compose exec db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c 'CREATE EXTENSION IF NOT EXISTS pg_uuidv7' \
+  -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto'
+docker compose up -d
+```
+
+If `CREATE EXTENSION` answers `extension "pg_uuidv7" is not available … Could not open extension
+control file`, the **server** does not have the `.so` and the image needs rebuilding
+(`docker compose build --no-cache db`) — that is the arm64 case, and it is a build defect rather
+than a database one.
+
+Starting over instead, **which destroys every row**:
+
+```bash
+docker compose down -v && docker compose up -d --build
+```
+
+Other reasons `migrate` exits 1, in rough order of likelihood: `.env` not present or
+`POSTGRES_PASSWORD` disagreeing with the volume's stored password (the password is set at initdb and
+changing `.env` afterwards does not change it); and individual statements failing, which the report
+lists with an index and a message — the applier continues past a failure and re-runs it next time,
+so a partial apply is recoverable.
+
 ## Create your first tenant
 
 Once up, use the platform console you just launched — which now needs a login, so do

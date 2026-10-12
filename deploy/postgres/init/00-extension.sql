@@ -1,6 +1,17 @@
--- Runs once, on first initialisation of an empty data directory.
--- Enables uuid_generate_v7() for the whole database so the migration applier's
--- pg_uuidv7 precondition passes and every meta.* id default resolves.
+-- Run TWICE, by two readers, and everything here must be idempotent.
+--
+--   1. by the `db` container's entrypoint, from /docker-entrypoint-initdb.d, which fires ONLY on
+--      the first initialisation of an empty data directory; and
+--   2. by the one-shot `extensions` service in docker-compose.yml, on every `up`.
+--
+-- The second reader exists because the first is not enough: a `db-data` volume that already holds a
+-- cluster never sees this file again, so an image fixed after the fact cannot repair a database
+-- created before it — the symptom being `crossengin apply` exiting 1 with
+-- `PRECONDITIONS FAILED … [MISSING_EXTENSION]` on every `up`, with the container reporting healthy.
+-- A precondition the migrate step needs on every run cannot live only in a hook that runs once.
+--
+-- Enables uuid_generate_v7() for the whole database so the migration applier's pg_uuidv7
+-- precondition passes and every meta.* id default resolves.
 CREATE EXTENSION IF NOT EXISTS pg_uuidv7;
 
 -- Backs at-rest column encryption (pgp_sym_encrypt/decrypt) for `phi`/`regulated` fields; without

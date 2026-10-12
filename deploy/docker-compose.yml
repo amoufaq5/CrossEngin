@@ -33,12 +33,46 @@ services:
       retries: 30
     restart: unless-stopped
 
+  # One-shot, on EVERY `up`: makes sure uuid_generate_v7() exists before the migrate step needs it.
+  #
+  # `postgres/init/00-extension.sql` is mounted into `db` as well, but the entrypoint runs
+  # /docker-entrypoint-initdb.d ONLY on the first initialisation of an empty data directory — so a
+  # `db-data` volume that already holds a cluster never sees it again. That is not a hypothetical:
+  # the previous postgres image installed pg_uuidv7 from a GitHub release whose only prebuilt .so is
+  # x86_64, so on arm64 (every Apple-silicon laptop, every Oracle Ampere A1 shape) `CREATE EXTENSION`
+  # failed under ON_ERROR_STOP=1 *after* initdb had written PG_VERSION. Fixing the image does not
+  # repair such a volume: initdb is skipped, the container reports healthy, and `crossengin apply`
+  # exits 1 with `PRECONDITIONS FAILED — no statements were executed … [MISSING_EXTENSION]` on every
+  # `up`, forever. A precondition the migrate step needs on every run cannot live only in a hook that
+  # runs once.
+  #
+  # The same file, run by both, rather than a second copy of the SQL: `CREATE EXTENSION IF NOT
+  # EXISTS` is idempotent, and pgcrypto stays inside its DO block there so a server without it still
+  # exits 0 (see that file for why the two extensions are deliberately asymmetric). Built from
+  # ./postgres because that image is the one carrying psql; the extension's .so has to be on the
+  # *server*, which is `db`, so this container only issues the statement.
+  extensions:
+    build:
+      context: ./postgres
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      <<: *pg-env
+    volumes:
+      - ./postgres/init:/init:ro
+    entrypoint: ["psql"]
+    command: ["-v", "ON_ERROR_STOP=1", "-f", "/init/00-extension.sql"]
+    restart: "no"
+
   # One-shot: applies the meta-schema (idempotent — safe to re-run on every `up`).
   migrate:
     build: *app-build
     depends_on:
       db:
         condition: service_healthy
+      extensions:
+        condition: service_completed_successfully
     environment:
       <<: *pg-env
     command: ["node", "apps/architect-cli/dist/bin/crossengin.js", "apply", "--confirm"]

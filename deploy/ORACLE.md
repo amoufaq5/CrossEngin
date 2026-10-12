@@ -239,8 +239,20 @@ docker compose up -d --build
 docker compose logs -f api
 ```
 
-The first build takes **10–20 minutes** on 2 A1 cores. Expect `migrate` to run once and exit 0,
-then `api` to boot, then `web`.
+The first build takes **10–20 minutes** on 2 A1 cores. Expect `extensions` and `migrate` to run once
+and exit 0, then `api` to boot, then `web`.
+
+> **If `migrate` exits 1 here, this is the arm64 case and the most likely single failure on Oracle.**
+> `docker compose logs migrate` will say `PRECONDITIONS FAILED — no statements were executed …
+> [MISSING_EXTENSION] uuid_generate_v7() is required`. The earlier postgres image installed
+> `pg_uuidv7` from a GitHub release whose only prebuilt `.so` is x86_64, so on an Ampere A1 shape
+> `CREATE EXTENSION` failed at initdb — and because the entrypoint runs
+> `/docker-entrypoint-initdb.d` **only** on the first initialisation of an empty data directory, a
+> volume created then is never repaired by a later image. `git pull && docker compose up -d --build`
+> fixes it without losing data: the image now installs the extension from PGDG (which publishes
+> arm64), and the one-shot `extensions` service issues `CREATE EXTENSION IF NOT EXISTS pg_uuidv7` on
+> every `up`. See *If `migrate` exits 1* in `deploy/README.md` for the by-hand form and the other
+> reasons.
 
 Four boot lines are worth reading, and they are the ones that tell you the deployment is
 configured rather than merely running:
