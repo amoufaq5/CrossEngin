@@ -49,12 +49,40 @@ interface Captured {
  * A fake `PgConnection` that answers the one introspection query from
  * `introspectRows` and records everything else, so the test asserts on the SQL
  * and bound parameters a real apply would send.
+ *
+ * `failOn` makes one statement raise, and the fake then **models the abort**: in a real
+ * transaction a raise leaves every later command answering `25P02` until a
+ * `ROLLBACK TO SAVEPOINT` arrives. Without that, a fake that went on cheerfully answering would
+ * assert the unique indexes are savepointed whether they are or not — a fake answering a statement
+ * it could not really serve is a test asserting the wrong thing. With `failOn` absent nothing ever
+ * fails, so the abort state is unreachable and every other test here is served exactly as before.
  */
-function capturePg(introspectRows: readonly Record<string, unknown>[] = []): Captured {
+function capturePg(
+  introspectRows: readonly Record<string, unknown>[] = [],
+  failOn: (sql: string) => Error | null = () => null,
+): Captured {
   const calls: { sql: string; params: readonly unknown[] }[] = [];
+  let aborted = false;
   const conn: PgConnection = {
     query: (async (sql: string, params?: readonly unknown[]) => {
       calls.push({ sql, params: params ?? [] });
+      // Checked before the abort guard, because it is the one command a real aborted transaction
+      // still accepts — which is the entire mechanism under test.
+      if (sql.startsWith("ROLLBACK TO SAVEPOINT")) {
+        aborted = false;
+        return { rows: [], rowCount: 0 };
+      }
+      if (aborted) {
+        throw Object.assign(
+          new Error("current transaction is aborted, commands ignored until end of transaction block"),
+          { code: "25P02" },
+        );
+      }
+      const failure = failOn(sql);
+      if (failure !== null) {
+        aborted = true;
+        throw failure;
+      }
       if (sql.includes("pg_catalog.format_type")) {
         return { rows: introspectRows, rowCount: introspectRows.length };
       }
@@ -321,6 +349,183 @@ describe("applyTenantManifestSchema", () => {
     const result = await applyTenantManifestSchema(cap.conn, TENANT, manifestOf([]));
     expect(result.applied).toBe(true);
     expect(cap.sql()).toContain(`CREATE SCHEMA IF NOT EXISTS "${SCHEMA}";`);
+  });
+});
+
+/**
+ * A tenant serving their own activated manifest (ADR-0314) got every table, column, foreign key,
+ * join table and RLS policy and **no unique index**, while the deployment's own pack got them from
+ * `ColumnMappedEntityStore.ensureSchema` — so `unique: true` was enforced for one and not the
+ * other, which is the increment's own class one applier over.
+ */
+describe("applyTenantManifestSchema — declared uniqueness", () => {
+  const PRODUCT: Entity = {
+    name: "Product",
+    fields: [
+      { name: "sku", type: { kind: "text" }, required: true, unique: true },
+      { name: "code", type: { kind: "text" }, unique: true },
+      { name: "price", type: { kind: "decimal", precision: 12, scale: 2 } },
+    ],
+  } as unknown as Entity;
+
+  const SECRET: Entity = {
+    name: "Secret",
+    fields: [{ name: "mrn", type: { kind: "text" }, classification: "phi", unique: true }],
+  } as unknown as Entity;
+
+  const DUPLICATES = Object.assign(new Error('could not create unique index "product_sku_uniq"'), {
+    code: "23505",
+    detail: "Key (tenant_id, sku)=(…, SKU-1) is duplicated.",
+  });
+
+  /** Fails whichever unique index is on `column`, leaving every other statement alone. */
+  function failUniqueOn(column: string): (sql: string) => Error | null {
+    return (sql) =>
+      sql.startsWith("CREATE UNIQUE INDEX") && sql.includes(`"${column}"`) ? DUPLICATES : null;
+  }
+
+  const uniqueIndexes = (cap: Captured): string[] =>
+    cap.sql().filter((s) => s.startsWith("CREATE UNIQUE INDEX"));
+
+  it("issues a tenant-scoped unique index per declared unique field", async () => {
+    const cap = capturePg();
+    const result = await applyTenantManifestSchema(cap.conn, TENANT, manifestOf([PRODUCT]));
+    expect(result.applied).toBe(true);
+    expect(result.statements).toContain(
+      `CREATE UNIQUE INDEX IF NOT EXISTS "product_sku_uniq" ON "${SCHEMA}"."product" ("tenant_id", "sku");`,
+    );
+    expect(uniqueIndexes(cap)).toHaveLength(2); // sku and code; price declares none
+  });
+
+  it("issues them after every schema statement, so an index can be on a just-added column", async () => {
+    const cap = capturePg();
+    await applyTenantManifestSchema(cap.conn, TENANT, manifestOf([PRODUCT]));
+    const all = cap.sql();
+    // The real ordering constraint is `ADD COLUMN IF NOT EXISTS`, not `CREATE TABLE`: a unique
+    // field added by a later manifest gets its column from the additive pass, so an index issued
+    // before that pass would name a column that does not exist yet.
+    const lastAddColumn = all.map((s) => s.includes("ADD COLUMN")).lastIndexOf(true);
+    const lastPolicy = all.map((s) => s.startsWith("CREATE POLICY")).lastIndexOf(true);
+    const firstUnique = all.findIndex((s) => s.startsWith("CREATE UNIQUE INDEX"));
+    expect(lastAddColumn).toBeGreaterThanOrEqual(0);
+    expect(firstUnique).toBeGreaterThan(lastAddColumn);
+    expect(firstUnique).toBeGreaterThan(lastPolicy);
+    expect(firstUnique).toBeLessThan(all.indexOf("COMMIT"));
+  });
+
+  it("wraps each index in its own savepoint and releases it when it succeeds", async () => {
+    const cap = capturePg();
+    await applyTenantManifestSchema(cap.conn, TENANT, manifestOf([PRODUCT]));
+    const all = cap.sql();
+    const first = all.findIndex((s) => s.startsWith("CREATE UNIQUE INDEX"));
+    expect(all[first - 1]).toMatch(/^SAVEPOINT /);
+    expect(all[first + 1]).toMatch(/^RELEASE SAVEPOINT /);
+    // One savepoint per index, never one around the batch: a batch savepoint would roll the
+    // successful indexes back along with the refused one.
+    expect(all.filter((s) => s.startsWith("SAVEPOINT "))).toHaveLength(2);
+    expect(all.filter((s) => s.startsWith("ROLLBACK TO SAVEPOINT"))).toHaveLength(0);
+  });
+
+  it("reports a refused index instead of rejecting, and still applies", async () => {
+    const cap = capturePg([], failUniqueOn("sku"));
+    const result = await applyTenantManifestSchema(cap.conn, TENANT, manifestOf([PRODUCT]));
+    expect(result.applied).toBe(true);
+    expect(result.uniqueIndexRefusals).toHaveLength(1);
+    expect(result.uniqueIndexRefusals[0]?.entity).toBe("Product");
+    expect(result.uniqueIndexRefusals[0]?.sql).toContain('"product_sku_uniq"');
+    expect(result.uniqueIndexRefusals[0]?.detail).toContain("could not create unique index");
+  });
+
+  it("rolls back to the savepoint, so the refusal does not abort the transaction", async () => {
+    const cap = capturePg([], failUniqueOn("sku"));
+    const result = await applyTenantManifestSchema(cap.conn, TENANT, manifestOf([PRODUCT]));
+    const all = cap.sql();
+    // The fake models a real transaction's `25P02`, so without the rollback every later statement
+    // — including the COMMIT — would have raised and this application would have been a total
+    // failure reported as a refusal. Reaching COMMIT *is* the assertion.
+    expect(all.filter((s) => s.startsWith("ROLLBACK TO SAVEPOINT"))).toHaveLength(1);
+    expect(all).toContain("COMMIT");
+    expect(result.uniqueIndexRefusals[0]?.detail).not.toContain("transaction is aborted");
+  });
+
+  it("still attempts the next index after one is refused", async () => {
+    const cap = capturePg([], failUniqueOn("sku"));
+    const result = await applyTenantManifestSchema(cap.conn, TENANT, manifestOf([PRODUCT]));
+    // ADR-0295's continue-past-a-failure rule: one field's duplicates must not cost another field
+    // the guarantee it could have had.
+    expect(uniqueIndexes(cap)).toHaveLength(2);
+    expect(result.statements.join("\n")).toContain('"product_code_uniq"');
+    expect(result.uniqueIndexRefusals.map((r) => r.sql.includes('"product_code_uniq"'))).toEqual([
+      false,
+    ]);
+  });
+
+  it("keeps a refused statement out of `statements` and in the refusal, which is what ran", async () => {
+    const cap = capturePg([], failUniqueOn("sku"));
+    const result = await applyTenantManifestSchema(cap.conn, TENANT, manifestOf([PRODUCT]));
+    // `statements` is a record of what executed, so pasting it cannot re-run a statement already
+    // known to raise — and the text an operator needs most is in the refusal, labelled as failed.
+    expect(result.statements.join("\n")).not.toContain('"product_sku_uniq"');
+    expect(result.uniqueIndexRefusals[0]?.sql).toContain("CREATE UNIQUE INDEX");
+  });
+
+  it("reports a non-Error throw rather than losing it", async () => {
+    const cap = capturePg([], (sql) =>
+      sql.startsWith("CREATE UNIQUE INDEX")
+        ? ("deadlock" as unknown as Error)
+        : null,
+    );
+    const result = await applyTenantManifestSchema(cap.conn, TENANT, manifestOf([PRODUCT]));
+    expect(result.applied).toBe(true);
+    expect(result.uniqueIndexRefusals.map((r) => r.detail)).toEqual(["deadlock", "deadlock"]);
+  });
+
+  it("emits no index for an encrypted unique field, converging with the emitter", async () => {
+    const cap = capturePg();
+    const result = await applyTenantManifestSchema(cap.conn, TENANT, manifestOf([SECRET]));
+    // `pgp_sym_encrypt` is non-deterministic, so a UNIQUE over ciphertext never fires; the applier
+    // must not emit one here either, or a tenant schema would carry a constraint that cannot work.
+    expect(uniqueIndexes(cap)).toEqual([]);
+    expect(result.uniqueIndexRefusals).toEqual([]);
+  });
+
+  it("issues none and reports none for a manifest declaring no unique field", async () => {
+    const cap = capturePg();
+    const result = await applyTenantManifestSchema(
+      cap.conn,
+      TENANT,
+      manifestOf([TICKET, ACCOUNT], [RELATION]),
+    );
+    expect(result.applied).toBe(true);
+    expect(uniqueIndexes(cap)).toEqual([]);
+    expect(cap.sql().filter((s) => s.startsWith("SAVEPOINT "))).toEqual([]);
+    // `[]` is the claim, not an absence: the field is required, so a reader can tell "every
+    // declared uniqueness landed" from "nobody looked".
+    expect(result.uniqueIndexRefusals).toEqual([]);
+  });
+
+  it("reports no refusal on a blocking change, because nothing ran", async () => {
+    const drifted = TICKET_LIVE.map((r) =>
+      r["column_name"] === "subject" ? { ...r, formatted_type: "integer" } : r,
+    );
+    const cap = capturePg(drifted);
+    const result = await applyTenantManifestSchema(
+      cap.conn,
+      TENANT,
+      manifestOf([TICKET, ACCOUNT], [RELATION]),
+    );
+    expect(result.applied).toBe(false);
+    expect(result.uniqueIndexRefusals).toEqual([]);
+    expect(uniqueIndexes(cap)).toEqual([]);
+  });
+
+  it("is idempotent across runs: the same indexes, all IF NOT EXISTS", async () => {
+    const a = await applyTenantManifestSchema(capturePg().conn, TENANT, manifestOf([PRODUCT]));
+    const b = await applyTenantManifestSchema(capturePg().conn, TENANT, manifestOf([PRODUCT]));
+    expect(b.statements).toEqual(a.statements);
+    for (const stmt of b.statements.filter((s) => s.startsWith("CREATE UNIQUE INDEX"))) {
+      expect(stmt).toContain("IF NOT EXISTS");
+    }
   });
 });
 

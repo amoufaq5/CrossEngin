@@ -1,6 +1,6 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
 import type { Manifest } from "@crossengin/kernel/manifest";
-import { encodeKeyset, ListSurfaceUnserveable } from "@crossengin/operate-runtime";
+import { encodeKeyset, ListSurfaceUnserveable, UniqueViolation } from "@crossengin/operate-runtime";
 import type { Entity } from "@crossengin/types/meta-schema";
 import { describe, expect, it } from "vitest";
 
@@ -44,7 +44,16 @@ interface Captured {
   setRows: (rows: Record<string, unknown>[]) => void;
 }
 
-function capturePg(initialRows: Record<string, unknown>[] = []): Captured {
+function capturePg(
+  initialRows: Record<string, unknown>[] = [],
+  /**
+   * Fails exactly the statements this answers an error for, and **only** those: a `null` falls
+   * through to the arms below untouched. One hook rather than a second fake, because a copy of
+   * these arms is a fake answering a statement it could not really serve, which is the thing this
+   * file's own convention forbids.
+   */
+  fail?: (sql: string) => Error | null,
+): Captured {
   const calls: { sql: string; params: readonly unknown[] }[] = [];
   const settings: { sql: string; params: readonly unknown[] }[] = [];
   let rows = initialRows;
@@ -54,6 +63,10 @@ function capturePg(initialRows: Record<string, unknown>[] = []): Captured {
       return { rows: [], rowCount: 0 };
     }
     calls.push({ sql, params: params ?? [] });
+    // Recorded *before* it throws, because the statement was issued: "the next index was still
+    // attempted" is only checkable against what actually reached the connection.
+    const failure = fail?.(sql) ?? null;
+    if (failure !== null) throw failure;
     if (sql.includes("SELECT") || sql.includes("RETURNING")) return { rows, rowCount: rows.length };
     if (sql.trimStart().startsWith("DELETE")) return { rows: [], rowCount: 1 };
     return { rows: [], rowCount: 1 };
@@ -981,5 +994,243 @@ describe("ColumnMappedEntityStore — the at-rest column key", () => {
     // `FEATURE_FLAG_COLUMN_NAMES` defect, where a store could not round-trip a single row against
     // any real database while every offline test passed.
     expect(DEFAULT_ENCRYPTION_KEY_REF).toContain(String(cap.settings[1]?.params[0]));
+  });
+});
+
+/**
+ * A node-postgres error as the driver really delivers one: the SQLSTATE in `code` and the index
+ * name in `constraint`, which is all a `23505` carries that a caller could act on.
+ */
+function pgError(code: string, constraint: string): Error & { code: string; constraint: string } {
+  return Object.assign(new Error(`pg error ${code}`), { code, constraint });
+}
+
+/**
+ * Where each `CREATE UNIQUE INDEX` landed in the call log.
+ *
+ * Positions rather than a `some()` over the names, because "both appear somewhere" is satisfied by
+ * the index issued *before* a failure and so says nothing about whether the loop went on past it.
+ */
+function uniqueIndexPositions(cap: Captured): readonly number[] {
+  return cap.calls.flatMap((c, i) => (c.sql.includes("CREATE UNIQUE INDEX") ? [i] : []));
+}
+
+describe("ColumnMappedEntityStore — a declared unique field", () => {
+  /** Two unique columns, so a refusal on the first is distinguishable from a refusal on both. */
+  const CATALOG: Entity = {
+    name: "Catalog",
+    fields: [
+      { name: "sku", type: { kind: "text" }, required: true, unique: true },
+      { name: "ean", type: { kind: "text" }, unique: true },
+      { name: "label", type: { kind: "text" } },
+    ],
+  };
+  const CATALOG_MANIFEST = { entities: [CATALOG] } as unknown as Manifest;
+  const catalogStore = (cap: Captured): ColumnMappedEntityStore =>
+    new ColumnMappedEntityStore(cap.conn, CATALOG_MANIFEST, { schema: "tenant_app" });
+
+  /**
+   * Three unique columns, so a refusal can be put on the **middle** one — which is what makes the
+   * continue-past-a-failure assertions below claims about this loop rather than about the emitter's
+   * column order. Two is not enough: with the refusal on an end, whether a surviving index proves
+   * the loop continued or merely that it had already run is decided by the direction
+   * `enforceableUniqueColumns` happens to filter in, so reversing that order would make a loop
+   * stopping at the first failure invisible. The middle of three has a sibling on each side under
+   * either direction. A local fixture rather than a third unique column on `CATALOG`, which five
+   * tests below share, so no existing test changes meaning.
+   */
+  const SHELF: Entity = {
+    name: "Shelf",
+    fields: [
+      { name: "sku", type: { kind: "text" }, required: true, unique: true },
+      { name: "ean", type: { kind: "text" }, unique: true },
+      { name: "upc", type: { kind: "text" }, unique: true },
+      { name: "label", type: { kind: "text" } },
+    ],
+  };
+  const SHELF_MANIFEST = { entities: [SHELF] } as unknown as Manifest;
+
+  it("issues the unique indexes last, after every CREATE TABLE and ALTER TABLE", async () => {
+    // The ordering is the design, not tidiness. These are the only statements this emitter issues
+    // whose outcome depends on existing **data** — a unique index over a populated table holding
+    // duplicates raises `23505` and no `IF NOT EXISTS` helps, because the condition is in the rows
+    // — so everything that must succeed has already succeeded by the time one can fail.
+    const cap = capturePg();
+    await catalogStore(cap).ensureSchema();
+    const sqls = cap.calls.map((c) => c.sql);
+    const firstUnique = sqls.findIndex((q) => q.includes("CREATE UNIQUE INDEX"));
+    const lastStructural = sqls.reduce(
+      (acc, q, i) => (q.includes("CREATE TABLE") || q.includes("ALTER TABLE") ? i : acc),
+      -1,
+    );
+    expect(firstUnique).toBeGreaterThanOrEqual(0);
+    expect(lastStructural).toBeGreaterThanOrEqual(0);
+    expect(firstUnique).toBeGreaterThan(lastStructural);
+  });
+
+  it("reports a refused unique index, completes the boot, and still attempts the next one", async () => {
+    const refused: { entity: string; sql: string; detail: string }[] = [];
+    const cap = capturePg([], (sql) =>
+      sql.includes("shelf_ean_uniq") ? new Error("could not create unique index") : null,
+    );
+    await new ColumnMappedEntityStore(cap.conn, SHELF_MANIFEST, {
+      schema: "tenant_app",
+      onUniqueIndexRefused: (entity, sql, detail) => refused.push({ entity, sql, detail }),
+    }).ensureSchema();
+    expect(refused).toHaveLength(1);
+    expect(refused[0]!.entity).toBe("Shelf");
+    expect(refused[0]!.sql).toContain('"shelf_ean_uniq"');
+    expect(refused[0]!.detail).toBe("could not create unique index");
+    // The assertions that pin ADR-0295's continue-past-a-failure rule rather than merely "it did
+    // not throw": all three were attempted, and one of them *after* the refused one. A loop that
+    // stopped at the first failure would withhold every later guarantee over one table's duplicate
+    // rows. Counted and positioned rather than asked for by name, so neither half can be satisfied
+    // by the index issued *before* the failure.
+    const positions = uniqueIndexPositions(cap);
+    const refusedAt = cap.calls.findIndex((c) => c.sql.includes('"shelf_ean_uniq"'));
+    expect(positions).toHaveLength(3);
+    expect(positions.filter((i) => i > refusedAt)).toHaveLength(1);
+  });
+
+  it("swallows the refusal with no reporter supplied, which is why node.ts always supplies one", async () => {
+    let failed = 0;
+    const cap = capturePg([], (sql) => {
+      if (!sql.includes("shelf_ean_uniq")) return null;
+      failed += 1;
+      return new Error("duplicate rows");
+    });
+    await expect(
+      new ColumnMappedEntityStore(cap.conn, SHELF_MANIFEST, { schema: "tenant_app" }).ensureSchema(),
+    ).resolves.toBeUndefined();
+    // Counted rather than assumed: "it resolved" is the claim only if a statement really failed,
+    // and a hook whose predicate had stopped matching would make this pass having failed nothing.
+    expect(failed).toBe(1);
+    // And the swallow is the *reporter's* absence, not the loop's: with nobody to tell, the two
+    // indexes either side of the refused one are still attempted.
+    const positions = uniqueIndexPositions(cap);
+    const refusedAt = cap.calls.findIndex((c) => c.sql.includes('"shelf_ean_uniq"'));
+    expect(positions).toHaveLength(3);
+    expect(positions.filter((i) => i > refusedAt)).toHaveLength(1);
+  });
+
+  it("translates a 23505 on INSERT into a UniqueViolation naming the field", async () => {
+    const cap = capturePg([], (sql) =>
+      sql.startsWith("INSERT") ? pgError("23505", "catalog_sku_uniq") : null,
+    );
+    const err = await catalogStore(cap)
+      .create(TENANT, "Catalog", { id: "c1", sku: "S1" })
+      .then(
+        () => null,
+        (e: unknown) => e as UniqueViolation,
+      );
+    expect(err).toBeInstanceOf(UniqueViolation);
+    expect(err!.entity).toBe("Catalog");
+    expect(err!.field).toBe("sku");
+  });
+
+  it("translates a 23505 on UPDATE into a UniqueViolation naming the field", async () => {
+    // The likelier of the two in practice: a create usually supplies a fresh business key, while
+    // an update is where somebody re-types one that is already taken.
+    const cap = capturePg([], (sql) =>
+      sql.trimStart().startsWith("UPDATE") ? pgError("23505", "catalog_ean_uniq") : null,
+    );
+    const err = await catalogStore(cap)
+      .update(TENANT, "Catalog", "c1", { ean: "E1" })
+      .then(
+        () => null,
+        (e: unknown) => e as UniqueViolation,
+      );
+    expect(err).toBeInstanceOf(UniqueViolation);
+    expect(err!.field).toBe("ean");
+  });
+
+  it("re-throws a 23505 from a constraint this store never emitted, untouched", async () => {
+    // The most important of these. Claiming a field for a constraint that cannot be attributed
+    // would be a guess in an error message, and an unattributable duplicate is exactly as opaque
+    // as it was before this existed — which is honest rather than improved. `catalog_pkey` is
+    // Postgres's own name for the primary key; nothing in this emitter produces it.
+    const original = pgError("23505", "catalog_pkey");
+    const cap = capturePg([], (sql) => (sql.startsWith("INSERT") ? original : null));
+    const err = await catalogStore(cap)
+      .create(TENANT, "Catalog", { id: "c1", sku: "S1" })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+    expect(err).not.toBeInstanceOf(UniqueViolation);
+    expect(err).toBe(original);
+  });
+
+  it("re-throws a non-23505 untouched, even when it names an index this store did emit", async () => {
+    // The constraint here *is* attributable, so only the SQLSTATE check can be what declines the
+    // translation: the keying is on `23505` and not on "something went wrong during a write".
+    const original = pgError("42501", "catalog_sku_uniq");
+    const cap = capturePg([], (sql) => (sql.startsWith("INSERT") ? original : null));
+    const err = await catalogStore(cap)
+      .create(TENANT, "Catalog", { id: "c1", sku: "S1" })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+    expect(err).toBe(original);
+    // The `23505` half beside it, because a bare re-throw is also what an *unattributable*
+    // constraint produces — so one name under two SQLSTATEs with opposite outcomes is the only
+    // shape that shows which of the two checks declined. The sibling above asserts the field;
+    // this asserts that attributability was not what decided it here.
+    const dup = pgError("23505", "catalog_sku_uniq");
+    const capDup = capturePg([], (sql) => (sql.startsWith("INSERT") ? dup : null));
+    await expect(
+      catalogStore(capDup).create(TENANT, "Catalog", { id: "c1", sku: "S1" }),
+    ).rejects.toBeInstanceOf(UniqueViolation);
+  });
+
+  it("names an encrypted unique field as withheld, and emits no index for it", async () => {
+    // A local fixture rather than an edit to `WIDGET`, so no existing test changes meaning.
+    const CHART: Entity = {
+      name: "Chart",
+      fields: [
+        { name: "mrn", type: { kind: "text" }, classification: "phi", unique: true },
+        { name: "code", type: { kind: "text" }, unique: true },
+      ],
+    };
+    const cap = capturePg();
+    const s = new ColumnMappedEntityStore(cap.conn, { entities: [CHART] } as unknown as Manifest, {
+      schema: "tenant_app",
+      encryptionKey: () => KEY,
+    });
+    expect(s.uniqueWithheld()).toEqual([
+      { entity: "Chart", field: "mrn", reason: "encrypted_at_rest" },
+    ]);
+    // Both directions, because reporting "withheld" beside an index that exists is the worse of
+    // the two errors: an operator reading `\d` would see a constraint `pgp_sym_encrypt`'s
+    // non-determinism makes inert — two rows with one plaintext encrypt to different bytes.
+    await s.ensureSchema();
+    const indexes = cap.calls.map((c) => c.sql).filter((q) => q.includes("CREATE UNIQUE INDEX"));
+    expect(indexes).toHaveLength(1);
+    expect(indexes[0]).toContain('"chart_code_uniq"');
+  });
+
+  it("carries a scoped unique through ensureSchema as (tenant_id, scope, column)", async () => {
+    const SEAT: Entity = {
+      name: "Seat",
+      fields: [
+        { name: "dept", type: { kind: "text" } },
+        { name: "seat_no", type: { kind: "text" }, unique: { scope: ["dept"] } },
+      ],
+    };
+    const cap = capturePg();
+    await new ColumnMappedEntityStore(cap.conn, { entities: [SEAT] } as unknown as Manifest, {
+      schema: "tenant_app",
+    }).ensureSchema();
+    const indexes = cap.calls.map((c) => c.sql).filter((q) => q.includes("CREATE UNIQUE INDEX"));
+    // Counted before it is read, or `find` would silently assert about whichever index came first
+    // if a second unique field were ever added to this fixture.
+    expect(indexes).toHaveLength(1);
+    const index = indexes[0]!;
+    // Tenant first, then the declared scope, then the column — a multi-column index serves a
+    // prefix of its own columns, so leading with `tenant_id` makes it useful to the tenant-filtered
+    // reads every op here issues. The emitter has its own unit tests; what this adds is that the
+    // *store* carries the scope through, which is the measured 0-of-47 form no pack declares.
+    expect(index).toContain('("tenant_id", "dept", "seat_no")');
   });
 });

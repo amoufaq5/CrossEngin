@@ -62,7 +62,7 @@ import {
   type ColumnEncryptionKeySource,
 } from "@crossengin/operate-runtime-pg";
 
-import type { PruneOptions, ReplayOptions, ServeOptions, VerifyChainOptions } from "./cli.js";
+import type { PruneOptions, ReplayOptions, ServeOptions, StoreKind, VerifyChainOptions } from "./cli.js";
 import type { RawHttpRequest, RawHttpResponse } from "./http.js";
 import {
   DEFAULT_MAX_REQUEST_BODY_BYTES,
@@ -144,6 +144,11 @@ import {
   surveyEnvelopeTenantReadiness,
 } from "./envelope-tenant-readiness.js";
 import { formatListSurfaceReport, surveyListSurfaces } from "./list-surface-survey.js";
+import {
+  formatUniqueEnforcementReport,
+  surveyUniqueEnforcement,
+  uniqueEnforcementIsSuspect,
+} from "./unique-enforcement.js";
 import {
   TENANT_WRITE_STATUS_DETAIL,
   probeTenantWriteStatus,
@@ -696,6 +701,7 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
   }
 
   if (options.store === "memory") {
+    sayUniqueEnforcement(manifest, "memory");
     return {
       store: new InMemoryEntityStore(),
       allocator: new InMemorySequenceAllocator(),
@@ -781,12 +787,81 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
     const store = new ColumnMappedEntityStore(conn, manifest, {
       ...(options.schema !== null ? { schema: options.schema } : {}),
       ...(columnKey !== undefined ? { encryptionKey: columnKey } : {}),
+      // Always supplied, because the callback's absence swallows the failure. A unique index is the
+      // one statement class in that emitter whose outcome depends on existing **data** — adding one
+      // to a populated table holding duplicates raises `23505` and nothing in the catalog can make
+      // it succeed — so `ensureSchema` reports rather than taking the deployment down over rows it
+      // cannot deduplicate. What must not happen is that it reports to nobody: a declared
+      // uniqueness that is silently not enforced is the defect this whole emitter exists to close.
+      onUniqueIndexRefused: (entity, sql, detail) =>
+        console.error(
+          `[unique] ${entity}: a declared unique field is NOT enforced — the index could not be` +
+            ` created and the duplicate rows are already there: ${detail}. Deduplicate, then run:` +
+            ` ${sql}`,
+        ),
     });
     await store.ensureSchema();
+    sayUniqueEnforcement(manifest, "pg-columns", store);
     return { store, allocator, settingsStore, conn, columnKey };
   }
   const store = new PostgresEntityStore(conn, options.schema !== null ? { schema: options.schema } : {});
+  sayUniqueEnforcement(manifest, "pg");
   return { store, allocator, settingsStore, conn };
+}
+
+/**
+ * The `[unique]` boot line, said either way and before the first request.
+ *
+ * `unique` had **two** readers in this workspace and neither emitted anything: the kernel's
+ * structural diff reads it only to *throw* when it changes, and `ui-schema.ts` copies it onto the
+ * `UiSchema` — where `unique` occurs exactly once in the whole `operate-web` tree, as a type
+ * declaration, and no component reads it. So 45 declarations were authored, validated, hashed into
+ * `manifestHash`, serialized to every client and read by nobody at either end, and the deployment
+ * said nothing at all. That silence is how it lasted four phases, and it is the same shape
+ * ADR-0350 named: a check that passes and a guarantee that is missing can be one sentence.
+ *
+ * Over the **manifest** and the store kind rather than over `store.uniqueWithheld()`, because the
+ * store's own answer is only available on `--store pg-columns` — and `pg` is the shipped compose
+ * default, where the figure is not 2 withheld but **all 32** of `erp-core`'s declarations, which is
+ * the headline an operator actually needs. A survey asking the manifest answers for every store.
+ *
+ * **And where the store can answer, it is asked, and the two answers are compared.** They are
+ * independent derivations of one fact — the survey reads `resolvedFields` and
+ * `requiresEncryptionAtRest` off the manifest, the store reads `encryptAtRest` off the column plan
+ * the emitter is actually driven by — so a divergence does not make the DDL wrong, it makes this
+ * *line* wrong, and an operator reading `33 of 34 enforced` would be trusting a figure that no
+ * longer describes the indexes. Checking it is free, since the plans are built by the time this
+ * runs. It is the same standard this repo applies to every other pair of readings of one fact, and
+ * it is also what keeps the store's method from being a second spelling with only a test behind it.
+ */
+function sayUniqueEnforcement(
+  manifest: Manifest,
+  storeKind: StoreKind,
+  store?: ColumnMappedEntityStore,
+): void {
+  const report = surveyUniqueEnforcement(manifest, storeKind);
+  const line = formatUniqueEnforcementReport(report);
+  if (uniqueEnforcementIsSuspect(report)) console.warn(line);
+  else console.info(line);
+  if (store === undefined) return;
+  const fromPlans = store.uniqueWithheld();
+  const key = (w: { readonly entity: string; readonly field: string }): string =>
+    `${w.entity}.${w.field}`;
+  const surveyed = new Set(report.withheld.map(key));
+  const planned = new Set(fromPlans.map(key));
+  // Compared as sets of (entity, field) and not by count: two lists of equal length naming
+  // different fields is the divergence most likely to go unnoticed, and the one a count cannot see.
+  const disagree = [
+    ...[...surveyed].filter((k) => !planned.has(k)).map((k) => `${k} (survey only)`),
+    ...[...planned].filter((k) => !surveyed.has(k)).map((k) => `${k} (emitter only)`),
+  ];
+  if (disagree.length > 0) {
+    console.warn(
+      `[unique] the boot figure above and the emitted DDL disagree about ${disagree.length.toString()}` +
+        ` field(s): ${disagree.join(", ")}. The indexes are whatever the emitter wrote; the line is` +
+        ` the one to distrust.`,
+    );
+  }
 }
 
 export interface RunningServer {
@@ -3804,6 +3879,20 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
               `[tenant-schema] ${application.tenantId} applied to ${application.schema}` +
                 ` (${application.statements.length.toString()} statements)`,
             );
+            // And a withheld uniqueness arrives on exactly this arm, which is why it is reported
+            // here rather than beside the refusal below: a unique index the tenant's existing rows
+            // refused leaves the application *successful* — schema, columns, FKs, join tables, RLS
+            // and every index whose data permitted one — with one guarantee missing. The early
+            // `return` above used to end the function here, so the fact reached nobody: the same
+            // defect `onUniqueIndexRefused` exists to prevent on the boot store, one path over.
+            for (const refusal of application.uniqueIndexRefusals) {
+              console.error(
+                `[unique] tenant ${application.tenantId} (${application.schema})` +
+                  ` ${refusal.entity}: a declared unique field is NOT enforced — the index could` +
+                  ` not be created and the duplicate rows are already there: ${refusal.detail}.` +
+                  ` Deduplicate, then run: ${refusal.sql}`,
+              );
+            }
             return;
           }
           // A refusal is not a failure to report once and forget: the tenant is being served from

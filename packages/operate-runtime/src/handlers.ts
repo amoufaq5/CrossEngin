@@ -43,6 +43,7 @@ import {
   isTransactional,
   ListSurfaceUnserveable,
   projectRecord,
+  UniqueViolation,
   type EntityRecord,
   type EntityStore,
   type ListPage,
@@ -152,6 +153,18 @@ function json(status: number, body: unknown): HandlerOutput {
  * can put the exception back by changing one argument; `writeTxn`'s catch carries the reasoning.
  */
 const WRITE_FAILED_CLIENT_DETAIL = "the write could not be completed";
+
+/**
+ * The write carries no caller-supplied field, so no unique violation it raises is the caller's to
+ * fix — true of `delete`, which has no body, and of a transition, whose patch is the state the
+ * *manifest's* workflow names plus a timestamp.
+ *
+ * A named empty list rather than a bare `[]` at the two call sites, because the empty set is the
+ * *claim* here — it asserts the write supplied nothing, as against a caller whose keys nobody
+ * gathered — and ADR-0331's rule is that those two must stay distinguishable wherever the
+ * difference decides an answer. Here it decides a 409 against a 500.
+ */
+const NO_CALLER_SUPPLIED_FIELD: readonly string[] = [];
 
 /**
  * Which ABAC grant position each route action's entity-level check evaluates in, as a **total map**
@@ -399,13 +412,12 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         // exist until this write commits. So a record-bearing obligation answers `deferred` here
         // and that is **final**, carrying the structural reason — `deferred` on its own reads like
         // a retry, and there is nothing to retry with.
-        const createMask = evaluateMask(
-          ctx,
-          spec.entity,
-          auth,
-          "create",
-          Object.keys(parsedBody ?? {}),
-        );
+        // The caller's own keys, read once and used twice: the write mask asks "may they write
+        // these", `writeTxn` asks "did they name the field a unique index refused". Both questions
+        // are about the same set and the comment above is the shared reason, so a second
+        // `Object.keys` here would be a second spelling of one rule.
+        const createKeys = Object.keys(parsedBody ?? {});
+        const createMask = evaluateMask(ctx, spec.entity, auth, "create", createKeys);
         if (createMask !== null) {
           return maskForbidden(
             spec.entity,
@@ -450,7 +462,7 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
             store,
           });
           return json(201, created);
-        });
+        }, createKeys);
       }
       case "update": {
         // Optimistic concurrency: a client MAY send the `updated_at` it last read as a reserved
@@ -539,12 +551,15 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
             store,
           });
           return json(200, record);
-        });
+        }, Object.keys(raw));
       }
       case "delete": {
         // No write mask: a delete carries no body, so there is no caller-supplied field to mask.
         // Whether this principal may destroy the record is the entity-level `delete` grant,
-        // already checked above.
+        // already checked above. `NO_CALLER_SUPPLIED_FIELD` says the same thing to `writeTxn` — and
+        // a delete can still raise `23505`, through an `ON DELETE SET NULL` cascade that collides
+        // two siblings on a unique column, which is a consequence of the schema and not of
+        // anything this caller typed.
         return writeTxn(ctx, tenantId, async (store) => {
           // An outstanding obligation forces the load: the record is what the policy is about.
           const needsBefore = hasGuards(ctx) || hasEffects(ctx) || obligationOutstanding;
@@ -579,7 +594,7 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
             store,
           });
           return { kind: "empty", status: 204 };
-        });
+        }, NO_CALLER_SUPPLIED_FIELD);
       }
       case "transition":
         // No write mask: a transition takes no body and writes `{[stateField]: toState,
@@ -671,7 +686,7 @@ async function applyTransition(
       transitionTo: t.toState,
     });
     return json(200, after);
-  });
+  }, NO_CALLER_SUPPLIED_FIELD);
 }
 
 /**
@@ -964,13 +979,19 @@ async function writeTxn(
   ctx: HandlerContext,
   tenantId: string,
   body: (store: EntityStore) => Promise<HandlerOutput>,
+  callerKeys: readonly string[],
 ): Promise<HandlerOutput> {
   try {
     if (isTransactional(ctx.store)) {
       return await ctx.store.withTransaction(tenantId, (tx) => body(tx));
     }
     return await body(ctx.store);
-  } catch {
+  } catch (err) {
+    // The one write failure whose body may name something — and only when the caller named the
+    // field. See `uniqueConflict`.
+    if (err instanceof UniqueViolation && callerKeys.includes(err.field)) {
+      return uniqueConflict(err);
+    }
     // Unbound deliberately: the message is dropped, not moved, and that is the honest description
     // rather than a tidier one. This layer has no
     // recorder. A handler returns a `HandlerOutput`, the gateway's dispatch stage sees a 500 and
@@ -988,6 +1009,42 @@ async function writeTxn(
     // stage folds into the stage reason — which is a contract change this does not make.
     return json(500, { error: "write_failed", detail: WRITE_FAILED_CLIENT_DETAIL });
   }
+}
+
+/**
+ * **409, and the one exception to `writeTxn`'s "the body names nothing" rule.**
+ *
+ * Everything else that reaches that catch is a condition the caller cannot act on, which is why its
+ * body is a fixed sentence — the diagnosis belongs to the operator. A unique violation is the
+ * opposite: it is the one write failure the caller is the *only* party who can fix, by sending a
+ * different value, and the field name is not a disclosure because they supplied it. Answering the
+ * fixed 500 here would have enforced uniqueness and made the refusal undiagnosable, which is this
+ * increment's own class in a new place.
+ *
+ * **And the exception is scoped by its own reason, which is why `callerKeys` is a parameter and not
+ * a convenience.** *The caller supplied the value* is the whole justification, so where they did
+ * not, it evaporates: measured, **14 of the 45** declared unique fields carry a `sequence` default
+ * (`Invoice.invoice_number`, `PurchaseOrder.po_number`, … `INV-{YYYY}-{SEQ:5}`), and a `23505` on
+ * one of those that the caller omitted is the *allocator* having handed out a number it had already
+ * handed out — an internal fault. Telling that client `'invoice_number' must be unique … another
+ * record already holds that value` is an instruction they cannot follow for a value they never
+ * sent, so those take the fixed 500 and the diagnosis stays with the operator, where it belongs.
+ *
+ * The keys come from `parsedBody` because the create handler already draws this exact line for the
+ * write mask, for the same reason and in so many words — *"a sequence / literal / settings default
+ * and the `created_at`/`updated_at` stamp are the server writing a field, not the caller writing
+ * it"*. One rule, read twice; a second spelling of it is what would eventually disagree.
+ *
+ * `409` and not `422`: the value is well-formed and the request would have been valid a moment
+ * earlier or in another tenant, so this is a conflict with the current state rather than a
+ * malformed body — the same distinction `conflict_idempotency_mismatch` draws.
+ */
+function uniqueConflict(err: UniqueViolation): HandlerOutput {
+  return json(409, {
+    error: "unique_violation",
+    detail: `'${err.field}' must be unique within this tenant on '${err.entity}', and another record already holds that value`,
+    field: err.field,
+  });
 }
 
 /** Runs post-write effects; a throw propagates so `writeTxn` rolls back + maps to 500. */

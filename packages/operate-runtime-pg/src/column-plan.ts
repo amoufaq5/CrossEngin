@@ -18,6 +18,26 @@ export interface ColumnMapping {
   readonly notNull: boolean;
   readonly classification: DataClassification | null;
   readonly encryptAtRest: boolean;
+  /**
+   * The uniqueness this field declares, as the **columns it is unique within**, or `null` for a
+   * field declaring none. `[]` means unique within the tenant; `["department_id"]` means unique
+   * within `(tenant, department_id)`.
+   *
+   * It had **two** readers in the workspace and neither emitted anything: `kernel`'s `ddl/diff.ts`
+   * reads it only to *throw* when it changes, and `ui-schema.ts` copies it onto the `UiSchema` —
+   * where `unique` occurs exactly once in the whole `apps/operate-web` tree, as a type declaration,
+   * and no component reads it. So the declaration was authored, validated, hashed into
+   * `manifestHash`, serialized to every client and read by nobody at either end. Measured: **45**
+   * distinct (entity, field) pairs declare it across the seven resolved packs, and zero UNIQUE
+   * constraints were emitted on any of the 54 tables.
+   *
+   * A scope list and not a `boolean`, because `UniqueHintSchema` is `boolean | {scope: string[]}`
+   * and has been since it was written — so `field.unique === true` **silently drops** the composite
+   * form, which is this increment's own class inside its own fix. Measured: 0 of the 47 source
+   * declarations use the scoped form, so reading it costs nothing today and is the only reading
+   * that cannot go quietly wrong later.
+   */
+  readonly uniqueScope: readonly string[] | null;
   /** For a reference field: the target entity name (so a FK can be emitted), else null. */
   readonly referenceTarget: string | null;
   /**
@@ -86,6 +106,20 @@ const UNDECIDED_SQL_TYPES: ReadonlyMap<string, string> = new Map([
   ["INTERVAL", "a 'duration' field has no decided wire type"],
 ]);
 
+/**
+ * The field names a `unique` declaration is scoped by, or `null` if it declares no uniqueness.
+ *
+ * Three cases and all three are written down, because the shape that reads only the first is what
+ * made this declaration unreachable: `true` → `[]` (unique within the tenant), `{scope}` → the
+ * scope, and `false`/absent → `null`. `field.unique === true` would answer `null` for a declared
+ * composite key, which is a silent drop in an emitter deciding a *constraint*.
+ */
+function uniqueScopeFields(field: Field): readonly string[] | null {
+  const hint = field.unique;
+  if (hint === undefined || hint === false) return null;
+  return hint === true ? [] : hint.scope;
+}
+
 function mappingForField(field: Field): ColumnMapping {
   const classification = field.classification ?? null;
   const isReference = field.type.kind === "reference";
@@ -99,6 +133,9 @@ function mappingForField(field: Field): ColumnMapping {
     notNull: field.required === true,
     classification,
     encryptAtRest: classification !== null && requiresEncryptionAtRest(classification),
+    // Field *names* here; `columnPlanForEntity` rewrites them to columns in a second pass, because
+    // resolving a scope needs every sibling field and `mappingForField` sees one.
+    uniqueScope: uniqueScopeFields(field),
     referenceTarget: field.type.kind === "reference" ? field.type.target : null,
     defaultSql: field.default !== undefined ? emitDefault(field.default) : null,
   };
@@ -124,8 +161,8 @@ export function columnPlanForEntity(
   if (!SCHEMA_RE.test(opts.schema)) {
     throw new Error(`invalid schema name: ${JSON.stringify(opts.schema)}`);
   }
-  const columns = resolvedFields(entity, opts.traits ?? []).map(mappingForField);
-  for (const column of columns) {
+  const planned = resolvedFields(entity, opts.traits ?? []).map(mappingForField);
+  for (const column of planned) {
     // At plan time, not at the first read: see `UNDECIDED_SQL_TYPES`. A manifest that cannot be
     // served is a configuration error, and the one thing worse than refusing it is provisioning a
     // table for it and failing on somebody's first page.
@@ -135,6 +172,24 @@ export function columnPlanForEntity(
       throw new UndecidedColumnTypeError(entity.name, column.field, base, reason);
     }
   }
+  // Second pass, because a scope names sibling *fields* and the index needs their *columns*.
+  // Refusing here follows `UNDECIDED_SQL_TYPES`' precedent exactly: a plan that cannot be built
+  // honestly throws, `applyTenantManifestSchema` catches it and reports a blocking change
+  // (ADR-0334's `unservable_field_type`), and the alternative — emitting the index without the
+  // unresolved scope column — would silently enforce a *different, stricter* constraint than the
+  // manifest declares, refusing writes a reviewer approved.
+  const columnOfField = new Map(planned.map((c) => [c.field, c.column] as const));
+  const columns = planned.map((c) => {
+    if (c.uniqueScope === null || c.uniqueScope.length === 0) return c;
+    return {
+      ...c,
+      uniqueScope: c.uniqueScope.map((name) => {
+        const col = columnOfField.get(name);
+        if (col === undefined) throw new UnresolvableUniqueScopeError(entity.name, c.field, name);
+        return col;
+      }),
+    };
+  });
   return {
     entity: entity.name,
     schema: opts.schema,
@@ -159,6 +214,27 @@ export class UndecidedColumnTypeError extends Error {
   ) {
     super(`${entity}.${field}: cannot plan a ${sqlType} column — ${reason}`);
     this.name = "UndecidedColumnTypeError";
+  }
+}
+
+/**
+ * Thrown when a field's `unique: {scope: [...]}` names a field the entity does not resolve to.
+ *
+ * `validateManifest` refuses this first, so reaching it means the plan was built from a manifest
+ * that did not go through validation — which is why it is an error and not a withheld reason: a
+ * reason is a guarantee this store declines to give, and this is a manifest that does not say what
+ * its author thinks it says.
+ */
+export class UnresolvableUniqueScopeError extends Error {
+  constructor(
+    readonly entity: string,
+    readonly field: string,
+    readonly scopeField: string,
+  ) {
+    super(
+      `${entity}.${field}: unique scope names '${scopeField}', which is not a field of '${entity}'`,
+    );
+    this.name = "UnresolvableUniqueScopeError";
   }
 }
 

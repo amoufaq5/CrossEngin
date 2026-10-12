@@ -24,6 +24,7 @@ import { SEALED_CURSOR_PREFIX, buildCursorSealer } from "./cursor-seal.js";
 import {
   InMemoryEntityStore,
   ListSurfaceUnserveable,
+  UniqueViolation,
   decodeKeyset,
   type ListPage,
   type UnserveableSurfaceRef,
@@ -1940,5 +1941,322 @@ describe("operate handlers — an unserveable list surface is refused, not dropp
     await expect(
       hit(clinicCtx(new Boom(), evaluator("satisfied")), "roster.list", { role: "clinician" }),
     ).rejects.toThrow(/connection terminated/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A unique violation the caller can act on, and every other write failure.
+//
+// `unique` had two readers in the workspace and neither emitted anything: `kernel/ddl/diff.ts`
+// reads it only to *throw* when it changes, and `ui-schema.ts` copies it onto the `UiSchema`,
+// where `unique` occurs exactly once in the whole `apps/operate-web` tree — as a type declaration
+// — and no component reads it. So the declaration was authored, validated, hashed into
+// `manifestHash`, serialized to every client, and read at neither end.
+//
+// Enforcing it raises a question the enforcement does not answer. `writeTxn`'s catch returns a
+// fixed sentence naming nothing, which is right for a database fault and wrong for the one write
+// failure the *caller* is the only party who can fix — so a 409 naming the field, and uniqueness
+// enforced with the refusal undiagnosable would have traded one silence for another.
+//
+// `callerKeys` is what scopes that exception, and it is the sharpest decision here: "they supplied
+// the value" is the whole justification, so where they did not, it evaporates. Each arm is pinned
+// on all four write actions below.
+// ---------------------------------------------------------------------------
+
+/**
+ * A store that raises on a write the way a uniqueness-enforcing Postgres store does.
+ *
+ * `arm` rather than a constructor argument: the update, delete and transition cases need a record
+ * to act on, and a store that refuses from construction leaves none to seed.
+ */
+class RaisingStore extends InMemoryEntityStore {
+  /**
+   * A box and not a number, because the count has to survive `compileOperateServer`'s store
+   * decorators. Each is `Object.assign(Object.create(store), overrides)`, and only the record-
+   * carrying methods are overridden — `withListValueTypes` overrides none of the three writes, so
+   * `create`/`update`/`remove` resolve through the prototype chain to this class with `this` bound
+   * to the *decorator*. `this.writes += 1` would then read the inherited 0 and define an own
+   * property on an object the test cannot see, which is why `CapturingStore.pageCalls` works
+   * (`listPage` is overridden, so it is re-dispatched onto the real store) and a write counter
+   * would not. Reading the box resolves to this instance's object and mutating it is visible here.
+   */
+  readonly writes = { n: 0 };
+  private raising: unknown = null;
+
+  arm(thrown: unknown): void {
+    this.raising = thrown;
+  }
+
+  private raise(): void {
+    this.writes.n += 1;
+    if (this.raising !== null) throw this.raising;
+  }
+
+  override async create(
+    ...args: Parameters<InMemoryEntityStore["create"]>
+  ): ReturnType<InMemoryEntityStore["create"]> {
+    this.raise();
+    return super.create(...args);
+  }
+
+  override async update(
+    ...args: Parameters<InMemoryEntityStore["update"]>
+  ): ReturnType<InMemoryEntityStore["update"]> {
+    this.raise();
+    return super.update(...args);
+  }
+
+  override async remove(
+    ...args: Parameters<InMemoryEntityStore["remove"]>
+  ): ReturnType<InMemoryEntityStore["remove"]> {
+    this.raise();
+    return super.remove(...args);
+  }
+}
+
+/**
+ * Points the module-level `server` at `store`, so these cases go through `invoke` and the real
+ * compiled handlers rather than a second request-building helper. `beforeEach` rebuilds `server`,
+ * so the reassignment cannot outlive the test.
+ *
+ * `failingEffect` raises from a post-write effect instead of from the store — the one position
+ * where a write has already landed, which is what makes the rollback assertion possible.
+ */
+function serving(store: InMemoryEntityStore, failingEffect?: unknown): void {
+  server = compileOperateServer(resolved, {
+    store,
+    principalRoles,
+    ...(failingEffect !== undefined
+      ? {
+          writeEffects: [
+            async (): Promise<void> => {
+              throw failingEffect;
+            },
+          ],
+        }
+      : {}),
+  });
+}
+
+/** `Product.sku` is a real `unique: true` field with no default, so the caller always supplies it. */
+function productBody(): Record<string, unknown> {
+  return { sku: "SKU-1", name: "Milk", unit_price: 2, unit_cost: 1 };
+}
+
+describe("operate handlers — a unique violation on a field the caller supplied", () => {
+  it("409s a create, naming the field and the entity", async () => {
+    const store = new RaisingStore();
+    serving(store);
+    store.arm(new UniqueViolation("Product", "sku"));
+
+    const out = await invoke("product.create", { role: "retail_admin", body: productBody() });
+    expect(out.status).toBe(409);
+    const body = bodyOf(out);
+    expect(body["error"]).toBe("unique_violation");
+    expect(body["field"]).toBe("sku");
+    // Both names, because the field alone does not say which collection it collided in — a caller
+    // writing two entities carrying a `code` cannot act on "'code' must be unique". One ordered
+    // match and not two `toContain`s: the sentence interpolates both, so presence alone passes
+    // with them transposed, and `'Product' must be unique … on 'sku'` disambiguates nothing while
+    // reading as if it does. Ordered rather than the whole prose, because the repair for a frozen
+    // sentence is to paste the new one out of the failure output, which re-greens the assertion
+    // without re-establishing either slot.
+    expect(String(body["detail"])).toMatch(/'sku' must be unique\b.*\bon 'Product'/);
+  });
+
+  it("409s an update, which is the path a caller is likelier to reach", async () => {
+    // A create usually supplies a fresh business key; an update is where somebody re-types one
+    // already taken.
+    const store = new RaisingStore();
+    serving(store);
+    const id = bodyOf(await invoke("product.create", { role: "retail_admin", body: productBody() }))[
+      "id"
+    ] as string;
+    store.arm(new UniqueViolation("Product", "sku"));
+
+    const out = await invoke("product.update", {
+      role: "retail_admin",
+      params: { id },
+      body: { sku: "TAKEN" },
+    });
+    expect(out.status).toBe(409);
+    expect(bodyOf(out)["field"]).toBe("sku");
+  });
+
+  it("answers 409 and not 422, which the same body accepted elsewhere is what proves", async () => {
+    // The value is well-formed and would have been valid a moment earlier, or in another tenant:
+    // a conflict with current state rather than a malformed body — the distinction
+    // `conflict_idempotency_mismatch` draws. Asserting the status alone would pin a constant, so
+    // the identical body is sent twice: 201 against a store that does not refuse, 409 against one
+    // that does. Nothing about the request changed, so nothing about it can be unprocessable.
+    const body = productBody();
+
+    serving(new InMemoryEntityStore());
+    expect((await invoke("product.create", { role: "retail_admin", body })).status).toBe(201);
+
+    const raising = new RaisingStore();
+    serving(raising);
+    raising.arm(new UniqueViolation("Product", "sku"));
+    const refused = await invoke("product.create", { role: "retail_admin", body });
+    expect(refused.status).toBe(409);
+    expect(refused.status).not.toBe(422);
+  });
+
+  it("rolls the write back before answering, so a 409 wrote nothing", async () => {
+    // The rollback is `withTransaction`'s catch, which restores its snapshot and rethrows — so it
+    // has already run by the time `writeTxn`'s catch decides on a status. Returning a value from
+    // the outer catch does not skip it, and that ordering is the only reason a 409 can be answered
+    // from a position where the record may already be in the bucket.
+    const store = new RaisingStore();
+    serving(store, new UniqueViolation("Product", "sku"));
+
+    const out = await invoke("product.create", { role: "retail_admin", body: productBody() });
+    expect(out.status).toBe(409);
+    expect(store.writes.n).toBe(1);
+    expect((await store.list(TENANT, "Product")).length).toBe(0);
+  });
+});
+
+describe("operate handlers — a unique violation on a field the caller did not supply", () => {
+  it("500s a create whose colliding field the server defaulted, and does not name it", async () => {
+    // The test the increment turns on. `category` is the *server* writing a field: the body omits
+    // it and `erp-retail` gives it the literal default `"other"`, which is the same set the create
+    // handler's own write-mask comment names — "a sequence / literal / settings default and the
+    // `created_at`/`updated_at` stamp are the server writing a field, not the caller writing it".
+    //
+    // The member that makes the rule load-bearing is the sequence: measured, **14 of the 45**
+    // declared unique (entity, field) pairs across the seven packs carry a `sequence` default
+    // (`Invoice.invoice_number` = `INV-{YYYY}-{SEQ:5}`, `PurchaseOrder.po_number`, …, 13 of them in
+    // the manifest this file resolves). A `23505` on one of those is the *allocator* having handed
+    // out a number it already handed out, so `'invoice_number' must be unique … another record
+    // already holds that value` is an instruction the caller cannot follow for a value they never
+    // sent. The diagnosis stays with the operator, where it belongs.
+    const store = new RaisingStore();
+    serving(store);
+    store.arm(new UniqueViolation("Product", "category"));
+
+    const out = await invoke("product.create", { role: "retail_admin", body: productBody() });
+    expect(out.status).toBe(500);
+    const body = bodyOf(out);
+    expect(body["error"]).toBe("write_failed");
+    expect(body["detail"]).toBe("the write could not be completed");
+    expect(JSON.stringify(body)).not.toContain("category");
+  });
+
+  it("500s an update whose collision is on a record the caller's patch never named", async () => {
+    // Raised from a post-write effect against another entity entirely, which is how this reaches a
+    // real deployment: the effects posting a GL document allocate `Invoice.invoice_number`, so the
+    // collision belongs to a write the caller did not ask for by name. It also pins that the
+    // predicate is the caller's key set and nothing else — the entity on the error is not compared,
+    // so `Invoice` is as unnamed here as a sibling field of `Product` would be.
+    const store = new RaisingStore();
+    serving(store);
+    const id = bodyOf(await invoke("product.create", { role: "retail_admin", body: productBody() }))[
+      "id"
+    ] as string;
+    serving(store, new UniqueViolation("Invoice", "invoice_number"));
+
+    const out = await invoke("product.update", {
+      role: "retail_admin",
+      params: { id },
+      body: { name: "B" },
+    });
+    expect(out.status).toBe(500);
+    const serialized = JSON.stringify(bodyOf(out));
+    expect(serialized).not.toContain("invoice_number");
+    expect(serialized).not.toContain("Invoice");
+  });
+
+  it("500s a delete even when a body smuggled onto it names the colliding field", async () => {
+    // A delete carries no body, so `NO_CALLER_SUPPLIED_FIELD` is a *claim about the write* and not
+    // a reading of the request — which is why a body on the DELETE changes nothing, and why the
+    // claim is a named empty list rather than `Object.keys(parsedBody ?? {})` at this call site.
+    // A delete can still raise genuinely, through an `ON DELETE SET NULL` cascade colliding two
+    // siblings on a unique column: a consequence of the schema, not of anything this caller typed.
+    const store = new RaisingStore();
+    serving(store);
+    const id = bodyOf(await invoke("product.create", { role: "retail_admin", body: productBody() }))[
+      "id"
+    ] as string;
+    store.arm(new UniqueViolation("Product", "sku"));
+
+    const out = await invoke("product.delete", {
+      role: "retail_admin",
+      params: { id },
+      body: { sku: "DUP" },
+    });
+    expect(out.status).toBe(500);
+    expect(JSON.stringify(bodyOf(out))).not.toContain("sku");
+  });
+
+  it("500s a transition, whose patch is the manifest's state plus a timestamp", async () => {
+    // Both values are server-chosen — the state comes from `sales_order_lifecycle`'s `place` edge
+    // and the stamp from the clock — so no unique violation a transition raises is the caller's to
+    // fix, whatever the request body says. `order_number` really is `SalesOrder`'s unique field,
+    // which is what makes the smuggled body a plausible mistake rather than a contrived one.
+    const store = new RaisingStore();
+    serving(store);
+    const id = bodyOf(
+      await invoke("salesOrder.create", {
+        role: "retail_admin",
+        body: { store_id: "st1", order_number: "SO-1", currency: "USD" },
+      }),
+    )["id"] as string;
+    store.arm(new UniqueViolation("SalesOrder", "order_number"));
+
+    const out = await invoke("salesOrder.place", {
+      role: "retail_admin",
+      params: { id },
+      body: { order_number: "SO-1" },
+    });
+    expect(out.status).toBe(500);
+    expect(store.writes.n).toBe(2);
+    expect(JSON.stringify(bodyOf(out))).not.toContain("order_number");
+  });
+});
+
+describe("operate handlers — the 409 is an exception to the fixed 500, not a hole in it", () => {
+  it("keeps the fixed 500 naming nothing for a throw that is not a unique violation", async () => {
+    // What makes the exception an exception. The caller named `sku`, so the only thing standing
+    // between this message and the client is the `instanceof`.
+    const store = new RaisingStore();
+    serving(store);
+    store.arm(new Error("connection reset: host=db-7 user=app_rw"));
+
+    const out = await invoke("product.create", { role: "retail_admin", body: productBody() });
+    expect(out.status).toBe(500);
+    const serialized = JSON.stringify(bodyOf(out));
+    expect(serialized).not.toContain("db-7");
+    expect(serialized).not.toContain("app_rw");
+    expect(bodyOf(out)["detail"]).toBe("the write could not be completed");
+  });
+
+  it("does not answer 409 for an error that merely carries a matching `field`", async () => {
+    // The arm tests `instanceof UniqueViolation`, not the shape. Duck-typing it would let any
+    // throw that happens to carry a `field` the caller named choose its own status and put its own
+    // string in the body, which is the disclosure the fixed sentence exists to close.
+    const store = new RaisingStore();
+    serving(store);
+    store.arm(Object.assign(new Error("boom"), { entity: "Product", field: "sku" }));
+
+    const out = await invoke("product.create", { role: "retail_admin", body: productBody() });
+    expect(out.status).toBe(500);
+    expect(bodyOf(out)["error"]).toBe("write_failed");
+  });
+
+  it("has a member on each side of the rule in the manifest this file resolves", async () => {
+    // Neither arm is hypothetical, which is what keeps the 500 arm from reading as defensive
+    // programming: the caller-supplied side and the server-written side each have a declared
+    // `unique` member in the shipped packs.
+    const field = (entity: string, name: string) =>
+      (resolved.entities ?? []).find((e) => e.name === entity)?.fields.find((f) => f.name === name);
+
+    const sku = field("Product", "sku");
+    expect(sku?.unique).toBe(true);
+    expect(sku?.default).toBeUndefined();
+
+    const invoiceNumber = field("Invoice", "invoice_number");
+    expect(invoiceNumber?.unique).toBe(true);
+    expect(invoiceNumber?.default?.kind).toBe("sequence");
   });
 });

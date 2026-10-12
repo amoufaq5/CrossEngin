@@ -133,6 +133,30 @@ export class ListSurfaceUnserveable extends Error {
   }
 }
 
+/**
+ * A write violated a declared `unique: true` field.
+ *
+ * Thrown by a store that enforces uniqueness, so the handler can answer **409** naming the field
+ * rather than the opaque 500 an uncaught `23505` becomes. Without it this increment would have
+ * traded one silence for another: uniqueness enforced, and the refusal undiagnosable — the client
+ * is told "the write could not be completed" for a condition it can fix by sending a different
+ * value, which is the one case where the caller is the only party who *can* fix it.
+ *
+ * It lives here for `ListSurfaceUnserveable`'s reason: the handler that maps it is in this package
+ * and cannot import `operate-runtime-pg`.
+ */
+export class UniqueViolation extends Error {
+  readonly entity: string;
+  readonly field: string;
+
+  constructor(entity: string, field: string) {
+    super(`'${field}' must be unique within the tenant on '${entity}'`);
+    this.name = "UniqueViolation";
+    this.entity = entity;
+    this.field = field;
+  }
+}
+
 export interface EntityStore {
   list(tenantId: string, entity: string): Promise<readonly EntityRecord[]>;
   listPage(tenantId: string, entity: string, query: ListQuery): Promise<ListPage>;

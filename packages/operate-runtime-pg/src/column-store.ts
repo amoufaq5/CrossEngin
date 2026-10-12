@@ -12,6 +12,7 @@ import {
   encodeKeyset,
   keysetOf,
   ListSurfaceUnserveable,
+  UniqueViolation,
   toDateWire,
   toDecimalWire,
   toTimeWire,
@@ -47,7 +48,14 @@ import {
   type EntityTablePlan,
   type JoinTablePlan,
 } from "./column-plan.js";
-import { emitManifestSchemaDdl, MILLISECOND_NOW_SQL } from "./entity-ddl.js";
+import {
+  emitManifestSchemaDdl,
+  emitUniqueIndexDdl,
+  MILLISECOND_NOW_SQL,
+  uniqueIndexFields,
+  uniqueWithheldFor,
+  type UniqueWithheld,
+} from "./entity-ddl.js";
 import { resolveRecordId } from "./records.js";
 import { withTenantContext } from "./tenant-context.js";
 
@@ -122,6 +130,9 @@ export class ColumnEncryptionUnavailable extends Error {
   }
 }
 
+/** Postgres's unique-violation SQLSTATE. One spelling, named rather than inline. */
+const PG_UNIQUE_VIOLATION = "23505";
+
 export interface ColumnMappedEntityStoreOptions {
   readonly schema?: string;
   /** SQL expression yielding the pgcrypto key (a reference, never the raw key). */
@@ -131,6 +142,17 @@ export interface ColumnMappedEntityStoreOptions {
    * transaction-local GUC, never in SQL text.
    */
   readonly encryptionKey?: ColumnEncryptionKeySource;
+  /**
+   * Called once per unique index `ensureSchema` could not create, with the SQL.
+   *
+   * It exists because these statements are the one class in this emitter whose outcome depends on
+   * **existing data**: adding a unique index to a populated table holding duplicates raises
+   * `23505`, and no `IF NOT EXISTS` helps because the condition is in the rows. Taking the
+   * deployment down over rows this code cannot deduplicate would be the wrong trade — the table
+   * serves perfectly well without the index, minus the guarantee — so the failure is reported and
+   * the boot goes on. Absent, a failure is swallowed, which is why `node.ts` always supplies it.
+   */
+  readonly onUniqueIndexRefused?: (entity: string, sql: string, detail: string) => void;
 }
 
 /**
@@ -156,6 +178,7 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
   private readonly deletePolicies: ReadonlyMap<string, OnDelete>;
   private readonly joinPlans: readonly JoinTablePlan[];
   private readonly joinIndex: ReadonlyMap<string, JoinTablePlan>;
+  private readonly onUniqueIndexRefused: ((entity: string, sql: string, detail: string) => void) | null;
 
   constructor(
     conn: PgConnection,
@@ -173,6 +196,7 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
     this.keyRef = keyRef;
     this.encryptionKey = opts.encryptionKey ?? null;
     this.encryptsAtRest = plansRequirePgcrypto(this.plans);
+    this.onUniqueIndexRefused = opts.onUniqueIndexRefused ?? null;
     // A caller that supplied its own *reference* is arranging the key by a route this store cannot
     // see — a session-level GUC set by a pooler, a `pgp_sym_encrypt` wrapper function, a literal in
     // a test — so it is taking responsibility and is not refused. The exemption is exactly that
@@ -266,6 +290,63 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
     for (const stmt of emitManifestSchemaDdl(this.plans, this.joinPlans, this.deletePolicies)) {
       await this.conn.query(stmt);
     }
+    // Last, and each in its own try, because this is the only statement class here whose outcome
+    // depends on existing **data**: a unique index over a populated table holding duplicates raises
+    // `23505` and nothing in the catalog can make it succeed. Running them with the rest would make
+    // one tenant's duplicate rows stop the whole deployment booting, over a guarantee the table was
+    // serving without until now — so the failure is reported and the remaining indexes are still
+    // attempted, which is `kernel-pg`'s continue-past-a-failure rule (ADR-0295) for the same reason.
+    for (const plan of this.plans.values()) {
+      for (const stmt of emitUniqueIndexDdl(plan)) {
+        try {
+          await this.conn.query(stmt);
+        } catch (err) {
+          this.onUniqueIndexRefused?.(
+            plan.entity,
+            stmt,
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * Re-throws a Postgres unique violation as a `UniqueViolation` naming the field.
+   *
+   * `23505` arrives carrying the **constraint name** and nothing else a caller could act on, and an
+   * uncaught one becomes the handler's opaque 500 — so without this the increment would have traded
+   * one silence for another: uniqueness enforced, and the refusal undiagnosable for the one party
+   * who can fix it by sending a different value. The name resolves through `uniqueIndexFields`,
+   * which is derived from the same function that generated it rather than parsed back out of it.
+   *
+   * A `23505` from an index this store did **not** emit — a catalogued constraint, a hand-made
+   * index — is re-thrown untouched. Claiming a field for a constraint we cannot attribute would be
+   * a guess in an error message, and an unattributable duplicate is exactly as opaque as it was
+   * before, which is honest rather than improved.
+   */
+  private rethrowUniqueViolation(entity: string, err: unknown): never {
+    const code = (err as { readonly code?: unknown }).code;
+    if (code === PG_UNIQUE_VIOLATION) {
+      const constraint = (err as { readonly constraint?: unknown }).constraint;
+      const plan = this.plans.get(entity);
+      if (typeof constraint === "string" && plan !== undefined) {
+        const field = uniqueIndexFields(plan).get(constraint);
+        if (field !== undefined) throw new UniqueViolation(entity, field);
+      }
+    }
+    throw err;
+  }
+
+  /**
+   * Every field whose declared `unique: true` this store will not enforce, with its reason.
+   *
+   * Asked by the boot survey rather than at request time: it is a property of the manifest and the
+   * store kind, so it is knowable before a row is written, and the answer is a guarantee withheld
+   * rather than a request to refuse.
+   */
+  uniqueWithheld(): readonly UniqueWithheld[] {
+    return [...this.plans.values()].flatMap((plan) => uniqueWithheldFor(plan));
   }
 
   async list(tenantId: string, entity: string): Promise<readonly EntityRecord[]> {
@@ -403,10 +484,14 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
       // `price: 10.25` and the following `get` answered `"10.25"`.
       stored[mapping.field] = readColumn(mapping, v);
     }
-    await tx.query(
-      `INSERT INTO ${qualified} (${columns.join(", ")}) VALUES (${placeholders.join(", ")})`,
-      values,
-    );
+    try {
+      await tx.query(
+        `INSERT INTO ${qualified} (${columns.join(", ")}) VALUES (${placeholders.join(", ")})`,
+        values,
+      );
+    } catch (err) {
+      this.rethrowUniqueViolation(entity, err);
+    }
     return stored;
   }
 
@@ -438,13 +523,21 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
     // value this store serves truncated, so a keyset cursor on it cannot round-trip and the page
     // walk does not terminate. Measured live.
     if (!stampsUpdatedAt) sets.push(`${quoteIdent("updated_at")} = ${MILLISECOND_NOW_SQL}`);
-    const res = await tx.query<Record<string, unknown>>(
-      `UPDATE ${qualified}
+    let res;
+    try {
+      res = await tx.query<Record<string, unknown>>(
+        `UPDATE ${qualified}
           SET ${sets.join(", ")}
         WHERE ${quoteIdent("tenant_id")} = $1 AND ${quoteIdent("id")} = $2
         RETURNING ${this.selectList(plan)}`,
-      params,
-    );
+        params,
+      );
+    } catch (err) {
+      // The update path too, and it is the one a caller is likelier to hit: a create usually
+      // supplies a fresh business key, while an update is where somebody re-types one that is
+      // already taken.
+      this.rethrowUniqueViolation(entity, err);
+    }
     const row = res.rows[0];
     return row === undefined ? null : rowToRecord(plan, row);
   }

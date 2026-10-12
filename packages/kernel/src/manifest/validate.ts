@@ -217,6 +217,46 @@ function validateEntitiesTraitsRelations(manifest: Manifest): EntityIndex {
     }
   }
 
+  // A `unique: {scope: [...]}` whose scope names a field the entity does not resolve to.
+  //
+  // Over `resolvedFields` and deliberately **not** over `entity.fields`: a unique field can arrive
+  // from a trait, and so can the field a scope names, and a rule reading the raw list while the
+  // emitter resolves traits is a divergence this repo keeps finding. The error names the entity
+  // because a field name may be declared on several.
+  //
+  // A validation error and not a boot refusal, on ADR-0348's split: the dischargeability of an ABAC
+  // obligation is a property of the *deployment*, while this is a property of the manifest alone —
+  // so it is decidable by a pack author, by `crossengin validate`, by the pack's own test suite and
+  // by the reviewer approving what the Architect designed, and a rule checkable earlier should be.
+  for (const [i, entity] of entities.entries()) {
+    for (const field of resolvedFields(entity, traits)) {
+      const hint = field.unique;
+      if (hint === undefined || typeof hint === "boolean") continue;
+      const fields = fieldsByEntity.get(entity.name);
+      if (fields === undefined) continue;
+      for (const [k, scopeField] of hint.scope.entries()) {
+        if (!fields.has(scopeField)) {
+          throw new ManifestValidationError(
+            `entities[${i}].fields.${field.name}.unique.scope[${k}]`,
+            `unique scope on '${entity.name}.${field.name}' names '${scopeField}', which is not a ` +
+              `field of '${entity.name}'; a scope naming a field that does not exist is served as ` +
+              `a constraint no store can emit`,
+          );
+        }
+        if (scopeField === field.name) {
+          // Self-scoping degenerates to the unscoped form, so it is not *wrong* — it is a
+          // declaration that does not say what its author thinks, which is the same class the rule
+          // above catches and the same remedy (`unique: true`).
+          throw new ManifestValidationError(
+            `entities[${i}].fields.${field.name}.unique.scope[${k}]`,
+            `unique scope on '${entity.name}.${field.name}' names the field itself; that is the ` +
+              `unscoped form, which is spelled 'unique: true'`,
+          );
+        }
+      }
+    }
+  }
+
   for (const [i, rel] of relations.entries()) {
     if (rel.kind === "many_to_many") {
       if (!entityNames.has(rel.left)) {

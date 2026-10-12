@@ -122,6 +122,98 @@ describe("validateManifest — entities", () => {
   });
 });
 
+describe("validateManifest — a unique scope", () => {
+  // `UniqueHintSchema` is `boolean | {scope: string[]}` and has been since it was written, while
+  // nothing read either form until now. These rules are validation errors and not boot refusals on
+  // ADR-0348's split: both are properties of the manifest alone, so they are decidable by a pack
+  // author, by `crossengin validate`, by the pack's own suite and by the reviewer approving what
+  // the Architect designed — and a rule checkable earlier should be.
+  const scoped = (scope: readonly string[], extra: readonly string[] = []): Manifest => ({
+    manifestVersion: "1.0",
+    meta: baseMeta,
+    entities: [
+      {
+        name: "Employee",
+        fields: [
+          ...extra.map((n) => ({ name: n, type: { kind: "text" } }) as const),
+          { name: "staff_no", type: { kind: "text" }, unique: { scope: [...scope] } },
+        ],
+      },
+    ],
+  });
+
+  it("accepts a scope naming a sibling field", () => {
+    expect(() => validateManifest(scoped(["dept"], ["dept"]))).not.toThrow();
+  });
+
+  it("accepts the unscoped boolean form", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [
+        { name: "Employee", fields: [{ name: "staff_no", type: { kind: "text" }, unique: true }] },
+      ],
+    };
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  it("throws on a scope naming a field the entity does not have", () => {
+    expect(() => validateManifest(scoped(["dept"]))).toThrow(ManifestValidationError);
+    expect(() => validateManifest(scoped(["dept"]))).toThrow(/'dept'/);
+  });
+
+  it("names the entity in the refusal, because a field name may be declared on several", () => {
+    expect(() => validateManifest(scoped(["dept"]))).toThrow(/Employee\.staff_no/);
+  });
+
+  it("throws on a scope naming the field itself", () => {
+    // Self-scoping degenerates to the unscoped form, so it is not wrong so much as a declaration
+    // that does not say what its author thinks — the same class as the rule above, same remedy.
+    expect(() => validateManifest(scoped(["staff_no"]))).toThrow(/unique: true/);
+  });
+
+  it("accepts a scope naming a TRAIT-supplied field", () => {
+    // Over `resolvedFields`, not `entity.fields`: a unique field and the field its scope names can
+    // both arrive from a trait, and a rule reading the raw list while the emitter resolves traits
+    // is a divergence this repo keeps finding.
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [
+        {
+          name: "Visit",
+          traits: ["auditable"],
+          fields: [{ name: "ref", type: { kind: "text" }, unique: { scope: ["created_by"] } }],
+        },
+      ],
+    };
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  it("checks a unique field CONTRIBUTED by a trait", () => {
+    // The negative control for the sentence above: if the rule read `entity.fields` this manifest
+    // would pass, because the only declaration is on the trait.
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      traits: [
+        {
+          name: "coded",
+          fields: [{ name: "code", type: { kind: "text" }, unique: { scope: ["nope"] } }],
+        },
+      ],
+      entities: [
+        {
+          name: "Thing",
+          traits: ["coded"],
+          fields: [{ name: "label", type: { kind: "text" } }],
+        },
+      ],
+    };
+    expect(() => validateManifest(m)).toThrow(/'nope'/);
+  });
+});
+
 describe("validateManifest — traits", () => {
   it("throws on duplicate custom trait names", () => {
     const m: Manifest = {

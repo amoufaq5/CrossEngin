@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 354 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 355 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 18,695 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 18,787 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -914,6 +914,51 @@ type errors.
   `server.ts` calls it *"the fail-closed answer"* and `tenant-gateway-cache.ts:81`, in the defective
   file, calls it *"(fail open to the default server)"*.
 
+  ADR-0360 closes the register's P0 item 7 and the class is **a declaration read by nobody at either
+  end**. `Field.unique` is validated, merged across lineage and hashed into `manifestHash`, **45
+  distinct (entity, field) pairs** declare it across the seven packs, and **zero** UNIQUE constraints
+  existed on any of the 54 entity tables. It had **two** readers and neither emitted anything:
+  `kernel`'s `ddl/diff.ts` reads it only to *throw* when it changes, and `ui-schema.ts` copies it
+  onto the `UiSchema` — where `unique` occurs **exactly once in the whole `apps/operate-web` tree**,
+  as the type declaration at `lib/schema.ts:26`, read by no component. So the register's own wording,
+  *"while the UI says the field is unique"*, is **false in the direction that understates it**: that
+  would at least have been a promise, and what was true is P1 item 2's shape — authored, validated,
+  hashed, serialized to every client, read by nobody — reaching *inside* a section that otherwise is
+  served. Two employees could share an `employee_number`, two patients an `mrn`, two invoices an
+  `invoice_number`.
+  Three measurements shaped the fix and each one moved it. `UniqueHintSchema` is
+  `boolean | {scope: string[]}` and always has been, so `field.unique === true` **silently drops** a
+  declared composite key — this increment's own class inside its own fix — and
+  `ColumnMapping.uniqueScope` is a list for that reason, with a scope naming an absent field refused
+  at *validation* (ADR-0348's split: a property of the manifest alone) and resolved field→column in a
+  second plan pass, because emitting the index without the unresolved column would enforce a
+  **stricter** constraint than the manifest declares. **14 of the 45 are sequence-defaulted**, so the
+  409 is gated on `callerKeys`: *the caller supplied the value* is the 409's whole justification, and
+  where they did not it evaporates — a `23505` on an allocator-chosen `invoice_number` takes the fixed
+  500, because *"send a different value"* is an instruction they cannot follow for a value they never
+  sent. The keys come from `parsedBody`, which the create handler already reads for the write mask on
+  the same stated ground (*"a default and the `created_at` stamp are the server writing a field, not
+  the caller writing it"*) — one rule, read twice. And **the document store cannot carry the
+  guarantee at all**, by shape rather than by wiring, so on the shipped compose default the honest
+  figure is **0 of 32**, not 2 withheld; the boot survey is therefore a pure function of
+  `(manifest, storeKind)` and never of the store, because the two stores that enforce nothing have no
+  plan to ask and *those are the deployments carrying the headline*.
+  It **reports and never refuses**, and ADR-0359 is the precedent one increment old: a plaintext PHI
+  column is incoherent while an absent unique index is *permissive* — every read returns the right
+  rows and every write stores what it was given — so it changes neither which rows come back nor
+  their order, only which can be created. Two things were sharper than the defect. **A try/catch
+  would have shipped the opposite of the design in the per-tenant applier**, measured rather than
+  reasoned: that function runs in one explicit transaction, so a `23505` aborts it, every later
+  statement answers `25P02`, the `COMMIT` returns `ROLLBACK` — the catch would report a refusal it
+  had turned into the total failure that sends the tenant to the JSONB fallback. Per-statement
+  savepoints, with `RELEASE` after `ROLLBACK TO` because the savepoint survives it; verified live on
+  PG 16.13, and 5 tests fail on the mutation. And **my own first boot line's remedy was false** —
+  *"serve this pack on `--store pg` where the value is plaintext"*, on the store that enforces
+  nothing — caught by a subagent instructed to check each remedy before writing it, and now pinned by
+  a test asserting the string does not contain `--store pg`. A refuter's *"`onApplication` has zero
+  consumers"* was the inverse: wrong cause, right conclusion — it *is* wired and `return`ed early on
+  `applied: true`, which is exactly the arm a withheld index arrives on.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -1035,6 +1080,14 @@ packages exist at only one layer, noted below where that is true.
   and useless. Eight in-repo fixtures declared a phantom `stateField` and were corrected; the pack
   now declares its own lifecycle over `status` with its own transition grants, which `overrides:
   true` always implied.
+  **And a `unique: {scope: [...]}` must name fields the entity resolves to** (ADR-0360), with a
+  scope naming the field itself refused too and `unique: true` printed as the remedy — it degenerates
+  to the unscoped form, so it is not wrong so much as a declaration that does not say what its author
+  thinks. Over `resolvedFields` and not `entity.fields`, because the unique field *and* the field its
+  scope names can both arrive from a trait, with a negative control pinning a trait-contributed
+  declaration (which `entity.fields` would miss entirely). A validation error on the same split as
+  the three above, and vacuous today — 0 of the 47 source declarations use the scoped form, which is
+  precisely why it costs nothing to refuse the incoherent case now.
 - **`kernel-pg`** — the impure applier. `PgConnection` + `parsePgEnvConfig` + node-postgres
   binding, advisory-lock-gated per-statement migration application with `_meta_migrations`
   hash bookkeeping, preconditions, and the pgcrypto at-rest encryption stack (coverage report,
@@ -1216,6 +1269,27 @@ packages exist at only one layer, noted below where that is true.
   FX revaluation and booking-rate stamping, WHT certificate clearing, payment application,
   journal reversal. Also entitlements, signed offline licences, plan catalog, AR/AP aging
   and WHT reconciliation reports.
+  **`writeTxn` takes the caller's own keys and answers 409 on a `UniqueViolation` only for a field
+  they named** (ADR-0360) — the one exception to that catch's *"the body names nothing"* rule, and
+  scoped by its own reason rather than by the field. Everything else reaching it is a condition the
+  caller cannot act on, which is why the body is a fixed sentence; a unique violation is the one
+  write failure the caller is the **only** party who can fix, and the field name is not a disclosure
+  because they supplied it. So where they did *not* supply it the justification evaporates:
+  **14 of the 45** declared unique fields carry a `sequence` default, and a `23505` on one the caller
+  omitted is the allocator having handed out a number it already handed out — an internal fault, for
+  which *"send a different value"* is an instruction they cannot follow. Those take the fixed 500.
+  The keys come from `parsedBody`, which the create handler already reads for the write mask on the
+  same stated ground (*"a sequence / literal / settings default and the `created_at`/`updated_at`
+  stamp are the server writing a field, not the caller writing it"*) — one rule, read twice, where a
+  second spelling is what would eventually disagree. `NO_CALLER_SUPPLIED_FIELD` is the named empty
+  list a delete and a transition pass: a delete carries no body and a transition's patch is the state
+  the *manifest's* workflow names plus a timestamp, and the empty set is the **claim** there, which
+  ADR-0331's rule keeps distinct from *nobody gathered them* — here the difference decides a 409
+  against a 500. **409 and not 422**, because the value is well-formed and would have been valid a
+  moment earlier or in another tenant: a conflict with current state, the distinction
+  `conflict_idempotency_mismatch` draws. The parameter is **required** on all four call sites, since
+  neither default is correct — `[]` loses every diagnosis and "all fields" gives the wrong
+  instruction.
 - **`operate-runtime-pg`** — Postgres `EntityStore` implementations plus the serving-side
   stores. **`ListSqlAdapter.columnExpr` answers a `ColumnExpr` and no longer `string | null`**
   (ADR-0359), because `null` meant *encrypted at rest*, *not a column* and *unsafe field name* and
@@ -1295,6 +1369,44 @@ packages exist at only one layer, noted below where that is true.
   `ON DELETE RESTRICT` key does not refuse the bulk delete. `COLUMN_STORE_DEFAULT_SCHEMA` is
   exported here because a second spelling of `"public"` is that defect's own shape — `column-store.ts`
   spelled it inline twice and `apps/operate-server` held a third copy.
+  **And enforces a declared `unique`** (ADR-0360), which nothing did: zero UNIQUE constraints existed
+  on any of the 54 tables against **45** declarations. `emitUniqueIndexDdl` writes
+  `CREATE UNIQUE INDEX IF NOT EXISTS "<table>_<col>_uniq" ON … ("tenant_id"[, …scope], "<col>")` —
+  `(tenant_id, …)` and never `(col)` alone, which is the whole of why this could not be an inline
+  `UNIQUE` copied from the field, since a bare one would make one tenant's `employee_number` collide
+  with another's; tenant **first** because a multi-column index serves a prefix of its own columns.
+  An **index**, and separate from `CREATE TABLE`, because `CREATE TABLE IF NOT EXISTS` no-ops so an
+  inline constraint would be silently skipped for every table an earlier manifest created —
+  `emitAddColumnDdl`'s reason one constraint over. `ColumnMapping.uniqueScope` is a **list and not a
+  boolean** (`null` declares none, `[]` is tenant-wide), because `UniqueHintSchema` is
+  `boolean | {scope}` and `=== true` drops the composite form silently; `columnPlanForEntity`
+  resolves the scope field→column in a second pass and throws `UnresolvableUniqueScopeError` rather
+  than emitting an index without the unresolved column, which would enforce a **stricter** constraint
+  than the manifest declares. **These statements run last, each in its own try, and a failure is
+  reported** — the only statement class here whose outcome depends on existing **data**, since a
+  unique index over a populated table with duplicates raises `23505` and no `IF NOT EXISTS` helps.
+  Last mechanically too: an index can be on a column `emitAddColumnDdl` has only just added.
+  `rethrowUniqueViolation` translates a `23505` into `UniqueViolation` through `uniqueIndexFields`,
+  derived from the same function that generated the name rather than parsed back out of it (the name
+  truncates at 63 characters), and an **unattributable** one — a constraint this store never emitted
+  — is re-thrown untouched, because claiming a field for a constraint we cannot attribute is a guess
+  in an error message. `uniqueWithheldFor` names the encrypted case, which is withheld rather than
+  emitted: `pgp_sym_encrypt` is non-deterministic, so two rows with one plaintext both insert and an
+  operator reading `\d` would see a constraint that cannot do its job.
+  **`applyTenantManifestSchema` emits them too, behind per-statement savepoints** (ADR-0360), which
+  it did not — so a tenant serving their **own** activated manifest got every table, column, FK, join
+  table and RLS policy and no unique index. A savepoint and **not** a try/catch, measured: that
+  function runs the whole application in one explicit transaction, so a raise aborts it, every later
+  statement answers `25P02` and the `COMMIT` returns `ROLLBACK` — the catch would report a refusal it
+  had turned into the total failure that sends the tenant to the JSONB fallback, where ADR-0314 says
+  their data is in a different place than they think. `ROLLBACK TO SAVEPOINT` leaves the savepoint
+  established, so the loop releases as well or a tenant with many unique fields grows a
+  subtransaction per index. The refusal rides on `TenantSchemaApplication.uniqueIndexRefusals`
+  (**required**, `[]` is the claim) rather than on a second callback, because the result is already
+  what the registry stores and forwards; `statements` stays *what ran*, so a refused statement is in
+  the refusal and not in the list an operator pastes. `applied: true` **with** a non-empty refusal
+  list is deliberate: the application genuinely succeeded minus one guarantee, and `applied: false`
+  would send the tenant to the fallback over duplicate rows.
   **And erases it** (ADR-0316), because ADR-0314's schema was never removed and `tenant-lifecycle` then
   signed a GDPR Article 17 tombstone over data that survived. `surveyTenantSchema` measures with
   `count(*)`, not `reltuples`, since a cryptographic proof commits to the figure; `probeCascadeCollateral`
@@ -3320,6 +3432,34 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `onBuildRefused` logs under `[tenant-gateway]` — split from `onInvalidManifest` because that
   callback's sentence is *false* for a build failure, the manifest having passed both gates, and
   its implied remedy is therefore the wrong one.
+  **And how many declared `unique` fields this deployment enforces** (`unique-enforcement.ts`,
+  ADR-0360), said on all three stores, either way, including when the figure is zero — which is the
+  half that would have surfaced 45 unenforced declarations four phases ago, and the hazard ADR-0350
+  named: a passing check and a missing guarantee can be one sentence. A **pure function of
+  `(manifest, storeKind)`** over a total map, and deliberately **not** of
+  `ColumnMappedEntityStore.uniqueWithheld()` — the two stores that enforce nothing have no plan to
+  ask, and *those are the deployments carrying the headline*: on `--store pg` + `erp-core` (the
+  shipped compose default) the figure is **0 of 32**, not 2 withheld, so a store-sourced survey would
+  have reported the small number on the deployment that is mostly right and printed nothing on the
+  one that is wholly wrong. Three reasons, and `no_durable_store` is the survey's own rather than the
+  emitter's, because `--store memory` is not the document store and that sentence would be false of
+  it; the two vocabularies are joined by a **type-level `extends`** rather than a
+  `Record<UniqueWithheldReason, …>`, since the `Record` form breaks whenever this package's `dist` is
+  a build behind the emitter's source — ADR-0307's conditional green — while the property worth
+  fencing is coverage and not a correspondence. It **reports and never refuses**: ADR-0338's premise
+  holds (nothing was enforced, so a refusal breaks nothing) and two measurements take it away — the
+  remedy is a data migration no operator owns, and the degradation is **permissive** rather than a
+  wrong answer, which is ADR-0359's line (*an absent unique index changes neither which rows come
+  back nor their order*). **Where the store can answer, it is asked and the two are compared** as
+  sets of (entity, field) and not by count, because two lists of equal length naming different fields
+  is the divergence a count cannot see: they are independent derivations of one fact, so a divergence
+  makes the *boot line* wrong, not the DDL, and an operator reading `33 of 34 enforced` would be
+  trusting a figure that no longer describes the indexes. Free, since the plans exist by then — and
+  it is also what keeps the store's method from being a second spelling with only a test behind it.
+  `onApplication`'s `applied: true` arm reports a **per-tenant** withheld index, which it did not:
+  it `return`ed early, which is exactly the arm one arrives on, so the fact reached nobody — the same
+  defect `onUniqueIndexRefused` exists to prevent, one path over, in the file whose comment argues
+  against it.
   **`/health` and `/readyz` exist** (`health.ts`, ADR-0357), wrapped **outermost in front of the
   gateway** — a probe carries no credential, so a gateway route would be 401'd by the auth stage,
   which is the bounce webhook's argument read the other way round. The split is the whole design
@@ -3366,7 +3506,7 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   default, so a redirect would hand every caller a 200 carrying the login page's HTML with
   `res.ok` true. The cookie is only a hint: the API verifies the token on every request, so a
   forged one is a 401 **from the API**.
-  It still has **zero tests**, so it is outside the 18,695-test sweep and all nine strategy rules,
+  It still has **zero tests**, so it is outside the 18,787-test sweep and all nine strategy rules,
   and the login flow is verified by `tsc`, `next build` and a live run.
 
 ## Cross-cutting invariants
@@ -4136,13 +4276,14 @@ opened them.
   (this file said "still callerless" for two increments after the ADR that wired it), and the
   `generation` parameter is still exposed by no flag or env var because
   exposed by no flag or env var: a deployment that bumped it would make every existing ciphertext
-  undecryptable with no way back. **(3)** `unique: true` is unenforced on the column store
-  (**zero** UNIQUE constraints across all 54 tables — it is simply not plumbed into the entity DDL, so
-  this changed nothing) and *unenforceable* on an encrypted column, since `pgp_sym_encrypt` is
-  non-deterministic: two rows with the same plaintext under a UNIQUE `bytea` both insert, verified.
-  `Citizen.national_id` is both `unique` and `regulated`, so whoever plumbs `unique` must **refuse**
-  the encrypted case rather than emit a constraint that silently never fires — ADR-0070's Q4 noticed
-  encrypted columns cannot be *searched* and nobody noticed they cannot be *unique*. **(4)**
+  undecryptable with no way back. **(3)** ~~`unique: true` is unenforced on the column store~~ —
+  **closed by ADR-0360**, which plumbed it and took this entry's own instruction: the encrypted case
+  is **withheld by name** rather than emitted, because `pgp_sym_encrypt` is non-deterministic and two
+  rows with the same plaintext under a UNIQUE `bytea` both insert (verified again). One correction to
+  what this entry said — the two members are in **different packs** (`Patient.mrn` in healthcare,
+  `Citizen.national_id` in government), so no single deployment holds both and the per-deployment
+  withheld count on `pg-columns` is at most 1. ADR-0070's Q4 noticed encrypted columns cannot be
+  *searched* and nobody noticed they cannot be *unique*; both are now said at boot. **(4)**
   `packages/security`'s `AT_REST_ALGORITHMS` offers AES and ChaCha AEADs and the mechanism is OpenPGP
   CFB+MDC, which is none of them, and nothing reads the enum. **(5)** no per-tenant BYOK, which
   `KEY_MANAGEMENT_KINDS`' `customer-managed-byok` models; `ColumnEncryptionKeySource` is the seam.
@@ -5863,17 +6004,41 @@ by it**.
    13.40 net computes `1.00` against an exact `1.005` that should post `1.01`. A 3-decimal currency
    (KWD, BHD, JOD) loses a minor unit per line. Multi-increment, and it is the one P0 that is
    arithmetic rather than wiring.
-7. **`unique: true` emits no constraint on any entity table while the UI says the field is unique.**
-   Neither `entity-ddl.ts` nor `column-plan.ts` reads the declaration — zero UNIQUE constraints
-   across all 54 tables — and `ui-schema.ts` copies `unique: true` onto the `UiSchema` the client
-   renders. 47 declarations across the packs (34 in `erp-core`), so two employees can share an
-   `employee_number`, two patients an `mrn`. Whoever plumbs it must **refuse** the encrypted case:
-   `pgp_sym_encrypt` is non-deterministic, so a UNIQUE on ciphertext never fires (see the PHI
-   entry's Q3).
-8. **`compliancePacks` is a counted string.** `resolveCompliancePacks` has zero non-test callers
-   and `resolveManifest` ignores the field, so healthcare's `["hipaa"]` contributes nothing — and
-   `hipaa`'s definition on disk declares the `PhiAccessLog` and `BreachIncident` entities that
-   §164.312(b) audit controls require. One increment.
+7. ~~**`unique: true` emits no constraint on any entity table while the UI says the field is
+   unique.**~~ — **closed by ADR-0360**, which corrected two of the three things this entry said.
+   *"while the UI says the field is unique"* is **false**: `unique` occurs exactly once in the whole
+   `apps/operate-web` tree, as the type declaration at `lib/schema.ts:26`, and no component reads it
+   — so the defect was one notch **worse** than claimed, because a promise would at least have been a
+   promise and this was authored, validated, hashed and serialized to a client that discards it. And
+   *"34 in `erp-core`"* is 32 — 34 is the *resolved `erp-healthcare`* figure transposed onto the pack
+   that is its base; 47 is right as a count of source declarations and 45 as distinct (entity, field)
+   pairs. The instruction to refuse the encrypted case was right and is what shipped. The entry also
+   did not know `UniqueHintSchema` admits `{scope: string[]}`, which is read now, or that 14 of the
+   45 are sequence-defaulted, which is what gates the 409.
+8. **`compliancePacks` is a counted string — and "one increment" is false, measured four ways.**
+   The core claim holds: `resolveCompliancePacks` has zero non-test callers, `@crossengin/compliance`
+   has zero importers, and healthcare's `["hipaa"]` contributes nothing. Four corrections from a
+   scout against the committed tree, three of them decisive. **(a)** Only **four** pack definitions
+   exist on disk (`hipaa`, `gdpr`, `uae-moh`, `21-cfr-part-11`) while the seven ERP packs name
+   **six** ids — and **five of the six have no definition**: retail `pci`, grocery `haccp`,
+   construction `osha`, education `ferpa`, government `nist-800-53` all throw `UnknownPackError`.
+   Conversely `gdpr`, `uae-moh` and `21-cfr-part-11` are declared by nobody. **(b)** Wiring the
+   function where this entry says it belongs **stops the one pack that does resolve from booting**:
+   no manifest sets `compliancePackParameters` and 10 of the 27 parameters are required with no
+   default, so the real call on resolved healthcare answers `PackParameterError: … parameter
+   'coveredEntityType': required but not provided`. **(c)** With the parameters supplied it resolves
+   and validates, and **what lands is inert and unprotected**, which inverts the §164.312(b)
+   framing: permissions go 53→53 and roles 19→19, so `rbacCheck` refuses all 19 roles × 5 operations
+   on each of the three new entities (`no permissions declared for entity 'PhiAccessLog'`) behind 3
+   tables and 15 routes, and `grep classification` across all four pack definitions returns **zero**
+   occurrences (`encryptAtRest` likewise) against `Patient`'s 7 classified fields. Nothing *writes*
+   a `PhiAccessLog` either — resolving the entity yields CRUD routes, not an audit control, while
+   `meta.audit_log` already hash-chains entity writes — so the control would be closed in name and
+   not in mechanism, which is ADR-0337's falsely-true-control direction. **(d)** There are **four**
+   readers, not one, and the field's single live wrong answer is in none of the above:
+   `node.ts:1234` hardcodes `compliancePacks: []` into the marketplace `TenantContext`, so a catalog
+   pack requiring `hipaa` is refused on a healthcare deployment that declares it. That one is a
+   one-line fix and is the only part of this item that is.
 9. **No automated backup, no tested restore.** ~~and no healthcheck on `api` or `web`~~ — ADR-0357
    added the `api` healthcheck and made `web` wait on it. Backup is still prose only
    (`README:181`, a manual `pg_dump` with no cron, no retention, no restore drill) on a platform
@@ -5892,15 +6057,36 @@ three make the rest honest, cheap or verifiable.
    **129.6 ms sequential vs 1.95 ms** without the wrapper — 66×, so ~2 s per request at 1M rows,
    issued per keystroke from the shipped search box, over an index no query reads. Days, and the
    evidence is already taken.
-2. **Eight of twenty manifest sections are authored, validated, hashed and read by nothing** —
-   `integrations`, `files`, `reports`, `dashboards`, `customWidgets`, `theme`, `i18n`, `search`.
-   They are cross-validated, merged across lineage and committed to `manifestHash`, and no runtime
-   reads them: a reviewer approves eight sections that are discarded at serving time. A boot or
-   validation census naming each declared-but-unserved section is one increment in a shape this
-   repo has built twice, and it converts the tier from silence into a stated limitation.
+2. **Eight manifest sections are read by nothing — but they are not *authored*, and the headline
+   this entry gave is inverted.** The core fact holds: `integrations`, `files`, `reports`,
+   `dashboards`, `customWidgets`, `theme`, `i18n` and `search` are merged across lineage, committed
+   to `manifestHash` and read by no runtime. Five particulars were wrong, measured against the
+   resolved packs. **(a)** `ManifestSchema` has **18** keys and **16** content sections, not twenty
+   (`manifestVersion` and `meta` are not sections; the extra two were probably `meta.compliancePacks`
+   and `meta.compliancePackParameters`). **(b)** All eight carry **zero declarations in all seven
+   resolved packs** — the key is absent, not empty — so nothing is discarded at serving time. The
+   honest framing is ADR-0336's *modelled domain with no mechanism*, and it changes the deliverable:
+   a census reporting "0 declared" is a different thing from one reporting "40 discarded".
+   **(c)** Three of the eight are **not validated either** — `validateManifest` is a hand-written
+   sequence of eleven calls that never names `customWidgets`, `theme` or `i18n` — and `validateFiles`
+   is structurally vacuous (it tests `Object.keys()` for duplicates, which cannot occur), so `files`
+   is nominally validated and effectively merge-only too. **(d)** *"A reviewer approves eight
+   sections that are discarded"* is **backwards, and the truth is worse**: `ManifestDiffView`, which
+   `design-review-routes.ts` shows the approving reviewer, covers **5 of 16** sections — so a
+   reviewer is blind to **eleven**, and two of the eleven (`jobs`, `views`) **are served**, which
+   means the review is blind to changes that do alter what a request gets. **(e)** The census shape
+   has been built **three** times, not twice, and `surveyListSurfaces` is the nearest fit: it already
+   pairs a verdict enum with a `*_MAY_SERVE` total map and argues report-vs-refuse from the remedy.
+   **And the member this entry was reaching for is one level down**: all **28** authored views carry
+   a `permissions` override that *is* validated against `manifest.roles` and enforced by nothing —
+   every authorization path reads `manifest.permissions[entity]` — and `ReportDeclaration` carries
+   both `permissions` and `abac` in the same state, with the `abac` key outside
+   `surveyAbacObligations`, so ADR-0340's by-name boot refusal cannot see a declared obligation no
+   deployment can discharge. Those are genuinely authored, validated, hashed and discarded. (Partly
+   P2 item 14's third clause, from the other end.)
 3. **No CI, no git hook, no smoke, e2e, load or migration test** — while `strategy/ci.ts` models
    triggers, budgets and a topological sort with no reader. No `.github/workflows`, no
-   `core.hooksPath`, so the nine rules and 18,695 tests run only when a human types `pnpm -r test`,
+   `core.hooksPath`, so the nine rules and 18,787 tests run only when a human types `pnpm -r test`,
    and this file's instruction never to use `--no-verify` describes a guardrail that does not
    exist. `operate-web` has **zero tests** against 15 pages and 34 unfenced `fetch` sites — the
    serialized-body boundary that shipped a broken console button for an hour (ADR-0335).
@@ -6183,7 +6369,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 354 records; 275 Accepted, 79 Proposed (the
+title or status change cannot drift. 355 records; 276 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 
