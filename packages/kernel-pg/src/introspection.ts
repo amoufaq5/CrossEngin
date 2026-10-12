@@ -158,12 +158,45 @@ export interface SessionPolicyVisibilityRow {
   readonly rls_forced: unknown;
 }
 
+/**
+ * Raised when the verdict column is absent or not a boolean.
+ *
+ * The four explanatory facts are read permissively — a missing `is_owner` makes a refusal's message
+ * vaguer and nothing else — and the verdict is not, because the two degrade in opposite directions:
+ * an unreadable explanation costs a sentence, and an unreadable verdict reads as *not confined*,
+ * which is a fence that silently stops refusing. Two of the three callers decide on it with no
+ * `rlsEnabled` check between the parse and the branch, and one of those is
+ * `KeyRotationMigrator.probeTable`, whose refusal runs immediately before a key generation is
+ * destroyed — so there a permissive default is `0 rows re-encrypted` followed by deleting the only
+ * key those rows are under.
+ *
+ * Unreachable from either caller today, because both issue SQL built from
+ * `SESSION_POLICY_VISIBILITY_COLUMNS`, which selects the column unconditionally. It is reachable
+ * from the *next* caller, which that constant's own doc comment invites to write its own query with
+ * extras — so this is the shape error made loud rather than a current hole.
+ */
+export class SessionPolicyVisibilityUnreadable extends Error {
+  constructor(readonly received: unknown) {
+    super(
+      "session policy visibility row carries no boolean `policies_active`: the confinement verdict " +
+        `is ${JSON.stringify(received)}. Build the select list from ` +
+        "SESSION_POLICY_VISIBILITY_COLUMNS rather than restating it.",
+    );
+    this.name = "SessionPolicyVisibilityUnreadable";
+  }
+}
+
 export function parseSessionPolicyVisibility(
   row: SessionPolicyVisibilityRow,
 ): SessionPolicyVisibility {
+  // Strict on the verdict, permissive on the explanation. Not symmetry for its own sake: see
+  // `SessionPolicyVisibilityUnreadable` for why a missing verdict cannot be allowed to default.
+  if (typeof row.policies_active !== "boolean") {
+    throw new SessionPolicyVisibilityUnreadable(row.policies_active);
+  }
   return {
     role: String(row.role),
-    policiesActive: row.policies_active === true,
+    policiesActive: row.policies_active,
     rlsEnabled: row.rls_enabled === true,
     rlsForced: row.rls_forced === true,
     isOwner: row.is_owner === true,

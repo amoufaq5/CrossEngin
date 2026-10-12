@@ -19,6 +19,7 @@ import {
   parseSessionPolicyVisibility,
   probeSessionPolicyVisibility,
   sessionPolicyVisibilityReason,
+  SessionPolicyVisibilityUnreadable,
   sessionWouldBeConfined,
   type CheckConstraintRow,
   type ColumnRow,
@@ -665,42 +666,54 @@ describe("the confinement verdict has one spelling in the workspace", () => {
 });
 
 describe("parseSessionPolicyVisibility", () => {
-  it("reads only strict `true` as true, so an absent or odd value is not permissive", () => {
-    expect(
-      parseSessionPolicyVisibility({
-        role: "serving",
-        policies_active: "t",
-        rls_enabled: true,
-        rls_forced: "f",
-        is_owner: null,
-        bypasses_rls: undefined,
-      }),
-    ).toEqual({
-      role: "serving",
-      policiesActive: false,
-      rlsEnabled: true,
+  it("throws on an absent or non-boolean verdict rather than defaulting it", () => {
+    // This test previously asserted the opposite, and its comment defended the permissive default
+    // with a property the code does not have: it claimed "every caller checks `rlsEnabled` first,
+    // which no shape error can make true on its own". Measured — only ONE of the three callers
+    // does. `check-admission.ts:743-744` and `encryption-writepath.ts:805-806` are both
+    // `parseSessionPolicyVisibility` immediately followed by `if (sessionWouldBeConfined(...))`
+    // with nothing between, and the second is `KeyRotationMigrator.probeTable`, whose refusal runs
+    // immediately before a key generation is destroyed. So the default was a fence that stops
+    // refusing on a shape error, defended by a sentence that was false in exactly that direction —
+    // this increment's own class, inside this increment's own fix.
+    for (const received of [undefined, null, "t", "f", 0, 1, {}]) {
+      expect(() =>
+        parseSessionPolicyVisibility({
+          role: "serving",
+          policies_active: received,
+          rls_enabled: true,
+          rls_forced: true,
+          is_owner: true,
+          bypasses_rls: false,
+        }),
+      ).toThrow(SessionPolicyVisibilityUnreadable);
+    }
+  });
+
+  it("stays permissive about the four explanatory facts, which degrade to a vaguer sentence", () => {
+    // The asymmetry is the decision, not an inconsistency: an unreadable explanation costs a
+    // sentence and an unreadable verdict costs the refusal. So `rls_forced: "f"` above is read as
+    // false and the message is merely less specific, while the verdict is strict.
+    const v = parseSessionPolicyVisibility({
+      role: 42,
+      policies_active: true,
+      rls_enabled: "yes",
+      rls_forced: "f",
+      is_owner: null,
+      bypasses_rls: undefined,
+    });
+    expect(v).toEqual({
+      role: "42",
+      policiesActive: true,
+      rlsEnabled: false,
       rlsForced: false,
       isOwner: false,
       bypassesRls: false,
     });
-  });
-
-  it("reads an absent verdict column as not-confined, which the caller's RLS check catches", () => {
-    // `policies_active` falling to `false` is the permissive direction, so it is worth being
-    // explicit about why it is safe: a row that reaches here at all came from
-    // SESSION_POLICY_VISIBILITY_COLUMNS, which selects the column unconditionally, so an absent
-    // value means the caller substituted its own query and dropped it — and every caller checks
-    // `rlsEnabled` first, which no shape error can make true on its own.
-    const v = parseSessionPolicyVisibility({
-      role: "serving",
-      policies_active: undefined,
-      rls_enabled: true,
-      rls_forced: true,
-      is_owner: true,
-      bypasses_rls: false,
-    });
-    expect(v.policiesActive).toBe(false);
-    expect(sessionPolicyVisibilityReason(v)).toBe("owner_exempt");
+    // And note what that combination means: Postgres says the policies apply while `rls_enabled`
+    // reads false. Incoherent, and it resolves toward the verdict — `rls_disabled` is what the
+    // *explanation* says, and every caller that branches reads `sessionWouldBeConfined`.
+    expect(sessionWouldBeConfined(v)).toBe(true);
   });
 
   it("stringifies the role rather than asserting it", () => {

@@ -793,15 +793,20 @@ export class KeyRotationMigrator {
     // the only confinement there is.
     //
     // `relforcerowsecurity` is read because **it confines the owner too**, which is the one input
-    // the ownership arm would otherwise answer wrongly in the permissive direction. Nothing in this
+    // an ownership arm would otherwise answer wrongly in the permissive direction. Nothing in this
     // repo sets `FORCE ROW LEVEL SECURITY` today, so this is latent — but the whole point of this
     // probe is that a confined session's zero is indistinguishable from an empty tenant, and
     // reading ownership while ignoring the one flag that overrides ownership would let exactly that
-    // session through.
+    // session through. It is now one of four facts that explain the verdict rather than compose it.
     //
-    // The rule lives in `sessionWouldBeConfined` since the admission survey needed the same one,
-    // and it was the only correct copy of eight. Only the rule moved: the query above stays here,
-    // because `has_scope_column` belongs in this round trip.
+    // The verdict itself is `row_security_active`, read through `sessionWouldBeConfined`
+    // (ADR-0362). This comment used to say that rule "was the only correct copy of eight", which
+    // the measurement retired twice over: the workspace held **three** confinement mechanisms, not
+    // eight spellings, and the composed rule this file once owned privately was not the most
+    // correct of them — `shared-table-erasure.ts` was already asking Postgres and scored 8/8 where
+    // the composition scored 6/8. Only the rule is shared; the query above stays here, because
+    // `has_scope_column` belongs in this round trip, and it interpolates the shared select list so
+    // a sixth fact reaches it without this file being edited.
     const visibility = parseSessionPolicyVisibility(row);
     if (sessionWouldBeConfined(visibility)) {
       refusals.push({
