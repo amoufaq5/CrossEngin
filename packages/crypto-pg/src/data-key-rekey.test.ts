@@ -100,14 +100,29 @@ function rotationAnswers(
       return { rows, rowCount: rows.length };
     }
     if (sql.includes("relrowsecurity")) {
+      const bypassesRls = options.bypassesRls ?? false;
+      const isOwner = options.isOwner ?? true;
+      const rlsEnabled = options.rlsEnabled ?? true;
+      const rlsForced = options.rlsForced ?? false;
+      // `policies_active` is `row_security_active` (ADR-0362) and is **derived**, never taken from
+      // `options`. `parseSessionPolicyVisibility` throws on a non-boolean verdict rather than
+      // defaulting it — because the two unguarded callers decide on it directly and one of them is
+      // `KeyRotationMigrator.probeTable`, whose refusal runs immediately before this very rekey
+      // destroys a key generation — so this fake answered a statement it could not really serve
+      // and all 32 tests here raised. Deriving rather than declaring is the rest of the rule: a
+      // fixture stating `{is_owner: true, rls_forced: true, policies_active: false}` describes a
+      // database that does not exist, and this file reaches `probeTable` through two packages, so
+      // an inconsistent fixture would be asserting rekey behaviour on an input no cluster produces.
+      const policiesActive = rlsEnabled && !(bypassesRls || (isOwner && !rlsForced));
       return {
         rows: [
           {
             role: "crossengin_app",
-            bypasses_rls: options.bypassesRls ?? false,
-            is_owner: options.isOwner ?? true,
-            rls_enabled: options.rlsEnabled ?? true,
-            rls_forced: options.rlsForced ?? false,
+            policies_active: policiesActive,
+            bypasses_rls: bypassesRls,
+            is_owner: isOwner,
+            rls_enabled: rlsEnabled,
+            rls_forced: rlsForced,
             has_scope_column: options.hasScopeColumn ?? true,
           },
         ],
