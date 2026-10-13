@@ -56,12 +56,37 @@ only then is the extension the thing to look at. Two causes, and the log names w
   while nothing is listening on 5432. `docker compose up -d` again succeeded, which is what made it
   look intermittent. Pull and rebuild if your compose file predates that flag; otherwise check the
   `db` container is up at all (`docker compose ps`).
-- **`role "…" does not exist`** or **`password authentication failed`** — `.env` is the problem, not
-  the database. `POSTGRES_USER`, `POSTGRES_PASSWORD` and `POSTGRES_DB` are read by *both* services:
-  `db` creates that role at initdb time and `extensions` connects as it. If you changed any of them
-  **after** the first `up`, the volume still holds a cluster created with the old values — the new
-  ones are not applied retroactively, so either put the old values back or destroy the volume with
-  `docker compose down -v` (which erases the database).
+- **`role "…" does not exist`** or **`password authentication failed for user "…"`** — `.env` is the
+  problem and the database is fine. `POSTGRES_USER`, `POSTGRES_PASSWORD` and `POSTGRES_DB` are read
+  by *both* services: `db` creates that role at initdb time and `extensions` connects as it. Two
+  causes, and this message cannot tell you which:
+
+  **The value changed after the first `up`.** Postgres uses it once, to create the role in a fresh
+  data directory, so a later edit does not change the role's password — the volume still holds a
+  cluster made with the old one, which is why `db` reports healthy while nothing can connect. Put
+  the old value back, or destroy just the database:
+
+  ```bash
+  docker compose down
+  docker volume rm crossengin_db-data      # erases the database
+  docker compose up -d --build
+  ```
+
+  Removing that one volume rather than `down -v` is deliberate: `-v` also takes `crossengin_caddy-data`,
+  and re-issuing the certificate counts against Let's Encrypt's limit of 5 duplicate certificates
+  per week — cycle a few times and you are rate-limited into plain HTTP, where the login silently
+  cannot work.
+
+  **Or `$` / `#` in the password.** Compose interpolates `$NAME` in `.env`, so `pa$$word` becomes
+  `pa` plus two empty variables behind a "variable is not set" warning that scrolls past in a build
+  log, and `#` starts a comment. `openssl rand -hex 24` avoids the question.
+
+  To keep the database instead, set the role's password to match `.env`. A local socket connection
+  inside the container is trusted, so this needs no password:
+
+  ```bash
+  docker compose exec db psql -U "$(grep '^POSTGRES_USER=' .env | cut -d= -f2-)"     -d postgres -c "ALTER ROLE "$(grep '^POSTGRES_USER=' .env | cut -d= -f2-)"     WITH PASSWORD '$(grep '^POSTGRES_PASSWORD=' .env | cut -d= -f2-)'"
+  ```
 
 Nothing downstream runs if this fails: `migrate` is gated on
 `extensions: service_completed_successfully` and `api` on `migrate`, so a stack whose first service
