@@ -215,7 +215,12 @@ eleventh workspace rule with a reason that costs something checkable.
   - Why not: `payment.completed` is a payment's *processing* completing, which is not a payment
     being *received* — a received payment may still fail to clear. Repointing silently would make
     the declaration read as served while firing at a moment nobody chose, which is ADR-0337's
-    falsely-true direction and invisible once it runs.
+    falsely-true direction and invisible once it runs. (My own brief for this slice claimed
+    `perishablelot.received` was a near candidate; it is **not producible** — `received` is that
+    entity's *initialState*, so it is reached by a create and emits `perishablelot.created`, and
+    `purchaseorder.received` is the only producible `.received` name in the seven packs. That is the
+    targets-versus-states over-reporting `producibleEntityEventNames`' own doc comment exists to
+    prevent, committed in the brief written to prevent it.)
 
 - **Add `attested_at` beside `attestation_phrase`.**
   - Pros: the signature over an authored attestation becomes recomputable from its row.
@@ -295,6 +300,34 @@ eleventh workspace rule with a reason that costs something checkable.
   the test**, calling the single disagreement a property. Neither side was ever compared with a
   database. The live matrix is recorded as data now and both retired compositions are scored
   against it.
+- **The eleventh rule has NINE declarations, not eight, and the ninth is the sharpest.**
+  `erp.work_order_completed → workorder.completed` is a correct rename on **six** of the seven
+  resolved packs and names nothing on `erp-construction`, which keys its own
+  `work_order_lifecycle` over `draft → scheduled → in_progress → done` — the pack ADR-0359 found
+  replacing core's `WorkOrder`. So producibility is a property of the *resolved* manifest, and the
+  fence is **per pack, never over the union**: a union would read that job as served, and the
+  direction is what matters, because an over-wide producible set **under**-reports findings.
+  The declaration grain is `(jobId, packs)` and the brief's `(jobId)` would not have worked — at
+  `(pack, jobId)` grain the residual is 28 instances over 9 pairs with 21 of the 28 being three
+  core facts repeated across seven packs, a list that grows with the pack count, while at `(jobId)`
+  grain the construction member reads `overtaken` on six packs and is needed on one.
+- **The rule's own test found a defect in the rule**, which is the clearest evidence the fence is
+  worth its length: the `undeclared` arm accepted a declaration on `jobId` + `packs` alone, so a
+  declaration whose `eventName` had gone stale would go on covering whatever the job was renamed
+  to — an adjudication of a string nobody uses silencing the one in use. Found by the test written
+  for `event_name_changed`, which expected two findings and got one.
+- **Three mutations survived the first battery and each named a real hole.** The
+  `entity_unreferenced` guard and resolving entities *through* the pack's own array were both
+  unpinned, because every `: Entity = {` const in the live packs is reached by its array — so a
+  test over the real workspace alone cannot distinguish this scan from one that takes every const
+  it finds, and both mutations passed. That is ADR-0355's *a measurement taken once goes stale
+  silently* arriving inside a new rule, and it is why the module carries fixture tests beside the
+  live ones.
+- **CLAUDE.md's phantom-failure hazard was observed again.** One
+  `pnpm --filter @crossengin/testing test` came back `3 failed | 574 passed` after a
+  doc-comment-only edit, while two commits were landing in other packages; three re-runs with
+  `pgrep` empty give 577/577. The rule holds: reproduce a sweep failure in isolation before
+  believing it.
 - **Inserting one column broke a positional test in exactly the way ADR-0355 predicts**, which
   is that rule's own class arriving live inside this increment. `decision-store.test.ts` asserted
   `params[11]`, `[12]`, `[16]` and `[17]`, and adding `attestation_phrase` shifted three of them
