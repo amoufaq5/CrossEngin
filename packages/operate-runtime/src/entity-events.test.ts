@@ -180,19 +180,35 @@ describe("entityEventEffect ↔ producibleEntityEventNames", () => {
     }
   });
 
-  it("produces none of the event names the pack's own job declarations match", async () => {
-    // The live mismatch, derived from the manifest rather than from a hand-typed list: the
-    // producer emits `<entity>.<verb>` while every declared `event` trigger is
-    // `<domain>.<snake_case act>` (`erp.lead_created`, `erp.work_order_completed`), matched with
-    // `===`. So not one of them can fire. Pinned here so neither side can be changed without this
-    // test naming the other.
+  it("splits the pack's own event declarations into the addressable and the unaddressable", async () => {
+    // Derived from the manifest rather than from a hand-typed list, and asserting the split in
+    // BOTH directions, which is what makes it a fence rather than a snapshot.
+    //
+    // It used to assert that *none* of the declared names was producible, which was true before
+    // ADR-0362 renamed the four whose target is mechanically decidable — and is the shape of
+    // assertion that reads as a property while pinning a defect. Either direction alone would now
+    // be weak: "some are producible" passes if a later rename repoints a name at the wrong write,
+    // and "some are not" passes if the grammar drifts and stops matching anything.
     const core = producibleEntityEventNames(resolvedCore);
     const declared = Object.values(resolvedCore.jobs ?? {})
       .map((job) => job.trigger)
       .filter((t): t is Extract<typeof t, { kind: "event" }> => t.kind === "event")
-      .map((t) => t.eventName);
+      .map((t) => t.eventName)
+      .sort();
     expect(declared.length).toBeGreaterThan(0);
-    expect(declared).toContain("erp.lead_created");
-    expect(declared.filter((name) => core.has(name))).toEqual([]);
+    const addressable = declared.filter((name) => core.has(name));
+    const unaddressable = declared.filter((name) => !core.has(name));
+    expect(addressable).toEqual(["lead.created", "quote.sent", "salesorder.fulfilled", "workorder.completed"]);
+    // Core's three: two have a witnessing write under a different name (`payment.completed`,
+    // `invoice.sent`), which is a domain judgement and not a rename, and `erp.payroll_approved`
+    // names an entity no pack has. `retail.order_placed` is the third witness case and is absent
+    // here because it is *retail's* declaration — which is itself worth pinning, since
+    // producibility is a property of the resolved manifest and so is the declaration set.
+    expect(unaddressable).toEqual([
+      "billing.payment_received",
+      "erp.invoice_issued",
+      "erp.payroll_approved",
+    ]);
+    expect(declared).not.toContain("retail.order_placed");
   });
 });
