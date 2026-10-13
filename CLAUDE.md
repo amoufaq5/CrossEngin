@@ -6644,12 +6644,19 @@ by it**.
    operator who does not read the boot line still discloses. Making it refuse was argued and
    rejected in ADR-0357 (it would refuse every deployment there is, and the hatch disarms the
    sharper row check beside it).
-3. **The shipped compose passes six flags, so nearly every subsystem built since Phase 3 is off.**
-   No scheduler, no workflow workers, no notification drain, no audit-chain config, no integrity
-   proof or checkpoint, no `--deletion-capabilities` (so neither Article 17 surface can mount), no
-   tenant-status gate, no rate-limit policy, no platform-user routes. ADR-0357 added
-   `--idempotency-store pg` and the healthcheck; the rest stands. One increment, and the only
-   question is which flags a reference deployment should default to.
+3. **The shipped compose mounts no background subsystem, so nearly everything built since Phase 3
+   is off.** Measured against the committed tree: the `api` command passes **15** flags, not the six
+   on record, and `--platform-user-routes` is among them — ADR-0358 added it (with a `deploy/README.md`
+   note that the page had told readers to POST to a route the stack did not serve), so that clause of
+   this entry was **false**, and so is any claim that the operator provisioning path is unreachable on
+   a shipped deployment. What stands is the whole of the *background* half, absent as of this
+   measurement: `--schedule-ms`, `--workflow-workers`, `--notification-drain-ms`,
+   `--audit-chain-config`, `--integrity-proof-config`, `--checkpoint-config`,
+   `--deletion-capabilities` (so neither Article 17 surface can mount), `--tenant-status-gate`,
+   `--rate-limit-policy`, `--read-state-routes`, `--preference-routes`. So the request path is
+   configured and nothing *recurs*: no job fires, no timer fires, no notification is delivered, no
+   audit row is anchored, no integrity proof runs. One increment, and the only question is which
+   flags a reference deployment should default to.
 4. **An Article 17 request naming one data subject erases the whole tenant.** `subjectIdentifier`
    is required on the submit body and the stored record, `DeletionRunnerOptions.run` has no field
    that could carry it, and `node.ts` calls `deleteTenantAtomically` with
