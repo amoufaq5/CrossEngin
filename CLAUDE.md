@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 18,929 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 19,080 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -4016,7 +4016,7 @@ typechecks *something*, which is the dangerous outcome) and runs the one script.
 (`packages/config`, which is JSON only, and `apps/operate-web`, a Next app that already includes every
 `.ts`/`.tsx`) are spelled out as lines, so adding a third is visible in a diff.
 
-**`packages/testing/src/strategy/` holds the workspace-level rules**, and there are **ten** now:
+**`packages/testing/src/strategy/` holds the workspace-level rules**, and there are **eleven** now:
 `typecheck-config.ts` (ADR-0307), `pg-column-coverage.ts` (ADR-0333), which reads `META_TABLES`
 and every store's SQL *as text* and asserts the two things a fake `PgConnection` structurally
 cannot — that every column a statement names exists, and that every `notNull`-with-no-default
@@ -4312,6 +4312,41 @@ the direction that *invents* members. Three `apps/operate-server` modules projec
 `pg-unreachable-stores.ts`' distinction, and they are declared as such.
 What it **cannot** see is a reader that receives its fields through a structural local type, which
 is exactly what `EntityLike` was in `list-query.ts` until this increment deleted it.
+The eleventh is `manifest-event-names.ts` (ADR-0362), and it is the first that fences a
+**declaration against a producer** rather than a store against the catalog. `matchEventJobs`
+compares a job's `eventName` to an emitted event's name with `===`, so the two halves of an event
+job are joined by one string that nothing compared — and measured over the real `resolveManifest`,
+**55 of 55 (pack, declaration) instances named an event no deployment could emit**. It is a
+workspace rule and deliberately **not** a `validateJobs` error, which ADR-0348's split would ask
+for, on one measurement: `validateManifest` is error-only with no warning channel, so a validation
+error would refuse 8 of 12 declarations and with them **all seven packs** — for five the remedy
+does not exist and for three it is a domain judgement.
+The fence is **per resolved pack and never over the union**, which is the decision rather than a
+detail: `mergeRecord` lets an overlay win by workflow key, so `erp-construction` keying its own
+`work_order_lifecycle` over `draft → scheduled → in_progress → done` takes core's `… → completed`
+away, and `workorder.completed` is addressable on six packs and names nothing on the seventh. A
+union would read that job as served, and the direction is what matters — **an over-wide producible
+set under-reports findings**. The declaration grain is `(jobId, packs)` for the same reason: at
+`(pack, jobId)` grain 21 of 28 residual instances are three core facts repeated across seven packs,
+and at `(jobId)` grain the construction member reads `overtaken` on six packs and is needed on one.
+Two reasons, each costing something checkable — `witness_named_differently` must name a `witness`
+the rule then asserts **is** producible, and `no_producible_counterpart` must name what is
+`missing` and the rule asserts it really is absent. **Nine declarations**, compared both ways.
+Its grammar is necessarily a second spelling of kernel's, because kernel *and all seven packs*
+devDepend on `@crossengin/testing`, so importing either makes `turbo run build`'s graph cyclic and
+reading their `dist` would make the rule green only after a build — so it is pinned by reading
+`kernel/src/manifest/event-names.ts` **as text** and comparing seven fragments (the two character
+classes, the `x_` escape, the three verbs, the separator), which is `pg-column-coverage.ts`'
+relationship to `META_TABLES` and the only agreement available across a dependency edge that cannot
+exist. Two things it learned the hard way and now fences: a first scan reading only the literal
+`: EntityLifecycleWorkflow = {` form answered **180 of core's 230** producible names and **7 of its
+19** lifecycles, because twelve are built through a factory — so `lifecycle_unparsed`,
+`entity_unreferenced`, `event_trigger_unattributed`, `pack_unresolved` and `workflow_key_ambiguous`
+are findings and never skips, since a smaller producible set over-reports and is one regex from the
+opposite. And **three mutations survived its first battery**: every `: Entity = {` const in the live
+packs is reached by its array, so a test over the real workspace cannot distinguish this scan from
+one taking every const it finds — ADR-0355's *a measurement taken once goes stale silently*,
+answered with fixture tests beside the live ones.
 `workspace-sql-scan.ts` is the fs walk extracted out of the column-coverage test so one scan feeds
 both SQL rules, and it gained a **reference collector** (`from`/`join`/`into`/`update`/`delete`/
 `truncate`, 312 references across 862 files) — without which three tables read as writerless that are
@@ -4443,6 +4478,17 @@ Prettier-clean and there is no `format:check`; don't bulk-format.
   incomplete 8`, 0 findings — and the one thing it cannot see is a reader that receives its fields
   through a structural local type, which is exactly what `EntityLike` was in `list-query.ts` until
   this increment deleted it.
+  **And a declaration naming an event no producer can emit is a failure too**
+  (`manifest-event-names.ts`, ADR-0362), the **eighth** reading and the first that fences a
+  declaration against a *producer* rather than an artifact against the catalog. A fake connection
+  is irrelevant again, and so is a real one: `matchEventJobs` compares two strings with `===`, both
+  satisfy one permissive regex (`EVENT_NAME_REGEX` types *both* sides of the comparison), and a
+  name nothing emits is a perfectly well-formed string. So the two halves of an event job were
+  joined by a value nothing compared, and **55 of 55 (pack, declaration) instances named an event
+  no deployment could emit** — while the survey written to report it told an operator to register
+  a handler. The honest fence is one function building every name and the survey enumerating its
+  domain, plus a rule per **resolved pack**, since an overlay replacing a lifecycle takes its
+  transition targets with it and an over-wide producible set under-reports.
   **And a query that is missing a predicate satisfies all of them** (ADR-0359), which is the blind
   spot the rules share rather than a seventh reading. Every one of them asks whether a column
   exists, whether an `INSERT` is complete, whether a live database admits a value, whether a CHECK
@@ -6536,7 +6582,7 @@ three make the rest honest, cheap or verifiable.
    P2 item 14's third clause, from the other end.)
 3. **No CI, no git hook, no smoke, e2e, load or migration test** — while `strategy/ci.ts` models
    triggers, budgets and a topological sort with no reader. No `.github/workflows`, no
-   `core.hooksPath`, so the ten rules and 18,929 tests run only when a human types `pnpm -r test`,
+   `core.hooksPath`, so the eleven rules and 19,080 tests run only when a human types `pnpm -r test`,
    and this file's instruction never to use `--no-verify` describes a guardrail that does not
    exist. `operate-web` has **zero tests** against 15 pages and 34 unfenced `fetch` sites — the
    serialized-body boundary that shipped a broken console button for an hour (ADR-0335).
