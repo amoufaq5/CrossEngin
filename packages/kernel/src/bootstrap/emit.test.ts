@@ -4,6 +4,7 @@ import {
   emitAddForeignKey,
   emitAddTableConstraint,
   emitAddTableConstraintIfEmpty,
+  emitAddTableConstraintIfUnviolated,
   emitAddUniqueConstraint,
   emitAlterColumnTypeIfEmpty,
   emitBootstrapSql,
@@ -19,6 +20,7 @@ import {
   emitReplaceRlsPolicy,
   emitReplaceTableConstraint,
   emitReplaceTableConstraintIfEmpty,
+  emitReplaceTableConstraintIfUnviolated,
   emitSetColumnDefault,
   emitRlsEnable,
   emitRlsPolicy,
@@ -32,6 +34,7 @@ import {
   REFERENTIAL_ACTIONS,
   RLS_POLICY_COMMANDS,
   TABLE_CONSTRAINT_KINDS,
+  type TableCheckConstraint,
   type TableConstraint,
   type TableDefinition,
 } from "./types.js";
@@ -620,8 +623,8 @@ describe("guarded table-constraint emitters", () => {
 
   it("re-checks emptiness in the statement, not only when the plan was built", () => {
     const sql = emitAddTableConstraintIfEmpty(table, check);
-    expect(sql).toContain("SELECT count(*) INTO existing FROM \"meta\".\"comms\"");
-    expect(sql).toContain("IF existing > 0 THEN");
+    expect(sql).toContain("SELECT count(*) INTO _ce_existing FROM \"meta\".\"comms\"");
+    expect(sql).toContain("IF _ce_existing > 0 THEN");
     expect(sql).toContain("RAISE EXCEPTION");
     expect(sql).toContain("refusing to add constraint comms_window_check to meta.comms");
   });
@@ -644,7 +647,7 @@ describe("guarded table-constraint emitters", () => {
     const add = sql.indexOf("ADD CONSTRAINT");
     expect(drop).toBeGreaterThan(0);
     expect(add).toBeGreaterThan(drop);
-    expect(sql.indexOf("IF existing > 0")).toBeLessThan(drop);
+    expect(sql.indexOf("IF _ce_existing > 0")).toBeLessThan(drop);
     expect(sql.startsWith("DO $$")).toBe(true);
     expect(sql.endsWith("END $$;")).toBe(true);
   });
@@ -665,6 +668,158 @@ describe("guarded table-constraint emitters", () => {
     expect(emitReplaceTableConstraintIfEmpty(table, check)).toContain(
       `DROP CONSTRAINT IF EXISTS "comms_window_check";`,
     );
+  });
+});
+
+describe("violation-guarded table-constraint emitters", () => {
+  const table: TableDefinition = {
+    schema: "meta",
+    name: "comms",
+    columns: [
+      { name: "id", type: "UUID", notNull: true },
+      { name: "status", type: "TEXT", notNull: true },
+    ],
+    primaryKey: ["id"],
+  };
+  const check: TableCheckConstraint = {
+    kind: "check",
+    name: "comms_status_check",
+    expression: "status IN ('draft', 'sent', 'bounced')",
+  };
+
+  it("counts the rows that violate the declared expression, not the rows", () => {
+    const sql = emitAddTableConstraintIfUnviolated(table, check);
+    expect(sql).toContain(
+      `SELECT count(*) INTO _ce_violating FROM "meta"."comms" ` +
+        `WHERE NOT coalesce((status IN ('draft', 'sent', 'bounced')), true);`,
+    );
+    expect(sql).toContain("IF _ce_violating > 0 THEN");
+  });
+
+  it("has no emptiness clause, because the violation count subsumes one", () => {
+    // ADR-0363: an empty table is one way for the violation count to be zero. A second clause
+    // beside this one would re-impose exactly the narrowing this emitter exists to lift.
+    const sql = emitAddTableConstraintIfUnviolated(table, check);
+    expect(sql).not.toContain("_ce_existing");
+    expect(sql).not.toContain(`count(*) INTO _ce_violating FROM "meta"."comms";`);
+  });
+
+  it("wraps the expression in coalesce, because a CHECK passes when it is NULL", () => {
+    // Counting `NOT E` would refuse a statement that succeeds: a row whose expression is unknown
+    // is admitted by the real constraint.
+    expect(emitAddTableConstraintIfUnviolated(table, check)).toContain("NOT coalesce((");
+  });
+
+  it("asserts the session is not confined before it believes the count", () => {
+    const sql = emitAddTableConstraintIfUnviolated(table, check);
+    const guard = sql.indexOf("row_security_active('meta.comms'::regclass)");
+    const count = sql.indexOf("SELECT count(*)");
+    expect(guard).toBeGreaterThan(0);
+    expect(count).toBeGreaterThan(guard);
+    expect(sql).toContain("FORCE ROW LEVEL SECURITY");
+  });
+
+  it("quiesces the table before counting, so no row can commit between count and ALTER", () => {
+    const sql = emitAddTableConstraintIfUnviolated(table, check);
+    const lock = sql.indexOf(`LOCK TABLE "meta"."comms" IN ACCESS EXCLUSIVE MODE;`);
+    expect(lock).toBeGreaterThan(0);
+    expect(sql.indexOf("SELECT count(*)")).toBeGreaterThan(lock);
+  });
+
+  it("never uses NOT VALID, which would record a rule the data may violate", () => {
+    expect(emitAddTableConstraintIfUnviolated(table, check)).not.toContain("NOT VALID");
+    expect(emitReplaceTableConstraintIfUnviolated(table, check)).not.toContain("NOT VALID");
+  });
+
+  it("adds the constraint once the guard passes", () => {
+    expect(emitAddTableConstraintIfUnviolated(table, check)).toContain(
+      `ALTER TABLE "meta"."comms" ADD CONSTRAINT "comms_status_check" ` +
+        `CHECK (status IN ('draft', 'sent', 'bounced'));`,
+    );
+  });
+
+  it("drops before adding, after the guard, when it replaces one", () => {
+    const sql = emitReplaceTableConstraintIfUnviolated(table, check);
+    const drop = sql.indexOf("DROP CONSTRAINT");
+    const add = sql.indexOf("ADD CONSTRAINT");
+    expect(sql.indexOf("IF _ce_violating > 0")).toBeLessThan(drop);
+    expect(add).toBeGreaterThan(drop);
+    expect(sql.startsWith("DO $$")).toBe(true);
+    expect(sql.endsWith("END $$;")).toBe(true);
+  });
+
+  it("counts against the declared expression and not the live constraint", () => {
+    // The live one is what the rows were written under, so it is satisfied by construction and
+    // counting against it would always pass.
+    const sql = emitReplaceTableConstraintIfUnviolated(table, check, "comms_legacy_check");
+    expect(sql).toContain("NOT coalesce((status IN ('draft', 'sent', 'bounced')), true)");
+    expect(sql).toContain(`DROP CONSTRAINT IF EXISTS "comms_legacy_check";`);
+  });
+
+  it("drops the declared name when no live name is given", () => {
+    expect(emitReplaceTableConstraintIfUnviolated(table, check)).toContain(
+      `DROP CONSTRAINT IF EXISTS "comms_status_check";`,
+    );
+  });
+
+  it.each([
+    ["a percent", "comms_100%_check"],
+    ["a quote", "comms_o'd_check"],
+  ])("refuses %s in the constraint name before any message is built", (_what, name) => {
+    // The refusal is `quoteIdent`'s and not this emitter's, which is worth pinning rather than
+    // assuming: `SAFE_IDENT_REGEX` is narrower than Postgres, which accepts either inside a
+    // quoted identifier. So neither character can reach the RAISE through a *name*, and
+    // `messageText`'s escaping is reachable only where the act carries something that is not an
+    // identifier — see the type-change case below.
+    const odd: TableCheckConstraint = { ...check, name };
+    expect(() => emitAddTableConstraintIfUnviolated(table, odd)).toThrow(
+      /unsafe SQL identifier/,
+    );
+  });
+});
+
+describe("the emptiness guards assert confinement too", () => {
+  const table: TableDefinition = {
+    schema: "meta",
+    name: "children",
+    columns: [
+      { name: "id", type: "UUID", notNull: true },
+      { name: "owner_id", type: "UUID", notNull: true },
+    ],
+    primaryKey: ["id"],
+  };
+  const check: TableConstraint = {
+    kind: "check",
+    name: "children_owner_check",
+    expression: "owner_id IS NOT NULL",
+  };
+
+  // A confined session's count of 0 is what hidden rows look like, so for these two guards the
+  // consequence is worse than a misleading refusal: a confined session would get the `ALTER` it
+  // asked for, on a table it cannot see the rows of. That is the only thing between a confined
+  // session and a silently successful type rewrite.
+  it.each([
+    ["emitAddTableConstraintIfEmpty", emitAddTableConstraintIfEmpty(table, check)],
+    ["emitReplaceTableConstraintIfEmpty", emitReplaceTableConstraintIfEmpty(table, check)],
+    ["emitAlterColumnTypeIfEmpty", emitAlterColumnTypeIfEmpty(table, "owner_id", "text")],
+  ])("%s asks row_security_active before it counts, and locks the table", (_name, sql) => {
+    const guard = sql.indexOf("row_security_active('meta.children'::regclass)");
+    const lock = sql.indexOf(`LOCK TABLE "meta"."children" IN ACCESS EXCLUSIVE MODE;`);
+    const count = sql.indexOf("SELECT count(*)");
+    expect(guard).toBeGreaterThan(0);
+    expect(lock).toBeGreaterThan(guard);
+    expect(count).toBeGreaterThan(lock);
+  });
+
+  it("escapes a percent in the type, the one position the act is not an identifier", () => {
+    // RAISE's message is a plpgsql format string, so a bare `%` consumes the count argument: the
+    // refusal would report the wrong thing, or raise `too few parameters specified for RAISE`
+    // from inside the guard that exists to refuse cleanly. A constraint and a table name are
+    // refused by `quoteIdent` first; a *type* is interpolated raw here and in the `ALTER`
+    // itself, as the catalog's types are not identifiers, so this is where the escape is live.
+    const sql = emitAlterColumnTypeIfEmpty(table, "owner_id", "weird%type");
+    expect(sql).toContain("to weird%%type: table holds % row(s)");
+    expect(sql).toContain("TYPE weird%type USING");
   });
 });
 
@@ -959,8 +1114,8 @@ describe("foreign-key and type-change emitters", () => {
     // The plan's row count was taken earlier; this is what stops a row inserted since then from
     // being silently rewritten.
     const sql = emitAlterColumnTypeIfEmpty(table, "owner_id", "text");
-    expect(sql).toContain("SELECT count(*) INTO existing FROM \"meta\".\"children\"");
-    expect(sql).toContain("IF existing > 0 THEN");
+    expect(sql).toContain("SELECT count(*) INTO _ce_existing FROM \"meta\".\"children\"");
+    expect(sql).toContain("IF _ce_existing > 0 THEN");
     expect(sql).toContain("RAISE EXCEPTION");
     expect(sql).toContain('ALTER COLUMN "owner_id" TYPE text USING "owner_id"::text');
   });

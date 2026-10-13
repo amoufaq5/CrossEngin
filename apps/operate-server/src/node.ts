@@ -13,6 +13,7 @@ import {
 import { StripeClient } from "@crossengin/billing-stripe";
 import {
   admissionBlocks,
+  admissionBlocksValues,
   admissionRemedy,
   createNodePgConnection,
   formatCheckAdmissionSurvey,
@@ -306,6 +307,11 @@ import {
   buildPreferenceRoutes,
 } from "./preference-routes.js";
 import { PostgresNotificationPreferenceStore } from "./preference-store.js";
+import {
+  PENDING_DELETION_ADMISSION_MAY_SERVE,
+  decidePendingDeletionAdmission,
+  pendingDeletionAdmissionMessage,
+} from "./pending-deletion-admission.js";
 import { PostgresTenantManifestStore, manifestSummary } from "./tenant-manifests.js";
 import { buildDesignDesigner, buildDesignProviderFromEnv } from "./ai-design.js";
 import { buildAiDesignRoutes } from "./ai-design-routes.js";
@@ -1518,6 +1524,44 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           ` transaction that erases the tenant, so the refusal lands after the data is gone${remedy}`,
       );
     }
+  }
+  // ADR-0363's half of P0.5. `meta.tenants.status` gained `pending_deletion` in ADR-0334, and until
+  // this increment a populated deployment could not store it — so the verify route's `UPDATE` was
+  // refused `23514`, `moveTenant` caught it, and the 202 carried `tenantReadOnly: false` while the
+  // tenant went on writing into data the runner was about to destroy.
+  //
+  // **Value-granular and not column-granular**, through `admissionBlocksValues`: two surfaces write
+  // this column and they write different values. `--deletion-request-routes` writes
+  // `pending_deletion`, which the old four-value CHECK refuses, while `--tenant-deletion-routes`
+  // writes `deleted`, which it admits — so naming the column would refuse the synchronous route for
+  // a value it can store, which is a refusal an operator cannot act on for the surface in front of
+  // them.
+  //
+  // **Refused only when the gate is also on, reported otherwise**, and the split is the measurement
+  // rather than caution: `--tenant-status-gate` is what *reads* this column on the request path, and
+  // without it `pending_deletion` is enforced by nothing — so the failed `UPDATE` costs a stale
+  // status column, a `console.error` and an honest `tenantReadOnly: false`, with the trail recording
+  // nothing rather than lying (`recordLifecycle` answers `false` on `fromState === null`). With the
+  // gate on it costs the one thing the state exists for. Refusing breaks nothing that worked in
+  // either case — the read-only window has never held on an un-upgraded deployment — but a refusal
+  // for a column nothing reads would refuse a deployment whose behaviour is unchanged by it.
+  const pendingDeletionBlocking =
+    admission === null
+      ? []
+      : admissionBlocksValues(admission, [
+          { table: `${metaSchema}.tenants`, column: "status", value: "pending_deletion" },
+        ]);
+  const pendingDeletionEffect = decidePendingDeletionAdmission({
+    deletionRequestRoutes: options.deletionRequestRoutes === true,
+    tenantStatusGate: options.tenantStatusGate === true,
+    blocking: pendingDeletionBlocking,
+  });
+  for (const finding of pendingDeletionEffect === "silent" ? [] : pendingDeletionBlocking) {
+    const line =
+      `[deletion-request] ${pendingDeletionAdmissionMessage(pendingDeletionEffect, finding)}` +
+      `\n${admissionRemedy(metaSchema, finding)}`;
+    if (!PENDING_DELETION_ADMISSION_MAY_SERVE[pendingDeletionEffect]) throw new Error(line);
+    console.warn(line);
   }
   // `--read-state-routes` is in this list because it needs the notice source and the recipient
   // resolver, and nothing else here. Left out, it mounted nothing and warned that it "requires a

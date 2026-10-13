@@ -163,6 +163,15 @@ async function runApply(flags: ReadonlySet<string>): Promise<number> {
     if (plan.unreconciled.length > 0) {
       process.stdout.write(formatReconciliationPlan(plan) + "\n");
     }
+    // An `unreconciled` item is **reported and exits 0**, and ADR-0363 is where that was weighed
+    // rather than inherited. `constraint_violated_by_existing_rows` is the first reason here that no
+    // re-run can clear, so "exit 1 for a difference that will never converge" is a real argument —
+    // and the deciding fact is on the other side: `deploy/docker-compose.yml` gates `api` on
+    // `migrate` with `condition: service_completed_successfully`, so a non-zero exit takes the whole
+    // stack down. A narrowing CHECK on one table is not a reason the API must not serve, and the
+    // machine-readable convergence claim ADR-0331 added (`remaining.statements.length === 0` on the
+    // JSON payload) is what a caller that does care should read. Exit 1 stays for the two conditions
+    // that mean *nothing was applied* or *a statement failed*.
     if (!report.preconditions.ok || report.failed > 0) return 1;
     return 0;
   } finally {

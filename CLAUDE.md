@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 357 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 358 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 19,080 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 19,133 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -588,10 +588,12 @@ type errors.
 
   ADR-0352 closes ADR-0351's Q5 and the class is **a probe that was one instance of a class**. The
   sharp edge is ADR-0330's: a *widening* CHECK cannot be told from a *narrowing* one, so
-  `planSchemaReconciliation` reports `constraint_needs_validation` on a populated table rather than
-  planning it — which means **every enum value the catalog has ever added is refused `23514` on every
-  already-applied deployment until an operator runs an `ALTER` by hand**, with nothing saying so until
-  a write fails. Three increments did exactly that and each was found by hand: ADR-0300 (three flag
+  `planSchemaReconciliation` **used to report** `constraint_needs_validation` on a populated table
+  rather than planning it — which meant **every enum value the catalog has ever added was refused
+  `23514` on every already-applied deployment until an operator ran an `ALTER` by hand**, with
+  nothing saying so until a write failed. ADR-0363 closed that half by giving `proveWideningSafe` a
+  caller; this survey is the other half and the two ask different questions (see the `proveWideningSafe`
+  entry above). Three increments did exactly that and each was found by hand: ADR-0300 (three flag
   kinds), ADR-0334 (`pending_deletion`, whose catalog comment spells the whole problem out), and
   ADR-0351 (`'v4'`, where the refusal lands *inside* the Article 17 transaction after the data is
   gone). Measured from the built catalog objects rather than the source text — which matters, because
@@ -1057,6 +1059,63 @@ type errors.
   *accurate* one described the defective code; and a comment this increment wrote defended its own
   permissive default with a property only one of three callers has.
 
+  ADR-0363 takes two register items that are one defect from both ends — P2.3 (`proveWideningSafe`
+  complete and wired to nothing) and P0.5 (its live member) — and the class is **a guard asking a
+  proxy for its own question**. `emitAddTableConstraintIfEmpty` asks *is this table empty*, where
+  the question deciding whether its statement can fail is *does any existing row violate the
+  expression*: emptiness is sufficient and strictly narrower, so its "no" was conservative and its
+  "yes" frequently wrong. ADR-0330's reasoning is right as written — a widening and a narrowing are
+  indistinguishable *from the expressions* — and its conclusion was one sentence from the fix,
+  because **Postgres can be asked**, which is that ADR's own *ask Postgres rather than imitate its
+  parser* applied one level out. The proxy appeared **twice in one decision** and the planner's copy
+  was the live one (`rowCount === 0` short-circuiting before any proof was consulted); it was found
+  not by reading but by **live arm 3 failing**, where a confined session got a widening *planned*
+  because it read a count it could not believe.
+  **And then the increment corrected itself, which is the most important thing in it.** Gating on
+  `proveWideningSafe` — *does any current row violate it* — is **strictly weaker than "this is a
+  widening"**, so a **narrowing or sideways** change was planned silently whenever today's rows
+  happened to satisfy it, and ordinary writes the live rule permits would start failing `23514` in
+  production with nothing in the plan having said the declaration narrows. Demonstrated on the
+  cluster by an adversarial read-only pass: live `IN ('a','b','c')`, declared `IN ('a','b','d')`,
+  guard counted 0, a plain `INSERT … 'c'` committed in the window, the `ALTER` raised — and the
+  guard's own refusal string asserted the distinction the code never tested. The fix is
+  **`predicate_implied_by`, the planner's own prover**, reached through `constraint_exclusion = on`:
+  `EXPLAIN SELECT … WHERE NOT (<declared>)` is planned `Result / One-Time Filter: false` iff the live
+  constraints refute it. It reads **neither expression**, which is what made the obvious alternative
+  wrong (extract both value sets and compare them is a regex over deparsed CHECK text, refused by
+  ADR-0352), and it is stronger than counting in three measured ways: no row is consulted, so a
+  confined session can **plan** a widening it could not count; the race is unreachable, since every
+  row the live CHECK admits satisfies the declared one; and `EXPLAIN` does not execute, so it cannot
+  fire a volatile function the count would. Sound and incomplete in the safe direction — a true
+  widening the prover cannot see is reported, which is the pre-increment behaviour — and one edge
+  closes itself: a `NOT VALID` live constraint is the only way a proven widening could still fail,
+  and **the planner declines to use one for exclusion**, so that case answers `not_implied`.
+  **One fake defect, found by the live run and not by kernel-pg's 776 unit tests**, which is this file's own
+  fifth fake-boundary member reproduced inside the increment that added it: `EXPLAIN`'s output column
+  is `QUERY PLAN`, cannot be aliased and cannot be wrapped in a subquery, so `rows[0]?.plan` was
+  always `undefined` and every implication answered `not_implied` — while the fake returned
+  `{ plan }`, so **the fake and the code agreed with each other and with nothing else.** It reads the
+  row's first value by position now.
+  Three things were sharper than the defect. **A pasted remedy could destroy a constraint**, since
+  ADR-0330: `manualColumnCheckSql` emitted the violator query as a *comment* and the `DROP`/`ADD`
+  live, so `psql -f` dropped the rule, failed the add, left the table with **zero** CHECK
+  constraints and then accepted anything — fixed by a transaction, and separately by giving the
+  *conclusive* arm the violator query **alone**, because there the plan has asked the rows so the
+  `ADD` is proved to fail while the `DROP` would succeed. **The two confinement stakes are
+  asymmetric**, which corrected this increment's own comment: measured as the only session that can
+  `ALTER` while confined (a non-superuser owner of a `FORCE ROW LEVEL SECURITY` table), the
+  constraint path counts 0 violations, passes the guard, and the `ALTER` raises `23514` — so the
+  assertion converts an opaque failure into a named one and Postgres's validation is the backstop —
+  while the type-change path counts **0 of 3** rows, passes, and the **rewrite applies**, because a
+  type change has no validation pass to refuse it. And the `%` escape is a **compile-time** fence
+  rather than a cosmetic one: unescaped, the same guard raises `too few parameters specified for
+  RAISE` at compilation of the `DO` block, so a `%` in the act breaks the statement before anything
+  is counted. P0.5's boot half is `admissionBlocksValues`, **value**-granular because
+  `meta.tenants.status` has two writers writing different values — naming the column would refuse
+  the synchronous Article 17 route for `deleted`, which the old CHECK stores perfectly well — and it
+  **refuses only when `--tenant-status-gate` reads the value**, warning otherwise, since without the
+  gate nothing enforces the state either way.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -1144,6 +1203,32 @@ packages exist at only one layer, noted below where that is true.
   cross-validate, diff, patch, `manifestHash`, `meta.extends` resolution — entity
   *ordering* lives with the store that creates tables, ADR-0285), and
   `tenancy/` + `workflow/` (tenant resolution, workflow definition validation).
+  **`bootstrap/emit.ts`'s row-counting guards count *violations* since ADR-0363, and every one of
+  them opens with a confinement assertion.** `emitAddTableConstraintIfUnviolated` /
+  `emitReplaceTableConstraintIfUnviolated` emit
+  `SELECT count(*) … WHERE NOT coalesce((<expr>), true)` and refuse with the count, which is the
+  question that decides whether the statement can fail — where `…IfEmpty` asked a **proxy** for it,
+  sufficient and strictly narrower. There is deliberately no emptiness clause beside it: an empty
+  table is a degenerate instance, and a second clause would refuse a statement that succeeds on a
+  table that gained a *satisfying* row between the plan and the apply. `coalesce(E, true)` is
+  load-bearing, because a CHECK passes when its expression is NULL — verified to agree with what
+  `ALTER TABLE … ADD CONSTRAINT` validates across 20 of 20 expression shapes on PG 16.13.
+  `rlsConfinementGuard` is the first line of all four guards (`row_security_active`, asked rather
+  than composed — ADR-0362's rule one layer out) and its **two stakes are asymmetric**: on the
+  constraint path a confined count lets the step through and the `ALTER` raises `23514`, so the
+  assertion converts an opaque failure into a named one, while for `emitAlterColumnTypeIfEmpty` it
+  is the *only* thing between a confined session and a **successful** rewrite of rows it cannot
+  see — measured both ways as a `FORCE ROW LEVEL SECURITY` owner, the only session that can `ALTER`
+  while confined. `tableQuiesceLock` (`ACCESS EXCLUSIVE`) sits between the assertion and the count,
+  because `ACCESS SHARE` and `ROW EXCLUSIVE` are compatible and the applier runs each statement in
+  its own transaction, so a row could commit in between; `ALTER TABLE` takes that lock anyway, so
+  it changes a duration and not a strength. `messageText` escapes `'` **and `%`**, the second being
+  a compile-time fence rather than a cosmetic one — unescaped, the guard raises `too few parameters
+  specified for RAISE` at compilation of the `DO` block — whose live position is
+  `emitAlterColumnTypeIfEmpty`'s raw `type`, since `quoteIdent` refuses either character in a name
+  first. The plpgsql variables carry a `_ce_` prefix because a column of the same name makes every
+  reference ambiguous (`column reference "existing" is ambiguous`), which the violation guard made
+  reachable by being the first one whose query names the table's own columns.
   **`manifest/event-names.ts` is the one spelling of the entity-event grammar** (ADR-0362):
   `eventNameSegment`, `ENTITY_EVENT_VERBS`, `entityEventName` and `producibleEntityEventNames`.
   It lives here and not in `operate-runtime` for a dependency reason that is also the increment's
@@ -1277,11 +1362,38 @@ packages exist at only one layer, noted below where that is true.
   stands. Matching goes by rendering first (so a *changed* expression is one finding rather than
   missing-plus-undeclared, which an operator would act on differently), by derived name second, and
   by naming family third when exactly one candidate fits. Planned as a guarded
-  `replace_column_check` on an empty table — safe because **neither identifier in the statement is
-  inferred** — and reported `constraint_needs_validation` with the SQL on a populated one. A name the
-  plan would have to *predict*, `ChooseConstraintName`'s numeric suffix inside a shared family, is
-  never written and reads `column_check_name_unavailable`. Costs one probe per declared column
-  check (**777** as of ADR-0352, ~850 ms, flat in row count).
+  `replace_column_check` — safe because **neither identifier in the statement is inferred** — and
+  **on a populated table too since ADR-0363**, once the probe's `proveWideningSafe` verdict says no
+  existing row violates the declaration. A name the plan would have to *predict*,
+  `ChooseConstraintName`'s numeric suffix inside a shared family, is never written and reads
+  `column_check_name_unavailable` **however the proof came back**, since that reason is about the
+  identifier and not the rows. Costs one probe per declared column check (**777** as of ADR-0352,
+  ~850 ms, flat in row count) plus, since ADR-0363, one catalog read and one violation count per
+  *declared-CHECK difference* — a converged database has none and pays nothing.
+  **The plan asks Postgres whether the declaration widens, and the rows only for the diagnosis**
+  (ADR-0363). `ReconciliationProbe` is four required fields — `rowCounts`, `wideningProofs`,
+  `wideningImplications`, `confinedTables` — and `decideCheckPlan` has **two independent sufficient
+  gates**: `live_implies_declared` from `proveDeclarationWidens` (structural, no row consulted, so
+  it survives a confined session and admits no race), and *the table is empty*, which is ADR-0299's
+  rule kept for its own reason — a new rule on no data is a decision about future writes alone, and
+  there is no existing data whose reinterpretation a human needs to approve — guarded on
+  `confinedTables`. Everything else is reported, over **three** reasons.
+  `constraint_violated_by_existing_rows` is conclusive, on the axis **answered versus unanswered**
+  and deliberately *not* ADR-0322's conclusive-versus-inferred (a count came back, rather than an
+  absence read as evidence). `constraint_widening_unproven` is the correction's reason — the rows
+  satisfy it and nothing proved it a widening — and it names **the prover's answer and never a fact
+  about the expressions**, because `not_implied` covers both *it really narrows* and *the
+  implication holds and the planner cannot see it*, the latter true of all 213 pattern CHECKs. Its
+  remedy is the `DROP`/`ADD` pair and that is the point: the SQL **will succeed**, which is exactly
+  why a plan must not run it unasked. The conclusive arm hands over
+  `manualCheckViolatorsSql`, the violator `SELECT` **live and alone**, because there the `ADD` is
+  proved to fail while the `DROP` before it would succeed; the inconclusive arm still gets the
+  `DROP`/`ADD` pair, now wrapped in `BEGIN;`/`COMMIT;` — which is a **data-integrity fix**, not
+  tidying: verified by paste, the old unwrapped pair left `meta.comms` with zero CHECK constraints
+  and then accepted anything. `probeForReconciliation` asks the confinement **before** counting and
+  records the table in `confinedTables` rather than a figure it cannot stand behind (ADR-0331's
+  claim-versus-nobody-looked, inside a probe), and `rowsPhrase` renders all three states so a
+  missing count says which.
   **Index and policy definitions are compared too** (ADR-0292) — columns, order, uniqueness and
   access method structurally; predicates and policy clauses by **asking Postgres to deparse the
   declared text** (`expression-render.ts` attaches it as a `CHECK … NOT VALID` constraint inside a
@@ -1325,7 +1437,25 @@ packages exist at only one layer, noted below where that is true.
   `proveWideningSafe` is the separate half, and separate because it reads tenant data where the survey
   reads only the catalog: it answers ADR-0330's open end by counting the rows that violate the
   declared expression, and **refuses the claim on a confined session** rather than reading 0 as safe —
-  measured, the owner counts 1 and a non-owner 0 while the `ALTER` genuinely raises.
+  measured, the owner counts 1 and a non-owner 0 while the `ALTER` genuinely raises. It has a caller
+  since ADR-0363 (`planSchemaReconciliation`, through `proveWidenings`) and is the **diagnostic**
+  there rather than the gate — what it proves is *no current row violates this*, which is strictly
+  weaker than *this is a widening*, and gating on it planned narrowings. **`proveDeclarationWidens`
+  is the gate**: `SET LOCAL constraint_exclusion = on` plus
+  `EXPLAIN (FORMAT JSON, COSTS OFF) SELECT 1 FROM t WHERE NOT (<declared>)`, proved iff the plan is
+  `Result / One-Time Filter: false` — `predicate_implied_by`, the planner's own prover, which reads
+  neither expression and consults no row. It answers over **three** values
+  (`live_implies_declared` / `not_implied` / `unknown_unreadable`), reads the row's **first value by
+  position** because `EXPLAIN`'s header is `QUERY PLAN` and cannot be aliased, and treats every
+  unrecognised plan shape as *not proved* — its "no" costs a planned step and its "yes" allows one.
+  Both lost `proveWideningSafe`'s `column` parameter in the same increment: it took one and read it
+  nowhere, and a parameter named `column` invites a caller to believe the verdict is about that
+  column, which for a table-level CHECK spanning three of them it is not — the verdict is about the
+  **expression**. Cheap for a reason that will not come again: callerless from ADR-0352 until then,
+  so no signature depended on it. The survey and the plan are **two questions and not two answers
+  to one** — the plan asks whether *this binary's declaration* can be applied, the survey whether
+  the *live* constraint admits what this binary emits — so they agree on a converged deployment and
+  diverge on exactly the one that has drifted.
   **`sessionWouldBeConfined` asks Postgres for the verdict and the catalog for the explanation**
   (ADR-0362). It returns `row_security_active(c.oid)` — the SQL face of `check_enable_rls`, the
   function the executor itself consults — so it is not a better approximation of the rule, it *is*
@@ -3628,6 +3758,26 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `meta.tenant_tombstones.proof_version` where the write is, with `admissionRemedy`'s `ALTER` pair
   printed — the same SQL `reconcile.ts` hands over, produced independently. Keeping both the probe and
   the survey would have been two mechanisms for one question.
+  **A second such refusal joined it in ADR-0363, and it is `admissionBlocksValues` rather than
+  `admissionBlocks`** — **value**-granular, because `meta.tenants.status` has two writers writing
+  different values: `--deletion-request-routes` writes `pending_deletion`, which an un-upgraded
+  four-value CHECK refuses, while `--tenant-deletion-routes` writes `deleted`, which it admits, so
+  naming the *column* would refuse the synchronous Article 17 route for a value it stores perfectly
+  well (ADR-0334's rule that a refusal an operator cannot act on for the surface in front of them is
+  worse than none). The returned finding's `refused` list is narrowed to the values asked about while
+  `declaredExpression` is untouched, so the remedy still restores the whole domain — a CHECK is
+  replaced and never amended. `decidePendingDeletionAdmission` in
+  `pending-deletion-admission.ts` is a **pair and not a boolean**: `refuse_boot` when
+  `--tenant-status-gate` is also on, because that flag is the column's only reader on the request
+  path and a refused `pending_deletion` then costs the one thing the state exists for; `warn`
+  otherwise, because without the gate nothing enforces the state either way and the cost is a stale
+  status column, a `console.error` and an honest `tenantReadOnly: false` — with the lifecycle trail
+  recording *nothing* rather than lying, since `recordLifecycle` answers `false` when no row moved.
+  Refusing breaks nothing that worked in either case (the window has never held on an un-upgraded
+  deployment, ADR-0338's rule), and what stops it being a refusal in both is that rule's other half.
+  `PENDING_DELETION_ADMISSION_MAY_SERVE` is a total map so a fourth effect is a compile error, and
+  `pendingDeletionAdmissionMessage` builds both sentences from one shared half and names no remedy of
+  its own, because the `ALTER` has one producer.
   **And `surveyEnvelopeTenantReadiness` names api-key tenants with no `meta.tenants` row** under
   `--column-key-mode envelope` (ADR-0349's live finding (a)), whose every PHI read and write is
   otherwise refused by `tenant_data_keys_tenant_id_fkey` and surfaced as an HTTP **504** — a
@@ -3969,11 +4119,14 @@ there is no honest default to give them: all three `RECORD_STORAGE_MODELS` are *
 `{"model":"document_rows",…}` would assert that the deployment had no typed relations — precisely
 the assertion ADR-0350's gap made unavailable — written onto rows whose digests never covered it,
 and then refused by the contract's version pairing anyway. The column's sibling is the widened
-`proof_version` CHECK, and the two migrate **differently**: on an empty table the plan is
-`2 steps, 0 unreconciled`, and on a populated one `1 step, 1 unreconciled` — the column lands and
-the CHECK is handed over as SQL, because ADR-0330 cannot tell a widening CHECK from a narrowing one.
-`apps/operate-server/src/proof-version-probe.ts` is the boot fence that makes the gap between them
-survivable; see the `operate-server` entry.
+`proof_version` CHECK, and the two **used to** migrate differently: on an empty table the plan was
+`2 steps, 0 unreconciled`, and on a populated one `1 step, 1 unreconciled` — the column landing and
+the CHECK handed over as SQL, because ADR-0330 cannot tell a widening CHECK from a narrowing one.
+**Since ADR-0363 both land**, because the plan asks **Postgres** whether the declaration widens
+rather than assuming it cannot know: the four-to-five-value change is one `predicate_implied_by`
+proves, so the `replace_column_check` is planned on a populated table too. `proof-version-probe.ts` was replaced
+by ADR-0352's general survey and the boot fence over it is what survives; see the `operate-server`
+entry.
 
 **Every column-level value-set CHECK declares which contract domain governs it** (ADR-0353), in
 `packages/testing/src/strategy/pg-value-set-domains.ts` rather than in the catalog — a ref is a
@@ -4424,8 +4577,15 @@ Prettier-clean and there is no `format:check`; don't bulk-format.
   invisible to it by construction, and it takes `{owner: true}` now and **throws** on a
   write with no `tenant_id` predicate; `feature-flags-pg`'s and `dr-runtime-pg`'s
   `mockConnection` modelled it **not at all**, pure recorders answering `{rowCount: 1}`,
-  and now call `assertStatementIsScoped`. So: **a fake that answers a statement it
-  could not really serve is a test asserting the wrong thing.** Reads stay exempt from
+  and now call `assertStatementIsScoped`. **ADR-0363 adds a fifth member and it is the subtlest:
+  a fake can answer the *wrong query's* row.** `reconcile.test.ts`'s fake matched
+  `SESSION_POLICY_VISIBILITY_QUERY` on `c.relrowsecurity` — which that query selects **and so does
+  the RLS-enabled query beside it** — so the confinement probe was handed the other statement's
+  row, ADR-0362's strict verdict parse threw, and **every widening proof came back
+  `unknown_unreadable`**: a test suite in which the feature being added could not work, passing.
+  The fix is a `row_security_active` branch placed *first*, and the lesson is that a shape match
+  must be specific to the statement and not merely true of it. So: **a fake that answers a
+  statement it could not really serve is a test asserting the wrong thing.** Reads stay exempt from
   that tripwire on purpose — `classifyScopedWriteRefusal`'s diagnosing re-read is
   deliberately unscoped, because its whole question is whether the row sits in another
   scope and a scoped read could only answer "absent". A **writerless** table is also a
@@ -4900,9 +5060,10 @@ opened them.
   and is pinned rather than served.
 - **The live catalog's admission of what this binary emits is surveyed, and what is left of it**
   (ADR-0352 closed ADR-0351's Q5). The class: ADR-0330 cannot tell a widening CHECK from a narrowing
-  one, so every enum value the catalog adds is refused `23514` on every already-applied deployment
-  until an operator runs an `ALTER` by hand — found by hand three times (ADR-0300, ADR-0334,
-  ADR-0351) and now detected, over **777** emitted column CHECKs of which **287** are value sets,
+  one *from the expressions*, so every enum value the catalog adds **was** refused `23514` on every
+  already-applied deployment until an operator ran an `ALTER` by hand — found by hand three times
+  (ADR-0300, ADR-0334, ADR-0351), detected here, and **planned since ADR-0363**, which asks the rows
+  rather than the expressions. Over **777** emitted column CHECKs of which **287** are value sets,
   **263** bounded ranges and **213** patterns. It evaluates the live predicate rather than reading
   it, casts through an allow-list because a modifier-bearing cast truncates, fences the evaluations
   with `SET TRANSACTION READ ONLY` because a CHECK can call a volatile function, reports rather than
@@ -4918,11 +5079,14 @@ opened them.
   quoted here was also off — 281 of 287 match exactly once inline `z.enum`s, exported `z.enum`
   constants, aliases, module-private constants and import-following are read, and **zero** columns
   match more than one domain once a constant is preferred over a reference to it. The real finding is
-  `META_DEPLOYMENTS`; see *The table that could not accept its own record*. **(2)** a widening can now
-  be **proved** safe, so `planSchemaReconciliation` could plan it instead of reporting
-  `constraint_needs_validation` — ADR-0330's open end closed rather than merely measured. It needs
-  the proof re-checked inside the statement's own transaction (`replace_column_check`'s `DO`-block
-  pattern) and must refuse on a confined session. **(3)** `meta.job_runs.status` is reported and not
+  `META_DEPLOYMENTS`; see *The table that could not accept its own record*. **(2)** ~~a widening can
+  now be **proved** safe, so `planSchemaReconciliation` could plan it~~ — **closed by ADR-0363**,
+  though not with `proveWideningSafe`: *no current row violates this* is weaker than *this is a
+  widening*, so the gate is `predicate_implied_by` and that function is the diagnostic beside it.
+  Both instructions this entry gave are in (the guard re-checks inside the statement's own
+  transaction, and it refuses on a confined session), plus two things neither this entry nor P2
+  item 3 had: the proxy had a **second copy in the planner**, and the remedy the class hands over
+  destroyed a constraint when pasted. **(3)** `meta.job_runs.status` is reported and not
   refused, and whether that is right depends on `--workflow-workers` being mounted — which `node.ts`
   knows and the survey does not; a second `admissionBlocks` caller there would close it, and the
   question applies to every surface writing a value-set column. **(4)** 11 strict `> N` bounds and
@@ -6241,7 +6405,13 @@ opened them.
 - **`meta.workflow_timers` still accepts a row its contract forbids** (ADR-0333's Option C): a
   `cron_schedule` row with a NULL `cron_expression` commits cleanly. ADR-0334 makes it unreachable
   from the write path, since the kind and its parameter now come out of one `TimerDefinition` — the
-  cheaper half of the same guarantee. Still a tightening that would land as standing manual SQL.
+  cheaper half of the same guarantee. It is a *tightening*, so it is exactly the case ADR-0363 does
+  **not** wave through: the table carries no live constraint on the pair, so `predicate_implied_by`
+  has nothing to imply from and answers `not_implied`, and the declaration is reported as
+  `constraint_widening_unproven` with the SQL — which **will succeed** on a deployment whose timers
+  were all written after ADR-0334 made the offending row unwritable. So it is standing manual SQL
+  still, by design, and the finding now says so by name with the statement attached rather than
+  leaving an operator to discover it.
 
 - `dispatched_at` is still unused (ADR-0277). A read state can be **stored** since ADR-0330 and no
   route wrote one until ADR-0331, which added the three read-state routes — so the inbox can mark a
@@ -6487,13 +6657,18 @@ by it**.
    `TombstoneRecordSchema` requires no subject for that kind, so the proof parses with none. A
    verified request for one person destroys every person's data. Subsystem, and its honest
    prerequisite is P1 item 4.
-5. **An upgraded deployment owes an undocumented `ALTER`, and until it runs the verify route
-   silently fails to make the tenant read-only.** `meta.tenants.status` gained `pending_deletion`
-   and `reconcile.ts` reports a changed CHECK on a populated table rather than planning it — so
-   verify returns 202, the `UPDATE` raises `23514`, the route catches and logs, and the response
-   carries `tenantReadOnly: false` while the tenant keeps writing into data about to be destroyed.
-   ADR-0352's `surveyCheckAdmission` now **reports** this at boot (`refusing` on that column);
-   the `ALTER` is still owed and P2 item 3 is the general fix.
+5. ~~**An upgraded deployment owes an undocumented `ALTER`, and until it runs the verify route
+   silently fails to make the tenant read-only.**~~ — **closed by ADR-0363**, which also found the
+   defect had a *second* copy one layer up that this entry could not see: the planner's own
+   `rowCount === 0` short-circuit decided the same question from the same proxy, and that is the
+   copy an operator met. The `ALTER` is no longer owed — `apply` plans it once the rows have been
+   asked — and a database that has not had it applied yet is reported at boot, refused where
+   `--tenant-status-gate` reads the value. What this entry said about the response was exactly
+   right and worth keeping: verify returned 202 with `tenantReadOnly: false` while the tenant kept
+   writing into data about to be destroyed. One correction: the lifecycle trail recorded
+   **nothing** rather than a transition that disagreed, because `recordLifecycle` answers `false`
+   when no row moved — so there was never a second record to contradict the first, which is why
+   the honest grade for the gate-off case is a warning rather than a refusal.
 6. **`Currency.decimal_places` has zero readers while the accounting core hardcodes two.** One hit
    in the whole workspace — its own declaration — against nine `Math.round(x*100)/100` sites in
    `write-effects.ts` and a `0.005` balance tolerance in `write-guards.ts`. Reproduced: 7.5% of a
@@ -6582,7 +6757,7 @@ three make the rest honest, cheap or verifiable.
    P2 item 14's third clause, from the other end.)
 3. **No CI, no git hook, no smoke, e2e, load or migration test** — while `strategy/ci.ts` models
    triggers, budgets and a topological sort with no reader. No `.github/workflows`, no
-   `core.hooksPath`, so the eleven rules and 19,080 tests run only when a human types `pnpm -r test`,
+   `core.hooksPath`, so the eleven rules and 19,133 tests run only when a human types `pnpm -r test`,
    and this file's instruction never to use `--no-verify` describes a guardrail that does not
    exist. `operate-web` has **zero tests** against 15 pages and 34 unfenced `fetch` sites — the
    serialized-body boundary that shipped a broken console button for an hour (ADR-0335).
@@ -6676,10 +6851,24 @@ land with or before it.
    to **P0 for any deployment serving activated manifests**, which is the headline Architect
    feature. Its cheap companion is a kernel rule requiring a sensitive-classified field to carry a
    grant at all, which would refuse zero fields today.
-3. **`proveWideningSafe` is complete, tested and wired to nothing**, so every catalog enum value
-   stays standing manual SQL — the class found by hand three times, whose live member is P0 item 5.
-   Giving it its first caller converts the class into a planned step; the proof must be re-checked
-   inside the statement's own transaction.
+3. ~~**`proveWideningSafe` is complete, tested and wired to nothing**~~ — **closed by ADR-0363**,
+   and the sharpest correction is to this entry's own framing: giving that function a caller is
+   **not** the fix, because what it proves (*no current row violates this*) is strictly weaker than
+   *this is a widening*, so gating on it planned **narrowings** silently — ordinary writes the live
+   rule permits would start failing `23514` with nothing having said the declaration narrows. The
+   gate is `predicate_implied_by`, the planner's own prover, reached through
+   `constraint_exclusion = on`; `proveWideningSafe` is the diagnostic beside it. Both halves of the
+   instruction this entry did give were right and are in: the guard re-checks at apply time, and the
+   confinement refusal is the first line of every such guard. Four things it did not have. The proxy
+   had a **second copy** in the planner (`rowCount === 0`), which is the one an operator met. A **row
+   count is itself confinable**, so the probe had to stop reporting one it could not believe — and
+   the structural gate makes that moot for a proven widening, which a confined session can now plan.
+   The *remedy* this class hands over was **destructive**: pasted unwrapped, the `DROP`/`ADD` pair
+   left a table with zero CHECK constraints and then accepted anything — now a transaction at all
+   three sites, with the conclusive arm handing over the violator query alone. And the fix's first
+   draft was **wrong in a way only the live run could see**: `EXPLAIN`'s output column is
+   `QUERY PLAN`, so reading `rows[0].plan` answered `undefined` and every widening was reported,
+   while the fake returned `{ plan }` and agreed with it.
 4. ~~**The 12 event-triggered jobs can never match the only event producer's names.**~~ —
    **closed by ADR-0362**, which confirmed the defect and corrected the stated cause in the
    direction that would have misdirected the fix. The shipped producer emits a **two**-part name:
@@ -6951,7 +7140,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 357 records; 278 Accepted, 79 Proposed (the
+title or status change cannot drift. 358 records; 279 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

@@ -19,15 +19,23 @@ import {
  * ## The class
  *
  * ADR-0330 established that a *widening* CHECK cannot be told from a *narrowing* one, so
- * `planSchemaReconciliation` reports `constraint_needs_validation` with the SQL on a populated table
- * instead of planning it. The consequence is that **every enum value the catalog adds is refused
- * `23514` on every existing deployment until an operator runs that `ALTER` by hand** — and nothing
- * says so until a write fails.
+ * `planSchemaReconciliation` used to report `constraint_needs_validation` with the SQL on a populated
+ * table instead of planning it. The consequence was that **every enum value the catalog adds is
+ * refused `23514` on every existing deployment until an operator runs that `ALTER` by hand** — and
+ * nothing said so until a write failed.
  *
  * ADR-0351 found one member the hard way: `meta.tenant_tombstones.proof_version` gained `'v4'`, and
  * the refusal lands *inside the Article 17 deletion pipeline's transaction, after the tenant's data
  * has been deleted*. It shipped a probe for that one column and named this survey as the shape the
- * class actually needs, because the column was never special. Measured over the catalog:
+ * class actually needs, because the column was never special.
+ *
+ * ADR-0363 then closed the planning half with `proveWideningSafe`'s first caller, which is why this
+ * survey and that plan are **two questions and not two answers to one**: the plan asks whether *this
+ * binary's own declaration* can be applied to the rows in front of it, and a clean plan says nothing
+ * about a database this binary is not applying to. This survey asks whether the live constraint —
+ * whatever a past apply, a hand-run `ALTER` or a rename left behind — admits what this binary emits,
+ * which is still the question an operator needs answered at boot. The two agree on a converged
+ * deployment and diverge on exactly the one that has drifted. Measured over the catalog:
  *
  * ```
  *   777  column-level CHECKs the catalog emits
@@ -652,21 +660,46 @@ async function evaluateOne(
  * expression in the `ADD`. The added constraint takes the live name too rather than the name
  * Postgres would choose on a fresh install: predicting that is `column-check.ts`'s problem, which it
  * solves for the reconciler, and a remedy an operator pastes must not depend on getting it right.
+ *
+ * **One transaction**, for `manualColumnCheckSql`'s measured reason (ADR-0363): pasted unwrapped,
+ * the `DROP` succeeds and a failing `ADD` leaves the table with **no rule at all** — verified by
+ * paste, after which the column accepted anything. That the `ADD` can fail here is not hypothetical
+ * from what the survey established: `refuses` says the live constraint rejects a value the catalog
+ * declares, and says **nothing** about whether every stored value is in the declared set, so a
+ * column that is simultaneously narrowed one way and widened the other raises on the `ADD`. Found
+ * by booting the real binary against an un-upgraded catalog and reading what it printed — the two
+ * sibling helpers had been wrapped in the same increment and this one, which two boot refusals
+ * print, had not.
+ *
+ * `BEGIN;`/`COMMIT;` wraps the **whole** output rather than each pair, because a refusal naming two
+ * constraints wants all of them or none: half-applied, the column is left under a mixture of rules
+ * nobody declared.
  */
 export function admissionRemedy(schema: string, finding: AdmissionFinding): string {
   const names = [...new Set(finding.refused.map((r) => r.constraintName))];
   const relation = `"${schema}"."${finding.table.replace(/^.*\./, "")}"`;
-  return names
+  const pairs = names
     .map(
       (name) =>
         `ALTER TABLE ${relation} DROP CONSTRAINT "${name}";\n` +
         `ALTER TABLE ${relation} ADD CONSTRAINT "${name}" CHECK (${finding.declaredExpression});`,
     )
     .join("\n");
+  return `BEGIN;\n${pairs}\nCOMMIT;`;
 }
 
 export const WIDENING_PROOFS = [
-  /** No existing row violates the declared expression, so the replacement cannot fail. */
+  /**
+   * No existing row violates the declared expression, so the replacement cannot fail **against the
+   * rows as they are now**.
+   *
+   * That is strictly weaker than *this is a widening*, and the gap is where ADR-0363's first draft
+   * was wrong: it gated the plan on this alone, so a **narrowing or sideways** change was planned
+   * silently whenever today's rows happened to satisfy it — and then ordinary writes the live CHECK
+   * permits start failing `23514` in production, with nothing in the plan having said the
+   * declaration narrows. `proveDeclarationWidens` is the structural question and it is the gate;
+   * this is the empirical one and it is the **diagnostic**.
+   */
   "safe",
   /** Some row does, so the `ALTER` would raise — the replacement is not a pure widening. */
   "violated_by_existing_rows",
@@ -683,6 +716,118 @@ export interface WideningSafety {
   readonly proof: WideningProof;
   readonly violatingRows: number | null;
   readonly detail: string;
+}
+
+export const WIDENING_IMPLICATIONS = [
+  /**
+   * Postgres proved that every value the **live** constraints admit, the declared expression admits
+   * too — so the declaration is a widening and the `ALTER` cannot fail. A validated CHECK holds of
+   * every row by definition, so this needs no row and makes no claim about any.
+   */
+  "live_implies_declared",
+  /**
+   * Not proved. Two facts under one answer, which is why the reason built on it names the prover's
+   * answer and never asserts "narrows": the declaration may genuinely reject values the live one
+   * admits, **or** the implication may hold and be outside what the planner can prove — true of
+   * every pattern CHECK, of which the catalog has **213**.
+   */
+  "not_implied",
+  /** The table is gone, the identifier is unusable, or the EXPLAIN failed. */
+  "unknown_unreadable",
+] as const;
+export type WideningImplication = (typeof WIDENING_IMPLICATIONS)[number];
+
+/**
+ * Whether Postgres can prove the declared expression admits everything the live constraints do.
+ *
+ * This is the question ADR-0330 said a plan cannot answer, and it turns out Postgres answers it
+ * directly: `predicate_implied_by` is the planner's own prover, and `constraint_exclusion = on`
+ * exposes it — a `SELECT … WHERE NOT (<declared>)` against a table carrying the live CHECK is
+ * planned as `Result / One-Time Filter: false` **iff** the planner can refute `NOT declared` from
+ * the live constraints. ADR-0330's rule, *ask Postgres rather than imitate its parser*, applied to
+ * implication rather than to rendering — and it needs **no parsing of either expression**, which is
+ * what made the alternative (extract both value sets and compare them) the wrong shape: ADR-0352
+ * already refused a regex over deparsed CHECK text, having been too narrow once inside its own
+ * increment.
+ *
+ * **It is strictly stronger than counting violations, in three ways**, all measured on PG 16.13:
+ *
+ * - *It consults no row*, so an RLS-confined session can still plan a widening. Measured as the
+ *   owner of a `FORCE ROW LEVEL SECURITY` table with a deny-all policy: `count(*)` answered 0 of 1
+ *   and the implication was still proved, because it is a proof over the constraint catalog.
+ * - *The race is unreachable.* A concurrent write cannot invalidate it: every row the live CHECK
+ *   admits satisfies the declared one, so there is no row an `INSERT` could add that the `ALTER`
+ *   would then refuse. For a change that is **not** a proven widening the race is real — verified,
+ *   a plain `INSERT` of a value the live CHECK permits committed between a guard's count and its
+ *   `ALTER`, which then raised — which is why the emitted guard keeps its `ACCESS EXCLUSIVE` lock.
+ * - *`EXPLAIN` does not execute*, so unlike the count it cannot fire a volatile function in the
+ *   declared expression.
+ *
+ * It is **sound and incomplete**, and the incompleteness is in the safe direction: a true widening
+ * the prover cannot see answers `not_implied` and is reported rather than planned, which is exactly
+ * the behaviour that shipped before ADR-0363. Measured coverage: a value-set widening, a value-set
+ * narrowing, a sideways value-set change, a range widening (`n >= 0` → `n >= -1`), a range
+ * narrowing, an identical expression and a nullable column all answer correctly; a column with
+ * **no** live constraint answers `not_implied`, which is right — adding a CHECK where none exists
+ * narrows the column's admitted domain by definition and is nobody's widening.
+ *
+ * `SET LOCAL` inside a read-only transaction, so the GUC does not outlive the probe and nothing can
+ * be written if a declared expression hides a side effect that planning would somehow reach.
+ */
+export async function proveDeclarationWidens(
+  conn: PgConnection,
+  input: {
+    readonly schema: string;
+    readonly table: string;
+    readonly declaredExpression: string;
+  },
+): Promise<WideningImplication> {
+  const { schema, declaredExpression } = input;
+  const table = input.table.replace(/^.*\./, "");
+  if (!IDENT_RE.test(schema) || !IDENT_RE.test(table)) return "unknown_unreadable";
+  try {
+    return await conn.transaction(async (tx) => {
+      await tx.query("SET TRANSACTION READ ONLY");
+      await tx.query("SET LOCAL constraint_exclusion = on");
+      const r = await tx.query<Record<string, unknown>>(
+        `EXPLAIN (FORMAT JSON, COSTS OFF) SELECT 1 FROM "${schema}"."${table}"
+          WHERE NOT (${declaredExpression})`,
+      );
+      // Read by **position** and not by name. `EXPLAIN` is a utility statement, so its output
+      // column cannot be aliased and cannot be wrapped in a subquery — and its header is
+      // `QUERY PLAN`, with a space, which `r.rows[0]?.plan` silently answered `undefined` for in
+      // this function's first draft. The live run caught that and the unit tests could not,
+      // because the fake answered a key the real statement never returns: this convention's own
+      // fifth member (a fake answering a statement it could not serve) reproduced inside the
+      // increment that added it. There is exactly one column, so position is unambiguous, and it
+      // is also robust to a header this code does not control.
+      const first = Object.values(r.rows[0] ?? {})[0];
+      return explainRefutesPredicate(first) ? "live_implies_declared" : "not_implied";
+    });
+  } catch {
+    return "unknown_unreadable";
+  }
+}
+
+/**
+ * Reads the one plan shape that means *the planner refuted this predicate from the table's own
+ * constraints*: a top-level `Result` node whose `One-Time Filter` is the constant `false`.
+ *
+ * Both conditions, and the node type is not decoration: a `Result` with any other filter is an
+ * ordinary constant-folding result, and `One-Time Filter: "false"` under a scan node would mean
+ * something else again. Anything unrecognised reads as **not proved**, which is the safe direction —
+ * this function's "no" costs a planned step and its "yes" is what allows one.
+ *
+ * node-postgres hands `json`/`jsonb` back parsed, so this walks objects and never a string.
+ */
+function explainRefutesPredicate(plan: unknown): boolean {
+  if (!Array.isArray(plan) || plan.length === 0) return false;
+  const first: unknown = plan[0];
+  if (typeof first !== "object" || first === null) return false;
+  const node: unknown = (first as { readonly Plan?: unknown }).Plan;
+  if (typeof node !== "object" || node === null) return false;
+  const typed = node as { readonly "Node Type"?: unknown; readonly "One-Time Filter"?: unknown };
+  return typed["Node Type"] === "Result" && typed["One-Time Filter"] === "false";
 }
 
 /**
@@ -708,13 +853,21 @@ export interface WideningSafety {
  * fourth comment in the workspace to describe that composition — the text fence in
  * `introspection.test.ts` found it, not the survey that preceded it, which is the clearest argument
  * for the fence being about the prose and not only the code.
+ *
+ * **There is no `column` parameter, and its removal is the point rather than tidying** (ADR-0363).
+ * It took one and read it nowhere, which this function's first caller then documented as
+ * "diagnostic only" — a claim that was false twice over: nothing logged it, and a parameter named
+ * `column` invites a caller to believe the verdict is *about that column*, which for a table-level
+ * CHECK spanning three of them it is not. The verdict is about the **expression** and the rows, so
+ * the input names exactly those. Removing a required parameter nothing reads is cheap here for a
+ * reason that will not come again: this function was callerless from ADR-0352 until ADR-0363, so no
+ * signature anywhere depended on it.
  */
 export async function proveWideningSafe(
   conn: PgConnection,
   input: {
     readonly schema: string;
     readonly table: string;
-    readonly column: string;
     readonly declaredExpression: string;
   },
 ): Promise<WideningSafety> {
@@ -797,6 +950,55 @@ export function admissionBlocks(
 ): readonly AdmissionFinding[] {
   const wanted = new Set(columns.map((c) => `${c.table}.${c.column}`));
   return survey.refusing.filter((f) => wanted.has(`${f.table}.${f.column}`));
+}
+
+/**
+ * The refusing findings for a **value** a caller names, narrowed to that value.
+ *
+ * `admissionBlocks` is column-granular, and for `meta.tenants.status` that is the wrong grain
+ * (ADR-0363). Two surfaces write that column and they write *different values*:
+ * `--deletion-request-routes` writes `pending_deletion`, which the four-value CHECK an un-upgraded
+ * deployment holds refuses, while `--tenant-deletion-routes` writes `deleted`, which it admits. A
+ * column-granular refusal would therefore refuse the synchronous Article 17 route for a value it can
+ * store perfectly well — which is ADR-0334's rule read the other way: a refusal an operator cannot
+ * act on for the surface in front of them is worse than none.
+ *
+ * Each returned finding's `refused` list is **narrowed to the values the caller asked about**, and
+ * narrowing is the point rather than tidying: the caller names a value because its own write depends
+ * on it, and a message listing values this surface never writes sends an operator to look at the
+ * wrong thing. `declaredExpression` is untouched by the narrowing, so `admissionRemedy` is unchanged
+ * — the `ALTER` an operator pastes restores the whole declared domain, not the one value, because a
+ * CHECK is replaced and not amended.
+ *
+ * A column that is `column_absent`, `table_absent` or `unreadable` does **not** block: those are not
+ * in `survey.refusing`, and this inherits that deliberately. An un-applied catalog is a condition the
+ * migrate step already reports, and at boot the database may simply not be up — refusing on an
+ * unestablished fact would refuse a deployment that works (ADR-0334's `missing`-versus-`unreachable`
+ * asymmetry).
+ */
+export function admissionBlocksValues(
+  survey: CheckAdmissionSurvey,
+  values: readonly { readonly table: string; readonly column: string; readonly value: string }[],
+): readonly AdmissionFinding[] {
+  const wanted = new Map<string, Set<string>>();
+  for (const v of values) {
+    const key = `${v.table}.${v.column}`;
+    const set = wanted.get(key) ?? new Set<string>();
+    set.add(v.value);
+    wanted.set(key, set);
+  }
+  const out: AdmissionFinding[] = [];
+  for (const finding of survey.refusing) {
+    const want = wanted.get(`${finding.table}.${finding.column}`);
+    if (want === undefined) continue;
+    // Matched on the value alone and not on `(value, origin)`: a caller names a literal it writes,
+    // and the same literal reaching the probe as both a declared member and a declared boundary is
+    // still the one value this surface cannot store.
+    const refused = finding.refused.filter((c) => want.has(c.value));
+    if (refused.length === 0) continue;
+    out.push({ ...finding, refused });
+  }
+  return out;
 }
 
 /** The boot line. The state leads, because that is what an operator greps for. */

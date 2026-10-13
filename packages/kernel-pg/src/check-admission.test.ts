@@ -8,14 +8,17 @@ import {
   CHECK_SHAPES,
   CHECK_SHAPE_COVERAGE,
   UNCONSTRAINED_WITHOUT_MODIFIER,
+  WIDENING_IMPLICATIONS,
   WIDENING_PROOFS,
   admissionBlocks,
+  admissionBlocksValues,
   admissionCastType,
   admissionRemedy,
   admissionVerdictIsActionable,
   classifyDeclaredCheck,
   declaredAdmissionChecks,
   formatCheckAdmissionSurvey,
+  proveDeclarationWidens,
   proveWideningSafe,
   surveyCheckAdmission,
   type CheckAdmissionSurvey,
@@ -530,6 +533,113 @@ describe("admissionVerdictIsActionable", () => {
   });
 });
 
+describe("proveDeclarationWidens", () => {
+  /**
+   * A connection that answers the EXPLAIN with one of the two plan shapes Postgres really emits,
+   * both taken verbatim from PG 16.13, and records what it was asked.
+   */
+  function explainDb(plan: unknown, opts: { readonly throws?: boolean } = {}) {
+    const sql: string[] = [];
+    const conn = {
+      query: async (text: string) => {
+        sql.push(text);
+        if (opts.throws === true && text.startsWith("EXPLAIN")) throw new Error("boom");
+        // Keyed `"QUERY PLAN"`, which is what the real statement returns — the first draft of both
+        // this fake and the code under test used `plan`, and so agreed with each other and with
+        // nothing else.
+        if (text.startsWith("EXPLAIN")) return { rows: [{ "QUERY PLAN": plan }], rowCount: 1 };
+        return { rows: [], rowCount: 0 };
+      },
+      transaction: async <T,>(fn: (tx: unknown) => Promise<T>): Promise<T> => fn(conn),
+      close: async () => undefined,
+    } as unknown as PgConnection;
+    return { conn, sql };
+  }
+  const REFUTED = [
+    {
+      Plan: {
+        "Node Type": "Result",
+        "Parallel Aware": false,
+        "Async Capable": false,
+        "One-Time Filter": "false",
+      },
+    },
+  ];
+  const SEQ_SCAN = [
+    {
+      Plan: {
+        "Node Type": "Seq Scan",
+        "Relation Name": "t",
+        Filter: "(status <> ALL ('{a,b,d}'::text[]))",
+      },
+    },
+  ];
+  const input = { schema: "meta", table: "meta.t", declaredExpression: "status IN ('a','b','c')" };
+
+  it("proves the implication when the planner refutes the negated predicate", async () => {
+    // Measured on PG 16.13: `constraint_exclusion = on` plus a live CHECK the declared expression
+    // subsumes gives exactly this plan. That is `predicate_implied_by`, the planner's own prover —
+    // ADR-0330's rule applied to implication rather than to rendering, and it reads neither
+    // expression.
+    const { conn } = explainDb(REFUTED);
+    expect(await proveDeclarationWidens(conn, input)).toBe("live_implies_declared");
+  });
+
+  it("answers not_implied for a seq scan, which is what a narrowing or sideways change gives", async () => {
+    const { conn } = explainDb(SEQ_SCAN);
+    expect(await proveDeclarationWidens(conn, input)).toBe("not_implied");
+  });
+
+  it("asks inside a read-only transaction with the GUC set locally", async () => {
+    // READ ONLY because EXPLAIN plans a predicate this binary did not write, and SET LOCAL so the
+    // GUC cannot outlive the probe and change how a later statement is planned.
+    const { conn, sql } = explainDb(REFUTED);
+    await proveDeclarationWidens(conn, input);
+    expect(sql[0]).toBe("SET TRANSACTION READ ONLY");
+    expect(sql[1]).toBe("SET LOCAL constraint_exclusion = on");
+    expect(sql[2]?.startsWith("EXPLAIN (FORMAT JSON, COSTS OFF)")).toBe(true);
+    expect(sql[2]).toContain("WHERE NOT (status IN ('a','b','c'))");
+  });
+
+  it("never runs the query, so a volatile function in the declaration cannot fire", async () => {
+    // The one way this is strictly safer than counting violating rows, which evaluates the
+    // expression per row and cannot be fenced read-only in the guard that has to run the ALTER.
+    const { conn, sql } = explainDb(REFUTED);
+    await proveDeclarationWidens(conn, input);
+    expect(sql.some((q) => q.startsWith("SELECT"))).toBe(false);
+  });
+
+  it.each([
+    ["a non-array", { Plan: {} }],
+    ["an empty array", []],
+    ["a null", null],
+    ["a node with no Plan", [{}]],
+    ["a Result with another filter", [{ Plan: { "Node Type": "Result", "One-Time Filter": "true" } }]],
+    ["the filter under a scan", [{ Plan: { "Node Type": "Seq Scan", "One-Time Filter": "false" } }]],
+  ])("reads %s as not proved, because an unrecognised plan must not allow a step", async (_w, plan) => {
+    const { conn } = explainDb(plan);
+    expect(await proveDeclarationWidens(conn, input)).toBe("not_implied");
+  });
+
+  it("answers unknown_unreadable for a throw and for a bad identifier", async () => {
+    const { conn } = explainDb(REFUTED, { throws: true });
+    expect(await proveDeclarationWidens(conn, input)).toBe("unknown_unreadable");
+    const clean = explainDb(REFUTED);
+    expect(
+      await proveDeclarationWidens(clean.conn, { ...input, table: 'meta."; DROP TABLE x --' }),
+    ).toBe("unknown_unreadable");
+    expect(clean.sql).toEqual([]);
+  });
+
+  it("names its three answers", () => {
+    expect(WIDENING_IMPLICATIONS).toEqual([
+      "live_implies_declared",
+      "not_implied",
+      "unknown_unreadable",
+    ]);
+  });
+});
+
 describe("proveWideningSafe", () => {
   /**
    * A visibility row whose `policies_active` is **derived**, not declared.
@@ -572,7 +682,6 @@ describe("proveWideningSafe", () => {
     const r = await proveWideningSafe(conn, {
       schema: "meta",
       table: "meta.t",
-      column: "status",
       declaredExpression: "status IN ('a','b')",
     });
     expect(r.proof).toBe("safe");
@@ -584,7 +693,6 @@ describe("proveWideningSafe", () => {
     const r = await proveWideningSafe(conn, {
       schema: "meta",
       table: "meta.t",
-      column: "status",
       declaredExpression: "status IN ('a','b')",
     });
     expect(r.proof).toBe("violated_by_existing_rows");
@@ -600,7 +708,6 @@ describe("proveWideningSafe", () => {
     const r = await proveWideningSafe(conn, {
       schema: "meta",
       table: "meta.t",
-      column: "status",
       declaredExpression: "status IN ('a','b')",
     });
     expect(r.proof).toBe("unknown_session_confined");
@@ -618,7 +725,6 @@ describe("proveWideningSafe", () => {
     const r = await proveWideningSafe(conn, {
       schema: "meta",
       table: "meta.t",
-      column: "status",
       declaredExpression: "status IN ('a')",
     });
     expect(r.proof).toBe("unknown_session_confined");
@@ -633,7 +739,6 @@ describe("proveWideningSafe", () => {
     const r = await proveWideningSafe(conn, {
       schema: "meta",
       table: "meta.t",
-      column: "status",
       declaredExpression: "status IN ('a')",
     });
     expect(r.proof).toBe("safe");
@@ -644,7 +749,6 @@ describe("proveWideningSafe", () => {
     const a = await proveWideningSafe(absent.conn, {
       schema: "meta",
       table: "meta.t",
-      column: "status",
       declaredExpression: "status IN ('a')",
     });
     expect(a.proof).toBe("unknown_unreadable");
@@ -652,7 +756,6 @@ describe("proveWideningSafe", () => {
     const b = await proveWideningSafe(bad.conn, {
       schema: "meta",
       table: 'meta."; DROP TABLE x --',
-      column: "status",
       declaredExpression: "status IN ('a')",
     });
     expect(b.proof).toBe("unknown_unreadable");
@@ -706,6 +809,80 @@ describe("admissionBlocks", () => {
   });
 });
 
+describe("admissionBlocksValues", () => {
+  // The grain that `meta.tenants.status` needs (ADR-0363): two surfaces write that column and they
+  // write different values, so a column-granular refusal would refuse the synchronous Article 17
+  // route for `deleted`, which an un-upgraded four-value CHECK stores perfectly well.
+  const twoValues: CheckAdmissionSurvey["refusing"][number] = {
+    ...refusal("meta.tenants", "status"),
+    declaredExpression:
+      "status IN ('active', 'suspended', 'archived', 'pending_deletion', 'deleted')",
+    refused: [
+      { value: "pending_deletion", origin: "declared_member", constraintName: "tenants_status_check" },
+      { value: "retired", origin: "declared_member", constraintName: "tenants_status_check" },
+    ],
+  };
+
+  it("blocks on the value a surface writes and is silent about the others", () => {
+    const s = surveyWith([twoValues]);
+    expect(
+      admissionBlocksValues(s, [
+        { table: "meta.tenants", column: "status", value: "pending_deletion" },
+      ]),
+    ).toHaveLength(1);
+    // `deleted` is admitted by the old CHECK, so the surface that writes it must still mount.
+    expect(
+      admissionBlocksValues(s, [{ table: "meta.tenants", column: "status", value: "deleted" }]),
+    ).toEqual([]);
+  });
+
+  it("narrows `refused` to the values asked about, so the message names nothing else", () => {
+    const [found] = admissionBlocksValues(surveyWith([twoValues]), [
+      { table: "meta.tenants", column: "status", value: "pending_deletion" },
+    ]);
+    expect(found?.refused.map((c) => c.value)).toEqual(["pending_deletion"]);
+    // ...and leaves `declaredExpression` alone, because the remedy replaces the whole domain: a
+    // CHECK is replaced, never amended.
+    expect(found?.declaredExpression).toContain("'deleted'");
+    expect(admissionRemedy("meta", found!)).toContain("'deleted'");
+  });
+
+  it("is silent for a column the survey does not refuse, and for another table's column", () => {
+    expect(
+      admissionBlocksValues(surveyWith([]), [
+        { table: "meta.tenants", column: "status", value: "pending_deletion" },
+      ]),
+    ).toEqual([]);
+    expect(
+      admissionBlocksValues(surveyWith([twoValues]), [
+        { table: "meta.incidents", column: "status", value: "pending_deletion" },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("matches on the value alone, across both candidate origins", () => {
+    const boundary: CheckAdmissionSurvey["refusing"][number] = {
+      ...twoValues,
+      refused: [
+        { value: "x", origin: "declared_boundary", constraintName: "tenants_status_check" },
+      ],
+    };
+    expect(
+      admissionBlocksValues(surveyWith([boundary]), [
+        { table: "meta.tenants", column: "status", value: "x" },
+      ]),
+    ).toHaveLength(1);
+  });
+
+  it("groups several values on one column rather than letting the last win", () => {
+    const [found] = admissionBlocksValues(surveyWith([twoValues]), [
+      { table: "meta.tenants", column: "status", value: "pending_deletion" },
+      { table: "meta.tenants", column: "status", value: "retired" },
+    ]);
+    expect(found?.refused.map((c) => c.value)).toEqual(["pending_deletion", "retired"]);
+  });
+});
+
 describe("admissionRemedy", () => {
   it("drops by the live name and adds the declared expression under it", () => {
     // The DROP must name the live constraint or it is a no-op, and the ADD reuses that name rather
@@ -715,6 +892,18 @@ describe("admissionRemedy", () => {
     expect(sql).toContain('ADD CONSTRAINT "proof_version_check"');
     expect(sql).toContain("CHECK (proof_version IN ('v1','v2','v3','v4'))");
     expect(sql).toContain('"meta"."tenant_tombstones"');
+  });
+
+  it("wraps the whole output in one transaction, so a failing ADD cannot orphan the DROP", () => {
+    // ADR-0363, verified by paste on a sibling helper: unwrapped, the DROP succeeds, the ADD fails,
+    // and the column then accepts anything. `refuses` says the live constraint rejects a declared
+    // value and says nothing about whether every stored value is declared, so the ADD can fail.
+    const sql = admissionRemedy("meta", refusal("meta.tenant_tombstones", "proof_version"));
+    expect(sql.startsWith("BEGIN;\n")).toBe(true);
+    expect(sql.endsWith("\nCOMMIT;")).toBe(true);
+    // One transaction for the whole output and not one per pair: half-applied leaves the column
+    // under a mixture of rules nobody declared.
+    expect(sql.match(/BEGIN;/g)).toHaveLength(1);
   });
 
   it("emits one pair per distinct refusing constraint", () => {

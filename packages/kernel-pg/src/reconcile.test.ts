@@ -16,8 +16,77 @@ import {
   formatReconciliationPlan,
   planLiveReconciliation,
   planSchemaReconciliation,
+  wideningProofKey,
+  type ReconciliationProbe,
+  type WideningProofSubject,
 } from "./reconcile.js";
+import type { WideningImplication, WideningSafety } from "./check-admission.js";
 import type { PgConnection, PgQueryResult } from "./connection.js";
+
+/**
+ * A probe carrying row counts and, by default, **no** widening proofs.
+ *
+ * `wideningProofs` is required on `ReconciliationProbe` rather than optional for ADR-0331's reason —
+ * an empty map is the claim *nothing needed asking*, where an absent field would make that
+ * indistinguishable from *nobody asked* — so this helper exists to keep the default explicit at 23
+ * call sites rather than letting one of them mean something it does not.
+ */
+function probeOf(
+  rowCounts: ReadonlyMap<string, number>,
+  wideningProofs: ReadonlyMap<string, WideningSafety> = new Map(),
+  confinedTables: ReadonlySet<string> = new Set(),
+  wideningImplications: ReadonlyMap<string, WideningImplication> = new Map(),
+): ReconciliationProbe {
+  return { rowCounts, wideningProofs, confinedTables, wideningImplications };
+}
+
+const SAFE: WideningSafety = {
+  proof: "safe",
+  violatingRows: 0,
+  detail: "no existing row violates the declared expression, so the replacement cannot fail",
+};
+const VIOLATED: WideningSafety = {
+  proof: "violated_by_existing_rows",
+  violatingRows: 3,
+  detail:
+    "3 existing row(s) violate the declared expression, so replacing the live CHECK with it would raise",
+};
+const CONFINED: WideningSafety = {
+  proof: "unknown_session_confined",
+  violatingRows: null,
+  detail:
+    "row-level security confines 'app_rw' on the table, so a count of 0 violating rows is what a hidden row looks like",
+};
+
+/**
+ * A probe that proves the named CHECK differences safe — what a real, unconfined probe returns for
+ * a widening.
+ *
+ * Every test that expects a CHECK to be *planned* names its proof through this, because since
+ * ADR-0363 the plan does not decide that from a row count: emptiness was the second proxy in this
+ * decision and a confined session counts zero on a table that holds rows. So "the table was empty"
+ * is no longer a reason a step appears, and a test that relied on it was relying on the thing the
+ * increment removed.
+ */
+function probeProving(
+  rowCounts: ReadonlyMap<string, number>,
+  subjects: readonly (readonly [string, WideningProofSubject, string])[],
+  safety: WideningSafety = SAFE,
+  // Defaulted from the safety rather than taken separately, because the two travel together in
+  // every real case these tests stand for: a probe that found no violating row on a widening
+  // proves the implication too, and one that found a violation or could not look proves nothing.
+  // The new reason's tests pass `"not_implied"` with `SAFE` explicitly, which is exactly the pair
+  // that has no real-world shorthand.
+  implication: WideningImplication = safety === SAFE ? "live_implies_declared" : "not_implied",
+): ReconciliationProbe {
+  const keyed = subjects.map(([t, s, g]) => wideningProofKey(t, s, g));
+  return probeOf(
+    rowCounts,
+    new Map(keyed.map((k) => [k, safety] as const)),
+    new Set(),
+    new Map(keyed.map((k) => [k, implication] as const)),
+  );
+}
 
 const WIDGETS: TableDefinition = {
   schema: "meta",
@@ -121,6 +190,8 @@ describe("UNRECONCILED_REASONS", () => {
       "policy_removed",
       "foreign_key_removed",
       "constraint_needs_validation",
+      "constraint_violated_by_existing_rows",
+      "constraint_widening_unproven",
       "constraint_removed",
       "column_check_name_unavailable",
       "rls_unexpectedly_enabled",
@@ -678,7 +749,7 @@ describe("a type change, now that foreign keys are visible", () => {
     const plan = planSchemaReconciliation(
       diffSchema([retyped], live([liveChild()])),
       [retyped],
-      { rowCounts: new Map([["children", 0]]) },
+      probeOf(new Map([["children", 0]])),
     );
     expect(plan.steps.map((s) => s.kind)).toEqual(["drop_foreign_key", "alter_column_type"]);
     expect(plan.steps[0]?.target).toBe("children_owner_id_fkey");
@@ -690,11 +761,11 @@ describe("a type change, now that foreign keys are visible", () => {
     const plan = planSchemaReconciliation(
       diffSchema([retyped], live([liveChild()])),
       [retyped],
-      { rowCounts: new Map([["children", 0]]) },
+      probeOf(new Map([["children", 0]])),
     );
     const step = plan.steps.find((s) => s.kind === "alter_column_type");
     expect(step?.guarded).toBe(true);
-    expect(step?.sql).toContain("SELECT count(*) INTO existing");
+    expect(step?.sql).toContain("SELECT count(*) INTO _ce_existing");
     expect(step?.sql).toContain("RAISE EXCEPTION");
   });
 
@@ -702,7 +773,7 @@ describe("a type change, now that foreign keys are visible", () => {
     const plan = planSchemaReconciliation(
       diffSchema([retyped], live([liveChild()])),
       [retyped],
-      { rowCounts: new Map([["children", 7]]) },
+      probeOf(new Map([["children", 7]])),
     );
     expect(plan.steps.some((s) => s.kind === "alter_column_type")).toBe(false);
     expect(plan.steps.some((s) => s.kind === "drop_foreign_key")).toBe(false);
@@ -734,9 +805,7 @@ describe("adding a column to a table that already holds rows", () => {
   };
 
   function planWithRows(rows: number) {
-    return planSchemaReconciliation(diffSchema([grown], live([liveChild()])), [grown], {
-      rowCounts: new Map([["children", rows]]),
-    });
+    return planSchemaReconciliation(diffSchema([grown], live([liveChild()])), [grown], probeOf(new Map([["children", rows]])));
   }
 
   it("adds all three when the table is empty", () => {
@@ -788,9 +857,7 @@ describe("refusals propagate to whatever depends on them", () => {
   };
 
   function planWithRows(rows: number) {
-    return planSchemaReconciliation(diffSchema([grown], live([liveChild()])), [grown], {
-      rowCounts: new Map([["children", rows]]),
-    });
+    return planSchemaReconciliation(diffSchema([grown], live([liveChild()])), [grown], probeOf(new Map([["children", rows]])));
   }
 
   it("creates everything when the column can be added", () => {
@@ -834,9 +901,7 @@ describe("refusals propagate to whatever depends on them", () => {
         },
       ],
     };
-    const plan = planSchemaReconciliation(diffSchema([withRef], live([liveChild()])), [withRef], {
-      rowCounts: new Map([["children", 5]]),
-    });
+    const plan = planSchemaReconciliation(diffSchema([withRef], live([liveChild()])), [withRef], probeOf(new Map([["children", 5]])));
     expect(plan.steps.some((s) => s.kind === "add_foreign_key")).toBe(false);
     const blocked = plan.unreconciled.find((u) => u.reason === "depends_on_unreconciled");
     expect(blocked?.target).toBe("parent_id");
@@ -1164,7 +1229,7 @@ describe("replacing a changed index, constraint or policy", () => {
     const plan = planSchemaReconciliation(
       diffSchema([grown], live([liveWidgets()]), RENDERED),
       [grown],
-      { rowCounts: new Map([["widgets", 4]]) },
+      probeOf(new Map([["widgets", 4]])),
     );
     expect(plan.steps.some((s) => s.kind === "replace_index")).toBe(false);
     expect(plan.unreconciled.some((u) => u.reason === "depends_on_unreconciled")).toBe(true);
@@ -1217,7 +1282,7 @@ describe("a column arriving with the constraints ADD COLUMN carries", () => {
   const plan = planSchemaReconciliation(
     diffSchema([CARRIER], live([bareFlags()])),
     [CARRIER],
-    { rowCounts: new Map([["flags", 0]]) },
+    probeOf(new Map([["flags", 0]])),
   );
 
   it("plans one step for a column that carries its own reference, not two", () => {
@@ -1265,9 +1330,7 @@ describe("a column arriving with the constraints ADD COLUMN carries", () => {
         { name: "tenant_id", dataType: "uuid", isNullable: true, defaultExpr: null },
       ],
     };
-    const p = planSchemaReconciliation(diffSchema([CARRIER], live([withColumns])), [CARRIER], {
-      rowCounts: new Map([["flags", 0]]),
-    });
+    const p = planSchemaReconciliation(diffSchema([CARRIER], live([withColumns])), [CARRIER], probeOf(new Map([["flags", 0]])));
     expect(p.steps.some((s) => s.kind === "add_foreign_key" && s.target === "tenant_id")).toBe(true);
   });
 });
@@ -1347,12 +1410,32 @@ describe("table-level constraints — planning", () => {
     };
   }
 
-  /** `rows: null` means no probe at all, which is what a caller that did not count looks like. */
-  function planWith(over: Partial<LiveTable>, rows: number | null = 0) {
+  /**
+   * `rows: null` means no probe at all, which is what a caller that did not count looks like.
+   *
+   * `safety` is what the rows answered about the declared CHECK. Since ADR-0363 that — and not the
+   * row count — is what decides whether the constraint is planned, so these tests name it.
+   */
+  function planWith(
+    over: Partial<LiveTable>,
+    rows: number | null = 0,
+    safety: WideningSafety | null = SAFE,
+    // Derived from the safety for `probeProving`'s reason, and overridable because the pair
+    // (`safe`, `not_implied`) — the rows satisfy a change nothing proved a widening — is the one
+    // combination with no shorthand and is exactly what `constraint_widening_unproven` is for.
+    implication: WideningImplication | null = null,
+  ) {
+    const key = wideningProofKey("comms", "table_constraint", "comms_bounces_check");
+    const proofs =
+      safety === null ? new Map<string, WideningSafety>() : new Map([[key, safety]]);
+    const implied: WideningImplication =
+      implication ?? (safety === SAFE ? "live_implies_declared" : "not_implied");
     return planSchemaReconciliation(
       diffSchema([COMMS], live([liveComms(over)]), RENDERED),
       [COMMS],
-      rows === null ? undefined : { rowCounts: new Map([["comms", rows]]) },
+      rows === null
+        ? undefined
+        : probeOf(new Map([["comms", rows]]), proofs, new Set(), new Map([[key, implied]])),
     );
   }
 
@@ -1371,26 +1454,105 @@ describe("table-level constraints — planning", () => {
     expect(fresh.unreconciled).toEqual([]);
   });
 
-  it("adds a missing CHECK on an empty table, guarded", () => {
+  it("adds a missing CHECK on an empty table, guarded on violations rather than on emptiness", () => {
     const plan = planWith({ checkConstraints: [] });
     const step = plan.steps.find((s) => s.kind === "add_table_constraint");
     expect(step?.target).toBe("comms_bounces_check");
     expect(step?.guarded).toBe(true);
-    expect(step?.sql).toContain("SELECT count(*) INTO existing");
+    // ADR-0363: the empty case is a *degenerate instance* of "no row violates it" and not a
+    // separate rule, so there is one guard and it is the violation one. The emptiness clause is
+    // deliberately gone rather than kept beside it — on a table that gained a satisfying row
+    // between the plan and the apply, it would refuse a statement that succeeds.
+    expect(step?.sql).not.toContain("INTO _ce_existing");
+    expect(step?.sql).toContain(
+      "SELECT count(*) INTO _ce_violating FROM \"meta\".\"comms\" WHERE NOT coalesce((bounces_count <= recipient_count), true)",
+    );
     expect(step?.sql).toContain(
       `ADD CONSTRAINT "comms_bounces_check" CHECK (bounces_count <= recipient_count);`,
     );
     expect(plan.unreconciled).toEqual([]);
   });
 
-  it("refuses a missing CHECK on a populated table, with the SQL and the violating rows", () => {
-    const plan = planWith({ checkConstraints: [] }, 4);
+  it("asks the confinement before the count, because a confined count is not evidence", () => {
+    const sql = planWith({ checkConstraints: [] }).steps.find(
+      (s) => s.kind === "add_table_constraint",
+    )?.sql;
+    expect(sql).toContain("IF row_security_active('meta.comms'::regclass) THEN");
+    // Ordering, not merely presence: a guard that counted first and asked afterwards would have
+    // already acted on the number it cannot believe.
+    expect(sql?.indexOf("row_security_active")).toBeLessThan(sql?.indexOf("INTO _ce_violating") ?? -1);
+  });
+
+  // ADR-0363: a populated table is no longer a reason on its own. What refuses is the *rows*
+  // answering that some of them violate the declaration — which is a different and stronger
+  // statement, and gets its own reason because no re-run changes it.
+  it("refuses a missing CHECK when the rows violate it, with the SQL and the violating rows", () => {
+    const plan = planWith({ checkConstraints: [] }, 4, VIOLATED);
     expect(plan.steps).toEqual([]);
-    const item = plan.unreconciled.find((u) => u.reason === "constraint_needs_validation");
+    const item = plan.unreconciled.find(
+      (u) => u.reason === "constraint_violated_by_existing_rows",
+    );
     expect(item?.target).toBe("comms_bounces_check");
-    expect(item?.detail).toContain("holds 4 row(s)");
-    expect(item?.manualSql).toContain("WHERE NOT (bounces_count <= recipient_count)");
-    expect(item?.manualSql).toContain(`ADD CONSTRAINT "comms_bounces_check" CHECK`);
+    expect(item?.detail).toContain("3 existing row(s) violate");
+    expect(item?.manualSql).toContain(
+      `SELECT * FROM "meta"."comms" WHERE NOT (bounces_count <= recipient_count);`,
+    );
+    // The DROP/ADD pair is withheld on this arm *only*, and that is the decision rather than an
+    // omission: this plan asked the rows, so the ADD is proved to fail, and the DROP before it
+    // would succeed — handing over a pair that leaves the table with no rule at all. Verified by
+    // paste: `psql -f` left `meta.comms` with zero CHECK constraints and then admitted anything.
+    expect(item?.manualSql).not.toContain("ADD CONSTRAINT");
+    expect(item?.manualSql).not.toContain("DROP CONSTRAINT");
+  });
+
+  it("reports a MISSING CHECK on a populated table whose rows satisfy it, rather than planning it", () => {
+    // ADR-0363's own correction. P2.3 is about a *widening*, and adding a CHECK where the database
+    // holds none is the opposite: it narrows the column's admitted domain from everything to this
+    // expression. `probeProving` supplies `safe` here and the implication is `not_implied`, which
+    // is what Postgres really answers for a table with no live constraint to imply from (measured)
+    // — so the rows satisfying it is not enough, and the operator is handed the SQL and the
+    // sentence saying what applying it will start refusing.
+    const plan = planWith({ checkConstraints: [] }, 4, SAFE, "not_implied");
+    expect(plan.steps).toEqual([]);
+    const item = plan.unreconciled.find((u) => u.reason === "constraint_widening_unproven");
+    expect(item?.target).toBe("comms_bounces_check");
+    expect(item?.detail).toContain("could not prove");
+    expect(item?.detail).toContain("decision about what this deployment accepts");
+    // The pair, not the violator query: this SQL succeeds, which is exactly why a plan must not
+    // run it unasked.
+    expect(item?.manualSql).toContain(`ADD CONSTRAINT "comms_bounces_check"`);
+  });
+
+  it("plans a missing CHECK on an EMPTY table, which is ADR-0299's rule and survives", () => {
+    // Kept as a second, independent gate rather than as an instance of the first: a new rule on no
+    // data is a decision about future writes alone, and there is no existing data whose
+    // reinterpretation a human needs to approve.
+    const plan = planWith({ checkConstraints: [] }, 0);
+    expect(plan.unreconciled).toEqual([]);
+    expect(plan.steps.find((s) => s.kind === "add_table_constraint")?.target).toBe(
+      "comms_bounces_check",
+    );
+  });
+
+  it("plans a CHANGED CHECK on a populated table when Postgres proves it a widening", () => {
+    // The whole of P2.3, and the member that motivated it: `meta.tenants.status` gained a value, so
+    // the live CHECK implies the declared one and the ALTER cannot fail — no row consulted.
+    const plan = planWith(
+      {
+        checkConstraints: [
+          {
+            name: "comms_bounces_check",
+            expression: "(bounces_count < recipient_count)",
+            columns: ["recipient_count", "bounces_count"],
+          },
+        ],
+      },
+      9,
+    );
+    expect(plan.unreconciled).toEqual([]);
+    expect(plan.steps.find((s) => s.kind === "replace_table_constraint")?.target).toBe(
+      "comms_bounces_check",
+    );
   });
 
   it("never plans a NOT VALID constraint, which would record an unchecked rule", () => {
@@ -1400,10 +1562,18 @@ describe("table-level constraints — planning", () => {
     }
   });
 
-  it("refuses when the row count is unknown, rather than assuming the table is empty", () => {
+  it("refuses when nothing asked the rows, rather than assuming they satisfy it", () => {
     const plan = planWith({ checkConstraints: [] }, null);
     expect(plan.steps).toEqual([]);
-    expect(plan.unreconciled[0]?.detail).toContain("an unknown number of row(s)");
+    expect(plan.unreconciled[0]?.reason).toBe("constraint_needs_validation");
+    expect(plan.unreconciled[0]?.detail).toContain("no probe asked the rows");
+  });
+
+  it("refuses, and says why, when the session's own policies hide the rows", () => {
+    const plan = planWith({ checkConstraints: [] }, 4, CONFINED);
+    expect(plan.steps).toEqual([]);
+    expect(plan.unreconciled[0]?.reason).toBe("constraint_needs_validation");
+    expect(plan.unreconciled[0]?.detail).toContain("row-level security confines");
   });
 
   it("adds a missing composite foreign key, unguarded", () => {
@@ -1507,7 +1677,7 @@ describe("table-level constraints — planning", () => {
     expect(plan.statements).toHaveLength(1);
   });
 
-  it("refuses a changed CHECK on a populated table and hands over both halves", () => {
+  it("refuses a changed CHECK the rows violate, handing over the violators and not the pair", () => {
     const item = planWith(
       {
         checkConstraints: [
@@ -1519,10 +1689,16 @@ describe("table-level constraints — planning", () => {
         ],
       },
       9,
+      VIOLATED,
     ).unreconciled[0];
-    expect(item?.reason).toBe("constraint_needs_validation");
-    expect(item?.manualSql).toContain("DROP CONSTRAINT");
-    expect(item?.manualSql).toContain("ADD CONSTRAINT");
+    expect(item?.reason).toBe("constraint_violated_by_existing_rows");
+    expect(item?.manualSql).toContain(
+      `SELECT * FROM "meta"."comms" WHERE NOT (bounces_count <= recipient_count);`,
+    );
+    // A *replacement* is where withholding the pair matters most: the live rule is standing and
+    // the DROP would remove it in exchange for an ADD that cannot land.
+    expect(item?.manualSql).not.toContain("DROP CONSTRAINT");
+    expect(item?.manualSql).not.toContain("ADD CONSTRAINT");
   });
 
   it("reports an undeclared CHECK rather than dropping it", () => {
@@ -1572,7 +1748,7 @@ describe("table-level constraints — planning", () => {
     const plan = planSchemaReconciliation(
       diffSchema([retyped], live([liveComms()]), RENDERED),
       [retyped],
-      { rowCounts: new Map([["comms", 0]]) },
+      probeOf(new Map([["comms", 0]])),
     );
     const kinds = plan.steps.map((s) => s.kind);
     expect(kinds.indexOf("drop_foreign_key")).toBeGreaterThanOrEqual(0);
@@ -1591,7 +1767,7 @@ describe("table-level constraints — planning", () => {
     const plan = planSchemaReconciliation(
       diffSchema([COMMS], live([stale]), RENDERED),
       [COMMS],
-      { rowCounts: new Map([["comms", 0]]) },
+      probeProving(new Map([["comms", 0]]), [["comms", "table_constraint", "comms_bounces_check"]]),
     );
     const kinds = plan.steps.map((s) => s.kind);
     expect(kinds.indexOf("add_column")).toBeLessThan(kinds.indexOf("add_table_constraint"));
@@ -1599,16 +1775,27 @@ describe("table-level constraints — planning", () => {
 
   it("names the constraint in the guard's error message", () => {
     expect(planWith({ checkConstraints: [] }).steps[0]?.sql).toContain(
-      "refusing to add constraint comms_bounces_check to meta.comms",
+      "refusing to apply constraint comms_bounces_check to meta.comms",
     );
+  });
+
+  it("the guard's messages carry counts and never a row", () => {
+    const sql = planWith({ checkConstraints: [] }).steps[0]?.sql ?? "";
+    for (const raise of sql.split("\n").filter((l) => l.includes("RAISE EXCEPTION"))) {
+      // `%` is the count placeholder plpgsql fills; a column reference in a message would put row
+      // data in a server log an operator pastes into a ticket.
+      expect(raise).not.toMatch(/\bbounces_count\b|\brecipient_count\b/);
+    }
   });
 
   it("prints the new step kinds and reasons in the plan report", () => {
     const added = formatReconciliationPlan(planWith({ checkConstraints: [] }));
     expect(added).toContain("add_table_constraint comms.comms_bounces_check");
     expect(added).toContain("[guarded]");
-    const refused = formatReconciliationPlan(planWith({ checkConstraints: [] }, 2));
-    expect(refused).toContain("[constraint_needs_validation] comms.comms_bounces_check");
+    const refused = formatReconciliationPlan(planWith({ checkConstraints: [] }, 2, VIOLATED));
+    expect(refused).toContain(
+      "[constraint_violated_by_existing_rows] comms.comms_bounces_check",
+    );
   });
 });
 
@@ -1647,7 +1834,7 @@ describe("allowLoosening — what it does not reach", () => {
       name: "orphan",
     }])),
     [target],
-    { rowCounts: new Map([["widgets", 3]]) },
+    probeOf(new Map([["widgets", 3]])),
     { allowLoosening: true },
   );
 
@@ -1777,7 +1964,7 @@ describe("renaming a column", () => {
         indexes: neither.indexes.filter((i) => i.name !== "idx_flags_default"),
       }])),
       [RENAMED],
-      { rowCounts: new Map([["flags", 0]]) },
+      probeOf(new Map([["flags", 0]])),
     );
     expect(plan.steps.some((s) => s.kind === "rename_column")).toBe(false);
     expect(plan.steps.find((s) => s.kind === "add_column")?.target).toBe("default_json");
@@ -1796,7 +1983,7 @@ describe("renaming a column", () => {
     const plan = planSchemaReconciliation(
       diffSchema([keepsBoth], live([liveFlags("default_value")])),
       [keepsBoth],
-      { rowCounts: new Map([["flags", 0]]) },
+      probeOf(new Map([["flags", 0]])),
     );
     expect(plan.steps.some((s) => s.kind === "rename_column")).toBe(false);
     expect(plan.steps.find((s) => s.kind === "add_column")?.target).toBe("default_json");
@@ -1812,7 +1999,7 @@ describe("renaming a column", () => {
     const plan = planSchemaReconciliation(
       diffSchema([retyped], live([liveFlags("default_value")])),
       [retyped],
-      { rowCounts: new Map([["flags", 0]]) },
+      probeOf(new Map([["flags", 0]])),
     );
     const kinds = plan.steps.map((s) => s.kind);
     expect(kinds[0]).toBe("rename_column");
@@ -1842,7 +2029,7 @@ describe("renaming a column", () => {
         indexes: liveFlags("default_json").indexes.filter((i) => i.name !== "idx_flags_default"),
       }])),
       [renamedRef],
-      { rowCounts: new Map([["flags", 0]]) },
+      probeOf(new Map([["flags", 0]])),
     );
     expect(plan.steps.map((s) => s.kind)).toEqual(["rename_column"]);
     expect(plan.unreconciled).toEqual([]);
@@ -1857,7 +2044,7 @@ describe("renaming a column", () => {
     const plan = planSchemaReconciliation(
       diffSchema([RENAMED], live([liveFlags("default_value")])),
       [RENAMED],
-      { rowCounts: new Map([["flags", 20_000]]) },
+      probeOf(new Map([["flags", 20_000]])),
     );
     expect(plan.steps.map((s) => s.kind)).toEqual(["rename_column"]);
   });
@@ -1921,12 +2108,38 @@ describe("planSchemaReconciliation — column-level CHECK expressions", () => {
     { name: "events_seq_check", expression: SEQ, columns: ["seq"] },
   ];
 
-  function planWith(checks: LiveTable["checkConstraints"], rowCount: number | undefined) {
+  /**
+   * `safety` is what the rows answered about the declared expression — the decision since ADR-0363.
+   * `null` records no proof, which is what an un-probed caller looks like.
+   */
+  function planWith(
+    checks: LiveTable["checkConstraints"],
+    rowCount: number | undefined,
+    safety: WideningSafety | null = SAFE,
+    implication: WideningImplication | null = null,
+  ) {
     const diff = diffSchema([TARGET], liveEvents(checks), RENDERED);
+    const keys = [
+      wideningProofKey("events", "column_check", "kind"),
+      wideningProofKey("events", "column_check", "seq"),
+    ];
+    const proofs =
+      safety === null
+        ? new Map<string, WideningSafety>()
+        : new Map(keys.map((k) => [k, safety] as const));
+    const implied: WideningImplication =
+      implication ?? (safety === SAFE ? "live_implies_declared" : "not_implied");
     return planSchemaReconciliation(
       diff,
       [TARGET],
-      rowCount === undefined ? undefined : { rowCounts: new Map([["events", rowCount]]) },
+      rowCount === undefined
+        ? undefined
+        : probeOf(
+            new Map([["events", rowCount]]),
+            proofs,
+            new Set(),
+            new Map(keys.map((k) => [k, implied] as const)),
+          ),
     );
   }
 
@@ -1951,29 +2164,38 @@ describe("planSchemaReconciliation — column-level CHECK expressions", () => {
     // One statement, so the table is never committed without the rule.
     expect(step?.sql).toContain('DROP CONSTRAINT IF EXISTS "events_kind_check"');
     expect(step?.sql).toContain('ADD CONSTRAINT "events_kind_check" CHECK (kind IN (\'a\', \'b\'))');
-    expect(step?.sql).toContain("SELECT count(*) INTO existing");
+    // The guard counts against the **declared** expression, not the live one: the live one is what
+    // the rows were written under and is satisfied by construction.
+    expect(step?.sql).toContain(
+      "WHERE NOT coalesce((kind IN ('a', 'b')), true)",
+    );
+    expect(step?.sql).toContain("IF row_security_active('meta.events'::regclass) THEN");
     expect(plan.unreconciled).toEqual([]);
   });
 
-  it("refuses a changed inline CHECK on a populated table, with the SQL and the violators query", () => {
-    const plan = planWith(NARROWED, 7);
+  it("refuses a changed inline CHECK the rows violate, handing over the violators alone", () => {
+    const plan = planWith(NARROWED, 7, VIOLATED);
     expect(plan.steps).toEqual([]);
     expect(plan.unreconciled).toHaveLength(1);
     const item = plan.unreconciled[0];
-    expect(item?.reason).toBe("constraint_needs_validation");
+    expect(item?.reason).toBe("constraint_violated_by_existing_rows");
     expect(item?.target).toBe("kind");
-    expect(item?.detail).toContain("7 row(s)");
+    expect(item?.detail).toContain("3 existing row(s) violate");
+    // Live, not commented out, and the only statement offered: an operator pastes what they are
+    // given, and the pair's DROP lands while its ADD cannot.
     expect(item?.manualSql).toContain(
-      "-- SELECT * FROM \"meta\".\"events\" WHERE NOT (kind IN ('a', 'b'));",
+      "SELECT * FROM \"meta\".\"events\" WHERE NOT (kind IN ('a', 'b'));",
     );
-    expect(item?.manualSql).toContain('DROP CONSTRAINT "events_kind_check"');
-    expect(item?.manualSql).toContain('ADD CONSTRAINT "events_kind_check" CHECK (kind IN (\'a\', \'b\'))');
+    expect(item?.manualSql).not.toContain("-- SELECT");
+    expect(item?.manualSql).not.toContain("DROP CONSTRAINT");
+    expect(item?.manualSql).not.toContain("ADD CONSTRAINT");
   });
 
-  it("refuses when the row count is unknown rather than assuming the table is empty", () => {
+  it("refuses when there is no probe at all rather than assuming the rows satisfy it", () => {
     const plan = planWith(NARROWED, undefined);
     expect(plan.steps).toEqual([]);
-    expect(plan.unreconciled[0]?.detail).toContain("an unknown number of row(s)");
+    expect(plan.unreconciled[0]?.reason).toBe("constraint_needs_validation");
+    expect(plan.unreconciled[0]?.detail).toContain("no probe asked the rows");
   });
 
   it("adds a missing inline CHECK on an empty table", () => {
@@ -1984,14 +2206,43 @@ describe("planSchemaReconciliation — column-level CHECK expressions", () => {
     expect(plan.steps[0]?.guarded).toBe(true);
   });
 
-  it("refuses a missing inline CHECK on a populated table", () => {
-    const plan = planWith([{ name: "events_seq_check", expression: SEQ, columns: ["seq"] }], 3);
+  it("refuses a missing inline CHECK the rows violate", () => {
+    const plan = planWith(
+      [{ name: "events_seq_check", expression: SEQ, columns: ["seq"] }],
+      3,
+      VIOLATED,
+    );
     expect(plan.steps).toEqual([]);
     expect(plan.unreconciled[0]).toMatchObject({
-      reason: "constraint_needs_validation",
+      reason: "constraint_violated_by_existing_rows",
       target: "kind",
     });
     expect(plan.unreconciled[0]?.manualSql).not.toContain("DROP CONSTRAINT");
+  });
+
+  it("reports a MISSING inline CHECK on a populated table whose rows satisfy it", () => {
+    // Same correction as the table-level sibling: there is no live constraint on `kind` to imply
+    // from, so nothing about adding one is a widening — measured, Postgres answers `not_implied`
+    // for a column carrying no CHECK at all.
+    const plan = planWith(
+      [{ name: "events_seq_check", expression: SEQ, columns: ["seq"] }],
+      3,
+      SAFE,
+      "not_implied",
+    );
+    expect(plan.steps).toEqual([]);
+    expect(plan.unreconciled.map((u) => u.reason)).toEqual(["constraint_widening_unproven"]);
+  });
+
+  it("adds a missing inline CHECK on an EMPTY table (ADR-0299's gate, kept)", () => {
+    const plan = planWith(
+      [{ name: "events_seq_check", expression: SEQ, columns: ["seq"] }],
+      0,
+      SAFE,
+      "not_implied",
+    );
+    expect(plan.unreconciled).toEqual([]);
+    expect(plan.steps.map((s) => s.kind)).toEqual(["add_column_check"]);
   });
 
   it("refuses rather than predicting a name Postgres would choose for itself", () => {
@@ -2020,7 +2271,11 @@ describe("planSchemaReconciliation — column-level CHECK expressions", () => {
       liveEvents([{ name: "events_check", expression: "(seq > 0)", columns: ["seq"] }]),
       rendered,
     );
-    const plan = planSchemaReconciliation(diff, [shared], { rowCounts: new Map([["events", 0]]) });
+    const plan = planSchemaReconciliation(
+      diff,
+      [shared],
+      probeProving(new Map([["events", 0]]), [["events", "column_check", "seq"]]),
+    );
     // Matched by name, so it is a replace under the live name — nothing is predicted.
     expect(plan.steps.map((s) => s.kind)).toEqual(["replace_column_check"]);
     expect(plan.steps[0]?.sql).toContain('DROP CONSTRAINT IF EXISTS "events_check"');
@@ -2049,7 +2304,7 @@ describe("planSchemaReconciliation — column-level CHECK expressions", () => {
       ]),
     };
     const diff = diffSchema([pair], liveEvents([]), rendered);
-    const plan = planSchemaReconciliation(diff, [pair], { rowCounts: new Map([["events", 0]]) });
+    const plan = planSchemaReconciliation(diff, [pair], probeOf(new Map([["events", 0]])));
     expect(plan.steps).toEqual([]);
     expect(plan.unreconciled.map((u) => u.reason)).toEqual([
       "column_check_name_unavailable",
@@ -2059,9 +2314,7 @@ describe("planSchemaReconciliation — column-level CHECK expressions", () => {
   });
 
   it("plans nothing and refuses nothing when no renderings were supplied", () => {
-    const plan = planSchemaReconciliation(diffSchema([TARGET], liveEvents(NARROWED)), [TARGET], {
-      rowCounts: new Map([["events", 0]]),
-    });
+    const plan = planSchemaReconciliation(diffSchema([TARGET], liveEvents(NARROWED)), [TARGET], probeOf(new Map([["events", 0]])));
     expect(plan.steps).toEqual([]);
     expect(plan.unreconciled).toEqual([]);
   });
@@ -2072,9 +2325,14 @@ describe("planSchemaReconciliation — column-level CHECK expressions", () => {
       columns: TARGET.columns.map((c) => (c.name === "seq" ? { ...c, type: "BIGINT" } : c)),
     };
     const diff = diffSchema([retyped], liveEvents(NARROWED), RENDERED);
-    const plan = planSchemaReconciliation(diff, [retyped], {
-      rowCounts: new Map([["events", 0]]),
-    });
+    const plan = planSchemaReconciliation(
+      diff,
+      [retyped],
+      probeProving(new Map([["events", 0]]), [
+        ["events", "column_check", "kind"],
+        ["events", "column_check", "seq"],
+      ]),
+    );
     const kinds = plan.steps.map((s) => s.kind);
     expect(kinds).toContain("alter_column_type");
     expect(kinds.indexOf("alter_column_type")).toBeLessThan(kinds.indexOf("replace_column_check"));
@@ -2106,9 +2364,78 @@ describe("planLiveReconciliation — the row count a column-check finding needs"
    * A connection that answers every introspection query for one `meta.events`, renders the probe,
    * and records what it was asked. The probe runs inside `transaction`, so the fake has to let the
    * rollback sentinel escape the way node-postgres would.
+   *
+   * `violating` and `confined` are what the widening proof is answered with (ADR-0363). Modelling
+   * them is not optional dressing: the first version of this fake matched the session-policy
+   * visibility query on `c.relrowsecurity` — which that query does select — and answered it with the
+   * *RLS-enabled* query's row, so the strict verdict parse ADR-0362 added threw and every proof came
+   * back `unknown_unreadable`. The behaviour was right (unknown refuses) and the test was asserting
+   * a sentence about row counts, which is this repo's own rule: a fake that answers a statement it
+   * could not really serve is a test asserting the wrong thing. The visibility branch therefore
+   * comes **first** and keys on `row_security_active`, which only that query names.
+   *
+   * `implied` answers the `EXPLAIN`, which is the **gate**. `true` returns the exact plan shape
+   * Postgres emits when it refutes the predicate from the table's own constraints, taken verbatim
+   * from a live PG 16.13 run; the default returns a `Seq Scan`, which is what not-proved looks
+   * like. Defaulted to *not proved* so a forgotten argument refuses rather than plans — the same
+   * direction every unknown takes in the code under test, and the reason a test that means
+   * "a widening" has to say so.
    */
-  function fakeConnection(capture: Captured[], rowCount: string): PgConnection {
+  function fakeConnection(
+    capture: Captured[],
+    rowCount: string,
+    opts: {
+      readonly violating?: number;
+      readonly confined?: boolean;
+      readonly implied?: boolean;
+    } = {},
+  ): PgConnection {
     const respond = (sql: string): PgQueryResult => {
+      // Before the visibility branch, because `EXPLAIN … WHERE NOT (…)` carries the declared
+      // expression and so can contain anything a catalogued CHECK does.
+      if (sql.startsWith("EXPLAIN")) {
+        return {
+          rows: [
+            {
+              // `"QUERY PLAN"` is the real header; `plan` is what the first draft used, and a fake
+              // keyed that way answers a statement the server never serves.
+              "QUERY PLAN": !(opts.implied ?? false)
+                ? [{ Plan: { "Node Type": "Seq Scan", "Relation Name": "events" } }]
+                : [
+                      {
+                        Plan: {
+                          "Node Type": "Result",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "One-Time Filter": "false",
+                        },
+                      },
+                    ],
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("constraint_exclusion")) return { rows: [], rowCount: 0 };
+      if (sql.includes("row_security_active")) {
+        return {
+          rows: [
+            {
+              policies_active: opts.confined === true,
+              rls_enabled: opts.confined === true,
+              rls_forced: false,
+              is_owner: opts.confined !== true,
+              bypasses_rls: opts.confined !== true,
+              role: "app_rw",
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("NOT coalesce(")) {
+        return { rows: [{ n: opts.violating ?? 0 }], rowCount: 1 };
+      }
+      if (sql.includes("SET TRANSACTION READ ONLY")) return { rows: [], rowCount: 0 };
       if (sql.includes("c.relrowsecurity")) {
         return { rows: [{ schema: "meta", name: "events", rls_enabled: false }], rowCount: 1 };
       }
@@ -2178,14 +2505,74 @@ describe("planLiveReconciliation — the row count a column-check finding needs"
     expect(plan.steps.map((s) => s.kind)).toEqual(["replace_column_check"]);
   });
 
-  it("refuses when that count comes back non-zero", async () => {
-    const plan = await planLiveReconciliation(fakeConnection([], "12"), "meta", [TARGET]);
+  // ADR-0363: a non-zero count used to end the decision here. It is now the point at which the
+  // *rows* are asked, and the three answers are three different outcomes — which is the whole of
+  // P2.3, since `proveWideningSafe` had been complete and callerless since ADR-0352.
+  it("plans a widening on a POPULATED table once the rows are asked and none violates it", async () => {
+    const capture: Captured[] = [];
+    const plan = await planLiveReconciliation(fakeConnection(capture, "12", { violating: 0, implied: true }), "meta", [
+      TARGET,
+    ]);
+    expect(plan.unreconciled).toEqual([]);
+    expect(plan.steps.map((s) => s.kind)).toEqual(["replace_column_check"]);
+    // It really asked, rather than assuming: the proof's own query is in the capture.
+    expect(capture.map((c) => c.sql).join("\n")).toContain(
+      "WHERE NOT coalesce((kind IN ('a', 'b')), true)",
+    );
+  });
+
+  it("refuses conclusively when some row does violate it", async () => {
+    const plan = await planLiveReconciliation(fakeConnection([], "12", { violating: 3 }), "meta", [
+      TARGET,
+    ]);
+    expect(plan.steps).toEqual([]);
+    expect(plan.unreconciled[0]).toMatchObject({
+      reason: "constraint_violated_by_existing_rows",
+      target: "kind",
+    });
+    // The count is the actionable part: it says the declaration is a narrowing, so no re-run helps.
+    expect(plan.unreconciled[0]?.detail).toContain("3 existing row(s) violate");
+  });
+
+  it("refuses inconclusively when the session cannot see the rows", async () => {
+    const plan = await planLiveReconciliation(fakeConnection([], "12", { confined: true }), "meta", [
+      TARGET,
+    ]);
     expect(plan.steps).toEqual([]);
     expect(plan.unreconciled[0]).toMatchObject({
       reason: "constraint_needs_validation",
       target: "kind",
     });
-    expect(plan.unreconciled[0]?.detail).toContain("12 row(s)");
+    // The distinction that earns the second reason: this one is a fact about the *session*, and a
+    // re-run from an unconfined one plans the step. Saying "N rows violate it" here would be a
+    // claim the session is not entitled to make — a confined count of 0 is what a hidden row
+    // looks like.
+    expect(plan.unreconciled[0]?.detail).toContain("row-level security confines");
+    expect(plan.unreconciled[0]?.detail).not.toContain("violate the declared expression");
+  });
+
+  it("proves an EMPTY table too, because the count that said it was empty is confinable", async () => {
+    // The short-circuit this replaces looked like free economy — an empty table is plannable
+    // without a proof — and it was the *second* proxy in the same decision: measured through this
+    // very planner, a confined session counts 0 on a table holding one row, and the plan then
+    // promised a statement whose own guard refused it. There is one question now, asked once.
+    const capture: Captured[] = [];
+    await planLiveReconciliation(fakeConnection(capture, "0"), "meta", [TARGET]);
+    expect(capture.map((c) => c.sql).some((s) => s.includes("NOT coalesce("))).toBe(true);
+  });
+
+  it("does not count a table whose rows this session cannot all see", async () => {
+    const capture: Captured[] = [];
+    const plan = await planLiveReconciliation(
+      fakeConnection(capture, "0", { confined: true }),
+      "meta",
+      [TARGET],
+    );
+    // No count is taken at all: a confined count is not a count, so it is not reported rather
+    // than reported with a caveat the planner would have to remember to read.
+    expect(capture.map((c) => c.sql).some((s) => s.includes("count(*)::TEXT"))).toBe(false);
+    expect(plan.steps).toEqual([]);
+    expect(plan.unreconciled[0]?.reason).toBe("constraint_needs_validation");
   });
 
   it("probes the column check's expression against its own table", async () => {

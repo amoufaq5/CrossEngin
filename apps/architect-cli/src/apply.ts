@@ -141,6 +141,9 @@ export async function runApply(
         );
       }
     }
+    // Unchanged by ADR-0363 and deliberately: an `unreconciled` item exits 0, including the one
+    // reason no re-run can clear, because `deploy/`'s `migrate` step gates the API on this exit
+    // code. `crossengin-pg.ts` carries the argument at the sibling site.
     if (!report.preconditions.ok || report.failed > 0) return 1;
     return 0;
   } catch (err) {

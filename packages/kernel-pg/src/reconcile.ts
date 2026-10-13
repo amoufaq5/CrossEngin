@@ -3,6 +3,7 @@ import {
   emitAddForeignKey,
   emitAddTableConstraint,
   emitAddTableConstraintIfEmpty,
+  emitAddTableConstraintIfUnviolated,
   emitAddUniqueConstraint,
   emitAlterColumnTypeIfEmpty,
   emitDropColumnDefault,
@@ -14,6 +15,7 @@ import {
   emitReplaceRlsPolicy,
   emitReplaceTableConstraint,
   emitReplaceTableConstraintIfEmpty,
+  emitReplaceTableConstraintIfUnviolated,
   emitRlsEnable,
   emitRlsPolicy,
   emitSetColumnDefault,
@@ -26,6 +28,12 @@ import {
   type TableDefinition,
 } from "@crossengin/kernel/bootstrap";
 
+import {
+  proveDeclarationWidens,
+  proveWideningSafe,
+  type WideningImplication,
+  type WideningSafety,
+} from "./check-admission.js";
 import {
   canonicalPgType,
   declaredForeignKeyConstraints,
@@ -43,7 +51,13 @@ import {
   type TableDiff,
 } from "./diff.js";
 import { renderExpressions } from "./expression-render.js";
-import { introspectSchema } from "./introspection.js";
+import {
+  introspectSchema,
+  parseSessionPolicyVisibility,
+  sessionWouldBeConfined,
+  SESSION_POLICY_VISIBILITY_QUERY,
+  type SessionPolicyVisibilityRow,
+} from "./introspection.js";
 
 export const RECONCILE_STEP_KINDS = [
   "create_table",
@@ -90,7 +104,41 @@ export const UNRECONCILED_REASONS = [
   "index_removed",
   "policy_removed",
   "foreign_key_removed",
+  /**
+   * A declared CHECK the database does not hold as declared, on a table whose rows could not be
+   * asked about it — the session is confined, the count was unreadable, or no probe was supplied.
+   *
+   * Since ADR-0363 this is the **inconclusive** arm and nothing more. Before it, it also covered the
+   * case where the rows *do* violate the declaration, and its detail said so in a sentence that is
+   * now false of every arm: *"whether every one of them already satisfies it is not something a plan
+   * may assume"*. It can be asked, and a re-run from a session policies do not confine may well
+   * plan it.
+   */
   "constraint_needs_validation",
+  /**
+   * The rows were asked and some violate the declared expression, so the declaration is a
+   * narrowing: no re-run changes it and no `ALTER` an operator pastes will succeed until either the
+   * data or the catalog gives way.
+   *
+   * Its own reason rather than a detail on the one above, and the axis is **answered versus
+   * unanswered** rather than ADR-0322's conclusive-versus-inferred: this is not an absence read as
+   * evidence, it is a count that came back. What the split buys is the remedy, which is the one
+   * thing a reason is read for — this one sends an operator to the rows, and the one above sends
+   * them to a session whose policies do not confine the read.
+   */
+  "constraint_violated_by_existing_rows",
+  /**
+   * No existing row violates the declaration, and Postgres could not prove the declaration admits
+   * everything the live constraints do — so applying it may start refusing writes the live rule
+   * permits (ADR-0363).
+   *
+   * Its own reason because the **remedy is a decision rather than a step**: the SQL is handed over
+   * and it will succeed, which is exactly why a plan must not run it unasked. It names the prover's
+   * answer and never asserts "narrows", because `not_implied` is two facts — the declaration really
+   * does reject values the live one admits, or the implication holds and is outside what the
+   * planner can prove, which is true of every pattern CHECK.
+   */
+  "constraint_widening_unproven",
   "constraint_removed",
   "column_check_name_unavailable",
   "rls_unexpectedly_enabled",
@@ -109,13 +157,65 @@ export interface UnreconciledItem {
 /**
  * Facts about the current database a plan needs but a diff does not carry.
  *
- * Only row counts, and only for the tables where a column's type changed — `ALTER COLUMN TYPE`
- * rewrites every row, so whether it is safe depends on whether there are any. Gathered by
- * `planLiveReconciliation`; an absent probe means the planner does not know, and it refuses rather
- * than assumes.
+ * Row counts, for the tables where a column's type changed or a constraint is being added —
+ * `ALTER COLUMN TYPE` rewrites every row, so whether it is safe depends on whether there are any.
+ * And since ADR-0363, **the widening proofs**: for a CHECK the catalog declares and the database
+ * does not hold as declared, whether any row already there violates the declared expression.
+ *
+ * Gathered by `planLiveReconciliation`; an absent probe means the planner does not know, and it
+ * refuses rather than assumes. That is why both fields are required and may be empty: an empty map
+ * is the claim *nothing needed asking*, where an optional field would make *nobody asked* and
+ * *nothing to ask* the same value (ADR-0331's distinction).
  */
 export interface ReconciliationProbe {
+  /**
+   * Absent for a table whose count could not be believed — see `confinedTables`. The planner
+   * already reads an absent count as *unknown* and refuses on it, so a confined count is simply not
+   * reported rather than reported with a caveat nobody reads.
+   */
   readonly rowCounts: ReadonlyMap<string, number>;
+  /**
+   * Keyed by `wideningProofKey`. A missing entry means the proof was not attempted — which the
+   * planner reads as *unknown* and refuses on, never as safe.
+   */
+  readonly wideningProofs: ReadonlyMap<string, WideningSafety>;
+  /**
+   * Keyed by `wideningProofKey`, the same key as the proofs. **This is the gate**; the proofs beside
+   * it are the diagnostic (ADR-0363). A missing entry reads as *unknown* and plans nothing.
+   */
+  readonly wideningImplications: ReadonlyMap<string, WideningImplication>;
+  /**
+   * Tables whose rows this session cannot all see, so **no** count taken from it decides anything
+   * (ADR-0363).
+   *
+   * This exists because the count was the second proxy in the same decision. The guard's count was
+   * one; `rowCount === 0` in the planner was the other, and it is the one that was *live*: measured
+   * through the real planner, the owner of a `FORCE ROW LEVEL SECURITY` table with a non-matching
+   * policy context counted **0** rows on a table holding one, the plan read that as an empty table
+   * and planned the statement, and the statement's own guard then refused it. The plan's invariant —
+   * every step in it is expected to succeed — was true only of sessions that could see the rows.
+   */
+  readonly confinedTables: ReadonlySet<string>;
+}
+
+/** The two things a declared CHECK can be, which decides what `target` names. */
+export type WideningProofSubject = "column_check" | "table_constraint";
+
+/**
+ * The one spelling of a proof's key, so the gatherer and the planner cannot disagree about which
+ * proof belongs to which refusal.
+ *
+ * The subject is in the key because `target` is a **column** name for a column check and a
+ * **constraint** name for a table-level one, and nothing stops a constraint being named after a
+ * column. No catalogued pair collides today (the 8 table-level checks are named `*_four_eyes` and
+ * the like), which is exactly when it costs nothing to make the collision unformable.
+ */
+export function wideningProofKey(
+  table: string,
+  subject: WideningProofSubject,
+  target: string,
+): string {
+  return `${table}\u0000${subject}\u0000${target}`;
 }
 
 /**
@@ -272,9 +372,9 @@ function planTable(
         table: table.name,
         target: name,
         detail:
-          `column '${name}' is declared NOT NULL with no default and the table holds ` +
-          `${rowCount === undefined ? "an unknown number of" : String(rowCount)} row(s); ` +
-          "what goes in them is a decision about existing data",
+          `column '${name}' is declared NOT NULL with no default and ` +
+          `${rowsPhrase(table.name, rowCount, probe)}; what goes in them is a decision about ` +
+          "existing data",
         manualSql:
           `ALTER TABLE ${quoted(table.schema, table.name)} ADD COLUMN "${name}" ${col.type};\n` +
           `-- backfill every row, then:\n` +
@@ -338,7 +438,7 @@ function planTable(
   planForeignKeyDrops(table, tableDiff, retypedColumns, options, steps, unreconciled);
 
   for (const delta of tableDiff.changedColumns) {
-    planChangedColumn(table, delta, columns.get(delta.column), steps, unreconciled, rowCount);
+    planChangedColumn(table, delta, columns.get(delta.column), steps, unreconciled, rowCount, probe);
   }
 
   planForeignKeyAdds(
@@ -359,12 +459,13 @@ function planTable(
     droppedForRetype,
     liveConstraintNames,
     rowCount,
+    probe,
     steps,
     unreconciled,
   );
   // After the type changes above: `ALTER COLUMN TYPE` re-derives a column's CHECK under the new
   // type, so replacing the expression first would be undone.
-  planColumnChecks(table, tableDiff, rowCount, steps, unreconciled);
+  planColumnChecks(table, tableDiff, probe, steps, unreconciled);
 
   const expected = expectedIndexNames(table);
   const declaredIndexes = new Map((table.indexes ?? []).map((i) => [i.name, i] as const));
@@ -628,6 +729,7 @@ function planTableConstraints(
   droppedForRetype: ReadonlySet<string>,
   liveConstraintNames: ReadonlyMap<string, string>,
   rowCount: number | undefined,
+  probe: ReconciliationProbe | undefined,
   steps: ReconcileStep[],
   unreconciled: UnreconciledItem[],
 ): void {
@@ -675,15 +777,56 @@ function planTableConstraints(
       });
       continue;
     }
+    // A CHECK is the one kind whose failure the rows can be asked about, so it is the one kind the
+    // proof reaches. A UNIQUE constraint fails on *duplicates*, which is a different count and has
+    // no member in the catalog to measure against (0 table-level unique constraints), so it keeps
+    // the emptiness guard rather than acquiring a second proof nothing would exercise.
+    if (constraint.kind === "check") {
+      const key = wideningProofKey(table.name, "table_constraint", constraint.name);
+      const decision = decideCheckPlan({
+        implication: probe?.wideningImplications.get(key),
+        proof: probe?.wideningProofs.get(key),
+        rowCount: probe?.rowCounts.get(table.name),
+        confined: probe?.confinedTables.has(table.name) ?? false,
+      });
+      if (!decision.plan) {
+        unreconciled.push({
+          reason: decision.reason,
+          table: table.name,
+          target: constraint.name,
+          detail: `check constraint '${constraint.name}' is declared and ${decision.because}`,
+          // The conclusive arm gets the violator query alone: the pair below is proved to fail at
+          // its ADD, and its DROP would succeed first. The other two get the pair, and for
+          // `constraint_widening_unproven` that is the whole point — the SQL will succeed, and
+          // handing it over is how a decision about what the deployment accepts stays the
+          // operator's rather than a step a plan runs unasked.
+          manualSql:
+            decision.reason === "constraint_violated_by_existing_rows"
+              ? manualCheckViolatorsSql(table, constraint.expression)
+              : manualConstraintSql(table, constraint, replacing),
+        });
+        continue;
+      }
+      steps.push({
+        kind: replacing ? "replace_table_constraint" : "add_table_constraint",
+        table: table.name,
+        target: constraint.name,
+        sql: replacing
+          ? emitReplaceTableConstraintIfUnviolated(table, constraint, liveName)
+          : emitAddTableConstraintIfUnviolated(table, constraint),
+        guarded: true,
+      });
+      continue;
+    }
     if (rowCount !== 0) {
       unreconciled.push({
         reason: "constraint_needs_validation",
         table: table.name,
         target: constraint.name,
         detail:
-          `${constraint.kind} constraint '${constraint.name}' is declared and the table holds ` +
-          `${rowCount === undefined ? "an unknown number of" : String(rowCount)} row(s); ` +
-          "whether every one of them already satisfies it is not something a plan may assume",
+          `${constraint.kind} constraint '${constraint.name}' is declared and ` +
+          `${rowsPhrase(table.name, rowCount, probe)}; whether every one of them already ` +
+          "satisfies it is not something a plan may assume",
         manualSql: manualConstraintSql(table, constraint, replacing),
       });
       continue;
@@ -704,26 +847,42 @@ function planTableConstraints(
  * Plans the column-level CHECK constraints the catalog declares and the database does not hold as
  * declared (ADR-0330).
  *
- * **Report, not plan, on a populated table** — ADR-0299's rule, unchanged: whether every existing row
- * satisfies an expression the catalog just started declaring is not something a plan may assume, and
- * `NOT VALID` would record a rule the data may violate. The refusal carries the `DROP`/`ADD` pair and
- * the `SELECT … WHERE NOT (…)` that names the rows which would refuse it.
+ * **Planned once the rows have been asked and none violates the declaration** (ADR-0363), on a
+ * populated table as readily as on an empty one. ADR-0299's rule — *whether every existing row
+ * satisfies an expression the catalog just started declaring is not something a plan may assume* —
+ * holds exactly as written; what changed is that the plan no longer has to assume. `decideCheckPlan`
+ * reads the probe's `proveWideningSafe` verdict, and an empty table is a degenerate instance of it
+ * rather than a second rule. `NOT VALID` is still never written: it records a rule the data may
+ * violate, which is worse than not recording it.
  *
- * **Planned on an empty table**, which is the table-level sibling's rule and is sound here for the
- * same reason — there is nothing to violate it — plus one that is specific to a constraint Postgres
- * named rather than the catalog: neither identifier in the statement is inferred. The `DROP` names
- * the row the diff actually matched, and the `ADD` names either that same row or the spelling a fresh
- * install produces, which the diff established nothing else holds. A name the plan would have to
+ * **Reported when the rows say no**, as `constraint_violated_by_existing_rows` with the violator
+ * query and deliberately without the `DROP`/`ADD` pair — the `ADD` is proved to fail and the `DROP`
+ * before it would succeed. **Reported when nothing asked them**, as `constraint_needs_validation`
+ * with the pair in one transaction.
+ *
+ * One reason here is independent of the rows and survives all of it: a name the plan would have to
  * *predict* — `ChooseConstraintName`'s numeric suffix inside the shared `<table>_check` family — is
- * never written: `addName` is null there and the difference is reported instead.
+ * never written, so `addName` is null there and the difference is reported however the proof came
+ * back. Where a name *is* available, neither identifier in the statement is inferred: the `DROP`
+ * names the row the diff actually matched, and the `ADD` names either that same row or the spelling
+ * a fresh install produces, which the diff established nothing else holds.
  */
 function planColumnChecks(
   table: TableDefinition,
   tableDiff: TableDiff,
-  rowCount: number | undefined,
+  probe: ReconciliationProbe | undefined,
   steps: ReconcileStep[],
   unreconciled: UnreconciledItem[],
 ): void {
+  const planFor = (column: string): CheckPlanInput => {
+    const key = wideningProofKey(table.name, "column_check", column);
+    return {
+      implication: probe?.wideningImplications.get(key),
+      proof: probe?.wideningProofs.get(key),
+      rowCount: probe?.rowCounts.get(table.name),
+      confined: probe?.confinedTables.has(table.name) ?? false,
+    };
+  };
   for (const missing of tableDiff.missingColumnChecks) {
     if (missing.addName === null) {
       unreconciled.push({
@@ -738,16 +897,19 @@ function planColumnChecks(
       });
       continue;
     }
-    if (rowCount !== 0) {
+    const decision = decideCheckPlan(planFor(missing.column));
+    if (!decision.plan) {
       unreconciled.push({
-        reason: "constraint_needs_validation",
+        reason: decision.reason,
         table: table.name,
         target: missing.column,
         detail:
-          `column '${missing.column}' declares a CHECK the database does not hold and the table ` +
-          `holds ${rowCount === undefined ? "an unknown number of" : String(rowCount)} row(s); ` +
-          "whether every one of them already satisfies it is not something a plan may assume",
-        manualSql: manualColumnCheckSql(table, missing.expression, null, missing.addName),
+          `column '${missing.column}' declares a CHECK the database does not hold and ` +
+          decision.because,
+        manualSql:
+          decision.reason === "constraint_violated_by_existing_rows"
+            ? manualCheckViolatorsSql(table, missing.expression)
+            : manualColumnCheckSql(table, missing.expression, null, missing.addName),
       });
       continue;
     }
@@ -755,7 +917,7 @@ function planColumnChecks(
       kind: "add_column_check",
       table: table.name,
       target: missing.column,
-      sql: emitAddTableConstraintIfEmpty(table, {
+      sql: emitAddTableConstraintIfUnviolated(table, {
         kind: "check",
         name: missing.addName,
         expression: missing.expression,
@@ -783,18 +945,19 @@ function planColumnChecks(
       });
       continue;
     }
-    if (rowCount !== 0) {
+    const decision = decideCheckPlan(planFor(delta.column));
+    if (!decision.plan) {
       unreconciled.push({
-        reason: "constraint_needs_validation",
+        reason: decision.reason,
         table: table.name,
         target: delta.column,
         detail:
           `column '${delta.column}' declares a CHECK the database holds differently ` +
-          `(${delta.detail}) and the table holds ` +
-          `${rowCount === undefined ? "an unknown number of" : String(rowCount)} row(s); ` +
-          "whether every one of them already satisfies the declared expression is not something a " +
-          "plan may assume",
-        manualSql: manualColumnCheckSql(table, delta.expression, delta.liveName, addName),
+          `(${delta.detail}) and ${decision.because}`,
+        manualSql:
+          decision.reason === "constraint_violated_by_existing_rows"
+            ? manualCheckViolatorsSql(table, delta.expression)
+            : manualColumnCheckSql(table, delta.expression, delta.liveName, addName),
       });
       continue;
     }
@@ -802,7 +965,7 @@ function planColumnChecks(
       kind: "replace_column_check",
       table: table.name,
       target: delta.column,
-      sql: emitReplaceTableConstraintIfEmpty(
+      sql: emitReplaceTableConstraintIfUnviolated(
         table,
         { kind: "check", name: addName, expression: delta.expression },
         delta.liveName,
@@ -813,13 +976,127 @@ function planColumnChecks(
 }
 
 /**
+ * Whether a declared CHECK may be planned, and when not, which of the three refusals it is.
+ *
+ * One function behind all three refusal sites (a missing column check, a changed one, and a
+ * table-level CHECK), because they ask one question and the detail an operator reads is the only
+ * thing that differs. Three copies of this decision is how the read and the write halves of
+ * ADR-0329 came to disagree, one domain over.
+ *
+ * **Two independent sufficient gates, and the ordering is the content.**
+ *
+ * 1. *The declaration is a proven widening* (`live_implies_declared`). Structural, consults no row,
+ *    and therefore survives an RLS-confined session and admits no race: every row the live CHECK
+ *    admits satisfies the declared one, so no concurrent write can produce a row the `ALTER` would
+ *    refuse. First, because it is the stronger answer and needs nothing from the probe.
+ * 2. *The table is empty*, which is ADR-0299's rule and is kept for its own reason rather than as
+ *    an instance of the first: a new rule on no data is a decision about future writes alone, and
+ *    there is no existing data whose reinterpretation a human needs to approve. Guarded on
+ *    `confinedTables`, because a confined count of 0 is what hidden rows look like.
+ *
+ * Everything else is reported, and the third reason is **this increment's own correction**
+ * (ADR-0363). Gating only on *no current row violates it* — which is what this function did when
+ * first written — plans a **narrowing or sideways** change whenever today's rows happen to satisfy
+ * it, so ordinary writes the live CHECK permits begin failing `23514` in production with nothing in
+ * the plan having said the declaration narrows. That is scope ADR-0330's refusal was protecting and
+ * this increment never argued for, so it is reported as `constraint_widening_unproven` — a reason
+ * that names **the prover's answer and not a fact about the expressions**, because `not_implied`
+ * covers both *the declaration really does narrow* and *the implication holds and the planner
+ * cannot see it*, the latter being true of every pattern CHECK and the catalog has 213 of those.
+ */
+type CheckPlanDecision =
+  | { readonly plan: true }
+  | {
+      readonly plan: false;
+      readonly reason: Extract<
+        UnreconciledReason,
+        | "constraint_needs_validation"
+        | "constraint_violated_by_existing_rows"
+        | "constraint_widening_unproven"
+      >;
+      readonly because: string;
+    };
+
+interface CheckPlanInput {
+  readonly implication: WideningImplication | undefined;
+  readonly proof: WideningSafety | undefined;
+  /** Absent when nothing counted, which `confined` then explains. */
+  readonly rowCount: number | undefined;
+  readonly confined: boolean;
+}
+
+function decideCheckPlan(input: CheckPlanInput): CheckPlanDecision {
+  if (input.implication === "live_implies_declared") return { plan: true };
+  if (!input.confined && input.rowCount === 0) return { plan: true };
+  const proof = input.proof;
+  if (proof === undefined) {
+    return {
+      plan: false,
+      reason: "constraint_needs_validation",
+      because:
+        "no probe asked the rows about the declared expression, so whether every one of them " +
+        "satisfies it is not something this plan can say",
+    };
+  }
+  switch (proof.proof) {
+    case "violated_by_existing_rows":
+      return { plan: false, reason: "constraint_violated_by_existing_rows", because: proof.detail };
+    case "safe":
+      return {
+        plan: false,
+        reason: "constraint_widening_unproven",
+        because:
+          "no existing row violates the declared expression, but Postgres could not prove that " +
+          "every value the live constraints admit the declared one admits too — so applying it " +
+          "may begin refusing writes the live rule permits, which is a decision about what this " +
+          "deployment accepts rather than a step that reconciles the schema",
+      };
+    case "unknown_session_confined":
+    case "unknown_unreadable":
+      return { plan: false, reason: "constraint_needs_validation", because: proof.detail };
+  }
+}
+
+/**
+ * The clause every row-count refusal states its premise with.
+ *
+ * One function because an absent count has two causes with different remedies, and the three sites
+ * that render it would otherwise each have to remember both: nobody probed, or the session's own
+ * policies make the number meaningless. Telling an operator to "migrate the data explicitly" when
+ * what they actually need is a different connection is ADR-0334's *a remedy that cannot work is
+ * worse than none*.
+ */
+function rowsPhrase(
+  table: string,
+  rowCount: number | undefined,
+  probe: ReconciliationProbe | undefined,
+): string {
+  if (rowCount !== undefined) return `the table holds ${rowCount} row(s)`;
+  if (probe?.confinedTables.has(table) === true) {
+    return (
+      "row-level security confines this session on the table, so its row count is not a row count" +
+      " — re-run from a session its policies do not confine"
+    );
+  }
+  return "the table holds an unknown number of rows";
+}
+
+/**
  * The SQL an operator runs to put a column-level CHECK right by hand.
  *
  * The `DROP` names the constraint the database actually holds, which for a column check is never the
- * name the catalog states — there is none — and the comment above it is the decision the plan
- * declines to make: a *widening* expression can never fail against existing rows, but nothing here
- * understands the expressions well enough to tell widening from narrowing, so the query that names
- * the refusing rows is handed over instead.
+ * name the catalog states — there is none — and the `SELECT` above it names the rows that would
+ * refuse the declared expression, which is the thing the operator has to look at.
+ *
+ * **It is wrapped in one transaction, and that is not tidiness** (ADR-0363). Measured on PG 16.13 by
+ * pasting the previous, unwrapped form the ordinary way (`psql -f`, no `-1`): the `DROP` **succeeded**,
+ * the `ADD` raised `check constraint … is violated by some row`, and the table was left holding
+ * **zero** CHECK constraints — after which `INSERT … 'ANYTHING_AT_ALL'` was accepted. So the remedy a
+ * plan handed an operator destroyed the rule that was protecting the table and did not replace it,
+ * on exactly the data that made the plan refuse in the first place. With `BEGIN`/`COMMIT` the same
+ * paste leaves the original constraint standing (verified: 1 constraint after, and the rule still
+ * refuses the row). That hazard has been in this function since ADR-0330; what the proof added was a
+ * named arm that makes it likely to be pasted.
  */
 function manualColumnCheckSql(
   table: TableDefinition,
@@ -832,8 +1109,32 @@ function manualColumnCheckSql(
   return (
     `-- rows that would refuse it:\n` +
     `-- SELECT * FROM ${fq} WHERE NOT (${expression});\n` +
+    `BEGIN;\n` +
     drop +
-    `ALTER TABLE ${fq} ADD CONSTRAINT "${addName}" CHECK (${expression});`
+    `ALTER TABLE ${fq} ADD CONSTRAINT "${addName}" CHECK (${expression});\n` +
+    `COMMIT;`
+  );
+}
+
+/**
+ * The remedy for the arm where the rows are **known** to violate the declaration.
+ *
+ * It is the violator query, live rather than commented, and the replacement pair is deliberately
+ * **not** offered. The plan has already asked and been told that `ADD CONSTRAINT` cannot succeed, so
+ * handing over SQL whose second half is proved to fail is ADR-0334's *a remedy that cannot work is
+ * worse than none* — and here it would be worse than that, because the first half succeeds.
+ *
+ * What an operator does from here is a decision between two things only they can make: the data is
+ * wrong and wants correcting, or the catalog is wrong and wants the declaration it had. Neither is a
+ * statement this plan is entitled to make, so it hands over the question rather than an answer.
+ */
+function manualCheckViolatorsSql(table: TableDefinition, expression: string): string {
+  const fq = quoted(table.schema, table.name);
+  return (
+    `SELECT * FROM ${fq} WHERE NOT (${expression});\n` +
+    `-- The DROP/ADD pair is deliberately not offered: this plan asked the rows and they violate the\n` +
+    `-- declaration, so the ADD is proved to fail — and the DROP before it would succeed, leaving the\n` +
+    `-- table with no rule at all. Correct the rows above, or change the catalog's declaration.`
   );
 }
 
@@ -857,7 +1158,11 @@ function manualConstraintSql(
         ? `-- rows that would refuse it: the ones whose (${constraint.columns.join(", ")}) has no match in ` +
           `"${constraint.references.schema ?? table.schema}"."${constraint.references.table}".\n`
         : `-- rows that would refuse it: duplicates over (${constraint.columns.join(", ")}).\n`;
-  return `${violators}${drop}ALTER TABLE ${fq} ADD ${emitTableConstraint(constraint)};`;
+  // One transaction, for `manualColumnCheckSql`'s measured reason: pasted unwrapped, the DROP
+  // succeeds and the ADD fails, which leaves the table with no rule at all.
+  return (
+    `${violators}BEGIN;\n${drop}ALTER TABLE ${fq} ADD ${emitTableConstraint(constraint)};\nCOMMIT;`
+  );
 }
 
 /**
@@ -985,6 +1290,7 @@ function planChangedColumn(
   steps: ReconcileStep[],
   unreconciled: UnreconciledItem[],
   rowCount: number | undefined,
+  probe: ReconciliationProbe | undefined,
 ): void {
   if (col === undefined) return;
   const reasons = new Set(delta.reasons);
@@ -1011,8 +1317,8 @@ function planChangedColumn(
         target: delta.column,
         detail:
           `column '${delta.column}' is ${delta.live.type} in the database and ${delta.target.type} ` +
-          `in the catalog; the table holds ${rowCount === undefined ? "an unknown number of" : String(rowCount)} ` +
-          "row(s), and rewriting them under a cast is a decision about existing data",
+          `in the catalog; ${rowsPhrase(table.name, rowCount, probe)}, and rewriting them under a ` +
+          "cast is a decision about existing data",
         manualSql:
           `-- drop any constraint on the column the catalog no longer declares, then:\n` +
           `ALTER TABLE ${fq} ALTER COLUMN "${delta.column}" TYPE ${canonicalPgType(col.type)} ` +
@@ -1208,14 +1514,15 @@ export async function planLiveReconciliation(
     .flatMap((tb) => expressionRequestsFor(tb));
   const rendered = await renderExpressions(conn, schema, requests);
   const diff = diffSchema(tables, live, rendered);
-  const probe = await probeRowCounts(conn, schema, diff);
+  const probe = await probeForReconciliation(conn, schema, diff, tables);
   return planSchemaReconciliation(diff, tables, probe, options);
 }
 
-async function probeRowCounts(
+async function probeForReconciliation(
   conn: PgConnection,
   schema: string,
   diff: SchemaDiff,
+  tables: readonly TableDefinition[],
 ): Promise<ReconciliationProbe> {
   // Every case that hinges on whether the table holds anything: rewriting a column's type, adding a
   // NOT NULL column with no default, and adding or replacing a table-level constraint the existing
@@ -1237,12 +1544,135 @@ async function probeRowCounts(
     )
     .map((m) => m.table);
   const rowCounts = new Map<string, number>();
+  const confinedTables = new Set<string>();
   for (const table of needed) {
+    // The confinement is asked **before** the count, because a count taken from a session the
+    // table's policies confine is not a count of the table (ADR-0363). Asked of
+    // `row_security_active` through the one function that owns that verdict, so this and the
+    // statement's own guard cannot disagree about what confinement is.
+    if (await sessionIsConfinedOn(conn, schema, table)) {
+      confinedTables.add(table);
+      continue;
+    }
     const result = await conn.query<{ count: string }>(
       `SELECT count(*)::TEXT AS count FROM ${quoted(schema, table)}`,
     );
     const row = result.rows[0];
     rowCounts.set(table, row === undefined ? 0 : Number.parseInt(row.count, 10));
   }
-  return { rowCounts };
+  const widening = await proveWidenings(conn, schema, diff, tables);
+  return {
+    rowCounts,
+    confinedTables,
+    wideningProofs: widening.proofs,
+    wideningImplications: widening.implications,
+  };
+}
+
+/**
+ * Whether this session's view of a table is confined by its policies.
+ *
+ * `proveWideningSafe` asks the same question for its own verdict and would be the obvious thing to
+ * reuse — but it also *counts*, which is the work this is deciding whether to do at all. So the
+ * fact is read directly and the rule is not restated: `sessionWouldBeConfined` is the one predicate
+ * (ADR-0362), and a read that cannot be parsed answers **true**, because an unreadable verdict must
+ * not be the permissive one.
+ */
+async function sessionIsConfinedOn(
+  conn: PgConnection,
+  schema: string,
+  table: string,
+): Promise<boolean> {
+  try {
+    const result = await conn.query<SessionPolicyVisibilityRow>(SESSION_POLICY_VISIBILITY_QUERY, [
+      schema,
+      table,
+    ]);
+    const row = result.rows[0];
+    // A table that is not there cannot confine anything, and the diff would not have named it.
+    if (row === undefined) return false;
+    return sessionWouldBeConfined(parseSessionPolicyVisibility(row));
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Asks the rows whether each declared CHECK the database does not hold as declared can be applied —
+ * `proveWideningSafe`'s first caller (ADR-0363).
+ *
+ * **Every declared-CHECK difference, and emptiness is not a short-circuit.** It was, for one
+ * revision: proving only a populated table looked like free economy, since an empty one is
+ * plannable anyway. Then the emptiness it short-circuited on turned out to be the *second* proxy in
+ * this decision — a confined session counts 0 on a table that holds rows, so the plan read "empty"
+ * and promised a statement its own guard then refused. There is one question now and it is asked
+ * once, which is what the whole increment is about.
+ *
+ * The cost stays proportional to the **drift** rather than to the catalog: only a table whose
+ * declared CHECK the database does not already hold is proved, so a schema in step proves nothing
+ * and the one real member (`meta.tenants.status` gaining `pending_deletion`) is a single `count(*)`
+ * with a predicate. On an empty table that count is free.
+ *
+ * That cost is a sequential scan on a table that may be large, and it is deliberately not capped.
+ * A ceiling would make the plan refuse on a proxy for its own question — the table's size instead of
+ * its contents — which is the defect this whole increment is about, one layer along. The scan is
+ * also the one the `ALTER` itself performs, so proving it costs the operator nothing they were not
+ * about to pay; without it they pay it by hand.
+ */
+async function proveWidenings(
+  conn: PgConnection,
+  schema: string,
+  diff: SchemaDiff,
+  tables: readonly TableDefinition[],
+): Promise<{
+  readonly proofs: ReadonlyMap<string, WideningSafety>;
+  readonly implications: ReadonlyMap<string, WideningImplication>;
+}> {
+  const byName = new Map(tables.map((t) => [t.name, t] as const));
+  const proofs = new Map<string, WideningSafety>();
+  const implications = new Map<string, WideningImplication>();
+  for (const m of diff.modifiedTables) {
+    const table = byName.get(m.table);
+    if (table === undefined) continue;
+    const subjects: { readonly subject: WideningProofSubject; readonly target: string; readonly expression: string }[] = [];
+    for (const missing of m.missingColumnChecks) {
+      subjects.push({ subject: "column_check", target: missing.column, expression: missing.expression });
+    }
+    for (const delta of m.changedColumnChecks) {
+      subjects.push({ subject: "column_check", target: delta.column, expression: delta.expression });
+    }
+    // Table-level CHECKs only, matching the one kind `planTableConstraints` routes to the proof.
+    const declared = new Map((table.constraints ?? []).map((c) => [c.name, c] as const));
+    for (const c of [...m.addedConstraints, ...m.changedConstraints]) {
+      const constraint = declared.get(c.name);
+      if (constraint?.kind !== "check") continue;
+      subjects.push({
+        subject: "table_constraint",
+        target: constraint.name,
+        expression: constraint.expression,
+      });
+    }
+    for (const s of subjects) {
+      // `s.target` is the **key** both verdicts are looked up under and is deliberately not an
+      // input to either: both are about the **expression**, and a table-level CHECK's expression
+      // spans several columns by definition, so there is no column they are about.
+      const key = wideningProofKey(m.table, s.subject, s.target);
+      // The implication is the gate, so it is asked first — and it is asked **always**, including
+      // where the empirical proof would plan anyway, because the reason an operator reads differs
+      // and `constraint_widening_unproven` cannot be reached without it.
+      implications.set(
+        key,
+        await proveDeclarationWidens(conn, {
+          schema,
+          table: m.table,
+          declaredExpression: s.expression,
+        }),
+      );
+      proofs.set(
+        key,
+        await proveWideningSafe(conn, { schema, table: m.table, declaredExpression: s.expression }),
+      );
+    }
+  }
+  return { proofs, implications };
 }

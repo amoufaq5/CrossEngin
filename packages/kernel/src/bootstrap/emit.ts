@@ -5,6 +5,7 @@ import type {
   ColumnReference,
   IndexSpec,
   RlsPolicy,
+  TableCheckConstraint,
   TableConstraint,
   TableDefinition,
 } from "./types.js";
@@ -223,13 +224,81 @@ export function emitRenameColumn(
 }
 
 /**
+ * The line every row-counting guard in this file opens with, and the reason it exists is a
+ * measurement rather than a precaution (ADR-0363).
+ *
+ * A guard counts rows through an ordinary `SELECT`, which row-level security confines. The statement
+ * it guards does not: `ALTER TABLE … ADD CONSTRAINT … CHECK` validates through an internal scan that
+ * sees every row, and `ALTER COLUMN … TYPE` rewrites every row. So the fence and the thing it fences
+ * read the table through different lenses, and on a confined session the fence reads **fewer** rows —
+ * which is the direction that admits.
+ *
+ * Measured on PG 16.13, as the owner of a `FORCE ROW LEVEL SECURITY` table with a policy context
+ * matching neither row: `count(*)` answered 0 on a table holding one row that violates the declared
+ * expression, the emptiness guard admitted, and the `ALTER` raised
+ * `check constraint … is violated by some row`. Ownership is not the exemption — `FORCE` confines the
+ * owner too — which is why the question is asked of `row_security_active`, the function the executor
+ * itself consults, rather than composed from ownership and `rolbypassrls` (ADR-0362's rule, one layer
+ * out).
+ *
+ * It is asked **first**, because a count taken from a confined session is not evidence of anything
+ * and a guard that acts on it has already lost. The message names both remedies and never a row.
+ *
+ * **The two guards it protects have different consequences, and only one of them is quiet.** For a
+ * constraint guard, a confined count lets the step through and the `ALTER` then raises `23514` — so
+ * the assertion converts a confusing failure into a named one. For `emitAlterColumnTypeIfEmpty` it
+ * is the *only* thing standing between a confined session and a **successful** rewrite of rows it
+ * cannot see, which is precisely the decision that guard exists to refuse. Measured on PG 16.13.
+ *
+ * Two bounds on its reach, both measured, so its silence is not read as coverage. A non-owner cannot
+ * `ALTER` at all (`must be owner of table`), so the only session that gets this far *and* is confined
+ * is the owner of a `FORCE ROW LEVEL SECURITY` table — and `TableRls` is `{enabled, policies}`, so
+ * **`FORCE` is not expressible by this catalog at all**, which is a stronger bound than a test could
+ * give and is why there is no test. An earlier draft of this comment claimed one; nothing in the
+ * kernel pins it, and the nearest thing is a sentence of prose in
+ * `kernel-pg/src/encryption-writepath.test.ts`. So the live member arrives only through an operator's
+ * own `ALTER TABLE … FORCE`, which is exactly the hardened deployment this fence is for. And
+ * `row_security_active` answers for the relation it is given: an inheritance child or a partition
+ * with its own `FORCE` policy answers `true` for itself and `false` through its parent, so the
+ * question is asked of the table being altered, which is the right granularity and the opposite of
+ * the intuitive guess.
+ */
+function rlsConfinementGuard(table: TableDefinition, act: string): readonly string[] {
+  const rel = quoteLiteral(`${table.schema}.${table.name}`);
+  return [
+    `  IF row_security_active(${rel}::regclass) THEN`,
+    `    RAISE EXCEPTION 'refusing to ${messageText(act)}: row-level security confines this session, so a count of 0 rows is what hidden rows look like — re-run as the table owner without FORCE ROW LEVEL SECURITY, or from a role holding BYPASSRLS';`,
+    "  END IF;",
+  ];
+}
+
+/**
+ * The lock the statement is about to take anyway, taken **before** the count that decides whether to
+ * issue it.
+ *
+ * Without it the guard and the thing it guards see different tables, and that is not theoretical:
+ * `SELECT count(*)` takes `ACCESS SHARE`, a concurrent `INSERT` takes `ROW EXCLUSIVE`, the two are
+ * compatible, and the applier runs each statement in its own `READ COMMITTED` transaction — so a row
+ * can commit between the count and the `ALTER`, and the `ALTER`'s validation sees it. The count then
+ * described a table that no longer exists.
+ *
+ * `ACCESS EXCLUSIVE` is what `ALTER TABLE` takes regardless, so this adds no contention the step did
+ * not already cause; all it does is move the moment the table goes quiet to *before* the question
+ * rather than after it. Held to the end of the transaction, which for a `DO` block is the block.
+ */
+function tableQuiesceLock(table: TableDefinition): string {
+  return `  LOCK TABLE ${qualifyTable(table.schema, table.name)} IN ACCESS EXCLUSIVE MODE;`;
+}
+
+/**
  * Changes a column's type, but only on an empty table, re-checking that in the same transaction.
  *
  * Unlike adding a `NOT NULL` column, Postgres will not stop you rewriting a populated column — it
  * casts every row, reinterpreting data or failing part-way on the first value that will not
  * convert. Whether that reinterpretation is the intended one is a decision about existing data, so
  * the statement refuses rather than guess. The count is taken here, not when the plan was built, so
- * a row inserted in between cannot slip past it.
+ * a row inserted in between cannot slip past it — and it is taken only after
+ * `rlsConfinementGuard` has established that the count can be believed.
  */
 export function emitAlterColumnTypeIfEmpty(
   table: TableDefinition,
@@ -239,13 +308,20 @@ export function emitAlterColumnTypeIfEmpty(
   const fq = qualifyTable(table.schema, table.name);
   const col = quoteIdent(column);
   const label = `${table.schema}.${table.name}.${column}`;
+  const act = `change ${label} to ${type}`;
   return [
     "DO $$",
-    "DECLARE existing bigint;",
+    // `_ce_` because a plpgsql variable and a column of the same name make every reference to it in
+    // this block ambiguous — demonstrated: a table with a column `existing` raises
+    // `column reference "existing" is ambiguous`. No catalogued column is named this, and the
+    // prefix is what keeps that from being load-bearing.
+    "DECLARE _ce_existing bigint;",
     "BEGIN",
-    `  SELECT count(*) INTO existing FROM ${fq};`,
-    "  IF existing > 0 THEN",
-    `    RAISE EXCEPTION 'refusing to change ${label} to ${type}: table holds % row(s) — migrate the data explicitly', existing;`,
+    ...rlsConfinementGuard(table, act),
+    tableQuiesceLock(table),
+    `  SELECT count(*) INTO _ce_existing FROM ${fq};`,
+    "  IF _ce_existing > 0 THEN",
+    `    RAISE EXCEPTION 'refusing to ${messageText(act)}: table holds % row(s) — migrate the data explicitly', _ce_existing;`,
     "  END IF;",
     `  ALTER TABLE ${fq} ALTER COLUMN ${col} TYPE ${type} USING ${col}::${type};`,
     "END $$;",
@@ -340,13 +416,125 @@ function emitGuardedConstraintStatements(
 ): string {
   const fq = qualifyTable(table.schema, table.name);
   const label = `${table.schema}.${table.name}`;
+  const act = `add constraint ${constraintName} to ${label}`;
   return [
     "DO $$",
-    "DECLARE existing bigint;",
+    "DECLARE _ce_existing bigint;",
     "BEGIN",
-    `  SELECT count(*) INTO existing FROM ${fq};`,
-    "  IF existing > 0 THEN",
-    `    RAISE EXCEPTION 'refusing to add constraint ${constraintName} to ${label}: table holds % row(s) — check the data against the rule explicitly', existing;`,
+    ...rlsConfinementGuard(table, act),
+    tableQuiesceLock(table),
+    `  SELECT count(*) INTO _ce_existing FROM ${fq};`,
+    "  IF _ce_existing > 0 THEN",
+    `    RAISE EXCEPTION 'refusing to ${messageText(act)}: table holds % row(s) — check the data against the rule explicitly', _ce_existing;`,
+    "  END IF;",
+    ...statements.map((s) => `  ${s}`),
+    "END $$;",
+  ].join("\n");
+}
+
+/**
+ * Adds a CHECK the rows are known to satisfy, re-asking that in the same transaction.
+ *
+ * This is the guard `emitAddTableConstraintIfEmpty` is a *proxy* for (ADR-0363). That one asks
+ * whether the table is **empty**, which is sufficient for the statement to succeed and strictly
+ * narrower than the question that decides it: *does any existing row violate the expression?* An
+ * empty table is one way for that count to be zero, so this form subsumes it — which is why there is
+ * no emptiness clause here rather than one beside it.
+ *
+ * The narrowing was conservative, and its cost was not: every value the catalog has ever added to an
+ * enum was refused on every already-applied deployment until an operator ran the `ALTER` by hand
+ * (ADR-0300, ADR-0334, ADR-0351 each found one member of that by hand). ADR-0330's reasoning stands
+ * exactly as written — a widening and a narrowing are indistinguishable *from the expressions* — and
+ * what it concluded from that does not: the **data** can be asked. `proveWideningSafe` asks it when
+ * the plan is built, and this asks it again when the statement runs, because a plan is applied a
+ * moment later and a row inserted in between must abort the step rather than slip under a rule that
+ * was never checked against it.
+ *
+ * `NOT VALID` is still refused for `emitAddTableConstraintIfEmpty`'s reason: it records a rule the
+ * data may violate, which is worse than not recording it, because every later reader believes it
+ * holds.
+ *
+ * **It is not fenced by `SET TRANSACTION READ ONLY`, and it cannot be.** `check-admission.ts` fences
+ * its evaluations that way because a CHECK may call a volatile function and evaluating the expression
+ * *fires the side effect* — demonstrated there, with a CHECK whose function inserts a row. That fence
+ * is unavailable here by construction: this count must run in the transaction that performs the
+ * `ALTER`, and a read-only transaction refuses it. What makes that acceptable is not the fence but
+ * the arithmetic: `ALTER TABLE … ADD CONSTRAINT … CHECK` validates the same expression over the same
+ * rows, so a volatile side effect fires **twice instead of once** where the guard passes and
+ * **once instead of twice** where it refuses. The guard adds no class of effect the statement does
+ * not already have. Measured over the catalog for the population: of **788** catalogued CHECKs (780
+ * column-level, 8 table-level) exactly **three** call a function at all — `char_length`, `length`
+ * and `jsonb_array_length` — and all three resolve to IMMUTABLE built-ins on PG 16.13, the one
+ * STABLE `length` overload being the two-argument `length(bytea, name)` an unqualified call cannot
+ * reach.
+ *
+ * Cost, measured on PG 16.13 over 200,000 rows: the violation count is **10.9 ms** against the
+ * emptiness count's 7.0 ms, and the `ALTER` it protects is **15.2 ms**. So the guard is about 70% of
+ * the statement it protects and about 4 ms dearer than the guard it replaces — it is a sequential
+ * scan either way, and the expression per row is the difference.
+ *
+ * The expression is interpolated raw, as it is everywhere else the catalog's own expressions are
+ * emitted — `emitTableConstraint` does the same with the same text.
+ */
+export function emitAddTableConstraintIfUnviolated(
+  table: TableDefinition,
+  constraint: TableCheckConstraint,
+): string {
+  return emitViolationGuardedConstraintStatements(table, constraint, [
+    `ALTER TABLE ${qualifyTable(table.schema, table.name)} ADD ${emitTableConstraint(constraint)};`,
+  ]);
+}
+
+/**
+ * Replaces a CHECK whose declared expression the rows are known to satisfy, in one guarded block.
+ *
+ * `emitReplaceTableConstraintIfEmpty`'s shape and reasons, over
+ * `emitAddTableConstraintIfUnviolated`'s question. `liveName` is what the database holds the
+ * constraint under; dropping anything else is a no-op that leaves the old rule standing beside the
+ * new one.
+ *
+ * The guard counts against the **declared** expression and not the live one, which is the point: the
+ * live one is what the rows were written under and is therefore satisfied by construction.
+ */
+export function emitReplaceTableConstraintIfUnviolated(
+  table: TableDefinition,
+  constraint: TableCheckConstraint,
+  liveName: string = constraint.name,
+): string {
+  const fq = qualifyTable(table.schema, table.name);
+  return emitViolationGuardedConstraintStatements(table, constraint, [
+    `ALTER TABLE ${fq} DROP CONSTRAINT IF EXISTS ${quoteIdent(liveName)};`,
+    `ALTER TABLE ${fq} ADD ${emitTableConstraint(constraint)};`,
+  ]);
+}
+
+function emitViolationGuardedConstraintStatements(
+  table: TableDefinition,
+  constraint: TableCheckConstraint,
+  statements: readonly string[],
+): string {
+  const fq = qualifyTable(table.schema, table.name);
+  const label = `${table.schema}.${table.name}`;
+  const act = `apply constraint ${constraint.name} to ${label}`;
+  return [
+    "DO $$",
+    // `_ce_` for the reason `emitAlterColumnTypeIfEmpty` states: this is the first guard here whose
+    // count query names the table's own columns, so a variable sharing a column name would make
+    // every reference to it in the predicate ambiguous.
+    "DECLARE _ce_violating bigint;",
+    "BEGIN",
+    ...rlsConfinementGuard(table, act),
+    tableQuiesceLock(table),
+    // `coalesce(E, true)` and not `E` alone: a CHECK passes when its expression is NULL, so a row
+    // whose expression is unknown is admitted by the real constraint and must be admitted here.
+    // Counting `NOT E` would refuse a statement that succeeds. Verified to agree with what
+    // `ALTER TABLE … ADD CONSTRAINT … CHECK` validates across 20 of 20 expression shapes on
+    // PG 16.13 — `IN` lists, an `IS NULL OR` prefix, ranges, `BETWEEN`, regex matches and
+    // cross-column comparisons — over a table holding a NULL row, a satisfying row and a
+    // violating one.
+    `  SELECT count(*) INTO _ce_violating FROM ${fq} WHERE NOT coalesce((${constraint.expression}), true);`,
+    "  IF _ce_violating > 0 THEN",
+    `    RAISE EXCEPTION 'refusing to ${messageText(act)}: % row(s) violate the declared expression — the declaration is a narrowing, not a widening', _ce_violating;`,
     "  END IF;",
     ...statements.map((s) => `  ${s}`),
     "END $$;",
@@ -373,9 +561,17 @@ function quoteLiteral(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
-/** Text spliced into a `RAISE EXCEPTION` message, which is itself a single-quoted literal. */
+/**
+ * Text spliced into a `RAISE EXCEPTION` message.
+ *
+ * Two escapes, because the message is **two** things at once: a single-quoted SQL literal, and
+ * plpgsql's own format string, where `%` is the placeholder a following argument fills. A `%` in an
+ * identifier would consume or misplace an argument — so a table called `pct%` would make the guard
+ * raise about the wrong thing, or raise about nothing (`too few parameters`). No catalogued name
+ * contains one, which is exactly why the doubling costs nothing and why it is written down.
+ */
 function messageText(value: string): string {
-  return value.replace(/'/g, "''");
+  return value.replace(/'/g, "''").replace(/%/g, "%%");
 }
 
 export function emitIndex(table: TableDefinition, idx: IndexSpec): string {

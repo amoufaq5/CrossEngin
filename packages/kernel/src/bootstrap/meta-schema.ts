@@ -107,10 +107,11 @@ export const META_TENANTS: TableDefinition = {
       // into data that was about to be destroyed. It is also the `fromState` `deletion_grace` and
       // `appeal_window` name, and it is already in `READ_ONLY_STATES`.
       //
-      // Widening a CHECK is not a tightening and cannot fail against existing rows, but
-      // `planSchemaReconciliation` cannot tell the two apart (ADR-0330), so this lands as
-      // `constraint_needs_validation` with the SQL on any populated deployment and is applied by
-      // hand there. That cost is ADR-0329's, unchanged, and is the open end this exercises.
+      // Widening a CHECK is not a tightening and cannot fail against existing rows, and
+      // ADR-0363 is what lets the plan say so: the expressions cannot be told apart (ADR-0330)
+      // and the **rows** can be asked, so this lands as a planned `replace_column_check` on a
+      // populated deployment once the probe has counted zero violations. It was standing manual
+      // SQL for two increments, which is the cost this column's own history records.
       name: "status",
       type: "TEXT",
       notNull: true,
