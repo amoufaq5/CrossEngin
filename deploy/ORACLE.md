@@ -183,15 +183,39 @@ Encrypt will not issue a certificate until the name resolves to this machine.
 **Success looks like:** `dig +short yourdomain.com` and `dig +short api.yourdomain.com` both
 return your IP. Give DNS a few minutes.
 
+**Wait for this before you try the UI in a browser.** The login cannot work over plain HTTP and
+fails silently when it is attempted — step 12 says exactly how — and the API's own bootstrap does
+not need DNS at all, because the compose file publishes it on `127.0.0.1:8787` on the VM itself.
+So there is nothing to gain by reaching for the IP address while you wait.
+
 ---
 
 ## 9. Clone and configure
 
 ```bash
 git clone <YOUR FORK OF THIS REPO> crossengin
-cd crossengin/deploy
+cd crossengin
+git log --oneline -1                     # which commit you are about to build
+cd deploy
 cp .env.example .env
 ```
+
+**Check which branch you are on before you build, because steps 11–14 depend on it.** The login,
+the user registry and the console's password panel landed on the working branch
+`claude/eloquent-archimedes-bn69tr` and `main` is behind it. On `main` the `api` command passes
+neither `--platform-user-routes` nor `--credential-admin-role` and publishes nothing on the host —
+so the route step 12 posts to is not registered and answers **404**, `127.0.0.1:8787` refuses the
+connection, and creating a user needs the compose edit this page no longer tells you to make. A
+bare `git pull` on `main` does not fix that — it is a different branch, not a newer commit:
+
+```bash
+git log --oneline origin/main -1                    # has it been merged since?
+git fetch origin && git checkout claude/eloquent-archimedes-bn69tr
+```
+
+If `git log origin/main` already shows that work, stay on `main`; the check is one command and the
+alternative is finding out at step 12. The arm64 database fix in step 1 is on **both**, so a plain
+`git pull` is enough for that one.
 
 Generate the five secrets. Run each line and paste the output into the matching `.env` key:
 
@@ -226,9 +250,13 @@ What each secret does, so you know what rotating one costs:
 | `OPERATE_TOKEN_SIGNING_KEY` | session tokens; the public half is derived from it | every session gets one 401 and a re-login |
 | `CURSOR_ENCRYPTION_SECRET` | the keyset cursor, which otherwise carries a classified field's plaintext | cursors in flight get one 400 and a restarted page walk |
 
-**Leave `COLUMN_ENCRYPTION_SECRET` unset unless you are switching `OPERATE_PACK`** to
-`erp-healthcare` or `erp-government`. Those declare `phi`/`regulated` fields and the API will
-refuse to boot without it; the default `erp-core` declares none.
+**Leave `COLUMN_ENCRYPTION_SECRET` unset.** The default `erp-core` declares no `phi`/`regulated`
+field, so nothing would use it. `erp-healthcare` and `erp-government` do declare them — and
+switching `OPERATE_PACK` to either is **refused at boot on the shipped `--store pg` whether or not
+this secret is set**, because the JSONB store cannot encrypt a column and would hold those fields in
+the clear. Setting the secret alone does not get you there: serving one of those packs means
+`--store pg-columns` on the `api` command *and* this secret, and `deploy/docker-compose.yml`'s
+comment above the `--pack` flag says what else that switch brings with it.
 
 ---
 
@@ -254,23 +282,60 @@ and exit 0, then `api` to boot, then `web`.
 > every `up`. See *If `migrate` exits 1* in `deploy/README.md` for the by-hand form and the other
 > reasons.
 
-Four boot lines are worth reading, and they are the ones that tell you the deployment is
-configured rather than merely running:
+The boot is talkative — a dozen surveys report what this manifest and this store can and cannot
+do — and these are the ones that tell you the deployment is *configured* rather than merely
+running. They appear in this order, interleaved with the rest, and the three `[auth]` lines are
+deliberately **not adjacent**: each is said at the point the thing it describes is actually wired,
+so the first lands before the database is even opened and the last two after everything else has
+mounted.
 
 ```
-[auth] api-key specs: 1 from OPERATE_API_KEY_SPECS, 0 from argv …
-[auth] credential login: enabled (kid login-v1, public key …)
+[auth] api-key specs: 0 from argv, 1 from OPERATE_API_KEY_SPECS — none on the command line
 [pg] database channel: PGSSLMODE=prefer — the server may decline TLS …
-[cursor] cursor sealing: sealed …
 [list] declared surfaces: all serveable on --store pg
+[cursor] cursor sealing: sealed …
+[cursor] cursor disclosure: sealed …
+[auth] credential login: enabled (kid login-v1, public key …)
+[auth] credential routes mounted: POST /v1/account/password (self) and POST /v1/platform/users/{id}/credential for roles: platform_admin
 ```
 
-If `credential login` says `refused`, it names the variable to set. If `[cursor]` says
-`plaintext_disclosing`, `CURSOR_ENCRYPTION_SECRET` is unset.
+There is deliberately **no** boot line announcing `/v1/auth/token`, the session TTL or the lockout
+threshold, so do not wait for one. The other two `[auth]` lines in the log are per-request rather
+than per-boot — `login refused <reason>: <detail>`, which is where a failed sign-in explains itself
+to you and not to the caller, and `user <id> credential re-hashed at current scrypt parameters`,
+which appears the first time someone signs in after the cost floor has been raised.
+
+Rather than scrolling the log for them:
+
+```bash
+docker compose logs api | grep -E '\[(auth|pg|cursor|list)\]'
+```
+
+What to do when one of them says something else:
+
+- **`credential login: refused …`** names the variable it wants, and it is fatal rather than
+  degraded: the API exits on it, so this line is followed by one `fatal:` line and nothing else.
+  See *When it does not come up* below for why that does not read as `unhealthy`.
+- **`credential routes mounted: … (self) only`** means `--credential-admin-role` is not granted, so
+  setting *another* person's password still needs a shell. The shipped compose grants it to
+  `platform_admin`; seeing this means you are on a commit that predates it (step 9).
+- **`cursor disclosure: plaintext_disclosing`** means `CURSOR_ENCRYPTION_SECRET` is unset. It is the
+  *disclosure* line that says so and not the sealing line, which reports `absent` for the same
+  cause — two lines, because sealing is about this deployment's configuration and disclosure is
+  about what the manifest you are serving actually exposes.
 
 **Success looks like:** `docker compose ps` shows `api` **healthy** (not just *running* — the
-healthcheck polls `/readyz`), and `curl -s https://api.yourdomain.com/readyz` returns JSON with
-`"status":"ready"`.
+healthcheck polls `/readyz`), and from the VM:
+
+```bash
+curl -s http://127.0.0.1:8787/readyz
+# {"status":"ready","checks":[{"name":"postgres","outcome":"ready"}]}
+```
+
+That address rather than the public one because the compose file publishes the API on
+`127.0.0.1:8787` — loopback only — so it answers before DNS has propagated and before Caddy holds
+a certificate. Once both are in place the same check answers at `https://api.yourdomain.com/readyz`,
+through Caddy.
 
 ### When it does not come up
 
@@ -286,17 +351,32 @@ The API's boot refusals are deliberate and each names its remedy — a classifie
 that encrypts nothing. They exit the process on purpose, which is why `web` waits on the API's
 health rather than on its start.
 
+**A refused boot does not show up as `unhealthy`, and that is worth knowing before you spend time
+in `docker compose ps`.** A refusal throws; the binary's top-level handler writes one `fatal: …`
+line to stderr and exits 1; and `api` is `restart: unless-stopped`, so compose respawns it
+immediately. What you see is `api` restarting on a loop and a healthcheck that simply never passes
+— no "unhealthy" anywhere, and nothing in `ps` naming a cause, because the process never lived long
+enough to be probed. The log is the only place the reason exists:
+
+```bash
+docker compose logs api | grep 'fatal:'
+```
+
 ---
 
 ## 11. Create your first tenant
 
-The token half of `OPERATE_ADMIN_API_KEY` is everything before the first colon.
+The token half of `OPERATE_ADMIN_API_KEY` is everything before the first colon — read it out of
+`.env` rather than retyping a credential:
 
 ```bash
-# Everything before the first colon of OPERATE_ADMIN_API_KEY.
-ADMIN=<the token half>
+# Run from crossengin/deploy, so .env is beside you.
+ADMIN=$(grep '^OPERATE_ADMIN_API_KEY=' .env | cut -d= -f2- | cut -d: -f1)
 
-curl -sS -X POST https://api.yourdomain.com/v1/platform/tenants \
+# http://127.0.0.1:8787 and not https://api.yourdomain.com: the compose file publishes the API on
+# the loopback interface for exactly this moment, when DNS may not have propagated and Caddy may
+# hold no certificate yet. Both reach the same API; from anywhere but the VM, use the public name.
+curl -sS -X POST http://127.0.0.1:8787/v1/platform/tenants \
   -H "x-api-key: $ADMIN" -H 'content-type: application/json' \
   -d '{"slug":"acme","name":"Acme Ltd","tier":"small","region":"eu"}'
 ```
@@ -307,40 +387,76 @@ deliberately not on this surface — that is the audited GDPR flow behind
 
 ---
 
-## 12. Create your first user — this is a shell step, on purpose
+## 12. Create your first user — a shell step for the first one only
 
 There is no sign-up page and no forgot-password, because a fresh deployment has **no mail
-channel**: an operator with shell access is the only principal that exists before the first
-password does.
+channel**. So one password comes from a shell and the rest do not, and the asymmetry is the
+bootstrap rather than a policy: setting a password in the console means being signed in to the
+console, which means already holding one. `set-credential` is how the first one gets in, and after
+it **Platform → Users** provisions a person and sets their first password over
+`POST /v1/platform/users/{id}/credential`, while each person changes their own at `/account`.
+Neither of those needs a shell.
 
-**First mount the registry.** It is off by default and behind its own grant — deliberately a
-*different* grant from `--platform-admin-role`, because the people who may create tenants need not
-be the people who may mint the identities inside them. Add two lines to the `api` service's
-`command:` in `docker-compose.yml`:
+**Nothing to mount.** The shipped `docker-compose.yml` already passes
+`--platform-user-routes --platform-user-role platform_admin` (the registry) and
+`--credential-admin-role platform_admin` (the password panel), so there is no compose edit to make
+here — check with `grep platform-user docker-compose.yml` if you want to see it. Both grants are
+deliberately *separate* from `--platform-admin-role`, because the people who may create tenants need
+not be the people who may mint identities inside them or take one over; on a single-operator
+deployment they are one person, which is why the shipped file points all three at `platform_admin`
+— two of them written out and the third by default. A deployment that wants those populations to
+differ changes one line each. Re-adding a flag that is already there is at best noise, and
+hand-editing that list is where a neighbouring flag goes missing.
 
-```yaml
-      - --platform-user-routes
-      - --platform-user-role
-      - platform_admin
-```
+### Which role to grant, and why it is a fork
 
-then `docker compose up -d api`. With no role nothing is mounted at all and the API says so at
-boot — the grant is fail-closed.
+**A session carries exactly one role.** The login reads the membership's `primaryRole` and stamps
+it into the token's `scope`; the gateway takes `scope[0]` and `secondaryRoles` is populated by
+nothing anywhere. So the membership below decides what this person can actually do, and the two
+jobs do not overlap:
+
+| Grant this | …and they reach |
+|---|---|
+| `platform_admin` | `/v1/platform/*` — **Platform → Tenants**, **Platform → Users** (including setting other people's passwords), **Platform → Design Reviews** |
+| `erp_admin` | the ERP entity pages under `/e/…`, tenant settings at `/admin/settings`, and the **AI Studio** at `/setup` |
+
+Neither reaches the other's surfaces, and in both directions it is a 403 rather than a missing
+link — the sidebar shows every section to everyone and the API is what refuses. `platform_admin` is
+not one of the fifteen roles `erp-core` declares, so a session carrying it has no entity permissions
+at all and every ERP page comes back empty; the shipped compose passes `--ai-design-role erp_admin`,
+which *replaces* the default rather than adding to it, so `platform_admin` is refused at the AI
+Studio too. Going the other way, `/v1/platform/*` is guarded by `--platform-admin-role`, which
+defaults to `platform_admin` alone.
+
+**One person doing both jobs means two memberships**, because
+`meta.user_tenant_membership` is `UNIQUE (user_id, tenant_id)` — one role per person per tenant.
+Grant `erp_admin` in the tenant from step 11 and `platform_admin` in a second tenant kept for the
+purpose, then choose which you are by the **Workspace** you type at the login form. Both tenants
+have to exist: the login resolves that field against `meta.tenants` and refuses a workspace it
+cannot find.
+
+**If you only want one login, grant `platform_admin`** — it is the one that can provision everybody
+else, including a second membership for yourself later. The commands below use it.
 
 ```bash
+# Still on the VM, in crossengin/deploy, with $ADMIN set from step 11.
 TENANT=<the tenant id from step 11>
-USER_ID=$(uuidgen)        # or any UUID you choose; it becomes the meta.users.id
+USER_ID=$(cat /proc/sys/kernel/random/uuid)   # the kernel's own generator; needs no package
 
 # 1. Provision the principal and its tenant membership in one call. Note the body is NESTED:
-#    `user` and `membership` are separate objects, and `id` is accepted because the id that needs
-#    a row is one the deployment may already have committed to in an --api-key spec.
-curl -sS -X POST https://api.yourdomain.com/v1/platform/users \
+#    `user` and `membership` are separate objects and the schema is strict, so the flat form is a
+#    400 every time. `id` is accepted because the id that needs a row is one the deployment may
+#    already have committed to in an --api-key spec.
+curl -sS -X POST http://127.0.0.1:8787/v1/platform/users \
   -H "x-api-key: $ADMIN" -H 'content-type: application/json' \
   -d "{\"user\":{\"id\":\"$USER_ID\",\"email\":\"you@yourdomain.com\",\"displayName\":\"You\"},
-       \"membership\":{\"tenantId\":\"$TENANT\",\"primaryRole\":\"erp_admin\",\"status\":\"active\"}}"
+       \"membership\":{\"tenantId\":\"$TENANT\",\"primaryRole\":\"platform_admin\",\"status\":\"active\"}}"
 
 # 2. Set the password. Read from the ENVIRONMENT and never from argv, because argv is readable by
-#    anyone who can run `ps` — the subcommand refuses `--password` by name.
+#    anyone who can run `ps` — the subcommand refuses `--password` by name. It runs inside the api
+#    container, which is where CREDENTIAL_PEPPER and the PG* variables already are; run it anywhere
+#    else and you have to supply them yourself, and a pepper that differs from the server's stores a
+#    hash no login can verify.
 docker compose exec -e OPERATE_NEW_PASSWORD='<a strong password>' api \
   node apps/operate-server/dist/bin/operate-server.js set-credential \
   --user "$USER_ID" --confirm-user "$USER_ID"
@@ -352,8 +468,22 @@ active membership resolves as a notification recipient. The user id is typed **t
 person out and hands their account to whoever typed the password. There is no `--yes`, because a
 flag meaning "I meant it" can be pasted from a runbook without reading the id.
 
-**Success looks like:** `set-credential: ok`. Then open `https://yourdomain.com`, log in, and you
-should land on the entity list.
+**Log in over HTTPS, because over plain HTTP it fails silently.** The session cookie is set
+`Secure` whenever `NODE_ENV=production`, which the compose file sets on `web` — so on a plain-http
+path the browser *discards* the cookie the login just issued: the POST returns 200, the page does a
+full reload, `middleware.ts` finds no cookie, and you land back on a freshly-mounted sign-in form
+with no error on it, because the error state belongs to the page that navigated away. It reads
+exactly like a wrong password, and an operator who tries this before DNS resolves will conclude the
+password is wrong and re-run `set-credential`. Use `https://yourdomain.com`. Reaching the VM by IP
+address does not show you this either — an IP matches neither site block in `deploy/Caddyfile`, so
+Caddy answers it rather than the UI — so anything other than the sign-in form means DNS or the
+certificate, not the credential.
+
+**Success looks like:** `set-credential: ok`. Then open `https://yourdomain.com`, type the
+tenant's **slug** (`acme`) as the workspace, your email and the password, and you should land in
+the console. From there on nobody needs a shell: **Platform → Users** provisions the next person
+and sets their first password, **Platform → Tenants → one tenant** grants them a membership, and
+they change their own password at `/account`.
 
 ---
 
@@ -393,23 +523,49 @@ it does, that cron line is the deployment's real recovery point.
 
 ## 14. Turn the rest of the platform on
 
-The shipped `docker-compose.yml` passes a deliberately small set of flags. A great deal of what is
-built is **off by default**, and each of these is a line added to the `api` service's `command:`.
-Read `deploy/README.md` for what each one needs; the ones most deployments want:
+The shipped `docker-compose.yml` passes the request path, the login, the identity surface and the
+AI Architect — `--platform-admin`, `--platform-user-routes`, `--credential-login`,
+`--credential-admin-role`, `--idempotency-store pg` and `--ai-design` are all on the `api` command
+already, so none of them is in the table below. What is still off is everything that **recurs**: no
+job fires, no timer fires, no notification is delivered and no audit row is anchored until you say
+so. Each is a line added to that `command:`; read `deploy/README.md` for what each one needs.
 
 | Flag | What it turns on |
 |---|---|
 | `--schedule-ms 60000` | the manifest's scheduled jobs (also needs `--workflow-workers` to drain them) |
 | `--workflow-workers` | the timer, activity and job workers — without this a due timer never fires |
+| `--notification-drain-ms 15000` | delivery — without it nothing is sent, in-app notices included |
 | `--audit-chain-config …` | the hash-chained audit trail |
+| `--checkpoint-config …` | the periodic chain checkpoints the next flag's truncation check needs |
 | `--integrity-proof-config …` | the periodic audit-integrity verification |
 | `--deletion-capabilities …` | GDPR Article 17 — **neither deletion surface mounts without it** |
 | `--tenant-status-gate` | enforces `suspended` / `archived` / `pending_deletion` on every request |
 | `--rate-limit-policy …` | durable, cross-replica rate limiting |
-| `--platform-user-routes` | the user/membership registry (step 12 turns this one on already) |
 
 Add them a few at a time and read the boot log after each `docker compose up -d`: every one of
 these has refusals that name what is missing.
+
+### The self-hosted model, if you want one
+
+`--ai-design` is already on, so the routes mount either way: with no provider configured the boot
+log says `[ai-design] no AI provider configured …` and `POST /v1/ai/design` answers a 503
+`ai_unavailable` rather than refusing the boot. Setting `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in
+`.env` is the whole of the hosted path. For a model on this VM instead, bring the stack up with the
+AI overlay:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.ai.yml up -d --build
+```
+
+**There is no compose edit to make, and that is a recent change worth knowing about.** The overlay
+no longer carries its own copy of the `api` `command:` — compose *replaces* a command rather than
+merging it, so the copy it used to hold had to repeat every flag and had drifted ten behind the
+base, including `--credential-login`, which meant this self-hosted path shipped with no login at
+all. It passes the model through `environment:`, which compose *merges*, so the overlay now inherits
+every flag and every variable the base declares.
+
+On an Ampere A1 with no GPU this works and is slow: generating a manifest takes minutes rather than
+seconds. Fine to try, not fine to put tenants in front of.
 
 ---
 
