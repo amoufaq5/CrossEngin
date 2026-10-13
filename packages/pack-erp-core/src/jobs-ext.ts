@@ -31,6 +31,17 @@ function job(id: string, name: string, description: string, trigger: Trigger, op
 }
 
 const scheduled = (cron: string): Trigger => ({ kind: "scheduled", cron, timezone: "UTC" });
+/**
+ * An `event` trigger, whose name must be one `entityEventEffect` emits.
+ *
+ * `matchEventJobs` compares the two with `===` and the only producer of an entity event spells it
+ * `<entity>.<verb>` — lowercased entity, then one of `created`/`updated`/`deleted` or a lifecycle
+ * transition's target state. The four names below were `erp.<snake_case act>`, which matched
+ * nothing, so none of these jobs could ever have been enqueued. The three that are still spelled
+ * that way are adjudicated in `packages/testing/src/strategy/manifest-event-names.ts`: they name
+ * acts this pack has no producible counterpart for, and renaming them onto a near miss would fire
+ * on a moment nobody chose.
+ */
 const event = (eventName: string): Trigger => ({ kind: "event", eventName });
 
 // ---- Integration connectors (external systems) ------------------------------
@@ -63,7 +74,7 @@ export const TAX_CALCULATION_JOB = job(
   "erp-core-tax-calculation",
   "External tax calculation",
   "On quote send, calls the tax engine (Avalara/TaxJar) to compute jurisdiction-accurate tax for each line and writes the result back.",
-  event("erp.quote_sent"),
+  event("quote.sent"),
   { inputDataClass: "commercial_sensitive" },
 );
 
@@ -87,7 +98,7 @@ export const CRM_LEAD_ENRICHMENT_JOB = job(
   "erp-core-crm-lead-enrichment",
   "Lead enrichment",
   "On lead creation, enriches the record via a data provider (Clearbit/ZoomInfo) with firmographics before routing it to a sales rep.",
-  event("erp.lead_created"),
+  event("lead.created"),
   { inputDataClass: "pii", outputDataClass: "pii" },
 );
 
@@ -113,7 +124,7 @@ export const SALES_ORDER_TO_INVOICE_JOB = job(
   "erp-core-sales-order-to-invoice",
   "Sales order to invoice",
   "On sales-order fulfillment, auto-generates the customer invoice from fulfilled lines and advances the order to 'invoiced'.",
-  event("erp.sales_order_fulfilled"),
+  event("salesorder.fulfilled"),
   { inputDataClass: "commercial_sensitive" },
 );
 
@@ -121,7 +132,7 @@ export const WORK_ORDER_COMPLETION_JOB = job(
   "erp-core-work-order-completion",
   "Work order completion posting",
   "On work-order completion, consumes component stock per the BOM and receives the finished good into the warehouse via stock movements.",
-  event("erp.work_order_completed"),
+  event("workorder.completed"),
   { concurrencyLimit: 5 },
 );
 
