@@ -189,6 +189,125 @@ describe("PostgresCredentialStore", () => {
     });
   });
 
+  describe("findById", () => {
+    it("reads the same columns as its sibling, by id", async () => {
+      // One `CREDENTIAL_COLUMNS` behind both, so the two cannot come to disagree about which
+      // fields a credential record has -- the asymmetry between them is the *obligation on a
+      // miss*, not the projection.
+      const { conn, captured } = fakeDb([
+        [
+          {
+            id: USER,
+            status: "suspended",
+            credential_hash: HASH,
+            credential_failed_attempts: 4,
+            credential_locked_until: null,
+          },
+        ],
+      ]);
+      expect(await new PostgresCredentialStore(conn).findById(USER)).toEqual({
+        userId: USER,
+        status: "suspended",
+        credentialHash: HASH,
+        failedAttempts: 4,
+        lockedUntil: null,
+      });
+      const sql = captured[0]!.sql;
+      expect(sql).toContain("credential_hash");
+      expect(sql).toContain("credential_failed_attempts");
+      expect(sql).toContain("credential_locked_until");
+      expect(sql).toContain("WHERE id = $1::uuid");
+      // `email` and not `lower(email)`: normalisation happens in `normalizeEmail` rather than in
+      // SQL, so the sibling statement is `WHERE email = $1` and an exclusion written over
+      // `lower(email)` passes for the exact statement it exists to rule out.
+      expect(sql).not.toContain("email");
+      expect(sql).not.toContain("display_name");
+    });
+
+    it("answers null for a non-uuid without issuing a statement", async () => {
+      // `::uuid` raises `22P02` on a malformed value, and the operator route turns this null into
+      // its own 400 -- so a mistyped path segment is a refusal rather than a 500 from the driver.
+      const { conn, captured } = fakeDb([[{ id: USER }]]);
+      const store = new PostgresCredentialStore(conn);
+      expect(await store.findById("not-a-uuid")).toBeNull();
+      expect(await store.findById("")).toBeNull();
+      expect(await store.findById("   ")).toBeNull();
+      expect(captured).toHaveLength(0);
+    });
+
+    it("lowercases and trims the id it binds", async () => {
+      // `USER` and `TENANT` are digits and dashes, so `.toUpperCase()` on either is the IDENTITY
+      // and an assertion written over one proves the trim and nothing about the case — it passes
+      // with `.toLowerCase()` deleted from the implementation. (`resolveTenant`'s sibling test at
+      // the top of this file is vacuous for exactly that reason.) So the case-folding half needs a
+      // uuid that carries hex letters, which is what makes it observable at all.
+      const MIXED = "AB12CD34-56EF-4A78-9BCD-EF0123456789";
+      const { conn, captured } = fakeDb([[], [{ id: MIXED.toLowerCase(), status: "active" }]]);
+      const store = new PostgresCredentialStore(conn);
+      await store.findById(`  ${USER}  `);
+      expect(captured[0]!.params).toEqual([USER]);
+      const record = await store.findById(`  ${MIXED}  `);
+      expect(captured[1]!.params).toEqual([MIXED.toLowerCase()]);
+      expect(record?.userId).toBe(MIXED.toLowerCase());
+    });
+
+    it("carries no tenant context and no scope predicate", async () => {
+      // The deliberate exception to the scoped-read rule rather than an omission: `meta.users` has
+      // no `tenant_id`, no RLS and no policies — verified against a live catalog — so it is
+      // confined by the serving role's table GRANT alone, and there is no scope for this read to
+      // name. Naming one would be a second spelling of `PostgresUserStore.membershipFor`'s scoped
+      // read, which that module's own comment says is how two of them drift. Asserted at the read
+      // it is about as well as in the file-wide sweep below, so the property is stated where it
+      // holds: the sweep proves no statement sets a context, and this proves it of *this* one,
+      // which is the assertion that survives a method being dropped from the sweep's list.
+      const { conn, captured, sql } = fakeDb([
+        [{ id: USER, status: "active", credential_hash: HASH, credential_failed_attempts: 0 }],
+      ]);
+      await new PostgresCredentialStore(conn).findById(USER);
+      expect(captured).toHaveLength(1);
+      expect(sql()).not.toContain("set_config");
+      expect(sql()).not.toContain("current_setting");
+      expect(captured[0]!.sql).not.toContain("tenant_id");
+    });
+
+    it("reads an absent or empty hash as null, so no-credential is distinguishable", async () => {
+      // A provisioned user holds no credential until one is set, and `no_current_credential` is a
+      // different refusal from `current_password_wrong` -- so the empty string must not read as a
+      // hash nobody can match (ADR-0331's claim-versus-nobody-looked, inside a 409 vs a 401).
+      const { conn } = fakeDb([
+        [{ id: USER, status: "active", credential_hash: "", credential_failed_attempts: 0 }],
+        [{ id: USER, status: "active", credential_failed_attempts: 0 }],
+      ]);
+      const store = new PostgresCredentialStore(conn);
+      expect((await store.findById(USER))?.credentialHash).toBeNull();
+      expect((await store.findById(USER))?.credentialHash).toBeNull();
+    });
+
+    it("normalizes a Date lock to an ISO instant", async () => {
+      // node-postgres answers a TIMESTAMPTZ as a `Date` and Postgres refuses to parse its own
+      // `Date.toString()` (ADR-0331), so the normaliser is not cosmetic.
+      const { conn } = fakeDb([
+        [
+          {
+            id: USER,
+            status: "active",
+            credential_hash: HASH,
+            credential_failed_attempts: 1,
+            credential_locked_until: new Date("2026-10-11T12:00:00.000Z"),
+          },
+        ],
+      ]);
+      expect((await new PostgresCredentialStore(conn).findById(USER))?.lockedUntil).toBe(
+        "2026-10-11T12:00:00.000Z",
+      );
+    });
+
+    it("answers null for a well-formed id with no row", async () => {
+      const { conn } = fakeDb([[]]);
+      expect(await new PostgresCredentialStore(conn).findById(USER)).toBeNull();
+    });
+  });
+
   describe("recordFailure", () => {
     it("increments and locks in ONE statement, reading the clock from the database", async () => {
       // Read-modify-write is what this must not be: the losing side of that race ADMITS an
@@ -269,6 +388,7 @@ describe("PostgresCredentialStore", () => {
     const { conn, sql } = fakeDb([
       [{ id: TENANT, status: "active" }],
       [{ id: USER, status: "active", credential_hash: HASH, credential_failed_attempts: 0 }],
+      [{ id: USER, status: "active", credential_hash: HASH, credential_failed_attempts: 0 }],
       [{ credential_failed_attempts: 1 }],
       [],
       [{}],
@@ -276,6 +396,7 @@ describe("PostgresCredentialStore", () => {
     const store = new PostgresCredentialStore(conn);
     await store.resolveTenant("acme");
     await store.findByEmail("a@b.test");
+    await store.findById(USER);
     await store.recordFailure(USER, 3, 30);
     await store.recordSuccess(USER);
     await store.setCredential(USER, HASH);

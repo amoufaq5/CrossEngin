@@ -133,6 +133,39 @@ export class PostgresCredentialStore {
   }
 
   /**
+   * The same row by id rather than by email, for a caller that already knows who it is talking to.
+   *
+   * Both credential routes need this and neither can use `findByEmail`: the self-service change
+   * identifies its subject from `principal.principalId`, which *is* `meta.users.id`, and asking
+   * the caller for their email to look up the row they are already authenticated as would make the
+   * subject a request field -- which is the one thing that route must not have.
+   *
+   * There is deliberately **no** `spendPasswordWork` obligation on a miss here, which is the one
+   * way this differs from its sibling. `findByEmail` is reached by an unauthenticated login where
+   * an early return is an account enumerator; every caller of this one is already past the auth
+   * stage and is naming its own id or one it holds a grant over, so there is nothing to enumerate
+   * and a constant-time miss would buy nothing.
+   */
+  async findById(userId: string): Promise<CredentialRecord | null> {
+    if (!UUID_RE.test(userId.trim())) return null;
+    const result = await this.conn.query<Record<string, unknown>>(
+      `SELECT ${CREDENTIAL_COLUMNS} FROM ${this.users} WHERE id = $1::uuid`,
+      [userId.trim().toLowerCase()],
+    );
+    const row = result.rows[0];
+    if (row === undefined) return null;
+    const hash = row["credential_hash"];
+    const locked = row["credential_locked_until"];
+    return {
+      userId: String(row["id"]),
+      status: String(row["status"]),
+      credentialHash: typeof hash === "string" && hash !== "" ? hash : null,
+      failedAttempts: Number(row["credential_failed_attempts"] ?? 0),
+      lockedUntil: locked === null || locked === undefined ? null : isoInstant(locked),
+    };
+  }
+
+  /**
    * Advances the failure counter and locks the account when it crosses the threshold, in **one**
    * statement.
    *

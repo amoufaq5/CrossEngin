@@ -5,7 +5,28 @@
 
 import { handleUnauthorized } from "@/lib/unauthorized";
 
-export type TenantStatus = "active" | "suspended" | "archived" | "deleted";
+/**
+ * All five, which is what the server has had since ADR-0334 added `pending_deletion`.
+ *
+ * This was four, and the two consequences were live rather than cosmetic: the type was simply
+ * **false about the wire**, so a tenant awaiting an Article 17 erasure rendered its raw status
+ * through a `TenantStatus`-typed field that said it could not exist; and the list page's filter
+ * offered the four it knew, so such a tenant was **unfindable** — the one state in which an
+ * operator most wants to find a tenant is the one the console could not ask for.
+ *
+ * `pending_deletion` deliberately carries no action in the console. `TENANT_STATUS_TRANSITIONS` has
+ * no set targeting it and `CONSOLE_ACTION` has three non-null entries for that reason: a tenant
+ * reaches it through the deletion-request route and leaves it the same way, so a button here would
+ * be a second route to a state machine that already has one.
+ */
+export const TENANT_STATUSES = [
+  "active",
+  "suspended",
+  "archived",
+  "pending_deletion",
+  "deleted",
+] as const;
+export type TenantStatus = (typeof TENANT_STATUSES)[number];
 
 export interface Tenant {
   readonly id: string;
@@ -64,9 +85,16 @@ function apiPath(suffix = ""): string {
  * Reads a non-2xx response body and extracts the best human message from an
  * RFC 9457 problem document ({ detail | title | message }), falling back to the
  * raw text or status line. Throws a PlatformError carrying the status.
+ *
+ * Exported because `lib/users.ts` reads the *same* problem documents from the same API through the
+ * same proxy, and its routes answer the same `{error, detail}` shape. A second copy there would be
+ * the one place the two could disagree about which key carries the human message — and the
+ * 401-redirect side effect is the half that must not be forgotten, since a module that omitted it
+ * would leave an expired session rendering "Request failed (401)" on every panel instead of
+ * sending the viewer to the login.
  */
-async function throwProblem(res: Response): Promise<never> {
-  // The single error path of this module's three requests, so one call covers all of them.
+export async function throwProblem(res: Response): Promise<never> {
+  // The single error path of every request in this module and in lib/users.ts.
   handleUnauthorized(res);
   let message = res.statusText || `Request failed (${res.status})`;
   try {

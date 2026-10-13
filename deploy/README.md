@@ -249,11 +249,19 @@ and `.env.example` says what each is for and how to generate it. The boot line i
 `[auth] credential login: enabled (kid login-v1, public key …)`; if it says `refused`,
 nobody can log in and the reason names the variable.
 
-**Create the first user by hand.** There is no mail channel in a fresh deployment, so there
-is no "forgot password" and no self-service sign-up. `.env.example` has the three commands:
-provision a user, grant it a membership in a tenant — which is what decides the role every
-session of theirs carries — then `set-credential`. The password comes from the environment
-and never from argv; the subcommand refuses `--password` by name and says why.
+**Create the first user by hand — and only the first.** There is no mail channel in a fresh
+deployment, so there is no "forgot password" and no self-service sign-up. `.env.example` has
+the three commands: provision a user, grant it a membership in a tenant — which is what
+decides the role every session of theirs carries — then `set-credential`. The password comes
+from the environment and never from argv; the subcommand refuses `--password` by name and
+says why.
+
+The asymmetry is the bootstrap and not an oversight: the console sets a password over HTTP,
+and reaching that route needs a session, which needs a password. So exactly one credential
+has to come from outside the web. **Every user after the first is a console step** — see
+*The console* below. Until ADR-0364 that was not true of any of them: `--platform-user-routes`
+mounted ten identity routes and the one act that makes them usable had no route at all, so
+onboarding broke at step 3 of 4 and a `docker compose exec` was mandatory per person.
 
 **A session's role is frozen until it expires.** The role is read from the membership at
 login and stamped into the token, and nothing re-reads the directory per request. So
@@ -269,6 +277,40 @@ accounts — for which there is no per-IP limit available here: behind Caddy eve
 arrives from the same container address. It also means anyone who knows an email address can
 lock that user out for the window, which is why the window lapses rather than being
 permanent and why `set-credential` clears a lock.
+
+### The console
+
+Once you can log in, `https://$DOMAIN` is where the deployment is operated. What is reachable,
+and what is not:
+
+| Where | What you can do |
+| --- | --- |
+| **Platform → Tenants** | List, filter by status, create. Open one to see its record and to suspend / archive / reactivate it — each needs a typed **reason**, which lands in the tenant's permanent lifecycle trail. |
+| **Platform → Tenants → one tenant** | Grant a membership (user id, primary role, and a status you must choose), activate or revoke one, and see every member of that tenant. |
+| **Platform → Users** | List every `meta.users` row, filter by status, provision a new one, and open one to suspend / reactivate / retire it. |
+| **Platform → Users → one user** | **Set their password.** This is the route that did not exist before ADR-0364 and the reason onboarding needed a shell. It cannot be aimed at yourself. |
+| **Platform → Design Reviews** | Approve or reject a manifest the Architect designed, with a field-level diff. |
+| **AI Studio** (`/setup`) | Describe a business in prose and have the Architect design a manifest for it; activating one makes it that tenant's live schema. |
+| **/account** | Change your own password. Needs the current one, so it is the one credential act that needs no grant. |
+
+Four things it deliberately does **not** do, so you know where the edges are:
+
+- **No user search.** The users list pages but has no email filter, because the server's list
+  route reads only `status`, `limit` and `cursor` — offering a search box the API drops would
+  return every user under a 200 that looks filtered. Page, or open a user by id.
+- **No "which tenants is this user in" view.** Memberships are reached from the tenant, never
+  from the user, because that read has no tenant to scope by and would be correct as the
+  table's owner and empty as anything else. The user page says so and links back.
+- **No role dropdown when granting a membership.** The valid roles come from the tenant's
+  resolved manifest and no route serves them, so the field is free text. An unknown role is
+  accepted here and grants nothing at serve time — which the form tells you.
+- **No database browser and no SQL.** A tenant's records are served by that tenant's own
+  compiled gateway, under that tenant's field grants, classification and redaction. A
+  platform-level reader would be a second path to the same rows with none of that applied.
+
+Setting someone's password needs `--credential-admin-role` on the `api` command; the shipped
+compose grants it to `platform_admin`. Without it the panel says so and names
+`set-credential` as the shell path, rather than failing as though the user were missing.
 
 ## Rate limiting
 

@@ -208,6 +208,24 @@ services:
       # password is read from the environment and never from argv, for the `ps` reason above; the
       # subcommand refuses `--password` by name and says so.
       - --credential-login
+      # Lets a platform_admin set ANOTHER user's password from the console, over
+      # POST /v1/platform/users/{id}/credential. Without it that act needs a shell -- and that is
+      # where onboarding used to break: the tenant and the user are both creatable over HTTP, so
+      # the only step that needed `docker compose exec` was the third of four.
+      #
+      # The same role as --platform-admin and --platform-user-role here, deliberately, because on a
+      # single-operator deployment they are one person and pretending otherwise buys nothing. The
+      # flag is separate because the privileges are: meta.users has no RLS, so this route's role
+      # check is the entire authorisation with no policy behind it, and a deployment that wants the
+      # people who provision identities to be a different set from the people who can take one over
+      # changes this line alone.
+      #
+      # It cannot be aimed at the caller (403 self_not_permitted). Changing your OWN password is
+      # POST /v1/account/password, which needs no grant and mounts with --credential-login above --
+      # so every user of this deployment can now change their password, which no deployment could
+      # do before.
+      - --credential-admin-role
+      - platform_admin
       # The issuer and audience the token asserts and the gateway checks. They are this
       # deployment's own names -- nothing external resolves them -- but they must agree, and
       # without them the runtime falls back to `https://crossengin.io` and refuses a token minted

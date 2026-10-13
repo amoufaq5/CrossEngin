@@ -278,6 +278,23 @@ export interface ServeOptions {
    * identities inside them.
    */
   readonly platformUserRoles: readonly string[];
+  /**
+   * Roles permitted to set **another** user's password, over
+   * `POST /v1/platform/users/{id}/credential`.
+   *
+   * Separate from `--platform-user-role` for a reason stronger than the tenants/identities split
+   * above: `meta.users` has no `tenant_id`, no RLS and no policies, so for a write to that table
+   * the route's role check is the *entire* authorisation — there is no policy behind it that would
+   * refuse a session which got past the handler, which is the belt every tenant-scoped write here
+   * has. Provisioning a principal and taking over its credential are different privileges, and the
+   * second has nothing underneath it.
+   *
+   * There is deliberately no `--credential-routes` boolean beside this. The **self**-service change
+   * (`POST /v1/account/password`) mounts whenever `--credential-login` does, because a deployment
+   * that can log in must be able to change the password it logs in with, and putting that behind a
+   * second opt-in is a feature with a trap in it (`--idempotency-store`'s reaper argument).
+   */
+  readonly credentialAdminRoles: readonly string[];
   /** Mount the per-user notification preference routes (`meta.notification_preferences`). */
   readonly preferenceRoutes: boolean;
   /** Roles permitted to read and set one's own preferences. Fail-closed on empty. */
@@ -580,6 +597,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   const gatewayCaptureOperations: string[] = [];
   let platformUserRoutes = false;
   const platformUserRoles: string[] = [];
+  const credentialAdminRoles: string[] = [];
   let preferenceRoutes = false;
   const preferenceRoles: string[] = [];
   const preferenceAdminRoles: string[] = [];
@@ -990,6 +1008,12 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       platformUserRoutes = true;
     } else if (arg === "--platform-user-role" || arg.startsWith("--platform-user-role=")) {
       platformUserRoles.push(takeValue(arg, next, "--platform-user-role"));
+      i += consumed();
+    } else if (
+      arg === "--credential-admin-role" ||
+      arg.startsWith("--credential-admin-role=")
+    ) {
+      credentialAdminRoles.push(takeValue(arg, next, "--credential-admin-role"));
       i += consumed();
     } else if (arg === "--preference-routes") {
       preferenceRoutes = true;
@@ -1735,6 +1759,16 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
         " surface mounted is silently inert",
     );
   }
+  // The same inert-grant rule one surface across, and the surface it names is `--credential-login`
+  // rather than a routes flag: the credential routes are built from the material
+  // `resolveCredentialAuth` returns, so without a login there is no pepper to hash under and the
+  // grant would reach a route that was never mounted.
+  if (credentialAdminRoles.length > 0 && !credentialLogin) {
+    throw new CliUsageError(
+      "--credential-admin-role requires --credential-login: the credential routes hash under the" +
+        " same pepper the login verifies with, so a grant with no login mounted is silently inert",
+    );
+  }
   if (platformUserRoutes && store === "memory") {
     throw new CliUsageError(
       "--platform-user-routes requires a Postgres store (--store pg or pg-columns): the registry is" +
@@ -1923,6 +1957,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     gatewayExecutionCapture,
     platformUserRoutes,
     platformUserRoles,
+    credentialAdminRoles,
     preferenceRoutes,
     preferenceRoles,
     preferenceAdminRoles,
@@ -2419,6 +2454,17 @@ Options:
                        audience resolved to the empty set. Needs --store pg|pg-columns
   --platform-user-role <role>  Role permitted to administer the registry (repeatable, fail-closed).
                        Separate from --platform-admin-role, which administers tenants
+  --credential-admin-role <role>  Role permitted to set ANOTHER user's password, over
+                       POST /v1/platform/users/{id}/credential (repeatable, fail-closed: with no
+                       role the route is not mounted at all). Until this existed, setting a password
+                       needed shell access — 'set-credential' is a subcommand because there is no
+                       mail channel, which is right about the FIRST password and does not generalise
+                       past it, so onboarding broke at step 3 of 4. Its own grant and not
+                       --platform-user-role's: meta.users has no RLS, so this route's role check is
+                       the entire authorisation with no policy behind it. Requires
+                       --credential-login. The route refuses being aimed at the caller — changing
+                       your own password is POST /v1/account/password, which needs no grant and
+                       mounts with --credential-login
   --preference-routes  Mount the per-user notification preference routes. Without them every user's
                        preferences are the built-in defaults for ever, so the consent half of
                        computeDispatchEligibility was unreachable. Needs --store pg|pg-columns

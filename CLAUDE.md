@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 358 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 359 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 19,133 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 19,175 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -1115,6 +1115,48 @@ type errors.
   the synchronous Article 17 route for `deleted`, which the old CHECK stores perfectly well — and it
   **refuses only when `--tenant-status-gate` reads the value**, warning otherwise, since without the
   gate nothing enforces the state either way.
+
+  ADR-0364 is the first user-directed increment of the run, and the class is **an argument that
+  expired and nothing noticed**. `set-credential`'s own doc comment says why it is a subcommand:
+  *"there is no mail channel … an operator with shell access is the only principal that exists
+  **before the first password does**."* Every clause is true of the **bootstrap** and stops
+  applying the moment that subcommand has been run once — after which an authenticated principal
+  carrying a grant exists, and the premise is spent. Nothing noticed, so the argument that
+  justified one shell step kept justifying **every** password: a tenant's onboarding broke at
+  step 3 of 4 (create tenant over HTTP, create user over HTTP, `docker compose exec`, log in), and
+  `--platform-user-routes` mounted **ten** identity routes with no UI at all while the one act that
+  makes them usable had no route.
+  Two routes, and the split is the decision rather than a layout: the operator route is authorised
+  by a **grant** and must not ask for the current password, the self route is authorised by
+  **possession** of the current password and needs no grant. So the preferences module's
+  `buildSetHandler(ctx, onBehalf)` boolean — one handler, one flag — would have been wrong here,
+  because the two differ in *what authorises them* and not in whom they are about.
+  **`self_not_permitted` is the checkable part of four-eyes for a credential**: the operator route
+  skips the possession proof, so aiming it at the caller would let a stolen session replace its own
+  credential and lock the owner out — refused **before any store call and before any audit row**,
+  since an act that must not be expressible is not a write anyone wants a row for.
+  `--credential-admin-role` is its own grant rather than `--platform-user-role` re-read for one
+  stated reason, measured against a live catalog: **`meta.users` carries no `tenant_id`, no RLS and
+  no policies**, so a route writing it has its role check as the *entire* authorization with no
+  policy belt behind it — which is the opposite of every other write surface here. The refusal set
+  is **smaller than the CLI's by construction**: `pepper_absent` and `pepper_refused` are
+  unreachable because the routes are built from the same `resolveCredentialAuth` material the login
+  is, so a deployment that can verify a password can hash one.
+  Three things were sharper than the feature, and all three are this run's own classes landing
+  inside it. **The first draft read `input.pathParams` and `input.body` through `as` casts** while
+  `HandlerInput` carries `params` and `parsedBody` — so both routes would have answered 400 to
+  every request, and the casts are exactly why `tsc` had nothing to say: ADR-0362's *type
+  annotation standing in for a check*, committed inside the increment citing it. The module now has
+  **no cast anywhere** and the removed helper's place carries the paragraph naming it. **Three
+  client/server contract defects were caught by reading the server rather than by a test**: a
+  `?email=` filter the list route drops (ADR-0359's class — never offer a surface the server
+  discards), a flat provision body against a nested `{user, membership?}` `.strict()` schema, and a
+  `tenantId` sent into a schema that `.omit()`s it. The second of those was **live in
+  `deploy/.env.example`**, whose step-1 curl could never have worked while `README.md` had it
+  right. And three times in one increment I read one process's output and attributed it to another
+  — a stale server on the port, an agent's journal lagging its writes, and a test file an agent was
+  mid-write on — which is ADR-0363's fake answering the wrong query's row, at the level of my own
+  measurements.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -3958,6 +4000,43 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   signed assertion that `--store memory` needs nothing to serve, where an optional field could be
   forgotten with the type still valid and every probe would answer 200 for a process whose database
   is gone.
+  **A password is settable over HTTP since ADR-0364** (`credential-routes.ts`), which closes the one
+  step of a tenant's onboarding that needed a shell. **Two** routes, and they are gateway routes
+  rather than interceptors — the login is outside the gateway because `authenticate` runs before
+  `match_route` and a login carries no credential that stage would accept, while both of these
+  carry one. `POST /v1/platform/users/{id}/credential` is the operator's, gated on
+  `--credential-admin-role` and mounted only when a role is granted; `POST /v1/account/password` is
+  the person's own, gated on nothing but `--credential-login`, so a deployment that mounts the
+  login gets self-service for free and an operator grant is the deliberate addition. The split is
+  **what authorises them** and not whom they are about, which is why this is not
+  `buildSetHandler(ctx, onBehalf)`: the operator route is authorised by a grant and takes no
+  current password, the self route by possession of the current password and takes no subject —
+  *"the viewer is always the credential"* (ADR-0331), load-bearing here rather than tidy, since a
+  subject parameter on the self route would be the operator route without the grant.
+  `--credential-admin-role` is its own grant and not `--platform-user-role` re-read, on a live
+  measurement: **`meta.users` carries no `tenant_id`, no RLS and no policies**, so the role check
+  is the *entire* authorization for a write to it, with no policy belt behind it — and
+  `--credential-admin-role` without `--credential-login` is **refused** at parse, because these
+  routes hash under the pepper the login verifies with, so the grant would otherwise be silently
+  inert. `self_not_permitted` is the checkable part of four-eyes for a credential: the operator
+  route skips the possession proof, so aiming it at the caller would let a stolen session replace
+  its own credential — refused **before any store call and before any audit row**, since an act
+  that must not be expressible is not a write anyone wants a row for. `confirmUserId` repeats the
+  path id (ADR-0316's `confirmTenantId` rule — this overwrites a credential, so naming the wrong
+  user both locks that person out and hands their account to whoever typed the password) and is
+  compared case-insensitively. The record goes **before** the write and an unrecordable one is a
+  **503** (ADR-0313's rule, ADR-0334's status), while a *refusal* row is best-effort, because
+  nothing changed and a lost refusal row must not become a 503. The audit scope is the increment's
+  one asymmetry: an operator's write files at **`tenantId: null`**, platform scope (ADR-0331),
+  because a credential is a property of the user and not of any one membership so filing it under
+  the operator's tenant would file it under an arbitrary one — while a self-service change files
+  against **the caller's own** tenant, which is the only one it is about. The refusal set is
+  **smaller than the CLI's by construction**: `pepper_absent` and `pepper_refused` cannot be
+  reached, because the routes are built from the same `resolveCredentialAuth` material the login
+  is. `PostgresCredentialStore.findById` is the read they need, with **no `spendPasswordWork`
+  obligation on a miss** — the one way it differs from `findByEmail`, which an unauthenticated
+  login reaches and where an early return is an account enumerator; every caller here is past the
+  auth stage and naming its own id or one it holds a grant over, so there is nothing to enumerate.
 - **`apps/operate-web`** — **long-running process** (Next.js app router + Tailwind, `next
   dev`/`next start` on :3000). The generic manifest-driven UI: a catch-all `/api/[...path]`
   proxy to operate-server, dynamic entity list/record/form pages under `/e/[slug]` rendered
@@ -3981,12 +4060,39 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   default, so a redirect would hand every caller a 200 carrying the login page's HTML with
   `res.ok` true. The cookie is only a hint: the API verifies the token on every request, so a
   forged one is a 401 **from the API**.
+  **It manages people since ADR-0364** — `/platform/users`, `/platform/users/[id]`, a Members panel
+  on `/platform/[id]` and `/account` — which is what made the ten identity routes
+  `--platform-user-routes` has mounted since ADR-0335 reachable by anybody without `curl`.
+  `lib/users.ts` is the contract and it **imports** `PlatformError` and `throwProblem` from
+  `lib/platform.ts` rather than restating them, because the 401-redirect inside `throwProblem` is
+  the half a second copy forgets. Three shapes are worth knowing. The status buttons are driven by
+  `USER_STATUS_TRANSITIONS` / `MEMBERSHIP_STATUS_TRANSITIONS`, mirrors of the server's maps, so a
+  button is offered exactly when the transition is legal rather than offered and 409'd. The
+  set-password panel's confirmation field is **deliberately not seeded from the route param** —
+  prefilling it from the same `id` the request is aimed at would confirm nothing — and it
+  distinguishes the two 404s (`user_unknown` from the route, versus the gateway matcher's
+  `no route for …` when `--credential-admin-role` is not granted), which is the one refusal whose
+  remedy is a deployment flag rather than anything the viewer can do. `/account` is the one page
+  that does **not** go through `lib/users.ts`, for a measured reason: **401 is three different
+  facts on that path** — no cookie (middleware or proxy), and a perfectly good session whose
+  *second* authentication failed (`current_password_wrong`) — and `throwProblem` reacts to the
+  status alone, so through it a mistyped password starts a document load to `/login` that
+  `middleware.ts` bounces straight back, giving a page flash, three cleared inputs and nothing
+  said. It reads the body's `error` code as the discriminator and still hands a genuine 401 to the
+  shared `redirectToLogin`, so it is a second reader of the body and not a second copy of the
+  reaction. It also renders the server's `sessionsRevoked: false` rather than paraphrasing it,
+  behind a **narrowing predicate** and not a cast, because that field decides which of two opposite
+  sentences a reader sees and an omitted one reads as `false`.
+  `Sidebar.tsx`'s active-link state is a **longest-matching-prefix over a declared list** since the
+  same increment, where it was `pathname.startsWith("/platform") && !pathname.startsWith(…)` —
+  an exclusion list that every new platform page has to be added to, and which lights two links at
+  once when it is not.
   It still has **zero tests**, so it is outside the sweep — though no longer outside every strategy
   rule: `entity-field-aperture.ts` (ADR-0361) walks it through a local fs walk, because that member
   has no `src/` and is therefore invisible to the other nine, and it is where 25 of the class's
   `.fields` reads live (all on the `UiEntitySchema` that `ui-schema.ts` produces, and so all
   downstream of the one raw reader that decides what the client sees at all),
-  and the login flow is verified by `tsc`, `next build` and a live run.
+  and the login and console flows are verified by `tsc`, `next build` and a live run.
 
 ## Cross-cutting invariants
 
@@ -4538,6 +4644,12 @@ Prettier-clean and there is no `format:check`; don't bulk-format.
 
 `apps/operate-web` is a Next.js app outside the vitest workspace: verify it with
 `npx next build` (and `npx tsc --noEmit`) from `apps/operate-web`.
+**Run only one `next build` at a time too** (ADR-0364), for the `pnpm -r` rule's reason one app
+over: `.next/` is shared mutable state, so a second build started while the first is tracing
+fails in `collectBuildTraces` on a missing `_not-found/page.js.nft.json` — a phantom failure
+naming a file neither build authored. And `pgrep -f "next build"` is not the wait condition: the
+pattern matches the waiting shell's own command line, so the loop never exits. The same trap
+turned a `pkill -f 'operate-server.js --pack …'` into a killed shell in the same increment.
 
 ## Conventions
 
@@ -4824,6 +4936,19 @@ Two constraints worth knowing before suggesting a host:
   lock that user out for the window, which is why the window lapses and why `set-credential`
   clears a lock. The boot lines an operator should read after the first `up` are now four:
   `[auth]` (twice — api-key specs and credential login), `[pg]` and `[cursor]`.
+- **Only the *first* user is a shell step now** (ADR-0364). The compose command gains
+  `--credential-admin-role platform_admin`, so Platform → Users sets a password over HTTP and
+  `README.md`'s section is retitled *Create the first user by hand — and only the first*: the
+  asymmetry is the bootstrap rather than an omission, because the console's set-password route
+  needs a session, which needs a password, so exactly one credential has to come from outside the
+  web. `.env.example`'s four-step walkthrough is what an operator follows, and **its step 1 could
+  never have worked** — the curl sent a flat `{"email":…}` body against a `.strict()`
+  `{user, membership?}` schema, a 400 every time, while `README.md` had it right — so the two
+  agreed about the feature and disagreed about the request. Step 2 (the membership, with its own
+  note that `status` has no default because *"invited" promises access and "active" grants it*) was
+  missing entirely. `README.md` also gained a **capability table** for the console with four
+  explicit non-capabilities beside it — no user search, no per-user tenant list, no role dropdown,
+  no database browser — because a console page that looks complete is read as complete.
 - **The managed-cloud guide says to *try* `PGSSLMODE=verify-full` and names what `require` costs**
   (ADR-0357), where it used to prescribe `require` with the comment *"Supabase requires TLS"*.
   That hop crosses the public internet carrying `app.current_tenant_id`, and `require`
@@ -4843,6 +4968,35 @@ opened them.
 
 **Load-bearing**
 
+- **A password is settable over HTTP, and what is left of it** (ADR-0364, user-directed). The
+  console provisions a person, moves their status, grants and revokes a membership and sets a first
+  password, and `/account` is the self-service change — so onboarding is four console steps after
+  one shell step, where it was three and a `docker compose exec`.
+  What remains, in order: **(1)** an operator-set password is **permanent, not single-use** — there
+  is no `credential_must_change` column, so the person who typed it can keep using it and the
+  operator who chose it still knows it. A nullable column, a branch in `verifyLogin`'s outcome and
+  one console sentence; the migration is free for ADR-0358's reason, since a CHECK on a column the
+  plan is *adding* has no existing rows to validate against. **(2)** the self-service route has
+  **no rate limit**, so the record lockout is the whole fence against guessing a current password —
+  which bounds guessing against one account and is the right fence, but a per-route policy needs
+  `--rate-limit-policy` mounted, which is register P0.3. **(3)** `UiViewer` carries no identity, so
+  `/account` names the *role* and not the person and **nobody can be shown their own record**; see
+  register P1.16, which this made the blocker for. **(4)** no email filter on the users list, and
+  the page says so rather than offering one (ADR-0359's rule). **(5)** the credential surface
+  prints what it mounted and does not **survey** — in particular a deployment with
+  `--credential-login` and no `--credential-admin-role` is not warned that setting another user's
+  password still needs a shell, which is the shape every sibling capability here takes and is not
+  taken. **(6)** the **diagnostics half of this console is unbuilt**, and it is a bigger increment
+  than this one because it is routes before UI: every boot survey in the binary
+  (`surveyCheckAdmission`, `surveyListSurfaces`, `decideCursorDisclosure`, the unique-enforcement
+  report, the erasure-coverage report, the job survey) is `console.log` only, and
+  `crossengin apply --plan` produces a JSON plan **no route serves**, so an operator reads all of
+  it through `docker compose logs`. **(7)** tenant **self-registration**, which this increment is
+  the prerequisite for — a signup is "create a tenant, create a user, set a credential", exactly
+  the three acts now behind a surface — and which still needs a public route with
+  `--rate-limit-policy` mounted, email verification (so a mail channel: register P1.14), and a
+  decision about what a self-registered tenant *gets*, since `trial` was removed from the tenant
+  lifecycle in ADR-0334 as a plan tier with no producer.
 - **At-rest PHI encryption works, per tenant, and what is left of it** (ADR-0338 closed ADR-0337's
   top open item; specified across ADR-0070 / ADR-0071 / ADR-0074 / ADR-0091). The key is **derived,
   not stored**: `HKDF-SHA256(ikm = COLUMN_ENCRYPTION_SECRET, salt = tenantId, info =
@@ -6656,7 +6810,11 @@ by it**.
    `--rate-limit-policy`, `--read-state-routes`, `--preference-routes`. So the request path is
    configured and nothing *recurs*: no job fires, no timer fires, no notification is delivered, no
    audit row is anchored, no integrity proof runs. One increment, and the only question is which
-   flags a reference deployment should default to.
+   flags a reference deployment should default to. (ADR-0364 added a **16th**,
+   `--credential-admin-role`, which is a request-path flag and moves nothing here — but it is the
+   second time in two increments that a flag this entry would have had to name arrived with the
+   feature that needed it, which is the argument for the entry being about *defaults* rather than
+   about a count.)
 4. **An Article 17 request naming one data subject erases the whole tenant.** `subjectIdentifier`
    is required on the submit body and the stored record, `DeletionRunnerOptions.run` has no field
    that could carry it, and `node.ts` calls `deleteTenantAtomically` with
@@ -6764,7 +6922,7 @@ three make the rest honest, cheap or verifiable.
    P2 item 14's third clause, from the other end.)
 3. **No CI, no git hook, no smoke, e2e, load or migration test** — while `strategy/ci.ts` models
    triggers, budgets and a topological sort with no reader. No `.github/workflows`, no
-   `core.hooksPath`, so the eleven rules and 19,133 tests run only when a human types `pnpm -r test`,
+   `core.hooksPath`, so the eleven rules and 19,175 tests run only when a human types `pnpm -r test`,
    and this file's instruction never to use `--no-verify` describes a guardrail that does not
    exist. `operate-web` has **zero tests** against 15 pages and 34 unfenced `fetch` sites — the
    serialized-body boundary that shipped a broken console button for an hour (ADR-0335).
@@ -6817,16 +6975,22 @@ three make the rest honest, cheap or verifiable.
     importers under six colliding names. Blocked on the product decision ADR-0336 declined. Sharp
     edge for later: the two use different bucketing (`hash*31` vs FNV-1a), so wiring the wrong one
     silently re-randomises every in-flight rollout.
-16. **The UI is entity CRUD, three reports, a tenant console and now a login** — 17 files, no user
-    or role management, no workflow view, no report builder, no incident surface, no
-    deletion-request surface, no preferences, and no self-service password change. **Unblocked by
-    ADR-0358**: this entry read "correctly blocked on P0 item 1, per-user surfaces are meaningless
-    while the proxy presents one shared key", and that premise is gone — the proxy forwards the
-    viewer's own token, so a per-user surface now has a viewer to be about. What it does *not* yet
-    have is the viewer's identity: `UiViewer` carries `primaryRole` and `roles` and no user id,
-    display name or email, so the shell's "Signed in as {role}" and the avatar initial taken from
-    the role name are still showing a role where a person now exists. That is the first thing to
-    build on top, and it is a server-side `UiSchema` change rather than a UI one.
+16. **The UI is entity CRUD, three reports, a tenant console, a login and — since ADR-0364 — user
+    management.** What that increment closed is this entry's own first clause in both halves:
+    `/platform/users` + `/platform/users/[id]` + a Members panel provision people, move their
+    status, grant and revoke memberships and set a first password, and `/account` is the
+    self-service change. Nothing else here moved: no workflow view, no report builder, no incident
+    surface, no deletion-request surface, no preferences page. **The viewer's identity is still
+    the sharpest remaining piece and is now the blocker for the obvious next one**: `UiViewer`
+    carries `primaryRole` and `roles` and no user id, display name or email, so `/account` can
+    name the role you signed in with and not the person holding it, the shell's avatar initial is
+    taken from a role name, and — the consequence that bites — **a person cannot be shown their
+    own record**, because the detail page is reached by an id the client does not have. A
+    server-side `UiSchema` change, two fields wide. Beside it, `--platform-user-routes` exposes
+    `PostgresUserStore.userCounts` through **no route**, so the users list has no stat tiles where
+    the tenants list has three, and there is **no email search** — the list route drops a `?email=`
+    parameter, which ADR-0359's rule says must not be offered rather than silently ignored, so the
+    page says so in one line and the fix is a server-side filter.
 17. **14 packages, 15,006 source lines, zero importers**: `active-active`, `compliance`,
     `data-lineage`, `deploy`, `edge`, `finops`, `migration`, `ml-training`, `pwa`, `rate-limiting`,
     `sdk-clients`, `security`, `sso`, `workflow-signal-bridge` — ~17% of the package count, built,
@@ -7013,6 +7177,21 @@ land with or before it.
     left for a hardened deployment to break. The one open end is in ADR-0362's own table — whether
     the switch's loosening at the rekey's pre-destruction fence, correct for a
     `SUPERUSER NOBYPASSRLS` session and measured at a population of zero, wants a flag.
+16. **Two route families are guarded by a role name no deployment can change**, found while scoping
+    ADR-0364 and verified independently. `BuildOperateHttpServerOptions.adminRoles` exists
+    (`server.ts:220`) and is forwarded into `compileOperateServer` (`:360`) — and **`node.ts` never
+    sets it**, so `DEFAULT_ADMIN_ROLES = ["erp_admin"]` governs `GET`/`PUT /v1/admin/settings` on
+    every deployment there is, and **there is no `--admin-role` flag** to pass. Those two routes are
+    *always mounted* and ungated even by the subscription gate, deliberately, so that a lapsed tenant
+    can still load its billing screen. `node.ts:1336` is the second member and hardcodes the same
+    literal for the marketplace admin routes, also with no flag. It fails **closed** — a deployment
+    whose administrator role is named anything else simply cannot reach its own tenant settings,
+    rather than the wrong principal reaching them — which is why this sits in P2 and not P0: the
+    cost is an unreachable surface, not a disclosure. It is this run's recurring class on an
+    *option* rather than a column (ADR-0339's `policyForEntity` with no producer, ADR-0336's flag
+    subsystem with no evaluator), and the fix is one flag plus one wiring line, with the open
+    question being whether the settings routes and the marketplace ones want one grant or two —
+    `--notification-admin-role` and `--credential-admin-role` are the precedent for two.
 
 ### P3 — debt and stale documentation
 
@@ -7147,7 +7326,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 358 records; 279 Accepted, 79 Proposed (the
+title or status change cannot drift. 359 records; 280 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

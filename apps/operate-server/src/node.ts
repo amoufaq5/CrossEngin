@@ -243,6 +243,7 @@ import {
   verifyLogin,
 } from "./auth-token-route.js";
 import { formatCredentialAuth, resolveCredentialAuth } from "./credential-auth-env.js";
+import { buildCredentialRoutes } from "./credential-routes.js";
 import { PostgresCredentialStore } from "./credential-store.js";
 import { DEFAULT_SESSION_TOKEN_SECONDS, mintSessionToken } from "./token-mint.js";
 import {
@@ -2511,6 +2512,62 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       );
     }
   }
+  // Setting a password over HTTP, which until now only a shell could do.
+  //
+  // Built from the **same** `credentialAuth.material` the login interceptor below is built from,
+  // which is what makes `pepper_absent` and `pepper_refused` unreachable on these routes by
+  // construction rather than by a check: a deployment with no usable pepper has no login, and a
+  // gateway route cannot be reached without one. The store is constructed here and reused there,
+  // because two `PostgresCredentialStore` instances over one connection would be two spellings of
+  // the same four statements.
+  const credentialStore =
+    credentialAuth?.ok === true && conn !== undefined
+      ? new PostgresCredentialStore(conn, schemaOpt)
+      : null;
+  if (credentialAuth?.ok === true && credentialStore !== null) {
+    const emitter = requireEmitter("--credential-login");
+    extraRouteList.push(
+      ...buildCredentialRoutes({
+        store: credentialStore,
+        pepper: credentialAuth.material.pepper,
+        principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
+        adminRoles: new Set(options.credentialAdminRoles),
+        // Required for the same reason the registry's is: both acts replace the one credential a
+        // person authenticates with, so the record goes before the write and an unrecordable one
+        // is refused (ADR-0313).
+        //
+        // `event.tenantId` is passed through and is deliberately different per route — null for an
+        // operator setting someone else's (a credential is the user's, not any one membership's)
+        // and the caller's own tenant for a self-service change, so that tenant's auditor can read
+        // it. Neither is the operator's tenant.
+        audit: async (event): Promise<void> => {
+          await emitter.emit(
+            auditEntry({
+              id: randomUUID(),
+              tenantId: event.tenantId,
+              occurredAt: event.at,
+              operation: event.operation,
+              entity: "User",
+              entityId: event.subjectUserId,
+              actor: auditActor({ userId: event.principalId }),
+              // `after` and never `before`: the only thing that changed is the one value that must
+              // not be recorded, so the payload carries the act's own facts and nothing derived
+              // from the password.
+              after: { roles: event.roles, ...event.detail },
+            }),
+          );
+        },
+      }),
+    );
+    console.info(
+      options.credentialAdminRoles.length > 0
+        ? "[auth] credential routes mounted: POST /v1/account/password (self) and" +
+            ` POST /v1/platform/users/{id}/credential for roles: ${options.credentialAdminRoles.join(", ")}`
+        : "[auth] credential routes mounted: POST /v1/account/password (self) only —" +
+            " no --credential-admin-role, so setting another user's password still needs" +
+            " 'operate-server set-credential' and a shell",
+    );
+  }
   if (options.readStateRoutes) {
     if (conn === undefined) {
       console.warn(
@@ -4253,9 +4310,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // Wrapped *before* the health block so the probes end up outermost. Order matters only in that
   // an unauthenticated probe must not be able to reach anything slower than itself; both return
   // null for a path that is not theirs, so neither can shadow the other.
-  if (credentialAuth?.ok === true && conn !== undefined) {
+  // `conn !== undefined` is kept beside the store check and is not redundant: it is what narrows
+  // `conn` for the `PostgresUserStore` below, and `credentialStore !== null` implies it only to a
+  // reader and not to the compiler.
+  if (credentialAuth?.ok === true && conn !== undefined && credentialStore !== null) {
     const material = credentialAuth.material;
-    const credentialStore = new PostgresCredentialStore(conn, schemaOpt);
     // The membership read is `PostgresUserStore.membershipFor`, which already carries the
     // `withTenantContext` and the strict `scopeFilter` that table's single `ALL`-scope policy
     // requires. A second spelling of a scoped read is how two of them drift.

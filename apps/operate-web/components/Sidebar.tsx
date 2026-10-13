@@ -9,6 +9,31 @@ import { useInbox } from "@/lib/inbox";
 import { fetchUnreadCount, listNotifications, recentDecisionCount } from "@/lib/notifications";
 import { accessibleEntities, entityByName, featureEnabled, groupByModule, roleLabel, useSchema } from "@/lib/schema";
 
+/**
+ * The Platform group's links, declared rather than written out three times.
+ *
+ * The active state used to be *"on /platform and not on /platform/reviews"*, which is a maintained
+ * list of siblings written as an exclusion — so the moment a third page landed under `/platform`,
+ * "Tenants" lit up for it and nothing said so. `activePlatformHref` resolves by **longest matching
+ * prefix** over this array instead, which makes a fourth entry one line and cannot be forgotten.
+ */
+const PLATFORM_LINKS: ReadonlyArray<{ href: string; label: string }> = [
+  { href: "/platform", label: "Tenants" },
+  { href: "/platform/users", label: "Users" },
+  { href: "/platform/reviews", label: "Design Reviews" },
+];
+
+/** The longest declared prefix the path is under, or null when it is under none. */
+function activePlatformHref(pathname: string): string | null {
+  let best: string | null = null;
+  for (const { href } of PLATFORM_LINKS) {
+    if (pathname === href || pathname.startsWith(`${href}/`)) {
+      if (best === null || href.length > best.length) best = href;
+    }
+  }
+  return best;
+}
+
 export function Sidebar() {
   const pathname = usePathname();
   const { schema } = useSchema();
@@ -68,9 +93,16 @@ export function Sidebar() {
       {primaryRole ? (
         <div className="px-5 pt-4 pb-1">
           <div className="text-[11px] font-semibold uppercase tracking-wide text-ink-faint">Signed in as</div>
-          <div className="text-sm font-bold text-ink" title="Your role">
+          {/* The role and not the person, because `UiViewer` carries no name or email — see /account. */}
+          <Link
+            href="/account"
+            className={`block text-sm font-bold transition ${
+              pathname === "/account" ? "text-brand-700" : "text-ink hover:text-brand-700"
+            }`}
+            title="Your account"
+          >
             {roleLabel(schema, primaryRole)}
-          </div>
+          </Link>
         </div>
       ) : (
         <div className="px-5 pt-4 pb-1 text-[11px] font-semibold uppercase tracking-wide text-ink-faint">
@@ -224,27 +256,19 @@ export function Sidebar() {
 
         <div className="mt-5 border-t border-line pt-3">
           <div className="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wider text-ink-faint">Platform</div>
-          <Link
-            href="/platform"
-            className={`block rounded-lg px-3 py-1.5 text-sm transition ${
-              (pathname === "/platform" || pathname.startsWith("/platform/")) &&
-              !pathname.startsWith("/platform/reviews")
-                ? "border-l-2 border-brand bg-brand-50 font-semibold text-brand-700"
-                : "text-ink-muted hover:bg-surface-soft hover:text-ink"
-            }`}
-          >
-            Tenants
-          </Link>
-          <Link
-            href="/platform/reviews"
-            className={`block rounded-lg px-3 py-1.5 text-sm transition ${
-              pathname === "/platform/reviews" || pathname.startsWith("/platform/reviews/")
-                ? "border-l-2 border-brand bg-brand-50 font-semibold text-brand-700"
-                : "text-ink-muted hover:bg-surface-soft hover:text-ink"
-            }`}
-          >
-            Design Reviews
-          </Link>
+          {PLATFORM_LINKS.map((link) => (
+            <Link
+              key={link.href}
+              href={link.href}
+              className={`block rounded-lg px-3 py-1.5 text-sm transition ${
+                activePlatformHref(pathname) === link.href
+                  ? "border-l-2 border-brand bg-brand-50 font-semibold text-brand-700"
+                  : "text-ink-muted hover:bg-surface-soft hover:text-ink"
+              }`}
+            >
+              {link.label}
+            </Link>
+          ))}
         </div>
       </nav>
     </aside>
