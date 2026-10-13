@@ -284,7 +284,7 @@ and exit 0, then `api` to boot, then `web`.
 
 The boot is talkative — a dozen surveys report what this manifest and this store can and cannot
 do — and these are the ones that tell you the deployment is *configured* rather than merely
-running. They appear in this order, interleaved with the rest, and the three `[auth]` lines are
+running. They appear in this order, interleaved with the rest, and the four `[auth]` lines are
 deliberately **not adjacent**: each is said at the point the thing it describes is actually wired,
 so the first lands before the database is even opened and the last two after everything else has
 mounted.
@@ -297,13 +297,13 @@ mounted.
 [cursor] cursor disclosure: sealed …
 [auth] credential login: enabled (kid login-v1, public key …)
 [auth] credential routes mounted: POST /v1/account/password (self) and POST /v1/platform/users/{id}/credential for roles: platform_admin
+[auth] serving /v1/auth/token (session ttl 3600s, lockout after 10 failures for 900s)
 ```
 
-There is deliberately **no** boot line announcing `/v1/auth/token`, the session TTL or the lockout
-threshold, so do not wait for one. The other two `[auth]` lines in the log are per-request rather
-than per-boot — `login refused <reason>: <detail>`, which is where a failed sign-in explains itself
-to you and not to the caller, and `user <id> credential re-hashed at current scrypt parameters`,
-which appears the first time someone signs in after the cost floor has been raised.
+Two further `[auth]` lines appear later and are **per-request rather than per-boot**, so do not look
+for them at startup: `login refused <reason>: <detail>`, which is where a failed sign-in explains
+itself to you and not to the caller, and `user <id> credential re-hashed at current scrypt
+parameters`, the first time someone signs in after the cost floor has been raised.
 
 Rather than scrolling the log for them:
 
