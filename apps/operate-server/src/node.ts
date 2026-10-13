@@ -243,6 +243,7 @@ import {
   verifyLogin,
 } from "./auth-token-route.js";
 import { formatCredentialAuth, resolveCredentialAuth } from "./credential-auth-env.js";
+import { aiModelLine, resolveAiModel } from "./ai-model-source.js";
 import { buildCredentialRoutes } from "./credential-routes.js";
 import { PostgresCredentialStore } from "./credential-store.js";
 import { DEFAULT_SESSION_TOKEN_SECONDS, mintSessionToken } from "./token-mint.js";
@@ -2524,6 +2525,15 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     credentialAuth?.ok === true && conn !== undefined
       ? new PostgresCredentialStore(conn, schemaOpt)
       : null;
+  // Resolved once, here, although the login that also enforces it is wired much further down.
+  // Parsing it twice would be two results for one policy, and the lockout is the one input where
+  // the two surfaces disagreeing is the whole defect: the credential route verifies a password
+  // against the same column the login locks on, so a route honouring a different threshold would
+  // be a door the lock does not cover. It depends on CLI options alone, so hoisting costs nothing.
+  const loginLockout = parseLoginLockout(
+    options.loginLockoutAttempts ?? DEFAULT_LOGIN_LOCKOUT_ATTEMPTS,
+    options.loginLockoutSeconds ?? DEFAULT_LOGIN_LOCKOUT_SECONDS,
+  );
   if (credentialAuth?.ok === true && credentialStore !== null) {
     const emitter = requireEmitter("--credential-login");
     extraRouteList.push(
@@ -2556,6 +2566,24 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
               after: { roles: event.roles, ...event.detail },
             }),
           );
+        },
+        // The login's `onFailure`, read a second time rather than written a second time: the same
+        // store method under the same hoisted policy, so a wrong password at either door advances
+        // one counter toward one lock. Without this the self-service route was an unmetered oracle
+        // and the lock it bypassed was the login's.
+        onFailedAttempt: async (userId): Promise<void> => {
+          const r = await credentialStore.recordFailure(
+            userId,
+            loginLockout.attempts,
+            loginLockout.seconds,
+          );
+          if (r.lockedUntil !== null) {
+            console.warn(
+              `[auth] user ${userId} locked until ${r.lockedUntil}` +
+                ` after ${r.failedAttempts.toString()} consecutive failures` +
+                " (failed password change)",
+            );
+          }
         },
       }),
     );
@@ -2761,9 +2789,14 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // business description to a vendor the operator deliberately opted out of. With no provider the
   // routes answer 503 but review/activate of existing proposals still works. Activation invalidates the per-tenant gateway cache below.
   if (options.aiDesign && manifestStore !== null) {
+    // The model now has an environment route as well as a flag, which is what let
+    // `docker-compose.ai.yml` stop carrying its own copy of this entire command — see
+    // `ai-model-source.ts` for why that copy was a defect and not merely duplication.
+    const aiModel = resolveAiModel(options.aiModel, process.env);
+    console.info(aiModelLine(aiModel));
     const providerBuild = buildDesignProviderFromEnv(
       process.env,
-      options.aiModel !== null ? { model: options.aiModel } : {},
+      aiModel.model !== null ? { model: aiModel.model } : {},
     );
     const designer =
       providerBuild !== null
@@ -4319,10 +4352,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     // `withTenantContext` and the strict `scopeFilter` that table's single `ALL`-scope policy
     // requires. A second spelling of a scoped read is how two of them drift.
     const userStore = new PostgresUserStore(conn, schemaOpt);
-    const lockout = parseLoginLockout(
-      options.loginLockoutAttempts ?? DEFAULT_LOGIN_LOCKOUT_ATTEMPTS,
-      options.loginLockoutSeconds ?? DEFAULT_LOGIN_LOCKOUT_SECONDS,
-    );
+    // The one result hoisted above the credential routes, which enforce the same lock.
+    const lockout = loginLockout;
     const ttl = options.sessionTokenTtl ?? DEFAULT_SESSION_TOKEN_SECONDS;
     const login = buildAuthTokenInterceptor({
       verify: (request) =>

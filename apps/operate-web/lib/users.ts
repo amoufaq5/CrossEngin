@@ -249,6 +249,25 @@ export interface CredentialSetResult {
   readonly userId: string;
   readonly credentialSet: boolean;
   readonly lockCleared: boolean;
+  /**
+   * The status the write saw, as the row held it — a bare `string` and deliberately not
+   * `UserStatus`. `CredentialRecord.status` is itself unparsed on the server, because the column's
+   * CHECK is the only thing constraining it, so a row written by a later binary arrives here as a
+   * status this one has no name for. Typing it narrower would be an annotation standing in for a
+   * parse, which is the class the repo keeps finding.
+   */
+  readonly subjectStatus: string;
+  /**
+   * Whether a login would still be refused for this user.
+   *
+   * **On the wire rather than inferred from the row the page already holds**, because the row and
+   * the write can disagree: the handler reads `meta.users` again, so a suspension or a retirement
+   * landing between this page's load and this submit is a fact only the response carries. Re-deriving
+   * it from the stale row is how a console comes to report a working credential for an account the
+   * login refuses outright — a success message for a password that cannot be used, which is the
+   * falsely-reassuring direction and the one worth spending a field to close.
+   */
+  readonly loginBlocked: boolean;
   readonly detail: string;
 }
 

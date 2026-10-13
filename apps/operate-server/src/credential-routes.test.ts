@@ -193,6 +193,8 @@ function principal(over: Partial<ResolvedPrincipal> = {}): ResolvedPrincipal {
 
 interface Recorded {
   readonly events: CredentialAuditEvent[];
+  /** One entry per counted failed possession proof, which is what makes the oracle metered. */
+  readonly failures: string[];
 }
 
 function ctxFor(
@@ -201,10 +203,11 @@ function ctxFor(
     readonly roles?: readonly string[];
     readonly adminRoles?: readonly string[];
     readonly auditThrows?: boolean;
+    readonly counterThrows?: boolean;
     readonly pepper?: string;
   } = {},
 ): { ctx: CredentialRoutesContext; recorded: Recorded } {
-  const recorded: Recorded = { events: [] };
+  const recorded: Recorded = { events: [], failures: [] };
   const roles = opts.roles ?? ["platform_admin"];
   return {
     recorded,
@@ -219,6 +222,10 @@ function ctxFor(
       audit: async (e) => {
         if (opts.auditThrows === true) throw new Error("audit down");
         recorded.events.push(e);
+      },
+      onFailedAttempt: async (userId) => {
+        if (opts.counterThrows === true) throw new Error("counter down");
+        recorded.failures.push(userId);
       },
       clock: () => new Date(AT),
     },
@@ -625,6 +632,80 @@ describe("the operator route", () => {
     expect(db.captured).toHaveLength(1);
   });
 
+  it("200s a suspended user and says the login is still refused", async () => {
+    // ADR-0322's report-rather-than-refuse: setting a password ahead of a reactivation is a
+    // coherent act, so it happens — and the consequence is STATED, because an unqualified
+    // "credential set" for a user `verifyLogin` refuses outright is a success message for a
+    // password that does not work (ADR-0337's falsely-true direction).
+    const db = fakeDb({ reads: [credentialRow({ status: "suspended" })], writes: [1] });
+    const { ctx, recorded } = ctxFor(new PostgresCredentialStore(db.conn));
+    const out = await invoke(handlerFor(ctx, SET), {
+      principal: principal(),
+      params: { id: TARGET },
+      parsedBody: setBody(),
+    });
+    expect(out.status).toBe(200);
+    expect(body(out)["credentialSet"]).toBe(true);
+    expect(body(out)["loginBlocked"]).toBe(true);
+    expect(body(out)["subjectStatus"]).toBe("suspended");
+    expect(String(body(out)["detail"])).toContain("suspended");
+    // The password really was written — this is a 200 that qualifies itself, not a refusal.
+    expect(db.updates()).toHaveLength(1);
+    // And the trail carries the status, because a credential set for a suspended user is a
+    // different act from one set for an active user.
+    expect(recorded.events[0]?.detail["subjectStatus"]).toBe("suspended");
+  });
+
+  it("reports loginBlocked false for an active user", async () => {
+    const db = fakeDb({ reads: [credentialRow()], writes: [1] });
+    const { ctx } = ctxFor(new PostgresCredentialStore(db.conn));
+    const out = await invoke(handlerFor(ctx, SET), {
+      principal: principal(),
+      params: { id: TARGET },
+      parsedBody: setBody(),
+    });
+    expect(body(out)["loginBlocked"]).toBe(false);
+    expect(body(out)["subjectStatus"]).toBe("active");
+  });
+
+  it("403s a retired user, because no transition brings one back", async () => {
+    // `USER_STATUS_TRANSITIONS.deleted` is empty, so a password set here could never be used by
+    // anybody — which is the terminal-versus-recoverable split read off the map rather than from
+    // the status name. Refused BEFORE the record, so a write that cannot matter leaves no row.
+    const db = fakeDb({ reads: [credentialRow({ status: "deleted" })] });
+    const { ctx, recorded } = ctxFor(new PostgresCredentialStore(db.conn));
+    const out = await invoke(handlerFor(ctx, SET), {
+      principal: principal(),
+      params: { id: TARGET },
+      parsedBody: setBody(),
+    });
+    expect(out.status).toBe(403);
+    expect(body(out)["error"]).toBe("user_not_active");
+    expect(String(body(out)["detail"])).toContain("deleted");
+    expect(recorded.events).toEqual([]);
+    expect(db.updates()).toHaveLength(0);
+  });
+
+  it("sets a password for a LOCKED user, because that is the remedy", async () => {
+    // The deliberate asymmetry with the self route: an operator setting a password for a
+    // locked-out person is how the lockout is cleared, and `setCredential` clears it in the same
+    // statement. Checking the lock here would make the remedy unreachable from the surface that
+    // exists to apply it.
+    const db = fakeDb({
+      reads: [credentialRow({ credential_locked_until: "2026-09-01T12:30:00.000Z" })],
+      writes: [1],
+    });
+    const { ctx } = ctxFor(new PostgresCredentialStore(db.conn));
+    const out = await invoke(handlerFor(ctx, SET), {
+      principal: principal(),
+      params: { id: TARGET },
+      parsedBody: setBody(),
+    });
+    expect(out.status).toBe(200);
+    expect(body(out)["lockCleared"]).toBe(true);
+    expect(db.updates()[0]?.sql).toMatch(/credential_locked_until = NULL/);
+  });
+
   it("files the operator's write at platform scope", async () => {
     const db = fakeDb({ reads: [credentialRow()], writes: [1] });
     const { ctx, recorded } = ctxFor(new PostgresCredentialStore(db.conn));
@@ -662,8 +743,13 @@ describe("the operator route", () => {
       parsedBody: setBody(),
     });
     expect(againRec.events[0]?.detail["hadCredential"]).toBe(true);
-    // The only fact recorded about the previous state is whether there was one.
-    expect(Object.keys(againRec.events[0]?.detail ?? {})).toEqual(["hadCredential"]);
+    // An exact key list rather than a spot check, and it is the fence that matters here: the only
+    // facts recorded about the previous state are whether there *was* a credential and what status
+    // the subject held. Nothing derived from the password itself can join them without failing here.
+    expect(Object.keys(againRec.events[0]?.detail ?? {})).toEqual([
+      "hadCredential",
+      "subjectStatus",
+    ]);
   });
 
   it("pairs the recorded act with a refusal row when the write lost a race", async () => {
@@ -821,12 +907,22 @@ describe("the self-service route", () => {
     // `unreadable_hash` lands here too and is deliberately **not** counted as a failed attempt: a
     // corrupt or foreign-format row says nothing about the password, and counting it would lock a
     // person out of an account whose password they typed correctly. So the caller gets one body for
-    // both, and neither path writes anything.
+    // both, and neither path writes a credential.
     expect(unreadable.status).toBe(401);
     expect(body(unreadable)).toEqual(body(mismatched));
     expect(corrupt.updates()).toHaveLength(0);
     expect(wrong.updates()).toHaveLength(0);
-    expect([...wrongRec.events, ...corruptRec.events]).toHaveLength(0);
+    // Each leaves **one** refusal row, and the asymmetry is the point: the two are
+    // indistinguishable to the caller and distinguishable in the trail, which is the only place the
+    // difference is actionable. This used to assert zero rows, which was the defect it pinned —
+    // a wrong possession proof against a live account left no trace at all.
+    expect(wrongRec.events).toHaveLength(1);
+    expect(corruptRec.events).toHaveLength(1);
+    expect(wrongRec.events[0]?.operation).toBe(CREDENTIAL_REFUSED_OPERATION);
+    expect(wrongRec.events[0]?.detail["verification"]).toBe("mismatched");
+    expect(corruptRec.events[0]?.detail["verification"]).toBe("unreadable_hash");
+    expect(wrongRec.failures).toEqual([OPERATOR]);
+    expect(corruptRec.failures).toEqual([]);
   });
 
   it("changes the password and says the existing sessions are not revoked", async () => {
@@ -898,6 +994,156 @@ describe("the self-service route", () => {
     // Both acts replace the one credential a person authenticates with, so the self route carries
     // the same fence as the operator one — proving the current password does not exempt it.
     expect(db.updates()).toHaveLength(0);
+  });
+
+  /* ------------------------------------------------- the lockout, after review */
+
+  it("honours the login's lock and does not verify a password against a locked account", async () => {
+    // The defect this closes: the route read the stored hash and neither the lock nor the counter,
+    // so the lockout the login enforces was bypassable by anyone holding a session — which is the
+    // one credential a stolen browser session already has. The predicate is the login's own.
+    const db = fakeDb({
+      reads: [
+        credentialRow({
+          id: OPERATOR,
+          credential_hash: await storedHash(),
+          credential_locked_until: "2026-09-01T12:30:00.000Z",
+        }),
+      ],
+    });
+    const { ctx, recorded } = ctxFor(new PostgresCredentialStore(db.conn));
+    const out = await invoke(handlerFor(ctx, CHANGE), {
+      principal: principal(),
+      params: {},
+      parsedBody: changeBody(),
+    });
+    expect(out.status).toBe(429);
+    expect(body(out)["error"]).toBe("account_locked");
+    // Not counted: hammering a locked account must not extend its own lock, or a caller could keep
+    // an account locked forever without ever learning a password (the login's stated rule).
+    expect(recorded.failures).toEqual([]);
+    // And nothing was written, including by the correct password it never got to check.
+    expect(db.updates()).toHaveLength(0);
+  });
+
+  it("reads an unparseable lock as locked", async () => {
+    // `credentialIsLocked`'s fail-closed arm, asserted at the second caller rather than only at the
+    // login: the column is written by one statement from the database clock, so a value this cannot
+    // read means something unexpected wrote it.
+    const db = fakeDb({
+      reads: [
+        credentialRow({
+          id: OPERATOR,
+          credential_hash: await storedHash(),
+          credential_locked_until: "not-a-timestamp",
+        }),
+      ],
+    });
+    const { ctx } = ctxFor(new PostgresCredentialStore(db.conn));
+    const out = await invoke(handlerFor(ctx, CHANGE), {
+      principal: principal(),
+      params: {},
+      parsedBody: changeBody(),
+    });
+    expect(out.status).toBe(429);
+  });
+
+  it("counts a wrong current password and records the refusal", async () => {
+    const db = fakeDb({
+      reads: [credentialRow({ id: OPERATOR, credential_hash: await storedHash() })],
+    });
+    const { ctx, recorded } = ctxFor(new PostgresCredentialStore(db.conn));
+    const out = await invoke(handlerFor(ctx, CHANGE), {
+      principal: principal(),
+      params: {},
+      parsedBody: changeBody({ currentPassword: "not-the-current-one" }),
+    });
+    expect(out.status).toBe(401);
+    expect(body(out)["error"]).toBe("current_password_wrong");
+    // The two halves that make it metered and legible: one counted attempt against the one lock,
+    // and one refusal row where previously a wrong possession proof left no trace at all.
+    expect(recorded.failures).toEqual([OPERATOR]);
+    expect(recorded.events).toHaveLength(1);
+    expect(recorded.events[0]?.operation).toBe(CREDENTIAL_REFUSED_OPERATION);
+    expect(recorded.events[0]?.detail["refusal"]).toBe("current_password_wrong");
+    expect(recorded.events[0]?.detail["verification"]).toBe("mismatched");
+    expect(db.updates()).toHaveLength(0);
+  });
+
+  it("does NOT count an unreadable stored hash", async () => {
+    // `REFUSAL_COUNTS_AGAINST_LOCKOUT`'s split, one surface over: a corrupt or foreign-format row
+    // says nothing about the password, and counting it would lock a person out of an account whose
+    // password they typed correctly. One body for both, so the caller cannot tell them apart.
+    const db = fakeDb({
+      reads: [credentialRow({ id: OPERATOR, credential_hash: "scrypt$not$a$valid$encoding" })],
+    });
+    const { ctx, recorded } = ctxFor(new PostgresCredentialStore(db.conn));
+    const out = await invoke(handlerFor(ctx, CHANGE), {
+      principal: principal(),
+      params: {},
+      parsedBody: changeBody(),
+    });
+    expect(out.status).toBe(401);
+    expect(body(out)["error"]).toBe("current_password_wrong");
+    expect(recorded.failures).toEqual([]);
+    expect(recorded.events[0]?.detail["verification"]).toBe("unreadable_hash");
+  });
+
+  it("refuses rather than 503s when the counter is down", async () => {
+    // Reported by the deployment's handler and swallowed here, the login's reasoning: the refusal
+    // is already decided and raising would turn a correctly-refused attempt into the one answer
+    // that invites a retry.
+    const db = fakeDb({
+      reads: [credentialRow({ id: OPERATOR, credential_hash: await storedHash() })],
+    });
+    const { ctx } = ctxFor(new PostgresCredentialStore(db.conn), { counterThrows: true });
+    const out = await invoke(handlerFor(ctx, CHANGE), {
+      principal: principal(),
+      params: {},
+      parsedBody: changeBody({ currentPassword: "wrong" }),
+    });
+    expect(out.status).toBe(401);
+    expect(body(out)["error"]).toBe("current_password_wrong");
+  });
+
+  it("403s a suspended account changing its own password", async () => {
+    // A session minted before a suspension stays valid until it expires, so a suspended person can
+    // still reach this route — and rotating the credential they were suspended from is the one
+    // thing the suspension exists to stop.
+    const db = fakeDb({
+      reads: [
+        credentialRow({ id: OPERATOR, status: "suspended", credential_hash: await storedHash() }),
+      ],
+    });
+    const { ctx, recorded } = ctxFor(new PostgresCredentialStore(db.conn));
+    const out = await invoke(handlerFor(ctx, CHANGE), {
+      principal: principal(),
+      params: {},
+      parsedBody: changeBody(),
+    });
+    expect(out.status).toBe(403);
+    expect(body(out)["error"]).toBe("user_not_active");
+    expect(recorded.failures).toEqual([]);
+    expect(db.updates()).toHaveLength(0);
+  });
+
+  it("refuses a status this binary does not recognise", async () => {
+    // `CredentialRecord.status` is a bare string because the column's CHECK is the only thing
+    // constraining it, so a row written by a later binary reads as a status with no entry in the
+    // map — and `asUserStatus` takes the fail-closed arm rather than indexing with a missing key.
+    const db = fakeDb({
+      reads: [
+        credentialRow({ id: OPERATOR, status: "dormant", credential_hash: await storedHash() }),
+      ],
+    });
+    const { ctx } = ctxFor(new PostgresCredentialStore(db.conn));
+    const out = await invoke(handlerFor(ctx, CHANGE), {
+      principal: principal(),
+      params: {},
+      parsedBody: changeBody(),
+    });
+    expect(out.status).toBe(403);
+    expect(body(out)["error"]).toBe("user_not_active");
   });
 
   it("puts no password or pepper in its audit payload or response body", async () => {

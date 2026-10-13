@@ -97,6 +97,7 @@ export * from "./api-key-source.js";
 export * from "./health.js";
 export * from "./auth-token-route.js";
 export * from "./credential-auth-env.js";
+export * from "./ai-model-source.js";
 export * from "./credential-routes.js";
 export * from "./credential-store.js";
 export * from "./set-credential.js";

@@ -1157,6 +1157,29 @@ type errors.
   — a stale server on the port, an agent's journal lagging its writes, and a test file an agent was
   mid-write on — which is ADR-0363's fake answering the wrong query's row, at the level of my own
   measurements.
+  **And then an adversarial review of it found five more, two high, in the same session** (ADR-0364's
+  addendum). The self route read `existing.credentialHash` and **none** of the `status`,
+  `failedAttempts` and `lockedUntil` the same `findById` returns — so the login's account lockout was
+  bypassed through it, a wrong guess was never counted (`recordFailure` had one caller in the
+  workspace, the login's), and a wrong possession proof **left no trace at all**, because `record`
+  sits after the `matched` gate. Two doors, one lock, and the slow one reachable through the fast
+  one; the reachability is this module's own argument for `self_not_permitted`, a held live session.
+  `credentialIsLocked` is **exported from the login** rather than spelled twice, `onFailedAttempt` is
+  **required** because an optional counter defaulting to *do not count* is the defect restated as a
+  default, and there is deliberately no policy field beside it — the handler reads the column the
+  counter wrote, so the threshold here would be a declaration nothing reads. And `status` was read
+  and never consulted, so a password for a **retired** user answered an unqualified `200` while
+  `verifyLogin` refuses that status outright: `CREDENTIAL_WRITE_BY_STATUS` splits **terminal from
+  recoverable** off the transition map, refusing `deleted` and letting `suspended` succeed with
+  `loginBlocked` on the 200 (ADR-0322). The documentation half was worse than the code half: the
+  **only documented path to the first login could not be followed**, because `.env.example`'s curls
+  named a port the stack published nowhere — fixed by publishing `127.0.0.1:8787` rather than by
+  pointing the bootstrap at the TLS layer that is the last thing to come up — and
+  `docker-compose.ai.yml` carried its own copy of the whole `api` command, **ten flags behind**, so
+  the entire self-hosted-AI path had no `--credential-login` and still passed `--api-key` on argv.
+  That copy is **deleted**, not re-synced: `ai-model-source.ts` gives the model the environment route
+  that was the only thing the overlay's command added, so `environment:` (which merges, where a
+  command replaces) is all it declares and there is nothing left to keep in step.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -4037,6 +4060,30 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   obligation on a miss** — the one way it differs from `findByEmail`, which an unauthenticated
   login reaches and where an early return is an account enumerator; every caller here is past the
   auth stage and naming its own id or one it holds a grant over, so there is nothing to enumerate.
+  **The self route honours the login's lock and advances the login's counter** (ADR-0364's addendum),
+  through `credentialIsLocked` exported from `auth-token-route.ts` rather than a second spelling —
+  because a second spelling is how the two doors came to disagree, with the login refusing a locked
+  account and this route verifying passwords against it at full speed. A `mismatched` outcome counts
+  and `unreadable_hash` does not, which is `REFUSAL_COUNTS_AGAINST_LOCKOUT`'s split one surface over,
+  and a locked attempt counts for neither, on the login's own rule that hammering a locked account
+  must not extend its own lock. `account_locked` is **429**: the login answers one body for every
+  refusal because an unauthenticated caller must learn nothing, and this caller is already
+  authenticated as the account in question, so the useful answer is the one that says *stop*. The
+  operator route deliberately does **not** check the lock — setting a password *is* how a lockout is
+  cleared, and `setCredential` clears it in the same statement, so checking it there would make the
+  remedy unreachable from the surface that applies it.
+  **And both routes consult `status`**, which `findById` has always returned and nothing read.
+  `CREDENTIAL_WRITE_BY_STATUS` is a total map over `USER_STATUSES` and the split is **terminal versus
+  recoverable**, read off `USER_STATUS_TRANSITIONS` rather than off a status name: `deleted` has no
+  outgoing transition, so a password set there could never be used and the route refuses
+  `user_not_active`; `suspended` transitions back to `active`, so the write lands and the 200 carries
+  `loginBlocked` and `subjectStatus` saying what it does not yet buy (ADR-0322). `selfMay` is false
+  for every non-active status, because a session minted before a suspension stays valid until it
+  expires (ADR-0358), so a suspended person can still reach that route — and rotating the credential
+  they were suspended from is the one thing the suspension exists to stop. `asUserStatus` **parses**
+  rather than casting, since `CredentialRecord.status` is a bare `string` constrained only by the
+  column's CHECK, so a row from a later binary takes the fail-closed arm instead of indexing the map
+  with a key it does not have.
 - **`apps/operate-web`** — **long-running process** (Next.js app router + Tailwind, `next
   dev`/`next start` on :3000). The generic manifest-driven UI: a catch-all `/api/[...path]`
   proxy to operate-server, dynamic entity list/record/form pages under `/e/[slug]` rendered
@@ -4949,6 +4996,27 @@ Two constraints worth knowing before suggesting a host:
   missing entirely. `README.md` also gained a **capability table** for the console with four
   explicit non-capabilities beside it — no user search, no per-user tenant list, no role dropdown,
   no database browser — because a console page that looks complete is read as complete.
+  **Three things in `deploy/` could not work and were fixed in the same session** (ADR-0364's
+  addendum). `.env.example`'s bootstrap curls named `http://localhost:8787` and the stack **published
+  no host port at all** — `api` declared `expose: 8787`, the compose network only, and Caddy's 80/443
+  were the only published ports — so the only documented path to the first login was refused by the
+  host. The compose publishes **`127.0.0.1:8787:8787`** now, and the loopback binding is the whole of
+  it rather than a formality: a bare `8787:8787` publishes on every interface, which on a cloud VM is
+  the public one, while loopback is reachable by exactly the population that can already run
+  `docker compose exec`. Rewriting the curls against `https://api.$DOMAIN` was the alternative and is
+  worse — the bootstrap is precisely the moment DNS may not have propagated and Caddy may hold no
+  certificate, so it would make the first user depend on the last thing to come up.
+  **`docker-compose.ai.yml` carried its own copy of the entire `api` command and was ten flags
+  behind**, including `--credential-login` — so the whole self-hosted-AI path had no login and the web
+  app it ships with could authenticate nobody — and it still passed `--api-key` on argv, the exposure
+  ADR-0357 removed from the base. Its own comment said *"Keep the two in step when either changes"*,
+  which is ADR-0288's maintained list, so the copy is **deleted** rather than re-synced: the model
+  gets an environment route and the overlay declares `environment:` alone, which **merges** where a
+  command replaces, so it inherits all 16 flags and all 33 variables.
+  And **`deploy/ORACLE.md` is the document an Oracle operator actually follows** and the original
+  increment did not touch it, so it still told them the first user was a shell step on purpose, to
+  hand-edit flags the compose already passes, and granted a different role than `.env.example` —
+  a fork that decides what the first person can do, since a session carries exactly one role.
 - **The managed-cloud guide says to *try* `PGSSLMODE=verify-full` and names what `require` costs**
   (ADR-0357), where it used to prescribe `require` with the comment *"Supabase requires TLS"*.
   That hop crosses the public internet carrying `app.current_tenant_id`, and `require`
@@ -4997,6 +5065,21 @@ opened them.
   `--rate-limit-policy` mounted, email verification (so a mail channel: register P1.14), and a
   decision about what a self-registered tenant *gets*, since `trial` was removed from the tenant
   lifecycle in ADR-0334 as a plan tier with no producer.
+  Five of that ADR's own review findings are closed in its addendum and what they leave is narrower:
+  **(a)** the self route still has no *rate* limit, so the lockout is the whole fence — it bounds
+  guessing against one account, which is the right fence, and a per-route policy still waits on
+  register P0.3. **(b)** `--login-lockout-*` now governs two surfaces and is still named for one;
+  renaming it is a flag rename with a deprecation, and the hoisted `loginLockout` is the seam if a
+  second policy ever becomes wanted. **(c)** the three 403s on the operator panel
+  (`forbidden` / `self_not_permitted` / `user_not_active`) are indistinguishable to the client,
+  because `throwProblem` keeps `detail` over `error` — the page names all three remedies rather than
+  string-matching a sentence that will be reworded, and the real fix is a client that reads the code,
+  which `/account` already does for its own reason. **(d)** `--allow-cursor-disclosure` and the
+  loopback publish are both one-line compose decisions an operator inherits without being asked;
+  neither is surveyed against what the deployment actually serves. **(e)** nothing compares the two
+  compose files, so the next flag added to the base and not to an overlay is found by a reader again
+  — the overlay now needs no command, which removes the instance rather than the class, and a rule
+  over `deploy/` is what would close it.
 - **At-rest PHI encryption works, per tenant, and what is left of it** (ADR-0338 closed ADR-0337's
   top open item; specified across ADR-0070 / ADR-0071 / ADR-0074 / ADR-0091). The key is **derived,
   not stored**: `HKDF-SHA256(ikm = COLUMN_ENCRYPTION_SECRET, salt = tenantId, info =

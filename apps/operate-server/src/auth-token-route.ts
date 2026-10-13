@@ -240,7 +240,7 @@ export async function verifyLogin(input: VerifyLoginInput): Promise<LoginOutcome
       detail: `user ${record.userId} has no password; set one with 'operate-server set-credential'`,
     };
   }
-  if (isLocked(record, input.now)) {
+  if (credentialIsLocked(record, input.now)) {
     // The work is spent even though the answer is already known, and that is the deliberate
     // choice. Short-circuiting here would make a locked account answer in a millisecond where an
     // unknown email takes ~130 ms, which is an enumeration oracle a caller can *create* on
@@ -300,7 +300,15 @@ export async function verifyLogin(input: VerifyLoginInput): Promise<LoginOutcome
   };
 }
 
-function isLocked(record: CredentialRecord, now: Date): boolean {
+/**
+ * Whether this account's lock is still in force.
+ *
+ * Exported because the credential routes ask the same question (ADR-0364's follow-up) and a second
+ * spelling of *is this account locked* is how two of them come to disagree -- which here would mean
+ * one surface honouring a lock the other ignores, so the slower one is bypassed through the faster.
+ * The login is the only caller that may *mint* on a false answer; the other reads it to refuse.
+ */
+export function credentialIsLocked(record: CredentialRecord, now: Date): boolean {
   if (record.lockedUntil === null) return false;
   const until = Date.parse(record.lockedUntil);
   // An unparseable lock reads as *locked*, not as unlocked: the column is written by one statement

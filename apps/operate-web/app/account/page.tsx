@@ -109,6 +109,21 @@ async function postPasswordChange(
  */
 const REFUSAL_SENTENCE: Readonly<Record<string, string>> = Object.freeze({
   current_password_wrong: "The current password did not match. Nothing was changed.",
+  // 429, and the one refusal here whose remedy is to stop: the same lock the sign-in page enforces,
+  // advanced by the same counter, because a wrong current password on this form is a failed
+  // possession proof exactly as a wrong password at the login is. Named rather than left to the
+  // server's detail because that detail cannot say *how long*, and neither can this page — the
+  // window is the deployment's `--login-lockout-seconds`, which the browser never sees. So the one
+  // honest instruction is to wait, and to say the lock clears itself rather than needing anybody.
+  account_locked:
+    "Too many failed attempts, so this account is locked for a while. Nothing was changed. The " +
+    "lock lapses on its own — wait and try again, or ask an operator to set a new password, which " +
+    "clears it immediately.",
+  // 403, and the one that is not about the password at all: a session minted before a suspension
+  // stays valid until it expires, so this form is reachable by someone who can no longer sign in.
+  user_not_active:
+    "This account is not active, so its password cannot be changed here. An operator can set one " +
+    "for a suspended account, and reactivating it is what restores sign-in.",
   no_current_credential:
     "This account has no password yet, so there is none to change — an operator has to set the " +
     "first one before you can change it yourself.",
@@ -156,8 +171,14 @@ export default function AccountPage() {
   async function submit(): Promise<void> {
     setError(null);
     setResult(null);
-    // The server takes two fields, so the third is ours alone to check — and checking it here is
-    // what keeps a typo in the confirmation from spending a failed attempt against the lockout.
+    // The server takes two fields, so the third is ours alone to check.
+    //
+    // An earlier version of this comment claimed the check "keeps a typo in the confirmation from
+    // spending a failed attempt against the lockout", and that was wrong twice: at the time there
+    // was no counter on this route at all, and even now the attempt is spent on a wrong *current*
+    // password, which a mistyped confirmation does not change. What it actually prevents is setting
+    // a password you mistyped and then cannot log in with — the one failure mode a server given two
+    // fields cannot see, since both of its fields were well-formed.
     if (next !== confirm) {
       setError("The two new passwords do not match.");
       return;

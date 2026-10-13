@@ -220,10 +220,17 @@ services:
       # people who provision identities to be a different set from the people who can take one over
       # changes this line alone.
       #
-      # It cannot be aimed at the caller (403 self_not_permitted). Changing your OWN password is
-      # POST /v1/account/password, which needs no grant and mounts with --credential-login above --
-      # so every user of this deployment can now change their password, which no deployment could
-      # do before.
+      # It cannot be aimed at a caller that names a person (403 self_not_permitted), which is the
+      # case that matters: a signed-in operator cannot replace their own credential through a route
+      # that never asks for the current one. The bootstrap api key below names no person -- a
+      # `token:role:tenant` spec resolves to a service account on a shared placeholder id (ADR-0331)
+      # -- so for THAT credential the refusal cannot fire, and there is nothing for it to protect
+      # either, since a service account has no password to take over.
+      #
+      # Changing your OWN password is POST /v1/account/password, which needs no grant and mounts
+      # with --credential-login above -- so every user of this deployment can now change their
+      # password, which no deployment could do before. That route honours the login's account
+      # lockout, so a wrong current password counts toward the same lock a wrong login does.
       - --credential-admin-role
       - platform_admin
       # The issuer and audience the token asserts and the gateway checks. They are this
@@ -262,6 +269,23 @@ services:
       - "2"
     expose:
       - "8787"
+    # Published on the LOOPBACK ONLY, which is what makes the documented bootstrap runnable.
+    #
+    # `expose:` above advertises the port on the compose network -- `web` and `caddy` reach it as
+    # `api:8787` -- and publishes nothing on the host, so `curl http://localhost:8787/...` from this
+    # VM's shell connected to nothing. Every bootstrap command in `.env.example` was written against
+    # that address, so the only documented path to the first login could not be followed as written.
+    #
+    # The alternative was to rewrite those commands against `https://api.$DOMAIN`, and it is the
+    # worse one: the bootstrap is precisely the moment DNS may not have propagated and Caddy may not
+    # yet hold a certificate, so it would make creating the first user depend on the TLS layer being
+    # up. `127.0.0.1:` is the whole of the binding and not a formality -- a bare `8787:8787` would
+    # publish on every interface, and on a cloud VM that is the public one, which would put an
+    # unauthenticated-at-the-edge API port on the internet behind whatever the host firewall happens
+    # to allow. Bound to loopback it is reachable by exactly the population that can already run
+    # `docker compose exec`, so it adds no exposure and removes a dependency.
+    ports:
+      - "127.0.0.1:8787:8787"
     # `/readyz`, not `/health`: this check's job is to decide whether `web` and `caddy` may be
     # pointed at the API, which is a readiness question. The API's boot is full of deliberate
     # refusals (a classified pack with no COLUMN_ENCRYPTION_SECRET, an undischargeable ABAC

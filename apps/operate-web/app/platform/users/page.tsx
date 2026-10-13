@@ -10,8 +10,10 @@ import {
   listUsers,
   PlatformError,
   provisionUser,
+  USER_STATUS_TRANSITIONS,
   USER_STATUSES,
   type PlatformUser,
+  type UserStatus,
 } from "@/lib/users";
 
 /**
@@ -24,6 +26,21 @@ const STATUS_FILTERS: ReadonlyArray<{ value: string; label: string }> = [
   { value: "all", label: "All" },
   ...USER_STATUSES.map((s) => ({ value: s, label: titleCase(s) })),
 ];
+
+/**
+ * Read off the transition map rather than naming `deleted`, which is what the detail page's action
+ * buttons already do — so a status that later loses its last outgoing edge is marked here without
+ * this page being edited.
+ *
+ * The footnote beside the marker also says a password cannot be set for such a status, and the
+ * server decides *that* from its own `CREDENTIAL_WRITE_BY_STATUS` rather than from this map. The
+ * two agree because that map's stated rule **is** terminality — a password set where nothing can
+ * reactivate the user could never be used — so a future terminal status admitting a credential
+ * write would have to contradict its own reason, and that sentence would then need its own source.
+ */
+const TERMINAL_STATUSES: ReadonlySet<UserStatus> = new Set(
+  USER_STATUSES.filter((s) => USER_STATUS_TRANSITIONS[s].length === 0),
+);
 
 /** `users_phone_e164_check`, so a typo is refused here rather than as a 23514 at the insert. */
 const PHONE_E164_RE = /^\+[1-9][0-9]{6,14}$/;
@@ -204,8 +221,11 @@ export default function PlatformUsersPage() {
                 </p>
                 <p className="mt-1.5 text-xs">
                   This is the id an <span className="font-mono">--api-key</span>{" "}
-                  <span className="font-mono">key:role:tenant:principal</span> spec names, and the
-                  id a password is set against. It is not shown again.
+                  <span className="font-mono">key:role:tenant:principal</span> spec names, the id a
+                  password is set against, and the id Grant membership asks for on a tenant&apos;s
+                  page. It is shown again whenever it is needed — on this user&apos;s own page
+                  under <span className="font-medium">User ID</span>, and in a tenant&apos;s members
+                  table — so it is here to save a hop, not to be copied down.
                 </p>
               </div>
               <button
@@ -423,7 +443,12 @@ export default function PlatformUsersPage() {
                   </td>
                   <td className="px-4 py-2.5 text-ink">{u.displayName ?? "—"}</td>
                   <td className="px-4 py-2.5">
-                    <Badge value={u.status} />
+                    <div className="flex items-center gap-2">
+                      <Badge value={u.status} />
+                      {TERMINAL_STATUSES.has(u.status) && (
+                        <span className="text-xs text-ink-faint">terminal</span>
+                      )}
+                    </div>
                   </td>
                   <td className="px-4 py-2.5 text-ink-muted">
                     {formatCell(u.lastLoginAt, "date")}
@@ -458,6 +483,18 @@ export default function PlatformUsersPage() {
             </button>
           )}
         </div>
+
+        {/* A legend, so it is shown only when a marked row is on screen rather than explaining a
+            marker nobody can see. */}
+        {users.some((u) => TERMINAL_STATUSES.has(u.status)) && (
+          <p className="mt-4 max-w-2xl text-xs text-ink-faint">
+            A status marked <span className="text-ink-muted">terminal</span> has no transition out
+            of it: nothing reactivates that identity, and because a password set for it could never
+            be used to log in, setting one is refused. The row stays either way — 97 catalogued
+            columns reference <span className="font-mono">meta.users</span>, so retiring is how a
+            spent identity is said rather than a deletion.
+          </p>
+        )}
 
         <p className="mt-4 max-w-2xl text-xs text-ink-faint">
           There is no email filter: the registry list reads{" "}

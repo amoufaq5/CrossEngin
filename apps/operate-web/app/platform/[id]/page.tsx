@@ -185,7 +185,12 @@ export default function TenantDetailPage({ params }: { params: { id: string } })
   const [tenant, setTenant] = useState<Tenant | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [notFound, setNotFound] = useState(false);
+  // Which 404 the read answered, and not a boolean: "no row" and "no route" send an operator to
+  // different places, and only one of them is about this id. Without --platform-admin-role the
+  // gateway's matcher answers its own 404 for every tenant, which a boolean renders as "no tenant
+  // found" — a sentence about the id, for a cause the id has nothing to do with. The users console
+  // draws the same distinction with the same predicate (`routeNotMounted` there).
+  const [absent, setAbsent] = useState<"row" | "route" | null>(null);
   const [acting, setActing] = useState<TenantAction | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   // Required by the server and recorded in the tenant's permanent lifecycle trail, so there is no
@@ -221,11 +226,15 @@ export default function TenantDetailPage({ params }: { params: { id: string } })
   const load = useCallback(() => {
     setBusy(true);
     setError(null);
-    setNotFound(false);
+    setAbsent(null);
     getTenant(id)
       .then((t) => setTenant(t))
       .catch((e: unknown) => {
-        if (e instanceof PlatformError && e.status === 404) setNotFound(true);
+        if (e instanceof PlatformError && e.status === 404) {
+          // `throwProblem` keeps `detail` over `error`, so the gateway's own
+          // `no route for <method> <path>` is what arrives when nothing is mounted.
+          setAbsent(e.message.startsWith("no route for ") ? "route" : "row");
+        }
         else setError(e instanceof Error ? e.message : String(e));
       })
       .finally(() => setBusy(false));
@@ -397,9 +406,18 @@ export default function TenantDetailPage({ params }: { params: { id: string } })
 
         {busy && tenant === null ? (
           <p className="text-sm text-ink-muted">Loading…</p>
-        ) : notFound ? (
+        ) : absent !== null ? (
           <div className="rounded-xl border border-line bg-surface-soft px-4 py-10 text-center text-sm text-ink-muted">
-            No tenant found for this id.
+            {absent === "route" ? (
+              <>
+                This deployment serves no tenant registry, so there is nothing to show here. It
+                arrives with <span className="font-mono">--platform-admin</span> and{" "}
+                <span className="font-mono">--platform-admin-role</span> on the API — a deployment
+                flag rather than anything about this id.
+              </>
+            ) : (
+              <>No tenant found for this id.</>
+            )}
           </div>
         ) : tenant === null ? (
           <p className="text-sm text-ink-muted">Not found.</p>

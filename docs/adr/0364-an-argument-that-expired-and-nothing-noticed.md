@@ -391,3 +391,143 @@ exercises the shipped binary rather than a decision.)_
    a public route with `--rate-limit-policy` mounted, email verification (so a mail channel), and a
    decision about what a self-registered tenant gets — `trial` was removed from the tenant
    lifecycle in ADR-0334 as a plan tier with no producer.
+
+## Addendum: what an adversarial review of this increment found
+
+Written in the same session, after the increment above was committed as `df61cb8` and pushed. Four
+independent lenses read the new module, the web contract, the pages and the docs against the server
+they talk to; eleven findings were raised and each was handed to a separate agent instructed to
+refute it. Two survived with high severity, three more were real, and the fixes are in this commit.
+They are recorded here rather than in a new ADR because they are this decision's own consequences,
+and one of them inverts a claim this file makes above.
+
+### The self-service route was an unmetered guessing oracle, and it ignored the lock the login honours
+
+`buildChangeOwnPasswordHandler` read `existing.credentialHash` and nothing else. `findById` returns
+`status`, `failedAttempts` and `lockedUntil`, and the handler read **none of the last three**. So:
+
+- **The account lockout was bypassed.** The login refuses a locked account
+  (`auth-token-route.ts:243`) and this route went on verifying passwords against it at full speed.
+  Two doors, one lock, and the slow one was reachable through the fast one.
+- **A wrong guess was not counted.** `recordFailure` had exactly one caller in the workspace — the
+  login's `onFailure` — so no number of wrong attempts here ever produced a lock.
+- **A wrong guess left no trace at all.** `record` is called *after* `verifyPassword` returns
+  `matched`, so the refusing branch took neither `record` nor `recordRefusal`. A wrong possession
+  proof against a live account was the one event on this surface an operator reading the trail would
+  want, and it wrote nothing.
+
+The reachability is this file's own argument, one section up: *"a session stolen from a live browser
+could lock the real operator out and keep the account"* is given as the reason `self_not_permitted`
+exists, so a held live session is an in-scope state. With one, the holder converts a time-boxed
+session into the permanent password. The refuting agent corrected two overstatements in the original
+report and both corrections are worth keeping: the lock is **not** cleared by guessing (the clearing
+is in `setCredential`, behind the `matched` gate), and scrypt at N=2^15 bounds the rate to roughly
+130 ms per attempt. So the honest statement is *the configured lockout was unenforced and the
+attempts left no trace*, not *free brute force*.
+
+The fix shares rather than copies. `isLocked` is exported from `auth-token-route.ts` as
+`credentialIsLocked`, because a second spelling of *is this account locked* is exactly how the two
+doors came to disagree. `CredentialRoutesContext.onFailedAttempt` is **required**, and that is the
+fence: an optional counter whose default is "do not count" is the defect restated as a default.
+There is deliberately no `LoginLockoutPolicy` field beside it — the handler checks the lock by
+reading the column the counter wrote, so carrying the threshold here would be a declaration nothing
+reads, which is the class this run keeps finding. `parseLoginLockout` is hoisted in `node.ts` so one
+result reaches both surfaces.
+
+Not counting a locked attempt is the login's own rule, inherited: hammering a locked account must
+not extend its own lock, or a caller could keep an account locked forever without ever learning a
+password. Not counting `unreadable_hash` is the other half, and the comment claiming that
+distinction was already in the file — describing a split the code did not make, since both outcomes
+took one branch and neither was counted.
+
+### `status` was read and never consulted, so a password for a retired user reported success
+
+The same `findById` returned `status` and nothing read it, while `verifyLogin` refuses
+`status !== "active"` outright. An operator set a password for a retired user, got
+`200 credential set`, and that user was told their password was wrong. That is ADR-0337's
+falsely-true-control direction on the surface built to make the act legible.
+
+`CREDENTIAL_WRITE_BY_STATUS` is the total map, and the split is **terminal versus recoverable**,
+read off `USER_STATUS_TRANSITIONS` rather than off a status name. `deleted` has no outgoing
+transition, so a password set there could never be used by anybody and the route refuses. `suspended`
+transitions back to `active`, so the write lands and the response **says what it does not yet
+buy** — ADR-0322's report-rather-than-refuse, with `loginBlocked` and `subjectStatus` on the 200 and
+in the audit detail. `selfMay` is false for every non-active status, because a session minted before
+a suspension stays valid until it expires, so a suspended person can still reach that route, and
+rotating the credential they were suspended from is the one thing the suspension exists to stop.
+
+### `self_not_permitted` cannot fire for the credential the shipped compose grants, and this file overstated it
+
+A bare `token:role:tenant` spec resolves to a `service_account` on a shared placeholder id
+(ADR-0331), which names no `meta.users` row — so for the bootstrap api key there is no "yourself" to
+refuse. The compose comment and `deploy/README.md` both asserted the refusal without qualification.
+
+No code changed, and the reasoning is why: the check exists to stop a principal replacing *its own*
+credential without proving possession, and a service account has no password to take over. It fires
+exactly where it matters, which is a signed-in person using the console. What was wrong was the
+prose, and both places now say so.
+
+### Three documents told the operator to do things that cannot work
+
+- **`.env.example`'s bootstrap curls named `http://localhost:8787`, which the stack published
+  nowhere.** `api` declared `expose: 8787` — the compose network only — and Caddy's 80/443 were the
+  only published ports, so every command in the only documented path to the first login was refused
+  by the host. Fixed by **publishing `127.0.0.1:8787:8787`** rather than by rewriting the commands
+  against `https://api.$DOMAIN`: the bootstrap is precisely the moment DNS may not have propagated
+  and Caddy may hold no certificate, so pointing it at the TLS layer makes the first user depend on
+  the last thing to come up. `127.0.0.1:` is the whole of the binding — a bare `8787:8787` publishes
+  on every interface, which on a cloud VM is the public one.
+- **`docker-compose.ai.yml` carried its own copy of the entire `api` command, and it was ten flags
+  behind.** Compose replaces a `command` rather than merging it, so adding one flag meant repeating
+  all of them, and the copy's own comment read *"Keep the two in step when either changes."* Nobody
+  did. Missing: `--credential-login` (so **the whole self-hosted-AI path had no login**, and the web
+  app it ships with could authenticate nobody), `--platform-user-routes`, `--idempotency-store pg`,
+  `--jwt-issuer`, `--jwt-audience` and five more — and it still passed `--api-key` on argv, the
+  exposure ADR-0357 removed from the base. This is ADR-0288's maintained list again, and the fix is
+  the one that has worked every previous time: make the duplicate **unnecessary** rather than
+  correct. `ai-model-source.ts` gives the model an environment route (`OPERATE_AI_MODEL`, already
+  documented and already used by the overlay's own `ai-pull` service), which was the only
+  CLI-only AI setting — the provider has always resolved from env — so the overlay now declares
+  `environment:` alone. Environment maps **merge** where commands replace, so it inherits all 16
+  flags and all 33 variables, and there is nothing left to keep in step.
+- **`deploy/ORACLE.md` was not touched by the original increment and is the document an Oracle
+  operator actually follows.** It still headed its section *"Create your first user — this is a
+  shell step, on purpose"*, told the reader to hand-edit the api command to add flags the compose
+  already passes, and granted `erp_admin` where `.env.example` grants `platform_admin` — a fork that
+  decides what the first person can do, since a session carries exactly one role.
+
+### Four things the review got wrong, kept because the corrections are the useful part
+
+`account_locked` is **unreachable from the operator panel**, so the UI does not claim it: that route
+*clears* a lock (`lockCleared: true`), and a sentence telling an operator to wait out a lock that is
+not there would be a remedy that cannot work. `credentialRouteAbsent` was already at module scope,
+so the 404 defect was a missing second reader rather than a scope problem. `setUserCredential`
+already returned its body, so only the interface needed the new fields. And the three 403s on that
+panel (`forbidden`, `self_not_permitted`, `user_not_active`) cannot be told apart by the page at
+all, because `throwProblem` keeps `detail` over `error` — so the server's sentence leads and the
+page's help names all three remedies, rather than string-matching prose that will be reworded.
+
+### Verified live, as a non-owner `NOBYPASSRLS` role
+
+A throwaway PG 16.13 cluster, the catalog applied (964/964), the real server with
+`--login-lockout-attempts 3`:
+
+| what | result |
+| --- | --- |
+| operator sets a password for an **active** user | `200`, `loginBlocked: false` |
+| operator sets one for a **suspended** user | `200`, `loginBlocked: true`, detail names the status |
+| operator sets one for a **retired** user | `403 user_not_active`, no audit row, no write |
+| three wrong current passwords on the self route | `401` each, **three refusal rows**, counter advances |
+| the fourth attempt | `429 account_locked` |
+| the **correct** password while locked | `429` — the lock is checked before any verification |
+| the **login** while locked | `401` — one counter, one lock, two doors |
+| operator sets a password | lock cleared, `UPDATE … credential_locked_until = NULL` |
+| re-login, then self-change | `200`, `sessionsRevoked: false` |
+| a session minted **before** a suspension | `GET /v1/meta/schema` `200` (live) and `POST /v1/account/password` `403` |
+| password, hash or pepper anywhere in `meta.audit_log` | **0 rows** |
+
+The audit trail reads `platform.user_credential_set` at platform scope carrying `subjectStatus`,
+three `platform.user_credential_refused` rows at tenant scope carrying `verification: mismatched`,
+and `account.credential_changed` at tenant scope. Before this commit the three refusal rows did not
+exist. All of it is invisible to the serving role without `app.platform_audit`, which is RLS doing
+its job rather than a missing row.

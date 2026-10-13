@@ -312,6 +312,29 @@ Setting someone's password needs `--credential-admin-role` on the `api` command;
 compose grants it to `platform_admin`. Without it the panel says so and names
 `set-credential` as the shell path, rather than failing as though the user were missing.
 
+Three limits of that panel are worth knowing before you use it:
+
+- **It cannot be aimed at the person using it** (403 `self_not_permitted`), because it does not ask
+  for the current password — so aiming it at yourself would replace your own credential without
+  proving you hold it, which is what a stolen browser session would do. Change your own at
+  `/account`. One caveat, which is honest rather than reassuring: that check compares the caller's
+  principal id to the target's, and the **bootstrap api key names no person** — a
+  `token:role:tenant` spec resolves to a service account on a shared placeholder id — so for that
+  credential there is no "yourself" to refuse, and nothing for the check to protect either, since a
+  service account has no password to take over. It bites where it matters, which is a signed-in
+  person using the console.
+- **A retired user is refused** (403 `user_not_active`). `deleted` has no transition back to
+  `active`, so a password set then could never be used by anybody.
+- **A suspended user succeeds and says so.** The password is written and the response says logging
+  in is still refused until you reactivate them — setting one ahead of a reactivation is a real
+  workflow, and an unqualified "credential set" for an account the login rejects outright would be
+  a success message for a password that does not work.
+
+**The API also answers on `127.0.0.1:8787`** on the VM itself, which is where the bootstrap curls in
+`.env.example` go. That publish is loopback-only on purpose: it is reachable by exactly the people
+who can already run `docker compose exec`, and it means creating the first user does not wait on DNS
+or on Caddy holding a certificate. The same API is at `https://api.$DOMAIN` from anywhere else.
+
 ## Rate limiting
 
 Out of the box the gateway limits at 10,000 requests per 60s window, in memory — so the

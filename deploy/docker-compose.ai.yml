@@ -61,25 +61,22 @@ services:
       # picked up by the real OpenAI client if the base URL above were ever unset, turning a
       # self-hosted deployment into cloud calls with a placeholder key.
       LOCAL_LLM_API_KEY: ${OPERATE_AI_API_KEY:-}
-    # Compose REPLACES `command` rather than merging it, so this repeats the base
-    # command and adds the AI flags. Keep the two in step when either changes.
-    command:
-      - node
-      - apps/operate-server/dist/bin/operate-server.js
-      - --pack
-      - ${OPERATE_PACK:-erp-core}
-      - --store
-      - pg
-      - --port
-      - "8787"
-      - --scheme
-      - https
-      - --platform-admin
-      - --api-key
-      - ${OPERATE_ADMIN_API_KEY}
-      - --ai-design
-      - --ai-model
-      - ${OPERATE_AI_MODEL:-qwen2.5:14b-instruct}
+      # The model, which used to be `--ai-model` on a `command:` this file had to repeat in full.
+      #
+      # There is **no `command:` here any more**, and that is the whole point of this block. Compose
+      # REPLACES a `command` rather than merging it, so adding one flag meant copying all of them,
+      # and the copy carried the comment *"Keep the two in step when either changes."* Nobody did:
+      # by ADR-0364 it was **ten flags behind** the base — no `--credential-login`, so this entire
+      # self-hosted path had no login at all and the web app it ships with could authenticate
+      # nobody; no `--platform-user-routes`; no `--idempotency-store pg`; no `--jwt-issuer` — and it
+      # still passed `--api-key` on argv, which ADR-0357 removed from the base because `ps` reads it.
+      #
+      # `environment:` MERGES across files where `command` replaces, so with the model reachable
+      # from the environment this overlay adds the AI wiring and inherits every flag and every
+      # variable the base declares. There is nothing left to keep in step, which is the only fix
+      # that has ever worked on this class (ADR-0288): make the duplicate unnecessary rather than
+      # correct. `--ai-design` is already on the base command.
+      OPERATE_AI_MODEL: ${OPERATE_AI_MODEL:-qwen2.5:14b-instruct}
 
 volumes:
   ollama-models:

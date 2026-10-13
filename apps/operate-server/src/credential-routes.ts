@@ -4,7 +4,9 @@ import { hashPassword, verifyPassword } from "@crossengin/crypto";
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
 import { z } from "zod";
 
+import { credentialIsLocked } from "./auth-token-route.js";
 import type { PostgresCredentialStore } from "./credential-store.js";
+import { USER_STATUSES, type UserStatus } from "./platform-users.js";
 
 /**
  * Setting a password over HTTP, which until now only a shell could do.
@@ -96,6 +98,8 @@ export const CREDENTIAL_REFUSALS = [
   "not_a_person",
   "no_current_credential",
   "current_password_wrong",
+  "account_locked",
+  "user_not_active",
   "unrecordable",
 ] as const;
 export type CredentialRefusal = (typeof CREDENTIAL_REFUSALS)[number];
@@ -103,13 +107,19 @@ export type CredentialRefusal = (typeof CREDENTIAL_REFUSALS)[number];
 /**
  * The HTTP status each refusal answers with.
  *
- * A total map so a ninth refusal is a compile error at the one place that decides, rather than a
+ * A total map so an eleventh refusal is a compile error at the one place that decides, rather than a
  * new member inheriting whichever branch an `if`-chain ended on.
  *
  * `current_password_wrong` is **401 and not 403**: the caller is authenticated as themselves and
  * their role is irrelevant, so what failed is a second authentication and not an authorisation.
  * `unrecordable` is 503 for ADR-0334's reason -- a transient inability to satisfy a standing rule
  * is retryable, where a 403 would be a claim about the caller.
+ *
+ * `account_locked` is **429 and not 401 or 423**. The login answers one body for every refusal, on
+ * purpose, because an unauthenticated caller must learn nothing -- but this caller is already
+ * authenticated as the account in question, so there is nothing to disclose and the useful answer
+ * is the one that says *stop and come back*. 429 is that answer, and unlike 401 it is not one a
+ * client should respond to by re-prompting for the password.
  */
 export const CREDENTIAL_REFUSAL_STATUS: Readonly<Record<CredentialRefusal, number>> = Object.freeze(
   {
@@ -120,9 +130,57 @@ export const CREDENTIAL_REFUSAL_STATUS: Readonly<Record<CredentialRefusal, numbe
     not_a_person: 403,
     no_current_credential: 409,
     current_password_wrong: 401,
+    account_locked: 429,
+    user_not_active: 403,
     unrecordable: 503,
   },
 );
+
+/**
+ * What a credential write means for a user in each status, which neither route consulted.
+ *
+ * `findById` has always returned `status` and nothing read it, so a password set for a retired user
+ * answered an unqualified `200 credential set` while `verifyLogin` refuses `status !== "active"`
+ * outright -- the operator told the credential works, the person told their password is wrong, and
+ * nothing in either answer naming the real cause. That is ADR-0337's falsely-true-control direction
+ * on a surface built to make an act legible.
+ *
+ * The split is **terminal versus recoverable**, read off `USER_STATUS_TRANSITIONS` rather than
+ * guessed: `deleted` has no outgoing transition, so a password set there can *never* be used and
+ * refusing is the honest answer; `suspended` transitions back to `active`, so setting one ahead of a
+ * reactivation is a coherent act and the honest answer is to do it and **say what it does not yet
+ * buy** (ADR-0322's report-rather-than-refuse rule).
+ *
+ * `selfMay` is false for every non-active status, and that asymmetry is deliberate: a session minted
+ * before a suspension stays valid until it expires (ADR-0358), so a suspended person can still reach
+ * this route -- and letting them rotate the credential they were suspended from is the one thing the
+ * suspension is for. An operator doing it for them is a decision; them doing it for themselves is a
+ * bypass.
+ */
+export const CREDENTIAL_WRITE_BY_STATUS: Readonly<
+  Record<UserStatus, { readonly operatorMay: boolean; readonly selfMay: boolean }>
+> = Object.freeze({
+  active: { operatorMay: true, selfMay: true },
+  suspended: { operatorMay: true, selfMay: false },
+  deleted: { operatorMay: false, selfMay: false },
+});
+
+/** True when a login would refuse this status outright, so a 200 has to say so. */
+function loginBlockedBy(status: UserStatus): boolean {
+  return status !== "active";
+}
+
+/**
+ * The stored status, or null when the row holds a value this binary does not know.
+ *
+ * Parsed rather than cast, which is ADR-0362's class: `CredentialRecord.status` is a bare `string`
+ * because the column's CHECK is the only thing constraining it, so a row written by a later binary
+ * reads as a status with no entry in the map above. Null then takes the fail-closed arm rather than
+ * indexing the map with a key it does not have and getting `undefined` for `operatorMay`.
+ */
+function asUserStatus(value: string): UserStatus | null {
+  return (USER_STATUSES as readonly string[]).includes(value) ? (value as UserStatus) : null;
+}
 
 /**
  * A password is bounded in length and has **no floor**, which is the repo's existing decision
@@ -191,6 +249,23 @@ export interface CredentialRoutesContext {
    * write.
    */
   readonly audit: CredentialAuditor;
+  /**
+   * Counts one failed possession proof against the account lockout.
+   *
+   * **Required**, and that is the fence rather than a style: this increment's own review found the
+   * self-service route reading the stored hash and neither the lock nor the counter, so it was an
+   * *unmetered* guessing oracle that also ignored a lock the login was honouring -- the slow door
+   * bypassed through the fast one. An optional field with a default is how the next wiring site
+   * forgets to pass the real one (ADR-0330's rule), and the default that would read as safe here
+   * ("no counter") is exactly the defect.
+   *
+   * The deployment supplies it, so the *policy* stays where the login's is -- one
+   * `resolveLoginLockout` result behind both, read twice rather than spelled twice. There is
+   * deliberately no `LoginLockoutPolicy` field beside this one: the handler never needs the
+   * threshold, because it checks the lock by reading the column the counter wrote, so carrying the
+   * numbers here would be a declaration nothing reads.
+   */
+  readonly onFailedAttempt: (userId: string) => Promise<void>;
   readonly clock?: () => Date;
 }
 
@@ -310,6 +385,19 @@ export function buildSetUserCredentialHandler(ctx: CredentialRoutesContext): Han
     if (existing === null) {
       return refuse("user_unknown", `no meta.users row with id ${userId}`);
     }
+    const status = asUserStatus(existing.status);
+    if (status === null || !CREDENTIAL_WRITE_BY_STATUS[status].operatorMay) {
+      // `deleted` is terminal -- `USER_STATUS_TRANSITIONS.deleted` is empty -- so nothing can ever
+      // reactivate this user and a password set here could never be used by anybody. Refusing is
+      // the honest answer where `suspended` gets a 200 that says what it does not yet buy, and the
+      // difference is read off the transition map rather than from the status name.
+      return refuse(
+        "user_not_active",
+        `user ${userId} is ${existing.status}, which has no transition back to active, so a` +
+          " password set now could never be used",
+      );
+    }
+    const loginBlocked = loginBlockedBy(status);
 
     const event: Omit<CredentialAuditEvent, "at"> = {
       operation: CREDENTIAL_SET_OPERATION,
@@ -322,7 +410,9 @@ export function buildSetUserCredentialHandler(ctx: CredentialRoutesContext): Han
       // `had_credential` is the one fact worth recording about the previous state: it separates
       // provisioning a first password from replacing a working one, which are different acts to
       // anyone reading the trail. Nothing derived from the password itself is recorded.
-      detail: { hadCredential: existing.credentialHash !== null },
+      // `status` rides along because a credential set for a suspended user is a different act from
+      // one set for an active user, and the trail is where that distinction has to survive.
+      detail: { hadCredential: existing.credentialHash !== null, subjectStatus: existing.status },
     };
     const unrecordable = await record(ctx, event);
     if (unrecordable !== null) return unrecordable;
@@ -338,11 +428,21 @@ export function buildSetUserCredentialHandler(ctx: CredentialRoutesContext): Han
         refuse("user_unknown", `no meta.users row with id ${userId} when the change landed`),
       );
     }
+    // `loginBlocked` is said rather than left for the operator to infer, because the alternative is
+    // ADR-0337's falsely-true control: an unqualified "credential set" for a suspended user is a
+    // success message for a password the login refuses outright, so the operator believes it works
+    // and the person is told their password is wrong. Reported and not refused, on ADR-0322's rule
+    // -- setting one ahead of a reactivation is a coherent act whose consequence is a fact to state.
     return json(200, {
       userId,
       credentialSet: true,
       lockCleared: true,
-      detail: "credential set; any lock on this account was cleared",
+      subjectStatus: existing.status,
+      loginBlocked,
+      detail: loginBlocked
+        ? `credential set and any lock cleared, but this user is ${existing.status}, so logging in` +
+          " is refused until they are reactivated"
+        : "credential set; any lock on this account was cleared",
     });
   };
 }
@@ -386,6 +486,19 @@ export function buildChangeOwnPasswordHandler(ctx: CredentialRoutesContext): Han
       // Authenticated as a user with no registry row: the token outlived the record.
       return refuse("user_unknown", "this credential names a user that no longer exists");
     }
+    const status = asUserStatus(existing.status);
+    if (status === null || !CREDENTIAL_WRITE_BY_STATUS[status].selfMay) {
+      // A session minted before a suspension stays valid until it expires (ADR-0358), so a
+      // suspended person can still reach this route -- and rotating the credential they were
+      // suspended from is the one thing the suspension exists to stop. An operator may still set
+      // one for them, which is a decision somebody made; this would be the person routing around
+      // it. An unrecognised status takes the same arm, fail-closed.
+      return refuse(
+        "user_not_active",
+        `this account is ${existing.status} and cannot change its own password; an operator sets` +
+          " one for a suspended account",
+      );
+    }
     if (existing.credentialHash === null) {
       // Not `current_password_wrong`: *there is no password* is a different fact from *the one you
       // sent did not match*, and conflating them would tell an api-key or SSO user to try harder at
@@ -395,6 +508,19 @@ export function buildChangeOwnPasswordHandler(ctx: CredentialRoutesContext): Han
         "this account has no password to change; an operator must set the first one",
       );
     }
+    // The lock the login writes is honoured **here too**, through the login's own predicate rather
+    // than a second spelling of it. Without this the two doors disagreed: the login refused a
+    // locked account and this route went on verifying passwords against it at full speed, so the
+    // lockout was bypassable by anyone holding a session -- which is the one credential a stolen
+    // browser session already has. Deliberately **not** counted as an attempt, on the login's own
+    // stated rule: hammering a locked account must not extend its own lock, or a caller could keep
+    // an account locked forever without ever learning a password.
+    if (credentialIsLocked(existing, (ctx.clock ?? ((): Date => new Date()))())) {
+      return refuse(
+        "account_locked",
+        "too many failed attempts; this account is locked and the lock lapses on its own",
+      );
+    }
 
     const outcome = await verifyPassword(
       body.data.currentPassword,
@@ -402,11 +528,38 @@ export function buildChangeOwnPasswordHandler(ctx: CredentialRoutesContext): Han
       ctx.pepper,
     );
     if (outcome !== "matched") {
-      // `unreadable_hash` lands here too and deliberately is **not** counted as a failed attempt.
-      // `password.ts` states the reason -- a corrupt or foreign-format row says nothing about the
-      // password, and counting it would lock a person out of an account whose password they typed
-      // correctly. The caller gets one body for both.
-      return refuse("current_password_wrong", "the current password did not match");
+      // Counted, which it was not: an uncounted wrong guess here is an *unmetered* oracle, and the
+      // caller is authenticated so the work is cheap to repeat. `mismatched` counts and
+      // `unreadable_hash` does not, which is `REFUSAL_COUNTS_AGAINST_LOCKOUT`'s split read one
+      // surface over -- `password.ts` states the reason: a corrupt or foreign-format row says
+      // nothing about the password, and counting it would lock a person out of an account whose
+      // password they typed correctly. The caller gets one body for both.
+      if (outcome === "mismatched") {
+        try {
+          await ctx.onFailedAttempt(userId);
+        } catch {
+          // Reported by the deployment's own handler and swallowed here, the login's reasoning
+          // exactly: the refusal is already decided and raising would turn a correctly-refused
+          // attempt into a 503, the one answer that invites a retry. An uncounted attempt is the
+          // direction a counter can afford, because nothing has been committed.
+        }
+      }
+      // Recorded too, best-effort. A wrong possession proof against a live account is the one event
+      // here an operator reading the trail would want and nothing wrote it -- and `recordRefusal`
+      // is best-effort for its own reason: nothing changed, so a lost row must not become a 503.
+      return recordRefusal(
+        ctx,
+        {
+          operation: CREDENTIAL_CHANGED_OPERATION,
+          tenantId: principal.tenantId ?? null,
+          subjectUserId: userId,
+          principalId: userId,
+          roles: rolesOf(ctx, principal),
+          detail: { self: true, verification: outcome },
+        },
+        "current_password_wrong",
+        refuse("current_password_wrong", "the current password did not match"),
+      );
     }
 
     const event: Omit<CredentialAuditEvent, "at"> = {
