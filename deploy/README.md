@@ -39,6 +39,35 @@ When `migrate` has exited successfully and `caddy` has obtained certificates
 > The `migrate` job is idempotent (hash-tracked in `_meta_migrations`), so it is safe
 > to run on every `up`. It applies the full meta-schema before the API starts.
 
+### If `extensions` exits 2
+
+```bash
+docker compose logs extensions
+```
+
+Exit **2** is psql's code for *the connection to the server went bad* — it never ran the SQL. That
+matters, because a failure **in** `00-extension.sql` would be exit **3** under `ON_ERROR_STOP=1`, and
+only then is the extension the thing to look at. Two causes, and the log names which:
+
+- **`connection to server at "db" … failed`** — the container could not reach Postgres. On a first
+  `up` this was a race until the `db` healthcheck gained `-h 127.0.0.1`: without a host
+  `pg_isready` probes the Unix socket, and the official entrypoint runs the init scripts against a
+  temporary server started with `listen_addresses=''`, so the socket answers *accepting connections*
+  while nothing is listening on 5432. `docker compose up -d` again succeeded, which is what made it
+  look intermittent. Pull and rebuild if your compose file predates that flag; otherwise check the
+  `db` container is up at all (`docker compose ps`).
+- **`role "…" does not exist`** or **`password authentication failed`** — `.env` is the problem, not
+  the database. `POSTGRES_USER`, `POSTGRES_PASSWORD` and `POSTGRES_DB` are read by *both* services:
+  `db` creates that role at initdb time and `extensions` connects as it. If you changed any of them
+  **after** the first `up`, the volume still holds a cluster created with the old values — the new
+  ones are not applied retroactively, so either put the old values back or destroy the volume with
+  `docker compose down -v` (which erases the database).
+
+Nothing downstream runs if this fails: `migrate` is gated on
+`extensions: service_completed_successfully` and `api` on `migrate`, so a stack whose first service
+could not connect reports exactly this one error and stops, rather than failing later somewhere less
+obvious.
+
 ### If `migrate` exits 1
 
 Read the reason first — it is printed, and there are only a few:

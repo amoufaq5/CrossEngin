@@ -27,7 +27,33 @@ services:
       - db-data:/var/lib/postgresql/data
       - ./postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      # `-h 127.0.0.1` is load-bearing and is the whole of the difference between this gate working
+      # and being a coin flip on a first `up`.
+      #
+      # Without a host, `pg_isready` probes the **Unix socket** — and on the very first
+      # initialisation the official entrypoint starts a *temporary* server with
+      # `listen_addresses=''`, socket only and no TCP, specifically so it can run
+      # `/docker-entrypoint-initdb.d/*` before the database is reachable. So a socket probe reports
+      # `accepting connections` during a window in which **nothing is listening on 5432**, Compose
+      # marks `db` healthy, and every dependent gated on `service_healthy` connects over TCP to
+      # `db:5432` and is refused. For the one-shot `extensions` service that surfaces as
+      # `psql: error: connection to server at "db" … failed` and **exit 2** — psql's documented code
+      # for *the connection to the server went bad*, which is also why it is not exit 3, the code for
+      # a script error under `ON_ERROR_STOP=1`. The two are worth telling apart: 3 means the SQL in
+      # `00-extension.sql` failed and the extension is the thing to look at, 2 means it never got to
+      # run it.
+      #
+      # With a host it is a TCP probe, so the check cannot pass until the real server is listening —
+      # which is after initdb and after the init scripts. It strictly tightens the gate: every state
+      # that answered healthy before and was genuinely serving still answers healthy, and the only
+      # states it newly refuses are the ones where a dependent would have failed. `pg_isready`
+      # authenticates nothing, so this needs no password and is unaffected by `pg_hba` rules.
+      #
+      # Reasoned from psql's exit codes and the entrypoint's documented behaviour, not reproduced:
+      # there is no Docker daemon in the environment this was written in. The discriminator on a
+      # real host is `docker compose logs extensions` — a refused connection is this race, while
+      # `role … does not exist` or `password authentication failed` is a `.env` problem instead.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 30
