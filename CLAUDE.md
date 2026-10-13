@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 356 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 357 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -621,9 +621,13 @@ type errors.
   expressions — with the trap that **the count is RLS-confined**: with one violating row the owner
   counts 1 and a non-owner counts 0 while the `ALTER` genuinely raises, so the confinement is asked of
   the catalog and a confined session gets `unknown_session_confined` rather than a claim. Third place
-  that class has been found (ADR-0330's erasure, ADR-0349's rekey), and converging it found that the
-  rule had **eight spellings** of which only `KeyRotationMigrator`'s private copy read
-  `relforcerowsecurity`, the one input that overrides ownership.
+  that class has been found (ADR-0330's erasure, ADR-0349's rekey), and converging it found what it
+  took to be eight spellings of one rule. **ADR-0362 retired that reading twice over**: the figure
+  is not reproducible from the committed tree by any counting (3 predicate implementations, 5
+  modules emitting a verdict, 7 naming the refusal, 9 naming it or a variant), and the copy this
+  increment extracted as the only correct one was **not** the most correct of them — it scores 6 of
+  8 against live ground truth where `shared-table-erasure.ts`, which was already asking Postgres,
+  scores 8 of 8.
 
   ADR-0353 closes ADR-0352's Q1 — the **upstream** half — and the class is **a table that could not
   accept its own record**. Downstream, the catalog is right and the database is behind, which is
@@ -1004,6 +1008,55 @@ type errors.
   which found 12 raw readers where this increment's own grep had found 8, three of them `fails_open`,
   and refused four broader anchors on measurement.
 
+  ADR-0362 is ADR-0361's rule read on **predicates** rather than on field lists, and the class is
+  **a predicate deciding from a proper subset of the facts that determine its answer**. It takes
+  three register items that read as unrelated — a confinement fence, a job survey and a four-eyes
+  attestation — and in every one the narrowing fails in the reassuring direction while a correct
+  sibling already sat somewhere in the tree. **The register's framing of all three was wrong in
+  ways that would have misdirected the work**, which is the increment's second finding and the
+  reason the corrections are written down rather than quietly applied.
+  *The confinement fence.* "Six fences infer confinement from ownership" is **three predicate
+  implementations and one defect**, and the sharpest part is that the repo had already converged
+  onto the wrong winner: ADR-0352 extracted `sessionWouldBeConfined` as the only correct copy of
+  eight, and it scores **6 of 8** while `row_security_active` — Postgres's own answer, sitting
+  unremarked in the Article 17 erasure — scores **8 of 8**. The live defect is a third spelling:
+  `probeJobQueueVisibility` composed ownership and bypass, so an owner of a `FORCE ROW LEVEL
+  SECURITY` table read `visible` while Postgres showed it **none** of the rows, and the destructive
+  confirmation is the silent zero this whole family exists to catch — the `DELETE … WHERE tenant_id
+  IS NOT NULL` removed nothing, the confirm-absence `count(*)` **also** reported 0 because it reads
+  through the same policy, and a `BYPASSRLS` role then counted both rows still present. Its own doc
+  comment is the class stated outright: *"Ownership, `rolbypassrls` and `relrowsecurity` are facts
+  Postgres will state, so they are **asked for** (ADR-0330's rule)"* — three inputs asked for and
+  the decision imitated, citing the ADR that says not to.
+  *The job survey.* All **55** (resolved pack, declaration) instances of an event-triggered job are
+  unproducible, and the survey written to say so told an operator *"event_emitter enqueues it — so
+  every fire accumulates a pending run … the behaviour has to be registered by the deployment"*:
+  two clauses of three false, in the function whose own comment states the rule being broken
+  (*"naming the fix that would not work is worse than naming none"*). The cause is **granularity** —
+  `classify()` reads `JOB_KIND_PRODUCERS[kind]`, the kind `event` genuinely has a producer, and no
+  verdict could say *a producer exists and cannot address this declaration*. The register blamed
+  arity; the shipped producer emits **two** segments unless `--event-prefix` is passed, which no
+  deployment passes, so the discriminator is the **separator** (`.` against `_`) and dropping the
+  prefix would have fixed nothing. Measured stronger than the register claimed: every declared
+  name's own first segment tried as a prefix across all seven packs gives **0 matches**, so the
+  failure is structural.
+  *The attestation.* The register's own proposed fix is **refuted**: `attestedAt === decidedAt`
+  could never fire for a stored row, because `rowToDecision` fills both from the same column — it
+  would declare the unstored field equal to the stored one and make a measured silent rewrite legal
+  by decree, ADR-0337's falsely-true direction. Three facts it did not have: there is **no column**
+  and the `INSERT` was *complete over the catalog*, which is exactly why no SQL rule reported it
+  (all ten compare SQL↔catalog or catalog↔a value set, and **none compares a contract field to a
+  catalog column**); the signed bytes commit to both lost fields independently; and `rowToDecision`
+  returned a bare literal **typed as** the contract, so no clause had ever been checked on read
+  while `rowToEvidence` fifteen lines down parses and says why. That is the member where the proper
+  subset is not a narrower field list but **the type annotation standing in for the parse**.
+  The recurring rule held a **ninth** time, and the increment's own three self-instances are the
+  evidence that it is a class rather than three bugs: a retired test pinned an exhaustive truth
+  table and compared the rule against a derivation of itself written in the test, calling the single
+  disagreement a property; **four comments in four packages** described the composition and the
+  *accurate* one described the defective code; and a comment this increment wrote defended its own
+  permissive default with a property only one of three callers has.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -1091,6 +1144,22 @@ packages exist at only one layer, noted below where that is true.
   cross-validate, diff, patch, `manifestHash`, `meta.extends` resolution — entity
   *ordering* lives with the store that creates tables, ADR-0285), and
   `tenancy/` + `workflow/` (tenant resolution, workflow definition validation).
+  **`manifest/event-names.ts` is the one spelling of the entity-event grammar** (ADR-0362):
+  `eventNameSegment`, `ENTITY_EVENT_VERBS`, `entityEventName` and `producibleEntityEventNames`.
+  It lives here and not in `operate-runtime` for a dependency reason that is also the increment's
+  own class avoided — `@crossengin/jobs`' survey must enumerate the names the producer can emit,
+  and `jobs → operate-runtime` and `jobs → kernel` are both cycles, so copying `segment()` into
+  kernel would have been a second spelling of the transform the convergence exists to remove. The
+  one thing in it that is easy to get wrong is wrong in the permissive direction:
+  `producibleEntityEventNames` reads declared transition **targets** and never `workflow.states`,
+  because `verbFor` reads `input.transitionTo`, so a state nothing transitions *to* can never appear
+  in a name — resolved `erp-core` has 95 (entity, state) pairs against 77 (entity, target) pairs, so
+  reading states would report 18 names producible that no write can emit. Measured across the seven
+  resolved packs: **294** names in union (core 230, retail 238, healthcare 243, grocery 247,
+  construction 233, education 243, government 243). `eventNameSegment` is deliberately **not**
+  idempotent at one input — `segment("")` is `x_` and `segment("x_")` is `x` — and an entity segment
+  can never need either, since `EntityNameSchema` is `/^[A-Z][A-Za-z0-9]*$/`, so the odd outputs can
+  only come from `eventPrefix` or a `Transition.to`.
   **`validatePermissions` checks a per-field grant for coherence with the entity grants beside it**
   since ADR-0348, where before it checked only that the field exists and every role is declared —
   and all three incoherences were reachable, **three of them live in the shipped packs**.
@@ -1257,10 +1326,33 @@ packages exist at only one layer, noted below where that is true.
   reads only the catalog: it answers ADR-0330's open end by counting the rows that violate the
   declared expression, and **refuses the claim on a confined session** rather than reading 0 as safe —
   measured, the owner counts 1 and a non-owner 0 while the `ALTER` genuinely raises.
-  `sessionWouldBeConfined` in `introspection.ts` is the rule that decides it, extracted because it had
-  **eight spellings** and only `KeyRotationMigrator`'s private copy read `relforcerowsecurity`, the
-  one input that overrides ownership. Only the *rule* is shared; each call site keeps its own query,
-  since `commonRefusals` wants `has_scope_column` in the same round trip.
+  **`sessionWouldBeConfined` asks Postgres for the verdict and the catalog for the explanation**
+  (ADR-0362). It returns `row_security_active(c.oid)` — the SQL face of `check_enable_rls`, the
+  function the executor itself consults — so it is not a better approximation of the rule, it *is*
+  the rule, and ADR-0330's *ask Postgres rather than imitate its parser* applies to a predicate
+  exactly as it does to an expression. It used to compose four catalog facts, measured at **6 of 8**
+  against live ground truth: both misses are a `SUPERUSER` holding `NOBYPASSRLS`, which
+  `check_enable_rls` exempts and no fact read here can see — a repo-wide grep for `rolsuper` /
+  `usesuper` / `is_superuser` returns **zero**. The misses are conservative and the bootstrap
+  `postgres` role carries `rolbypassrls`, so it was never in the divergent set: what the switch buys
+  is an **unwritable** composition rather than a corrected one, and three sites now agree on what
+  decides rather than two agreeing and one differing. The four facts stay and are still read,
+  because a refusal has to say *why* — "you do not own the table" and "you own it and FORCE confines
+  the owner too" send an operator to opposite remedies — and `sessionPolicyVisibilityReason`
+  composes that sentence, with `role_is_exempt` as the **honest arm**: Postgres says this session is
+  free and no fact here says why, where claiming `owner_exempt` would be actionable and false.
+  `parseSessionPolicyVisibility` is **strict on the verdict and permissive on the four facts**, and
+  the asymmetry is load-bearing rather than tidy: an unreadable explanation costs a sentence, an
+  unreadable verdict reads as *not confined* and silently stops a fence refusing. That was found by
+  review **after** the first commit shipped, because the test defending the permissive default
+  claimed *"every caller checks `rlsEnabled` first"* and only **one of three** does —
+  `check-admission.ts` and `encryption-writepath.ts` both parse and branch with nothing between, and
+  the second is `KeyRotationMigrator.probeTable`, whose refusal runs immediately before a key
+  generation is destroyed. Only the *rule* is shared; each call site keeps its own query, since
+  `commonRefusals` wants `has_scope_column` in the same round trip — but it **interpolates**
+  `SESSION_POLICY_VISIBILITY_COLUMNS` now rather than restating the five columns, which is the case
+  that constant's doc comment names and had zero consumers of, and is how the sixth column reached
+  that probe without the file being edited.
   **`PGSSLMODE` says what the channel actually promises, and `verify-ca` is refused** (ADR-0357).
   That wire carries `app.current_tenant_id` on every query — it **is** the tenant-isolation
   boundary — and on the column store `app.column_encryption_key` on every PHI write, while the
@@ -1787,11 +1879,35 @@ packages exist at only one layer, noted below where that is true.
   cancelling now and recording the request; `workflow-runtime-pg`'s `requestJobCancellation` re-asserts the
   premise *inside* the `UPDATE` predicate so a worker that claimed the run in between wins the row, and
   `COALESCE`-stamps so cancelling twice is a no-op on the record.
-  `survey.ts` (ADR-0334) is `surveyManifestWorkflows`' shape for jobs — five verdicts
-  (`handler_registered` / `served_by_kind_handler` / `deprecated` / `no_producer` / `handler_missing`)
+  `survey.ts` (ADR-0334) is `surveyManifestWorkflows`' shape for jobs — **six** verdicts
+  (`handler_registered` / `served_by_kind_handler` / `deprecated` / `no_producer` /
+  `event_unproducible` / `handler_missing`)
   over `JOB_KIND_PRODUCERS`, a **total map over `JOB_KINDS`** naming which producer enqueues each
   kind. `workflow` and `cdc` are `"none"`, so a job of those kinds reports `no_producer` **in
   preference to** `handler_missing`: naming a fix that would not work is worse than naming none.
+  **`event_unproducible` is the sixth, and it exists because the map's granularity is the wrong
+  one** (ADR-0362): `classify()` reads `JOB_KIND_PRODUCERS[kind]`, the kind `event` genuinely *has*
+  a producer, and the question is whether that producer can emit this declaration's **name**. So all
+  **55** (resolved pack, declaration) instances landed on `handler_missing`, whose detail told an
+  operator *"event_emitter enqueues it — so every fire accumulates a pending run … the behaviour has
+  to be registered by the deployment"* — two clauses of three false, in the function whose own
+  comment at `:14` states the rule being broken. Checked **after** `no_producer`, which is the
+  stronger statement (nothing enqueues this *kind* at all) and must keep winning for a `workflow`
+  job, and **before** both handler checks; `deprecated` still outranks it, since all three producers
+  skip a deprecated declaration so its name being unproducible is not a finding. It covers
+  `delayed` as well as `event` — both are matched by `matchEventJobs` and both carry a name, read
+  through a `switch` on the discriminated union rather than a total map, because the name lives in a
+  *different field per member* (`eventName` / `afterEvent`) so a map keyed on the kind could only
+  reach it through a cast. `SurveyManifestJobsInput.producibleEventNames` is **required with no
+  default** and `[]` is the **claim** — this deployment emits no entity events, which is true with
+  `--emit-entity-events` off — because an optional field defaulting to "assume producible" is the
+  pre-ADR-0362 answer kept as the default, reachable by anyone who forgets the argument
+  (`probeJobQueueVisibility`'s scope parameter, ADR-0334). The names arrive as an `Iterable<string>`
+  rather than a manifest, which is what keeps this package free of the manifest layer: kernel
+  depends on `@crossengin/jobs`, so `jobs → kernel` is a cycle. The same increment replaced the two
+  hand-written `||` filter chains in `surveyManifestJobs` with a module-private total map over the
+  verdict enum — they were a maintained list of "will never run" verdicts, and the one place a
+  seventh verdict falling out of **both** lists would have been silent.
   `cron.ts`'s evaluator is complete and correct (5-/6-field, IANA zones via `Intl`, pure) and is what
   `scheduledJobsDue` has always used — and until ADR-0335 it **constructed an `Intl.DateTimeFormat`
   per stepped minute**, taking that path for any non-`undefined` zone including the literal `"UTC"`,
@@ -2705,6 +2821,27 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   GDPR / 21 CFR Part 11): campaigns, scoped items, decisions with attestation kinds and
   four-eyes, exceptions with per-reason duration caps, templates, sealed evidence with
   per-framework control mappings.
+  **`DecisionAttestationSchema` orders the co-attestation and requires the phrase its kind names**
+  (ADR-0362). It required `coAttestedAt` **by name** for `two_person_attestation` and then
+  constrained only `coAttestingUserId`, so a four-eyes record with `coAttestedAt` in 2020 and
+  `attestedAt` in 2026 parsed and stored — one of three `STRONG_ATTESTATION_KINDS`, temporally
+  incoherent, in a record an auditor reads. That clause is worth having where the register's own
+  proposal was not, and the difference is which operands have columns: `co_attested_at` is real,
+  bound and read back, so the clause binds **stored** rows, while `attestedAt === decidedAt` could
+  never fire for one because `rowToDecision` fills both from `decided_at`. It cannot be a CHECK for
+  two reasons and the decisive one is not the obvious one — required-ness depending on
+  `attestation_kind` is true of the family, but *this* comparison's right-hand side has no column at
+  all, so the nearest CHECK (`co_attested_at >= decided_at`) is a **different predicate** that
+  agrees only because the mapper reconstructs the equality. The guard is `typeof x === "string"`
+  rather than an explicit null check, which fences this increment's own class: `coAttestedAt` is
+  `.nullable()` today, and `Date.parse(undefined)` is `NaN` with every `NaN` comparison false, so a
+  later move to `.optional()` would silently turn the refusal into an accept.
+  `typed_attestation_phrase` now requires a non-empty phrase — the kind whose name asserts one
+  required none and stored none — and because `signDecisionAttestation` and
+  `signDecisionAttestationWithStore` both end in `DecisionAttestationSchema.parse(out)`, one signed
+  without a phrase is refused **before a signature is returned**. The clause is **coupled to the
+  column** by necessity: with it and no `attestation_phrase`, such a row is writable and not
+  readable.
 - **`access-reviews-runtime`** — drives them: due-campaign scheduling and next-occurrence
   planning, item generation from live grants with reviewer resolution, overdue/past-grace
   detection, and auto-revocation planning for unattested items. `evidence-compilation.ts`
@@ -2720,7 +2857,29 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   store refuses one that is not; quantising at the store boundary is what ADR-0332 does for a
   computed `decimal` and is exactly wrong here.
 - **`access-reviews-runtime-pg`** — persists campaigns/items/decisions, wraps the runtime,
-  and ships a replayer. `evidence-store.ts` (ADR-0335) is the writer `meta.access_review_evidence`
+  and ships a replayer.
+  **`rowToDecision` parses** (ADR-0362), where it returned a bare object literal *typed as*
+  `AccessReviewDecision` — which asserts conformance rather than establishing it, so **no clause had
+  ever been checked on read** while its sibling `rowToEvidence` fifteen lines down does
+  `AccessReviewEvidenceSchema.parse` and carries a comment saying *"a row edited into a shape the
+  contract forbids is only caught here"*. The file held both the rule and its violation. This is the
+  member of ADR-0362's class where the proper subset is not a narrower field list but **the type
+  annotation standing in for the parse**. Measured afterwards: **9 of the 13** clauses are reachable
+  from a stored row at all, and the primary four-eyes clause is **not** one of them —
+  `decidedByUserId === attestation.attestedByUserId` reads both sides from the single column
+  `decided_by_user_id`, so the mapper *reconstructs* the equality and no row can break it; the
+  reachable four-eyes fence is the co-attestor's. **Not one existing test broke** when the parse
+  landed, so this is fail-closed hardening rather than a bug-find, and the honest headline is
+  reachability.
+  `attestation_phrase` is bound and read, and **`attested_at` deliberately is not**. The asymmetry
+  is the decision rather than an inconsistency: `attested_at` duplicates `decided_at`, which the
+  sole live producer (one `nowIso`), this mapper and `EvidenceBundleDecisionRow` all treat as one
+  instant — so storing it would invent a second fact nothing in the tree distinguishes — while the
+  phrase duplicates nothing and is the only evidence `typed_attestation_phrase` carries. The
+  mapper's fill of `attestedAt` from `decided_at` is a **declared** decision now, with its
+  consequence stated: an authored `attestedAt` that differs is dropped, and a signature over the
+  authored value cannot be recomputed from the row.
+  `evidence-store.ts` (ADR-0335) is the writer `meta.access_review_evidence`
   never had: `certification.ts:177–199` read it with its exact column list, so the adapter answered
   `null`, the engine read that as *no evidence* rather than *not wired*, and `certifiable` was **false
   in every certification report ever produced**. `latestSealed` had no tenant predicate either, so as
@@ -3784,6 +3943,24 @@ deployment: **4 planned, 0 unreconciled, 4 executed, re-plan clean**, with both 
 on their `ADD COLUMN`. That last part is why ADR-0330's widening-versus-narrowing problem cannot
 bite here and does for `proof_version`: a CHECK on a column the plan is *adding* has no existing
 rows to validate against.
+
+**`meta.access_review_decisions.attestation_phrase` exists because a declared contract field with
+no column is invisible to every workspace rule** (ADR-0362). `DecisionAttestationSchema` declared
+it, `canonicalAttestationBytes` hashed it into the bytes `attestation_signature_sha256` commits to,
+and the `INSERT` beside it was **complete over this table** — so `pg-column-coverage`,
+`pg-binding-names` and `pg-record-reads` all passed, because every one of the ten rules compares SQL
+against the catalog or the catalog against a value set and **none compares a contract field to a
+catalog column**. Measured: an authored phrase round-tripped to `undefined`, and since
+`canonicalStringify` skips undefined keys it left the payload a **key short** rather than null, so
+the signature over a signed attestation carrying a phrase could never be recomputed from its own
+row. `attested_at` deliberately gets **no** column beside it and the asymmetry is the decision:
+that one duplicates `decided_at`, which the sole live producer (one `nowIso`), `rowToDecision` and
+`EvidenceBundleDecisionRow` all treat as one instant, so storing it would invent a second fact
+nothing in the tree distinguishes; this one duplicates nothing and is the only evidence
+`typed_attestation_phrase` carries. Nullable TEXT with a `length(...) <= 500` CHECK matching the
+contract's `max(500)`, and the migration is free for ADR-0358's reason — a CHECK on a column the
+plan is *adding* has no existing rows to validate against. Measured on a fresh database and on a
+populated one with the column dropped: **1 step, 0 unreconciled, re-plan clean**.
 
 **`meta.tenant_tombstones.record_storage` is nullable with no default, and that is the whole
 decision** (ADR-0351) — `retained_obligations`' choice for a sharper reason. NULL means *this
@@ -6457,12 +6634,23 @@ land with or before it.
    stays standing manual SQL — the class found by hand three times, whose live member is P0 item 5.
    Giving it its first caller converts the class into a planned step; the proof must be re-checked
    inside the statement's own transaction.
-4. **The 12 event-triggered jobs can never match the only event producer's names.**
-   `entity-events.ts` builds a three-part name (`retail.salesorder.placed`, pinned by its own test)
-   while every declared trigger is two-part (`retail.order_placed`), matched with `===`. So even
-   after handlers are registered not one of the 12 fires, and `JOB_KIND_PRODUCERS` answers
-   `event_emitter`, so the survey tells the operator to register a handler — the exact failure its
-   own doc comment says the map exists to prevent. Must land with or before P1 item 6.
+4. ~~**The 12 event-triggered jobs can never match the only event producer's names.**~~ —
+   **closed by ADR-0362**, which confirmed the defect and corrected the stated cause in the
+   direction that would have misdirected the fix. The shipped producer emits a **two**-part name:
+   `eventPrefix` is optional, `--event-prefix` defaults to null and appears nowhere in `deploy/`,
+   and the test pinning `retail.salesorder.placed` is titled *"applies an optional event prefix"*
+   while five of its six cases pin the two-part form. So arity was never the discriminator — the
+   **separator** is (`.` against `_`, with the domain first) — and dropping the prefix would have
+   fixed nothing. Measured stronger than this entry claimed: **0 of 294** producible names matches
+   any of the 12, **55 of 55** (resolved pack, declaration) instances are unreachable, and trying
+   every declared name's own first segment as a prefix across all seven packs gives **0 matches**,
+   so the failure is structural rather than a misconfiguration. The verdict claim was right and
+   narrower than stated: the survey only runs under `--schedule-ms` or `--workflow-workers`, so
+   `--emit-entity-events` alone produced **no** survey and no boot line at all. `event_unproducible`
+   is the sixth verdict and the grammar now has one spelling in `kernel/manifest/event-names.ts`.
+   What remains is item 6 itself — a handler for any of them — plus two pack changes a domain owner
+   could make today (a lifecycle on `Permit`, a `posted` target on `Enrollment`) and three
+   declarations whose entities do not exist.
 5. **`meta.users` keeps every user's email, display name and phone after a completed tenant
    erasure, and the proof is silent about it.** `partitionSharedTables` skips any catalogued table
    with no `tenant_id`, and of those 31 `meta.users` is the only one holding a natural person's
@@ -6568,11 +6756,21 @@ land with or before it.
     members and arguably their own increment, and `ui-schema.ts` is the widest — no trait field
     reaches the web client at all, so `created_at`/`updated_at` are absent from every view on all 68
     `auditable` entities in every deployment.
-15. **Six confinement fences infer RLS confinement from ownership without reading
-    `relforcerowsecurity`.** `sessionWouldBeConfined` has two callers while the
-    `rls_would_confine_this_session` refusal appears in eight non-test modules. Latent while
-    nothing runs `ALTER TABLE … FORCE ROW LEVEL SECURITY` — and the moment a hardened deployment
-    sets it, all six answer "not confined" for a session that is. One column in six queries.
+15. ~~**Six confinement fences infer RLS confinement from ownership without reading
+    `relforcerowsecurity`.**~~ — **closed by ADR-0362**, which corrected every figure in this entry.
+    It is **three** predicate implementations and **one** defect, not six fences; the refusal string
+    appears in **seven** non-test modules of which only three emit it; and "one column in six
+    queries" is one column in **one** query plus one branch, the six being probe *invocations*. The
+    `sessionWouldBeConfined` two-caller count was right. What this entry could not see is the part
+    that mattered: the repo had already converged onto the **wrong winner**, since the copy ADR-0352
+    extracted as the only correct one of eight scores **6 of 8** against live ground truth while
+    `row_security_active` — Postgres's own answer, sitting unremarked in the Article 17 erasure —
+    scores **8 of 8**. The live defect was a third spelling in `probeJobQueueVisibility`, where an
+    owner of a FORCEd table read `visible` while seeing none of the rows, confirmed destructively.
+    Latency was right and is now irrelevant: the verdict is asked for, so there is no composition
+    left for a hardened deployment to break. The one open end is in ADR-0362's own table — whether
+    the switch's loosening at the rekey's pre-destruction fence, correct for a
+    `SUPERUSER NOBYPASSRLS` session and measured at a population of zero, wants a flag.
 
 ### P3 — debt and stale documentation
 
@@ -6610,6 +6808,22 @@ method is that a stale figure misleads.
    view *declarations*, and `permissions: "inherit"` is an explicit opt-out written by `erp-core`'s
    own `listView` factory — ADR-0282's text already said so), and the rule's own two `fails_open`
    notes claimed "live" for traits **no pack declares**.
+   **ADR-0362 adds three more and they are the sharpest yet, because all three are inside one
+   increment and one of them is that increment's own.** (a) A retired test pinned an exhaustive
+   truth table over four catalog facts and compared the rule against an `ownershipOnly` derivation
+   **written in the test itself**, calling the single disagreement a property — two spellings of one
+   composition, agreeing, with no database ever consulted, under a comment claiming it asserted
+   "the intended rule and not merely agreement with the code". (b) **Four** comments in four
+   packages described the composed confinement rule and the **accurate** one described the
+   *defective* code (`node.ts` enumerated three facts, which was true of `job-claim.ts`), while two
+   understated a correct read and one was right; three were found by survey and the fourth by the
+   new text fence on its first run. (c) A comment **this increment wrote** defended its own
+   permissive default with *"every caller checks `rlsEnabled` first"* when only one of three does —
+   found by adversarial review twenty minutes after the commit shipped, on the path where the
+   unguarded caller is the rekey's pre-destruction fence. Two sibling instances landed in the same
+   increment at a one-commit distance: a comment citing a bind position (`$16`) that a parallel
+   slice had already shifted to `$17`, and a clause **count** ("eleven") that the same increment
+   took to thirteen. A bind position and a count in a comment are volatile by construction.
 2. **Six concepts are modelled several times over, two with non-nesting member sets.** Data
    classification has five declarations — four identical and one, in `data-lineage`, **disjoint past
    two members**, so the moment anything bridges the kernel's classification into the lineage graph
@@ -6643,12 +6857,25 @@ method is that a stale figure misleads.
    cron wrote `started_at = 03:00:00Z`. A subsystem change wearing a column's clothes: the claim
    predicate, the `ORDER BY`, `idx_job_runs_due` and the retry path move together against a live
    fleet.
-6. **The four-eyes attestation enforces identity and not time.** `AccessReviewDecisionSchema` fixes
-   `decidedByUserId === attestation.attestedByUserId` and says nothing about `attestedAt`, while
-   `decision-store.ts` binds neither it nor `attestationPhrase` and no construction site varies the
-   two. The identity half of an attestation a SOC 2 or HIPAA auditor reads is enforced and the
-   temporal half is not; one `superRefine` clause breaks nothing today and gets dearer with every
-   construction site.
+6. ~~**The four-eyes attestation enforces identity and not time.**~~ — **closed by ADR-0362**,
+   which **refuted this entry's own proposed fix**. One `superRefine` clause pinning
+   `attestedAt === decidedAt` would have been vacuous for every persisted row and worse than
+   nothing: `rowToDecision` fills *both* from `row.decided_at`, so the equality holds by
+   construction on every read, and the clause would have declared the unstored field equal to the
+   stored one — making a measured silent three-hour rewrite legal by decree, ADR-0337's
+   falsely-true-control direction. "Binds neither" was true and incomplete in the decisive
+   direction: **there was no column to bind**, and the `INSERT` was *complete over the catalog*,
+   which is why none of the ten workspace rules reported it — they compare SQL↔catalog or
+   catalog↔a value set, and **none compares a contract field to a catalog column**. The census of
+   five construction sites was also incomplete (seven, two with a non-null `coAttestedAt`, both
+   coherent). What shipped instead: `attestation_phrase` gets a column because it duplicates
+   nothing and is the only evidence its kind carries, `attested_at` deliberately does not because
+   it duplicates `decided_at`, `rowToDecision` **parses**, and the ordering clause lands on the
+   pair that *has* columns — `coAttestedAt >= attestedAt`, where a `two_person_attestation` with
+   `coAttestedAt` in 2020 and `attestedAt` in 2026 had been parsing and storing. The remaining
+   open end is that a signature over an authored attestation is still not recomputable from its
+   row, which needs either the second column or dropping the field from
+   `canonicalAttestationBytes` under a `.v2` tag.
 7. **983 files under `packages/*/src` are unformatted**, not the 882 on record — and re-measuring
    it found the figure was also *scoped* without saying so: repo-wide it is **1687**. Both measured
    just now (`npx prettier --check "packages/*/src/**/*.ts"` and `npx prettier --check .`), which
@@ -6678,7 +6905,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 356 records; 277 Accepted, 79 Proposed (the
+title or status change cannot drift. 357 records; 278 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 
