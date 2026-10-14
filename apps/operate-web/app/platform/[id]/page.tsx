@@ -644,9 +644,11 @@ export default function TenantDetailPage({ params }: { params: { id: string } })
                         </p>
                       ) : (
                         <p className="mt-1 text-xs text-ink-faint">
-                          Must name a role this tenant&rsquo;s manifest declares. Free text, and
-                          nothing here checks it: an unknown role is accepted and then grants
-                          nothing at serve time.
+                          Must name a role this tenant&rsquo;s manifest declares. Free text, because
+                          no route serves the list &mdash; but the grant is checked against it and a
+                          role that is not declared comes back named below, with the ones that are.
+                          An undeclared role is still accepted and stored; it grants nothing at
+                          serve time.
                         </p>
                       )}
                     </div>

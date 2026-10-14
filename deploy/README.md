@@ -341,7 +341,7 @@ and what is not:
 | --- | --- |
 | **Platform → Tenants** | List, filter by status, create. Open one to see its record and to suspend / archive / reactivate it — each needs a typed **reason**, which lands in the tenant's permanent lifecycle trail. |
 | **Platform → Tenants → one tenant** | Grant a membership (user id, primary role, and a status you must choose), activate or revoke one, and see every member of that tenant. |
-| **Platform → Users** | List every `meta.users` row, filter by status, provision a new one, and open one to suspend / reactivate / retire it. |
+| **Platform → Users** | List every `meta.users` row with a per-status census, filter by status or by exact email address, provision a new one, and open one to suspend / reactivate / retire it. |
 | **Platform → Users → one user** | **Set their password.** This is the route that did not exist before ADR-0364 and the reason onboarding needed a shell. It cannot be aimed at yourself. |
 | **Platform → Design Reviews** | Approve or reject a manifest the Architect designed, with a field-level diff. |
 | **AI Studio** (`/setup`) | Describe a business in prose and have the Architect design a manifest for it; activating one makes it that tenant's live schema. |
@@ -349,15 +349,19 @@ and what is not:
 
 Four things it deliberately does **not** do, so you know where the edges are:
 
-- **No user search.** The users list pages but has no email filter, because the server's list
-  route reads only `status`, `limit` and `cursor` — offering a search box the API drops would
-  return every user under a 200 that looks filtered. Page, or open a user by id.
+- **Email search is exact, not partial.** `?email=` is matched whole and case-folded, because
+  `meta.users.email` is UNIQUE so an equality is one index lookup where a substring search is an
+  unindexed scan of the table. You can find an address you know; you cannot find one you
+  half-remember. Page, or open a user by id.
 - **No "which tenants is this user in" view.** Memberships are reached from the tenant, never
   from the user, because that read has no tenant to scope by and would be correct as the
   table's owner and empty as anything else. The user page says so and links back.
 - **No role dropdown when granting a membership.** The valid roles come from the tenant's
-  resolved manifest and no route serves them, so the field is free text. An unknown role is
-  accepted here and grants nothing at serve time — which the form tells you.
+  resolved manifest and no route serves the list, so the field is free text — but the grant *is*
+  checked against it, and a role the manifest does not declare comes back on the response named
+  beside the ones it does, in the panel and in the audit trail. It is still accepted and stored,
+  and it still grants nothing at serve time: a per-tenant manifest may declare roles the boot
+  pack does not, so this warns rather than refusing.
 - **No database browser and no SQL.** A tenant's records are served by that tenant's own
   compiled gateway, under that tenant's field grants, classification and redaction. A
   platform-level reader would be a second path to the same rows with none of that applied.
