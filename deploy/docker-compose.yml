@@ -283,8 +283,23 @@ services:
       # outside it SILENTLY falls back to the default (claude-sonnet-4-6) rather than refusing — so
       # it is left unset here, where the default is at least stated.
       - --ai-design
+      # BOTH, because this flag REPLACES its default rather than adding to it, and the default is
+      # `["erp_admin", "platform_admin"]` (cli.ts). Passing only the first silently dropped the
+      # second — which reads as someone writing the default out and stopping half way, and the
+      # consequence is sharp on this file specifically: `platform_admin` is the role that provisions
+      # tenants and users, so it is the one login a single-operator deployment actually has, and it
+      # was the one refused at the AI Studio. The Architect is the headline feature and the operator
+      # could not reach it without inventing a second tenant and a second membership, because
+      # `meta.user_tenant_membership` is UNIQUE (user_id, tenant_id).
+      #
+      # `erp_admin` stays first and is not redundant: a tenant's own administrator designs their own
+      # system, which is the flow /setup exists for, and `platform_admin` is not one of erp-core's
+      # fifteen declared roles so it reaches no entity page at all. The two are different jobs on one
+      # surface rather than one job spelled twice.
       - --ai-design-role
       - erp_admin
+      - --ai-design-role
+      - platform_admin
       # Both ceilings are per tenant. The monthly one bounds the bill; the per-REQUEST one is
       # refused before the call rather than discovered after it, and is OFF by default — so without
       # it a single prompt is unbounded. Neither is a guess an operator should have to make blind:
