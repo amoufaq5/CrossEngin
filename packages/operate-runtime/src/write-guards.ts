@@ -1,3 +1,4 @@
+import { drainList } from "./list-drain.js";
 import type { EntityStore, ListFilter } from "./store.js";
 
 /** A write the guard is asked to vet, just before it is persisted. */
@@ -53,7 +54,12 @@ export interface JournalPostingGuardConfig {
   readonly lockedPeriodStates?: readonly string[];
   /** Largest absolute debit/credit difference treated as balanced (rounding slack). */
   readonly tolerance?: number;
-  /** Max lines fetched when summing (a single entry should be well under this). */
+  /**
+   * Largest number of lines this guard reads before it refuses rather than deciding. Reaching it
+   * yields `unverifiable_journal_entry` and never a balance verdict over the prefix — which is the
+   * whole difference from the `limit` it replaces, since a cap that truncated in silence made this
+   * guard wrong in *both* directions from one read.
+   */
   readonly maxLines?: number;
 }
 
@@ -71,7 +77,13 @@ const DEFAULTS = {
   periodStateField: "status",
   lockedPeriodStates: ["closed", "locked"] as readonly string[],
   tolerance: 0.005,
-  maxLines: 1000,
+  // 50_000 rather than 1000: `JournalEntry.source` enumerates `payroll` and `depreciation`, and
+  // both jobs are declared (`erp-core-payroll-disbursement`, and `erp-core-depreciation-run`, whose
+  // own description posts the period's entries to the GL), so a payroll run for 5,000 employees at
+  // five lines each is 25,000 lines. A thousand-line cap sits *below* an artifact the entity model
+  // has already committed to, which is how a bound stops being a safety margin and starts refusing
+  // correct data.
+  maxLines: 50_000,
 } as const;
 
 function num(v: unknown): number {
@@ -85,6 +97,15 @@ function num(v: unknown): number {
  * and total debits must equal total credits (within `tolerance`). Fires only on
  * the draft→posted edge; all other writes pass. Domain field/entity names are
  * configurable so the guard isn't hard-wired to one manifest.
+ *
+ * The balance is totalled over **every** line, draining the set rather than reading one page of
+ * `maxLines`, because a prefix cannot carry this verdict in either direction. Measured at the old
+ * cap of 1000: a 1001-line entry unbalanced by 9999 whose first 1000 lines happen to balance was
+ * **allowed to post**, and a genuinely balanced 1001-line entry was **refused** `422
+ * unbalanced_journal_entry: debits (10000.00) must equal credits (0.00)` — a detail that is a lie
+ * about the entry. A balancing prefix is the ordinary shape here rather than a contrivance, because
+ * every GL posting effect writes its lines as a balanced group and the reversal mirrors them
+ * pairwise. Past `maxLines` the guard refuses `unverifiable_journal_entry` instead of guessing.
  */
 export function journalPostingGuard(config: JournalPostingGuardConfig = {}): WriteGuard {
   const c = { ...DEFAULTS, ...config };
@@ -112,21 +133,48 @@ export function journalPostingGuard(config: JournalPostingGuardConfig = {}): Wri
     const entryId = input.id ?? (typeof input.after["id"] === "string" ? (input.after["id"] as string) : null);
     if (entryId === null) return null;
     const filter: ListFilter = { field: c.lineEntryRefField, op: "eq", value: entryId };
-    const page = await input.store.listPage(input.tenantId, c.lineEntity, {
-      limit: c.maxLines,
-      cursor: null,
-      sort: [],
-      filters: [filter],
-    });
-    const lines = page.records.filter((r) => String(r[c.lineEntryRefField] ?? "") === entryId);
-    if (lines.length === 0) {
-      return { status: 422, error: "empty_journal_entry", detail: "a posted journal entry must have at least one line" };
-    }
+    let lines = 0;
     let debit = 0;
     let credit = 0;
-    for (const line of lines) {
-      debit += num(line[c.debitField]);
-      credit += num(line[c.creditField]);
+    // Folded page by page, so the guard holds two running totals rather than the entry's rows: a
+    // depreciation or payroll entry costs O(1) here whatever its size.
+    const read = await drainList(
+      input.store,
+      input.tenantId,
+      c.lineEntity,
+      { sort: [], filters: [filter] },
+      { ceiling: c.maxLines },
+      (records) => {
+        for (const line of records) {
+          if (String(line[c.lineEntryRefField] ?? "") !== entryId) continue;
+          lines += 1;
+          debit += num(line[c.debitField]);
+          credit += num(line[c.creditField]);
+        }
+      },
+    );
+
+    // Neither of these may fall through to the balance verdict, which a prefix cannot support in
+    // either direction. What separates them is the completeness conjunct and not their order: a
+    // read that matched nothing and had nothing left to read is a complete read of an empty set, so
+    // `empty_journal_entry` names what to fix — while an unread set is not an empty one, and a
+    // store that ignored the filter could exhaust the ceiling on other entries' lines and match
+    // none of this entry's. With the conjunct the two cases partition and swapping these blocks is
+    // behaviour-identical; dropping it makes the guard call an entry with lines empty.
+    if (lines === 0 && read.complete) {
+      return { status: 422, error: "empty_journal_entry", detail: "a posted journal entry must have at least one line" };
+    }
+    if (!read.complete) {
+      // No remedy is named, deliberately: `maxLines` is reachable by no CLI flag, no manifest field
+      // and no environment variable (`compileOperateServer` constructs this guard with no config at
+      // all), so "raise the cap" is an instruction the operator meeting this cannot carry out.
+      return {
+        status: 422,
+        error: "unverifiable_journal_entry",
+        detail:
+          `more than ${c.maxLines.toString()} lines match this entry, so the balance of its ` +
+          `debits and credits could not be established over the whole set`,
+      };
     }
     if (Math.abs(debit - credit) > c.tolerance) {
       return {

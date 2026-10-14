@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { InMemoryEntityStore } from "./store.js";
+import { DEFAULT_DRAIN_PAGE_SIZE, isReadCeilingExceeded, ReadCeilingExceeded } from "./list-drain.js";
+import { InMemoryEntityStore, type EntityStore } from "./store.js";
 import {
   bookingRateStampEffect,
   computeLineTaxBreakdown,
@@ -1166,5 +1167,503 @@ describe("amounts that arrive as wire decimals", () => {
     expect(lines.reduce((s, l) => s + Number(l.debit), 0)).toBe(
       lines.reduce((s, l) => s + Number(l.credit), 0),
     );
+  });
+});
+
+/**
+ * A store whose pages hold at most `size` rows however many were asked for — a legal short page
+ * carrying a cursor, which is what makes a drain genuinely page over a small fixture. It cannot
+ * shorten a walk: the drain's termination is `nextCursor === null` and nothing else.
+ */
+/**
+ * Runs `fn` and hands back the refusal it rejected with, narrowed by `isReadCeilingExceeded`
+ * rather than by an assertion — a cast here would be a type annotation standing in for the check
+ * the assertions below are about, and resolving at all is itself the failure.
+ */
+async function refusalFrom(fn: () => Promise<void>): Promise<ReadCeilingExceeded> {
+  try {
+    await fn();
+  } catch (err) {
+    if (isReadCeilingExceeded(err)) return err;
+    throw err;
+  }
+  throw new Error("expected a ReadCeilingExceeded; the effect resolved");
+}
+
+function pagedAt(inner: InMemoryEntityStore, size: number): EntityStore {
+  return {
+    listPage: (t, e, q) => inner.listPage(t, e, { ...q, limit: Math.min(q.limit, size) }),
+    get: (t, e, id) => inner.get(t, e, id),
+    create: (t, e, r) => inner.create(t, e, r),
+    update: (t, e, id, patch) => inner.update(t, e, id, patch),
+    remove: (t, e, id) => inner.remove(t, e, id),
+    list: (t, e) => inner.list(t, e),
+  };
+}
+
+describe("journalReversalEffect — the whole line set", () => {
+  async function fiveLineEntry() {
+    const store = new InMemoryEntityStore();
+    const entry = await store.create(TENANT, "JournalEntry", { entry_number: "JE-BIG", state: "posted" });
+    const id = String(entry.id);
+    for (const debit of [10, 10, 10]) {
+      await store.create(TENANT, "JournalLine", { journal_entry_id: id, ledger_account_id: "cash", debit, credit: 0 });
+    }
+    for (const credit of [15, 15]) {
+      await store.create(TENANT, "JournalLine", { journal_entry_id: id, ledger_account_id: "revenue", debit: 0, credit });
+    }
+    return { store, id, entry };
+  }
+  const reverse = (store: EntityStore, id: string, before: Record<string, unknown>): WriteEffectInput => ({
+    operation: "transition",
+    entity: "JournalEntry",
+    tenantId: TENANT,
+    id,
+    before,
+    after: { ...before, state: "reversed" },
+    store,
+  });
+
+  it("mirrors every line across a multi-page read, so the reversal balances", async () => {
+    const { store, id, entry } = await fiveLineEntry();
+    await journalReversalEffect({ clock })(reverse(pagedAt(store, 2), id, entry));
+    const rev = (await store.list(TENANT, "JournalEntry")).find((e) => e.entry_number === "JE-BIG-REV")!;
+    const revLines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === rev.id);
+    expect(revLines.length).toBe(5);
+    expect(revLines.reduce((s, l) => s + Number(l.debit), 0)).toBe(30);
+    expect(revLines.reduce((s, l) => s + Number(l.credit), 0)).toBe(30);
+  });
+
+  it("refuses rather than posting an unbalanced mirror when the line ceiling is reached", async () => {
+    const { store, id, entry } = await fiveLineEntry();
+    await expect(journalReversalEffect({ clock, maxLines: 3 })(reverse(store, id, entry))).rejects.toThrow(
+      ReadCeilingExceeded,
+    );
+    // **Nothing at all was written — the reversal entry included.** The header's `create` sits below
+    // the drain for exactly this: `writeTxn` falls through to `body(ctx.store)` on a store that is
+    // not transactional, so a refusal there rolls nothing back, and a header written first would
+    // leave a second posted entry with no lines behind every refusal (and a third on retry).
+    expect((await store.list(TENANT, "JournalEntry")).some((e) => e.entry_number === "JE-BIG-REV")).toBe(false);
+    expect((await store.list(TENANT, "JournalEntry")).length).toBe(1);
+    expect((await store.list(TENANT, "JournalLine")).length).toBe(5);
+  });
+
+  it("names the entity, the ceiling and what it could not compute", async () => {
+    const { store, id, entry } = await fiveLineEntry();
+    const err = await refusalFrom(() => journalReversalEffect({ clock, maxLines: 3 })(reverse(store, id, entry)));
+    expect(err.entity).toBe("JournalLine");
+    expect(err.ceiling).toBe(3);
+    // A literal, never the document number it used to interpolate: `writeTxn` puts this string in a
+    // 500 body on the stated premise that the refusal carries no value read from a record.
+    expect(err.computing).toBe("a journal reversal");
+  });
+});
+
+describe("invoiceVoidCreditNoteEffect — the whole line set", () => {
+  async function fourLineInvoice() {
+    const store = new InMemoryEntityStore();
+    const inv = await store.create(TENANT, "Invoice", {
+      invoice_number: "INV-BIG",
+      state: "sent",
+      document_type: "invoice",
+      subtotal: 400,
+      tax_total: 0,
+      total: 400,
+    });
+    const id = String(inv.id);
+    for (let i = 0; i < 4; i += 1) {
+      await store.create(TENANT, "InvoiceLine", {
+        invoice_id: id,
+        position: i + 1,
+        description: `L${String(i)}`,
+        quantity: 1,
+        unit_price: 100,
+        line_total: 100,
+      });
+    }
+    return { store, id, inv };
+  }
+  const voidIt = (store: EntityStore, id: string, before: Record<string, unknown>): WriteEffectInput => ({
+    operation: "transition",
+    entity: "Invoice",
+    tenantId: TENANT,
+    id,
+    before,
+    after: { ...before, state: "void" },
+    store,
+  });
+
+  it("copies every line across a multi-page read, so the header total equals the sum of lines", async () => {
+    const { store, id, inv } = await fourLineInvoice();
+    await invoiceVoidCreditNoteEffect({ lineEntity: "InvoiceLine", clock })(voidIt(pagedAt(store, 2), id, inv));
+    const cn = (await store.list(TENANT, "Invoice")).find((r) => r.document_type === "credit_note")!;
+    const cnLines = (await store.list(TENANT, "InvoiceLine")).filter((l) => l.invoice_id === cn.id);
+    expect(cnLines.length).toBe(4);
+    expect(cnLines.reduce((s, l) => s + Number(l.line_total), 0)).toBe(Number(cn.total));
+  });
+
+  it("refuses rather than issuing a credit note whose lines do not add up to its total", async () => {
+    const { store, id, inv } = await fourLineInvoice();
+    await expect(
+      invoiceVoidCreditNoteEffect({ lineEntity: "InvoiceLine", clock, maxLines: 2 })(voidIt(store, id, inv)),
+    ).rejects.toThrow(ReadCeilingExceeded);
+    // No credit note either: the header is written below the drain, so a refusal leaves the voided
+    // invoice alone rather than leaving a credit note the customer could be sent.
+    expect((await store.list(TENANT, "Invoice")).some((r) => r.document_type === "credit_note")).toBe(false);
+    expect((await store.list(TENANT, "InvoiceLine")).length).toBe(4);
+  });
+});
+
+describe("recognitionGlPostingEffect — the whole line set (withholding past the gate)", () => {
+  /**
+   * The reconciliation gate covers `netTotal + taxTotal` and NOT `withholdingTotal`, so a dropped
+   * tail that nets to ~0 passes it and applies a truncated withholding — to the control line, the
+   * WHT line and the document stamp, all of which balance. The fixture is exactly that shape: a
+   * first line carrying 40 of withholding on net 400, then a tail of +1000 withholding-coded and
+   * −1000 untaxed that nets to 0 and carries another 100.
+   */
+  async function withholdingInvoice() {
+    const store = new InMemoryEntityStore();
+    const wht = await store.create(TENANT, "TaxCode", { code: "WHT10", rate_pct: 10, kind: "withholding" });
+    const inv = await store.create(TENANT, "Invoice", {
+      invoice_number: "INV-WHT",
+      state: "draft",
+      document_type: "invoice",
+      subtotal: 400,
+      tax_total: 0,
+      total: 400,
+    });
+    const id = String(inv.id);
+    await store.create(TENANT, "InvoiceLine", { invoice_id: id, position: 1, line_total: 400, tax_code_id: String(wht.id) });
+    await store.create(TENANT, "InvoiceLine", { invoice_id: id, position: 2, line_total: 1000, tax_code_id: String(wht.id) });
+    await store.create(TENANT, "InvoiceLine", { invoice_id: id, position: 3, line_total: -1000 });
+    return { store, id, inv };
+  }
+  const recognize = (maxRows?: number) =>
+    recognitionGlPostingEffect({
+      entity: "Invoice",
+      triggerState: "sent",
+      numberField: "invoice_number",
+      controlSide: "debit",
+      controlAccountRef: "ar",
+      netAccountRef: "revenue",
+      taxAccountRef: "tax",
+      controlDescription: "AR",
+      netDescription: "Revenue",
+      taxDescription: "Tax",
+      taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total", ...(maxRows === undefined ? {} : { maxRows }) },
+      stampWithholdingField: "withholding_total",
+      clock,
+    });
+  const issue = (store: EntityStore, id: string, before: Record<string, unknown>): WriteEffectInput => ({
+    operation: "transition",
+    entity: "Invoice",
+    tenantId: TENANT,
+    id,
+    before,
+    after: { ...before, state: "sent" },
+    store,
+  });
+
+  it("withholds the whole set's 140 across a multi-page read, not the first page's 40", async () => {
+    const { store, id, inv } = await withholdingInvoice();
+    await recognize()(issue(pagedAt(store, 1), id, inv));
+    const lines = await store.list(TENANT, "JournalLine");
+    expect(Number(lines.find((l) => l.ledger_account_id === "ar")!.debit)).toBeCloseTo(260, 6);
+    expect(Number(lines.find((l) => l.ledger_account_id === "revenue")!.credit)).toBeCloseTo(400, 6);
+    expect(
+      lines.filter((l) => String(l.description ?? "").startsWith("Withholding")).reduce((s, l) => s + Number(l.debit), 0),
+    ).toBeCloseTo(140, 6);
+    expect(Number((await store.get(TENANT, "Invoice", id))!.withholding_total)).toBeCloseTo(140, 6);
+  });
+
+  it("refuses rather than posting a balanced entry built from a truncated withholding", async () => {
+    const { store, id, inv } = await withholdingInvoice();
+    await expect(recognize(1)(issue(store, id, inv))).rejects.toThrow(ReadCeilingExceeded);
+    // The read precedes every write in this effect, so the refusal writes nothing at all.
+    expect((await store.list(TENANT, "JournalEntry")).length).toBe(0);
+    expect((await store.get(TENANT, "Invoice", id))!.withholding_total).toBeUndefined();
+  });
+});
+
+describe("paymentApplicationEffect — the whole payment set", () => {
+  const apply = (maxPayments?: number) =>
+    paymentApplicationEffect({
+      documentEntity: "Invoice",
+      refField: "invoice_id",
+      settleableStates: ["sent", "overdue"],
+      ...(maxPayments === undefined ? {} : { maxPayments }),
+      clock,
+    });
+
+  /** 400 covered by three payments of 200 and taken back under by a −300 correction. */
+  async function correctedInvoice() {
+    const store = new InMemoryEntityStore();
+    const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-NEG", state: "sent", total: 400 });
+    const invId = String(inv.id);
+    for (const amount of [200, 200, 200]) {
+      await store.create(TENANT, "Payment", { invoice_id: invId, direction: "inbound", amount, state: "completed" });
+    }
+    const correction = await store.create(TENANT, "Payment", {
+      invoice_id: invId,
+      direction: "inbound",
+      amount: -300,
+      state: "completed",
+    });
+    return { store, invId, correctionId: String(correction.id), correction };
+  }
+  const complete = (store: EntityStore, id: string, record: Record<string, unknown>): WriteEffectInput => ({
+    operation: "transition",
+    entity: "Payment",
+    tenantId: TENANT,
+    id,
+    before: { state: "pending" },
+    after: { ...record },
+    store,
+  });
+
+  it("leaves the invoice unsettled when a later page's negative correction takes the applied total back under", async () => {
+    const { store, invId, correctionId, correction } = await correctedInvoice();
+    await apply()(complete(pagedAt(store, 2), correctionId, correction));
+    const doc = (await store.get(TENANT, "Invoice", invId))!;
+    expect(doc.state).toBe("sent"); // applied 300 of 400
+    expect(doc.paid_at).toBeUndefined();
+  });
+
+  it("refuses rather than settling from a prefix that happens to cover the total", async () => {
+    const { store, invId, correctionId, correction } = await correctedInvoice();
+    // A cap of 3 reads the three 200s and not the correction — the measured wrong write.
+    await expect(apply(3)(complete(store, correctionId, correction))).rejects.toThrow(ReadCeilingExceeded);
+    const doc = (await store.get(TENANT, "Invoice", invId))!;
+    expect(doc.state).toBe("sent");
+    expect(doc.paid_at).toBeUndefined();
+  });
+
+  it("still settles a document its payments genuinely cover", async () => {
+    const store = new InMemoryEntityStore();
+    const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-OK", state: "sent", total: 400 });
+    const invId = String(inv.id);
+    let last: Record<string, unknown> = {};
+    for (const amount of [100, 100, 100, 100]) {
+      last = await store.create(TENANT, "Payment", { invoice_id: invId, direction: "inbound", amount, state: "completed" });
+    }
+    await apply()(complete(pagedAt(store, 1), String(last.id), last));
+    expect((await store.get(TENANT, "Invoice", invId))!.state).toBe("paid");
+  });
+
+  it("reads past the real default page size, where the first page alone would have settled it", async () => {
+    const store = new InMemoryEntityStore();
+    const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-500", state: "sent", total: 400 });
+    const invId = String(inv.id);
+    // 599 × 1 covers the total within the first page of 500; the correction is only on the second.
+    for (let i = 0; i < DEFAULT_DRAIN_PAGE_SIZE + 99; i += 1) {
+      await store.create(TENANT, "Payment", { invoice_id: invId, direction: "inbound", amount: 1, state: "completed" });
+    }
+    const correction = await store.create(TENANT, "Payment", {
+      invoice_id: invId,
+      direction: "inbound",
+      amount: -250,
+      state: "completed",
+    });
+    await apply()(complete(store, String(correction.id), correction));
+    expect((await store.get(TENANT, "Invoice", invId))!.state).toBe("sent"); // applied 349 of 400
+  });
+});
+
+describe("unrealizedFxRevaluationEffect — the whole payment and document sets", () => {
+  async function threeHalfPaidInvoices(withPayments: boolean) {
+    const store = new InMemoryEntityStore();
+    const usd = await store.create(TENANT, "Currency", { code: "USD" });
+    const eur = await store.create(TENANT, "Currency", { code: "EUR" });
+    await store.create(TENANT, "ExchangeRate", {
+      from_currency_id: String(eur.id),
+      to_currency_id: String(usd.id),
+      rate: 1.1,
+      rate_date: "2026-06-29",
+    });
+    for (let i = 0; i < 3; i += 1) {
+      const inv = await store.create(TENANT, "Invoice", {
+        invoice_number: `INV-FX-${String(i)}`,
+        state: "sent",
+        total: 1000,
+        currency: "EUR",
+      });
+      if (withPayments) {
+        await store.create(TENANT, "Payment", { invoice_id: String(inv.id), amount: 500, state: "completed" });
+      }
+    }
+    const period = await store.create(TENANT, "FiscalPeriod", { status: "closing", end_date: "2026-06-30", name: "2026-06" });
+    return { store, periodId: String(period.id) };
+  }
+  const close = (store: EntityStore, id: string): WriteEffectInput => ({
+    operation: "transition",
+    entity: "FiscalPeriod",
+    tenantId: TENANT,
+    id,
+    before: { status: "closing" },
+    after: { status: "closed", end_date: "2026-06-30", name: "2026-06" },
+    store,
+  });
+
+  it("nets every payment page against every document page (one pass, no payment rows retained)", async () => {
+    const { store, periodId } = await threeHalfPaidInvoices(true);
+    await unrealizedFxRevaluationEffect({ functionalCurrency: "USD", clock })(close(pagedAt(store, 1), periodId));
+    const arLine = (await store.list(TENANT, "JournalLine")).find((l) => Number(l.debit) > 0)!;
+    expect(Number(arLine.debit)).toBeCloseTo(150, 6); // open 3 × 500 = 1500 × (1.1 − 1)
+  });
+
+  it("refuses on the payment read rather than revaluing documents as if unpaid", async () => {
+    const { store, periodId } = await threeHalfPaidInvoices(true);
+    const err = await refusalFrom(() =>
+      unrealizedFxRevaluationEffect({ functionalCurrency: "USD", clock, maxRows: 1 })(close(store, periodId)),
+    );
+    expect(err.entity).toBe("Payment");
+    expect(err.computing).toBe("an unrealized FX revaluation");
+    expect((await store.list(TENANT, "JournalEntry")).length).toBe(0);
+  });
+
+  it("refuses on the document read, naming the document entity", async () => {
+    // No payments, so the payment drain completes and the three open invoices exceed the ceiling.
+    const { store, periodId } = await threeHalfPaidInvoices(false);
+    const err = await refusalFrom(() =>
+      unrealizedFxRevaluationEffect({ functionalCurrency: "USD", clock, maxRows: 2 })(close(store, periodId)),
+    );
+    expect(err.entity).toBe("Invoice");
+    expect((await store.list(TENANT, "JournalEntry")).length).toBe(0);
+  });
+
+  it("keeps each document side's applied payments apart when two entities hold one id", async () => {
+    const store = new InMemoryEntityStore();
+    const usd = await store.create(TENANT, "Currency", { code: "USD" });
+    const eur = await store.create(TENANT, "Currency", { code: "EUR" });
+    await store.create(TENANT, "ExchangeRate", {
+      from_currency_id: String(eur.id),
+      to_currency_id: String(usd.id),
+      rate: 1.1,
+      rate_date: "2026-06-29",
+    });
+    // Records are bucketed per `(tenant, entity)` and a supplied `id` is kept, so one id across
+    // two entities is representable — and it is what separates a per-side accumulator from one
+    // shared map keyed by document id, which would see 400 + 900 against this id and skip both
+    // documents as overpaid.
+    const shared = "shared-doc-id";
+    await store.create(TENANT, "Invoice", { id: shared, invoice_number: "INV-1", state: "sent", total: 1000, currency: "EUR" });
+    await store.create(TENANT, "Bill", { id: shared, bill_number: "BILL-1", state: "approved", total: 1000, currency: "EUR" });
+    await store.create(TENANT, "Payment", { invoice_id: shared, amount: 400, state: "completed" });
+    await store.create(TENANT, "Payment", { bill_id: shared, amount: 900, state: "completed" });
+    const period = await store.create(TENANT, "FiscalPeriod", { status: "closing", end_date: "2026-06-30", name: "2026-06" });
+    await unrealizedFxRevaluationEffect({ functionalCurrency: "USD", clock })(close(pagedAt(store, 1), String(period.id)));
+    const lines = await store.list(TENANT, "JournalLine");
+    // AR open 600 → a 60 gain; AP open 100 → a 10 loss.
+    expect(Number(lines.find((l) => l.description === "Unrealized FX revaluation — AR EUR")!.debit)).toBeCloseTo(60, 6);
+    expect(Number(lines.find((l) => l.description === "Unrealized FX revaluation — AP EUR")!.credit)).toBeCloseTo(10, 6);
+  });
+});
+
+describe("lookupPeriodEndRate — the latest eligible rate, asked for rather than scanned", () => {
+  /**
+   * Ids are time-ordered, so under `sort: []` a capped page kept the OLDEST rates and dropped the
+   * ones nearest the date. Inserting oldest-first is what made that the wrong answer, so the
+   * fixture inserts in exactly that order.
+   */
+  async function dailyRates(count: number) {
+    const store = new InMemoryEntityStore();
+    const usd = await store.create(TENANT, "Currency", { code: "USD" });
+    const eur = await store.create(TENANT, "Currency", { code: "EUR" });
+    const end = Date.UTC(2026, 5, 30);
+    for (let i = count - 1; i >= 0; i -= 1) {
+      await store.create(TENANT, "ExchangeRate", {
+        from_currency_id: String(eur.id),
+        to_currency_id: String(usd.id),
+        rate: 1 + (count - 1 - i) / 100,
+        rate_date: new Date(end - i * 86_400_000).toISOString().slice(0, 10),
+      });
+    }
+    // A rate after the date must still be excluded.
+    await store.create(TENANT, "ExchangeRate", {
+      from_currency_id: String(eur.id),
+      to_currency_id: String(usd.id),
+      rate: 9.9,
+      rate_date: "2026-07-15",
+    });
+    const inv = await store.create(TENANT, "Invoice", {
+      invoice_number: "INV-RATE",
+      state: "draft",
+      currency: "EUR",
+      issue_date: "2026-06-30",
+    });
+    return { store, invId: String(inv.id), inv, latest: 1 + (count - 1) / 100 };
+  }
+  const stamp = bookingRateStampEffect({
+    entity: "Invoice",
+    triggerState: "sent",
+    dateField: "issue_date",
+    functionalCurrency: "USD",
+    clock,
+  });
+
+  it("stamps the latest eligible rate from a set larger than any page", async () => {
+    const { store, invId, inv, latest } = await dailyRates(DEFAULT_DRAIN_PAGE_SIZE + 100);
+    await stamp({
+      operation: "transition",
+      entity: "Invoice",
+      tenantId: TENANT,
+      id: invId,
+      before: inv,
+      after: { ...inv, state: "sent" },
+      store,
+    });
+    expect(Number((await store.get(TENANT, "Invoice", invId))!.booking_rate)).toBeCloseTo(latest, 6);
+  });
+
+  it("asks for one row, so the answer does not depend on how the store pages", async () => {
+    const { store, invId, inv, latest } = await dailyRates(40);
+    await stamp({
+      operation: "transition",
+      entity: "Invoice",
+      tenantId: TENANT,
+      id: invId,
+      before: inv,
+      after: { ...inv, state: "sent" },
+      store: pagedAt(store, 1),
+    });
+    expect(Number((await store.get(TENANT, "Invoice", invId))!.booking_rate)).toBeCloseTo(latest, 6);
+  });
+});
+
+describe("resolveAccountId — no positional fallback", () => {
+  it("declines a row that does not carry the code asked for, rather than posting to it", async () => {
+    const store = new InMemoryEntityStore();
+    // A store whose filter did not narrow — what `--store pg` gives when two LedgerAccount rows
+    // share an `account_code`, since the document store enforces no `unique` declaration.
+    const unnarrowed: EntityStore = {
+      listPage: (t, e, q) =>
+        e === "LedgerAccount"
+          ? Promise.resolve({ records: [{ id: "SOME-OTHER-ACCOUNT", account_code: "9999" }], nextCursor: null })
+          : store.listPage(t, e, q),
+      get: (t, e, id) => store.get(t, e, id),
+      create: (t, e, r) => store.create(t, e, r),
+      update: (t, e, id, patch) => store.update(t, e, id, patch),
+      remove: (t, e, id) => store.remove(t, e, id),
+      list: (t, e) => store.list(t, e),
+    };
+    const inv = await store.create(TENANT, "Invoice", {
+      invoice_number: "INV-ACCT",
+      state: "sent",
+      document_type: "invoice",
+      total: 100,
+    });
+    await creditNoteGlPostingEffect({ clock, resolveAccountCodes: () => Promise.resolve({ ar: "1100", revenue: "4000" }) })({
+      operation: "transition",
+      entity: "Invoice",
+      tenantId: TENANT,
+      id: String(inv.id),
+      before: inv,
+      after: { ...inv, state: "void" },
+      store: unnarrowed,
+    });
+    const accounts = (await store.list(TENANT, "JournalLine")).map((l) => l.ledger_account_id);
+    expect(accounts).not.toContain("SOME-OTHER-ACCOUNT");
+    expect(accounts.sort()).toEqual(["accounts_receivable", "revenue"]);
   });
 });

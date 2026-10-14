@@ -1,5 +1,6 @@
 import { parseDecimal } from "./decimal.js";
-import type { EntityRecord, ListFilter } from "./store.js";
+import { drainList, ReadCeilingExceeded } from "./list-drain.js";
+import type { EntityRecord } from "./store.js";
 import type { WriteGuardInput } from "./write-guards.js";
 
 /**
@@ -35,6 +36,12 @@ export interface JournalReversalConfig {
   readonly functionalDebitField?: string;
   readonly functionalCreditField?: string;
   readonly descriptionField?: string;
+  /**
+   * The largest line set this reversal reads **in full**. Reaching it is reported rather than
+   * silently truncated: the effect throws and the write rolls back, where a prefix would leave a
+   * posted, unbalanced mirror entry that no balance check downstream can distinguish from a
+   * correct one.
+   */
   readonly maxLines?: number;
   readonly clock?: { now(): Date };
 }
@@ -57,7 +64,10 @@ const DEFAULTS = {
   functionalDebitField: "functional_debit",
   functionalCreditField: "functional_credit",
   descriptionField: "description",
-  maxLines: 1000,
+  // 50_000 rather than the 1000 this was, because 1000 is below an artifact the entity model has
+  // already committed to: `JournalEntry.source` enumerates `payroll` and `depreciation` and both
+  // jobs are declared, so a payroll run for 5,000 employees at five lines each is 25,000 lines.
+  maxLines: 50_000,
 } as const;
 
 function num(v: unknown): number {
@@ -126,17 +136,6 @@ export function journalReversalEffect(config: JournalReversalConfig = {}): Write
     for (const carry of ["book_id", "fiscal_period_id"]) {
       if (typeof original[carry] === "string") reversalEntry[carry] = original[carry];
     }
-    const created = await input.store.create(input.tenantId, c.entryEntity, reversalEntry);
-    const newId = String(created["id"]);
-
-    const filter: ListFilter = { field: c.lineEntryRefField, op: "eq", value: originalId };
-    const page = await input.store.listPage(input.tenantId, c.lineEntity, {
-      limit: c.maxLines,
-      cursor: null,
-      sort: [],
-      filters: [filter],
-    });
-    const lines = page.records.filter((r) => String(r[c.lineEntryRefField] ?? "") === originalId);
 
     const skip = new Set([
       "id",
@@ -149,22 +148,57 @@ export function journalReversalEffect(config: JournalReversalConfig = {}): Write
       c.functionalCreditField,
       c.descriptionField,
     ]);
-    for (const line of lines) {
-      const reversed: EntityRecord = {};
-      for (const [k, v] of Object.entries(line)) {
-        if (!skip.has(k)) reversed[k] = v;
-      }
+    // **Nothing is written until the read is known complete** — not the lines, and not the entry
+    // header either, which is why the header's `create` moved below this drain. Holding the
+    // mirrored payloads costs the same bound as holding the rows (one entry's children) and buys
+    // the ordering, and the ordering is the whole point rather than tidiness: `writeTxn` falls
+    // through to `body(ctx.store)` on a store that is not transactional, so a ceiling refusal there
+    // rolls nothing back. Measured before the move: driven over a 5-line entry outside a
+    // transaction with `maxLines: 3`, the throw left a second posted `JE-1-REV` entry behind with
+    // no lines — and on a retry a third, `JE-1-REV-REV`. A refusal that leaves a posted entry is
+    // the defect this effect is being fixed for, arriving by a different door.
+    //
+    // The payloads carry no entry reference while they are being built, because there is no entry
+    // to reference yet; it is stamped on each of them after the header commits. Reading the
+    // original's id while writing the new entry's is also why interleaving would have been safe —
+    // the drain's filter can never match a row this effect creates — but safe is not the same as
+    // ordered, and the ordering is what makes the refusal clean.
+    const reversals: EntityRecord[] = [];
+    const outcome = await drainList(
+      input.store,
+      input.tenantId,
+      c.lineEntity,
+      { sort: [], filters: [{ field: c.lineEntryRefField, op: "eq", value: originalId }] },
+      { ceiling: c.maxLines },
+      (rows) => {
+        for (const line of rows) {
+          if (String(line[c.lineEntryRefField] ?? "") !== originalId) continue;
+          const reversed: EntityRecord = {};
+          for (const [k, v] of Object.entries(line)) {
+            if (!skip.has(k)) reversed[k] = v;
+          }
+          reversed[c.debitField] = num(line[c.creditField]);
+          reversed[c.creditField] = num(line[c.debitField]);
+          if (swapAmount(line[c.functionalDebitField], line[c.functionalCreditField])) {
+            reversed[c.functionalDebitField] = num(line[c.functionalCreditField]);
+            reversed[c.functionalCreditField] = num(line[c.functionalDebitField]);
+          }
+          const desc = typeof line[c.descriptionField] === "string" ? (line[c.descriptionField] as string) : "";
+          reversed[c.descriptionField] = `Reversal: ${desc}`.trim();
+          reversed.created_at = nowIso;
+          reversed.updated_at = nowIso;
+          reversals.push(reversed);
+        }
+      },
+    );
+    if (!outcome.complete) {
+      throw new ReadCeilingExceeded(c.lineEntity, c.maxLines, "a journal reversal");
+    }
+
+    const created = await input.store.create(input.tenantId, c.entryEntity, reversalEntry);
+    const newId = String(created["id"]);
+    for (const reversed of reversals) {
       reversed[c.lineEntryRefField] = newId;
-      reversed[c.debitField] = num(line[c.creditField]);
-      reversed[c.creditField] = num(line[c.debitField]);
-      if (swapAmount(line[c.functionalDebitField], line[c.functionalCreditField])) {
-        reversed[c.functionalDebitField] = num(line[c.functionalCreditField]);
-        reversed[c.functionalCreditField] = num(line[c.functionalDebitField]);
-      }
-      const desc = typeof line[c.descriptionField] === "string" ? (line[c.descriptionField] as string) : "";
-      reversed[c.descriptionField] = `Reversal: ${desc}`.trim();
-      reversed.created_at = nowIso;
-      reversed.updated_at = nowIso;
       await input.store.create(input.tenantId, c.lineEntity, reversed);
     }
   };
@@ -199,6 +233,12 @@ export interface InvoiceCreditNoteConfig {
   readonly lineUnitPriceField?: string;
   readonly lineTaxRateField?: string;
   readonly lineTotalField?: string;
+  /**
+   * The largest line set this credit note copies **in full**. Reaching it is reported rather than
+   * silently truncated: the header is created carrying the original's total, so a prefix of the
+   * lines leaves `total != sum(lines)` on a document the customer is sent, with nothing
+   * reconciling the two.
+   */
   readonly maxLines?: number;
   readonly clock?: { now(): Date };
 }
@@ -228,7 +268,9 @@ const CN_DEFAULTS = {
   lineUnitPriceField: "unit_price",
   lineTaxRateField: "tax_rate_pct",
   lineTotalField: "line_total",
-  maxLines: 1000,
+  // 50_000, the journal-line figure: these two caps were 1000 and 500 over ONE population — a
+  // document's lines — and that they were two different numbers at all was itself the finding.
+  maxLines: 50_000,
 } as const;
 
 /**
@@ -304,15 +346,28 @@ export function invoiceVoidCreditNoteEffect(config: InvoiceCreditNoteConfig = {}
     }
     creditNote.created_at = nowIso;
     creditNote.updated_at = nowIso;
-    const created = await input.store.create(input.tenantId, c.invoiceEntity, creditNote);
-    const newId = String(created["id"]);
 
-    if (config.lineEntity === undefined) return;
+    // One spelling of the header write, deferred so each arm can order it against its own read.
+    // The full-copy arm below writes it only after the line read is known complete, because a
+    // header carries the original's `total` whole while its lines are a copy: written first, a
+    // ceiling refusal mid-copy leaves a credit note the customer is sent whose lines do not add up
+    // to its own total, and on a store `writeTxn` finds non-transactional nothing rolls that back.
+    // The two arms that copy nothing have nothing to order against and write it straight away.
+    const writeHeader = async (): Promise<string> => {
+      const created = await input.store.create(input.tenantId, c.invoiceEntity, creditNote);
+      return String(created["id"]);
+    };
+
+    if (config.lineEntity === undefined) {
+      await writeHeader();
+      return;
+    }
     const lineEntity = config.lineEntity;
 
     if (isPartial) {
+      const partialId = await writeHeader();
       await input.store.create(input.tenantId, lineEntity, {
-        [c.lineInvoiceRefField]: newId,
+        [c.lineInvoiceRefField]: partialId,
         [c.linePositionField]: 1,
         [c.descriptionField]: "Partial credit",
         [c.lineQuantityField]: 1,
@@ -325,25 +380,39 @@ export function invoiceVoidCreditNoteEffect(config: InvoiceCreditNoteConfig = {}
       return;
     }
 
-    const filter: ListFilter = { field: c.lineInvoiceRefField, op: "eq", value: originalId };
-    const page = await input.store.listPage(input.tenantId, lineEntity, {
-      limit: c.maxLines,
-      cursor: null,
-      sort: [],
-      filters: [filter],
-    });
-    const lines = page.records.filter((r) => String(r[c.lineInvoiceRefField] ?? "") === originalId);
     const lineSkip = new Set(["id", c.lineInvoiceRefField, c.descriptionField, "created_at", "updated_at"]);
-    for (const line of lines) {
-      const cnLine: EntityRecord = {};
-      for (const [k, v] of Object.entries(line)) {
-        if (!lineSkip.has(k)) cnLine[k] = v;
-      }
+    // Derived per page and written only once the read is known complete, header included — the
+    // reversal effect's ordering and for its reason, stated at `writeHeader` above. The payloads
+    // carry no invoice reference while they are being built; it is stamped on after the header
+    // commits.
+    const cnLines: EntityRecord[] = [];
+    const outcome = await drainList(
+      input.store,
+      input.tenantId,
+      lineEntity,
+      { sort: [], filters: [{ field: c.lineInvoiceRefField, op: "eq", value: originalId }] },
+      { ceiling: c.maxLines },
+      (rows) => {
+        for (const line of rows) {
+          if (String(line[c.lineInvoiceRefField] ?? "") !== originalId) continue;
+          const cnLine: EntityRecord = {};
+          for (const [k, v] of Object.entries(line)) {
+            if (!lineSkip.has(k)) cnLine[k] = v;
+          }
+          const desc = typeof line[c.descriptionField] === "string" ? (line[c.descriptionField] as string) : "";
+          cnLine[c.descriptionField] = `Credit: ${desc}`.trim();
+          cnLine.created_at = nowIso;
+          cnLine.updated_at = nowIso;
+          cnLines.push(cnLine);
+        }
+      },
+    );
+    if (!outcome.complete) {
+      throw new ReadCeilingExceeded(lineEntity, c.maxLines, "a credit note's line copy");
+    }
+    const newId = await writeHeader();
+    for (const cnLine of cnLines) {
       cnLine[c.lineInvoiceRefField] = newId;
-      const desc = typeof line[c.descriptionField] === "string" ? (line[c.descriptionField] as string) : "";
-      cnLine[c.descriptionField] = `Credit: ${desc}`.trim();
-      cnLine.created_at = nowIso;
-      cnLine.updated_at = nowIso;
       await input.store.create(input.tenantId, lineEntity, cnLine);
     }
   };
@@ -473,7 +542,17 @@ export function creditNoteGlPostingEffect(config: CreditNoteGlConfig = {}): Writ
   };
 }
 
-/** Resolves a LedgerAccount `account_code` to its record id within the tenant, or null. */
+/**
+ * Resolves a LedgerAccount `account_code` to its record id within the tenant, or null.
+ *
+ * `.find` with **no positional fallback**, converging on `resolveCurrencyId`, which made the
+ * opposite and correct choice: a row that does not carry the code asked for is not that account,
+ * and returning it posts money to an arbitrary ledger account. It is not merely latent — the
+ * document store enforces 0 of 32 declared `unique` fields and `--store pg` is the compose
+ * default, so two LedgerAccount rows can share an `account_code` there and `limit: 1` under
+ * `sort: []` returns an arbitrary one of them. Null makes the caller fall back to its configured
+ * placeholder ref, which is a wrong-but-named account rather than a wrong-and-unnamed one.
+ */
 async function resolveAccountId(
   input: WriteEffectInput,
   c: { ledgerAccountEntity: string; accountCodeField: string },
@@ -486,7 +565,7 @@ async function resolveAccountId(
     sort: [],
     filters: [{ field: c.accountCodeField, op: "eq", value: code }],
   });
-  const rec = page.records.find((r) => String(r[c.accountCodeField] ?? "") === code) ?? page.records[0];
+  const rec = page.records.find((r) => String(r[c.accountCodeField] ?? "") === code);
   return rec !== undefined ? String(rec["id"]) : null;
 }
 
@@ -565,6 +644,13 @@ export interface RecognitionTaxLinesConfig {
   /** TaxCode field carrying its kind + the value that marks a withholding code. */
   readonly codeKindField?: string;
   readonly withholdingKind?: string;
+  /**
+   * The largest line set the tax breakdown reads **in full**. Reaching it is reported rather than
+   * silently truncated, and the reconciliation gate below is not a substitute for that: it covers
+   * `netTotal + taxTotal` and **not** `withholdingTotal`, so a dropped tail that nets to ~0 passes
+   * the gate and applies a truncated withholding to the control line, the WHT line and the
+   * document stamp — all of which balance.
+   */
   readonly maxRows?: number;
 }
 
@@ -578,7 +664,9 @@ const TAX_LINES_FALLBACKS = {
   codeJurisdictionField: "jurisdiction",
   codeKindField: "kind",
   withholdingKind: "withholding",
-  maxRows: 500,
+  // 50_000, the journal- and invoice-line figure. These are a document's lines, the same
+  // population `CN_DEFAULTS.maxLines` bounds, so they take the same number.
+  maxRows: 50_000,
 } as const;
 
 export interface TaxBreakdownLine {
@@ -731,6 +819,7 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
       subtotal = total;
       tax = 0;
     }
+    const docNumber = typeof doc[c.numberField] === "string" ? (doc[c.numberField] as string) : docId;
 
     // Line-level tax codes: when configured and the line-derived split reconciles to
     // the document total, post one tax line per TaxCode instead of one aggregate line.
@@ -740,24 +829,41 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
     let withholdingTotal = 0;
     if (config.taxLines !== undefined) {
       const tc = { ...TAX_LINES_FALLBACKS, ...config.taxLines };
-      const page = await input.store.listPage(input.tenantId, tc.entity, {
-        limit: tc.maxRows,
-        cursor: null,
-        sort: [],
-        filters: [{ field: tc.refField, op: "eq", value: docId }],
-      });
-      const lineRows = page.records.filter((r) => String(r[tc.refField] ?? "") === docId);
-      if (lineRows.length > 0) {
+      // One pass collects the breakdown's own input and the distinct TaxCode ids it needs
+      // resolved, so the line rows themselves are never retained — and the drain is read in full
+      // before the first code lookup, because which codes to resolve is a property of the whole
+      // set. Nothing is written yet at this point, so a refusal here writes nothing at all.
+      const breakdownLines: TaxBreakdownLine[] = [];
+      const codeIds = new Set<string>();
+      const outcome = await drainList(
+        input.store,
+        input.tenantId,
+        tc.entity,
+        { sort: [], filters: [{ field: tc.refField, op: "eq", value: docId }] },
+        { ceiling: tc.maxRows },
+        (rows) => {
+          for (const r of rows) {
+            if (String(r[tc.refField] ?? "") !== docId) continue;
+            const codeId = r[tc.taxCodeField];
+            const taxCodeId = typeof codeId === "string" && codeId.length > 0 ? codeId : null;
+            if (taxCodeId !== null) codeIds.add(taxCodeId);
+            breakdownLines.push({
+              net: num(r[tc.netField]),
+              taxCodeId,
+              flatRatePct: optionalNum(r[tc.flatRateField]),
+            });
+          }
+        },
+      );
+      if (!outcome.complete) {
+        throw new ReadCeilingExceeded(tc.entity, tc.maxRows, "a document's tax breakdown");
+      }
+      if (breakdownLines.length > 0) {
         // Resolve each distinct TaxCode once.
         const rateByCode = new Map<
           string,
           { rate: number; label: string; accountCode: string | null; jurisdiction: string | null; withholding: boolean }
         >();
-        const codeIds = new Set<string>();
-        for (const r of lineRows) {
-          const id = r[tc.taxCodeField];
-          if (typeof id === "string" && id.length > 0) codeIds.add(id);
-        }
         for (const id of codeIds) {
           const code = await input.store.get(input.tenantId, tc.codeEntity, id);
           if (code !== null) {
@@ -773,17 +879,7 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
             });
           }
         }
-        const breakdown = computeLineTaxBreakdown(
-          lineRows.map((r) => {
-            const codeId = r[tc.taxCodeField];
-            return {
-              net: num(r[tc.netField]),
-              taxCodeId: typeof codeId === "string" && codeId.length > 0 ? codeId : null,
-              flatRatePct: optionalNum(r[tc.flatRateField]),
-            };
-          }),
-          rateByCode,
-        );
+        const breakdown = computeLineTaxBreakdown(breakdownLines, rateByCode);
         // Accept the line-derived split only when its regular (non-withholding) tax
         // reconciles to the document total — withholding is a contra, not part of total.
         if (breakdown.netTotal > 0 && Math.abs(breakdown.netTotal + breakdown.taxTotal - total) <= EPSILON) {
@@ -798,7 +894,6 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
     const now = c.clock?.now() ?? new Date();
     const nowIso = now.toISOString();
     const today = nowIso.slice(0, 10);
-    const docNumber = typeof doc[c.numberField] === "string" ? (doc[c.numberField] as string) : docId;
     const currency = typeof doc[c.currencyField] === "string" ? (doc[c.currencyField] as string) : "USD";
 
     const codes = config.resolveAccountCodes ? await config.resolveAccountCodes(input.tenantId) : {};
@@ -991,6 +1086,12 @@ export interface PaymentApplicationConfig {
   readonly paidAtField?: string;
   /** Document states from which auto-settlement is allowed (issued/approved, not draft/void). */
   readonly settleableStates?: readonly string[];
+  /**
+   * The largest payment set the applied total is summed over **in full**. Reaching it is reported
+   * rather than silently truncated, and the direction of the error is not bounded: nothing
+   * enforces `Payment.amount`'s declared `min: 0`, so a dropped negative correction over-reports
+   * the applied total and settles a document that is still owed.
+   */
   readonly maxPayments?: number;
   readonly clock?: { now(): Date };
 }
@@ -1004,7 +1105,10 @@ const APPLICATION_FALLBACKS = {
   documentStateField: "state",
   paidState: "paid",
   paidAtField: "paid_at",
-  maxPayments: 1000,
+  // 10_000 rather than 1000: the population is one document's payments, which is smaller than a
+  // document's lines (a 50,000-instalment invoice is not a thing) but is not bounded by anything
+  // in the model either — a subscription billed daily and corrected accumulates rows for years.
+  maxPayments: 10_000,
 } as const;
 
 const APPLY_EPSILON = 0.005;
@@ -1037,17 +1141,27 @@ export function paymentApplicationEffect(config: PaymentApplicationConfig): Writ
     const total = num(doc[c.documentTotalField]);
     if (total <= 0) return;
 
-    const page = await input.store.listPage(input.tenantId, c.paymentEntity, {
-      limit: c.maxPayments,
-      cursor: null,
-      sort: [],
-      filters: [{ field: c.refField, op: "eq", value: docId }],
-    });
+    // Every completed payment, not the first page of them, and with no stop once `applied`
+    // crosses `total`: a later page can carry a negative correction that takes it back under,
+    // which is the measured defect — an invoice of 400 with three payments of 200 and a
+    // correction of −300 was written `paid` at a cap of 3 and correctly left `sent` at 99.
     let applied = 0;
-    for (const p of page.records) {
-      if (String(p[c.refField] ?? "") === docId && p[c.stateField] === c.completedState) {
-        applied += num(p[c.amountField]);
-      }
+    const outcome = await drainList(
+      input.store,
+      input.tenantId,
+      c.paymentEntity,
+      { sort: [], filters: [{ field: c.refField, op: "eq", value: docId }] },
+      { ceiling: c.maxPayments },
+      (rows) => {
+        for (const p of rows) {
+          if (String(p[c.refField] ?? "") === docId && p[c.stateField] === c.completedState) {
+            applied += num(p[c.amountField]);
+          }
+        }
+      },
+    );
+    if (!outcome.complete) {
+      throw new ReadCeilingExceeded(c.paymentEntity, c.maxPayments, "the amount applied to a document");
     }
     if (applied + APPLY_EPSILON < total) return; // not yet fully covered
 
@@ -1105,6 +1219,13 @@ export interface UnrealizedFxRevaluationConfig {
   readonly fxAccountRef?: string;
   readonly arAccountRef?: string;
   readonly apAccountRef?: string;
+  /**
+   * The largest set either tenant-wide read here reads **in full** — the completed payments and,
+   * per document side, the open documents. Reaching it is reported rather than silently
+   * truncated: a dropped payment makes the open balance too large and a document whose payments
+   * were all dropped is revalued as if entirely unpaid, and the resulting entry **balances by
+   * construction**, so nothing downstream can see that the figure is wrong.
+   */
   readonly maxRows?: number;
   readonly clock?: { now(): Date };
 }
@@ -1141,7 +1262,10 @@ const FX_REVAL_FALLBACKS = {
   fxAccountRef: "unrealized_fx_gain_loss",
   arAccountRef: "accounts_receivable",
   apAccountRef: "accounts_payable",
-  maxRows: 5000,
+  // 100_000 rather than 5000, because these two populations are lifetime-cumulative: there is no
+  // purge or archive job for Payment anywhere in the packs, so a tenant's completed payments only
+  // ever grow and 5000 is reached by ordinary trading history rather than by anything unusual.
+  maxRows: 100_000,
 } as const;
 
 const FX_EPSILON = 0.005;
@@ -1205,14 +1329,40 @@ export function unrealizedFxRevaluationEffect(config: UnrealizedFxRevaluationCon
     const arAccount = (await resolveAccountId(input, c, codes.ar)) ?? c.arAccountRef;
     const apAccount = (await resolveAccountId(input, c, codes.ap)) ?? c.apAccountRef;
 
-    // Sum completed payments once, grouped by each document side's ref field.
-    const payments = await input.store.listPage(input.tenantId, c.paymentEntity, {
-      limit: c.maxRows,
-      cursor: null,
-      sort: [],
-      filters: [{ field: c.paymentStateField, op: "eq", value: c.paymentCompletedState }],
-    });
-    const completed = payments.records.filter((p) => p[c.paymentStateField] === c.paymentCompletedState);
+    const periodLabel = typeof period[c.periodNumberField] === "string" ? (period[c.periodNumberField] as string) : periodId;
+
+    // Every document side's applied-payment map is filled in ONE pass over the payment pages,
+    // before the document loop. The accumulators are hoisted rather than rebuilt per side because
+    // a drain is a stream: rebuilding them inside the loop would either re-read every payment per
+    // side or retain every payment row, where one pass holds only
+    // O(sides × documents-with-payments) and the rows are discarded as they arrive.
+    //
+    // One map **per side** and not one shared map keyed by document id, because a side's keys are
+    // the values of its own `paymentRefField` and nothing draws two entities' ids from one space:
+    // records are bucketed per `(tenant, entity)` and a caller-supplied `id` is not stripped (the
+    // fact `compareIds` records for the keyset). A shared map would merge an invoice's payments
+    // with a same-id bill's and skip both as overpaid.
+    const sides = c.documents.map((spec) => ({ spec, applied: new Map<string, number>() }));
+    const paymentOutcome = await drainList(
+      input.store,
+      input.tenantId,
+      c.paymentEntity,
+      { sort: [], filters: [{ field: c.paymentStateField, op: "eq", value: c.paymentCompletedState }] },
+      { ceiling: c.maxRows },
+      (rows) => {
+        for (const p of rows) {
+          if (p[c.paymentStateField] !== c.paymentCompletedState) continue;
+          for (const side of sides) {
+            const ref = p[side.spec.paymentRefField];
+            if (typeof ref !== "string" || ref.length === 0) continue;
+            side.applied.set(ref, (side.applied.get(ref) ?? 0) + num(p[c.paymentAmountField]));
+          }
+        }
+      },
+    );
+    if (!paymentOutcome.complete) {
+      throw new ReadCeilingExceeded(c.paymentEntity, c.maxRows, "an unrealized FX revaluation");
+    }
 
     // Accumulate the open foreign balance per (currency, side); then one rate lookup per currency.
     // We also accumulate Σ(open × bookingRate) so the revaluation compares against each
@@ -1221,40 +1371,40 @@ export function unrealizedFxRevaluationEffect(config: UnrealizedFxRevaluationCon
     const bookedByCurrencySide = new Map<string, number>(); // Σ(open × booking_rate) in functional terms
     const rateCache = new Map<string, number | null>();
 
-    for (const doc of c.documents) {
-      const applied = new Map<string, number>();
-      for (const p of completed) {
-        const ref = p[doc.paymentRefField];
-        if (typeof ref === "string" && ref.length > 0) {
-          applied.set(ref, (applied.get(ref) ?? 0) + num(p[c.paymentAmountField]));
-        }
-      }
-      const page = await input.store.listPage(input.tenantId, doc.entity, {
-        limit: c.maxRows,
-        cursor: null,
-        sort: [],
-        filters: [{ field: "state", op: "in", value: [...doc.openStates] }],
-      });
-      for (const record of page.records) {
-        if (!doc.openStates.includes(String(record["state"] ?? ""))) continue;
-        const docId = String(record["id"] ?? "");
-        if (docId === "") continue;
-        const currency = typeof record[c.currencyField] === "string" ? (record[c.currencyField] as string).toUpperCase() : functional;
-        if (currency === functional) continue; // only foreign-currency documents are revalued
-        const total = num(record[c.totalField]);
-        const open = Math.round((total - (applied.get(docId) ?? 0)) * 100) / 100;
-        if (open <= 0) continue; // fully paid → nothing to revalue
-        // The rate the document was booked at; absent → 1 (matching the legacy approximation).
-        const bookingRate = record[c.bookingRateField] !== undefined ? num(record[c.bookingRateField]) : 1;
-        const key = `${currency}|${doc.side}`;
-        openByCurrencySide.set(key, (openByCurrencySide.get(key) ?? 0) + open);
-        bookedByCurrencySide.set(key, (bookedByCurrencySide.get(key) ?? 0) + open * bookingRate);
+    for (const { spec: doc, applied } of sides) {
+      // The documents fold straight into the two per-(currency, side) maps, so this read needs no
+      // array either — it is O(currencies) however many open documents there are.
+      const docOutcome = await drainList(
+        input.store,
+        input.tenantId,
+        doc.entity,
+        { sort: [], filters: [{ field: "state", op: "in", value: [...doc.openStates] }] },
+        { ceiling: c.maxRows },
+        (rows) => {
+          for (const record of rows) {
+            if (!doc.openStates.includes(String(record["state"] ?? ""))) continue;
+            const docId = String(record["id"] ?? "");
+            if (docId === "") continue;
+            const currency = typeof record[c.currencyField] === "string" ? (record[c.currencyField] as string).toUpperCase() : functional;
+            if (currency === functional) continue; // only foreign-currency documents are revalued
+            const total = num(record[c.totalField]);
+            const open = Math.round((total - (applied.get(docId) ?? 0)) * 100) / 100;
+            if (open <= 0) continue; // fully paid → nothing to revalue
+            // The rate the document was booked at; absent → 1 (matching the legacy approximation).
+            const bookingRate = record[c.bookingRateField] !== undefined ? num(record[c.bookingRateField]) : 1;
+            const key = `${currency}|${doc.side}`;
+            openByCurrencySide.set(key, (openByCurrencySide.get(key) ?? 0) + open);
+            bookedByCurrencySide.set(key, (bookedByCurrencySide.get(key) ?? 0) + open * bookingRate);
+          }
+        },
+      );
+      if (!docOutcome.complete) {
+        throw new ReadCeilingExceeded(doc.entity, c.maxRows, "an unrealized FX revaluation");
       }
     }
 
     const now = c.clock?.now() ?? new Date();
     const nowIso = now.toISOString();
-    const periodLabel = typeof period[c.periodNumberField] === "string" ? (period[c.periodNumberField] as string) : periodId;
 
     const lines: Record<string, unknown>[] = [];
     for (const [key, open] of openByCurrencySide) {
@@ -1330,7 +1480,6 @@ export interface BookingRateStampConfig {
   readonly rateToField?: string;
   readonly rateField?: string;
   readonly rateDateField?: string;
-  readonly maxRows?: number;
   readonly clock?: { now(): Date };
 }
 
@@ -1346,7 +1495,6 @@ const BOOKING_RATE_FALLBACKS = {
   rateToField: "to_currency_id",
   rateField: "rate",
   rateDateField: "rate_date",
-  maxRows: 5000,
 } as const;
 
 /**
@@ -1410,6 +1558,19 @@ async function resolveCurrencyId(
  * Period-end rate for (docCurrency → functional): the ExchangeRate from the doc currency's
  * Currency id to the functional currency id with the latest `rate_date` ≤ `endDate`. Returns
  * null when the doc currency has no Currency record or no eligible rate.
+ *
+ * It **asks** for that row rather than reading a page and picking in JS, which is why this is not
+ * one of the drained reads: it never wanted a set. Under `sort: []` the ordering is `ORDER BY id`
+ * and house ids are time-ordered, so a capped page kept the OLDEST rates and dropped exactly the
+ * ones nearest the period end — past the cap it returned a stale rate and multiplied the whole
+ * revaluation by it. Pushing the date bound and the ordering into the query makes `limit: 1`
+ * sufficient, so there is no ceiling to exceed and nothing to report. `rate_date` is a `date`
+ * field, whose canonical spelling is fixed-width and zero-padded, so text order IS chronological
+ * on the JSONB store and the column store compares a real `DATE`.
+ *
+ * The JS re-check of from/to/date stays as the belt, for the stores' own
+ * `UNSERVEABLE_SURFACE_REFUSES` reason: a surface that is dropped rather than refused answers
+ * with rows the caller asked to exclude, and here the excluded rows are future rates.
  */
 async function lookupPeriodEndRate(
   input: WriteEffectInput,
@@ -1421,7 +1582,6 @@ async function lookupPeriodEndRate(
     rateToField: string;
     rateField: string;
     rateDateField: string;
-    maxRows: number;
   },
   docCurrency: string,
   functionalCurrencyId: string,
@@ -1430,24 +1590,24 @@ async function lookupPeriodEndRate(
   const fromId = await resolveCurrencyId(input, c, docCurrency);
   if (fromId === null) return null;
   const page = await input.store.listPage(input.tenantId, c.exchangeRateEntity, {
-    limit: c.maxRows,
+    limit: 1,
     cursor: null,
-    sort: [],
+    sort: [{ field: c.rateDateField, direction: "desc" }],
     filters: [
       { field: c.rateFromField, op: "eq", value: fromId },
       { field: c.rateToField, op: "eq", value: functionalCurrencyId },
+      { field: c.rateDateField, op: "lte", value: endDate },
     ],
   });
-  let best: { date: string; rate: number } | null = null;
   for (const r of page.records) {
     if (String(r[c.rateFromField] ?? "") !== fromId) continue;
     if (String(r[c.rateToField] ?? "") !== functionalCurrencyId) continue;
     const dateRaw = r[c.rateDateField];
     const date = typeof dateRaw === "string" && dateRaw.length > 0 ? dateRaw.slice(0, 10) : null;
     if (date === null || date > endDate) continue; // rate must be on/before the period end
-    if (best === null || date > best.date) best = { date, rate: num(r[c.rateField]) };
+    return num(r[c.rateField]);
   }
-  return best !== null ? best.rate : null;
+  return null;
 }
 
 export interface WhtCertificateClearingConfig {

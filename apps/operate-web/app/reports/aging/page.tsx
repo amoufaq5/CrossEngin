@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { Topbar } from "@/components/Topbar";
+import { boundedReadNotice } from "@/lib/bounded-read";
 import { fetchAging } from "@/lib/api";
 import { AGING_BUCKETS, type AgingReport, type AgingResponse } from "@/lib/aging";
 import { formatCell } from "@/lib/format";
@@ -81,6 +82,12 @@ export default function AgingPage() {
           </div>
         )}
 
+        {data && boundedReadNotice(data, "ledger") !== null && (
+          <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            <span className="font-semibold">Partial figures. </span>
+            {boundedReadNotice(data, "ledger")}
+          </div>
+        )}
         {error && (
           <div className="rounded-lg border border-brand-200 bg-brand-50 px-4 py-3 text-sm text-brand-700">
             Could not load the aging report: {error}. Is operate-server running?

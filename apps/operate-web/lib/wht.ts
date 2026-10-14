@@ -1,3 +1,5 @@
+import type { BoundedReadDeclaration } from "@/lib/bounded-read";
+
 export type WhtStatus = "certified" | "partial" | "uncertified";
 
 export interface WhtReconRow {
@@ -17,7 +19,7 @@ export interface WhtCurrencySubtotal {
   readonly uncertified: number;
 }
 
-export interface WhtReconciliation {
+export interface WhtReconciliation extends BoundedReadDeclaration {
   readonly totals: { readonly withheld: number; readonly certified: number; readonly uncertified: number };
   readonly byCurrency: readonly WhtCurrencySubtotal[];
   readonly rows: readonly WhtReconRow[];

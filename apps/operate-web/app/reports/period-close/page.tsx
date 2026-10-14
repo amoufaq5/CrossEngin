@@ -21,6 +21,7 @@ export default function PeriodClosePage() {
 
   const [selected, setSelected] = useState<FiscalPeriodRow | null>(null);
   const [entry, setEntry] = useState<RevaluationEntry | null>(null);
+  const [entryError, setEntryError] = useState<string | null>(null);
   const [entryLoading, setEntryLoading] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -46,13 +47,20 @@ export default function PeriodClosePage() {
   function view(period: FiscalPeriodRow) {
     setSelected(period);
     setEntry(null);
+    setEntryError(null);
     setEntryLoading(true);
     fetchRevaluationEntry(period.id)
       .then((e) => {
         setEntry(e);
         setEntryLoading(false);
       })
-      .catch(() => setEntryLoading(false));
+      .catch((e: unknown) => {
+        // A null entry renders "no FX revaluation was posted for this period", which is a claim
+        // about the period's exposure and not about the read — so a failed read must not take that
+        // arm. It used to: the error was swallowed here and the panel asserted the negative.
+        setEntryError(e instanceof Error ? e.message : String(e));
+        setEntryLoading(false);
+      });
   }
 
   async function close(period: FiscalPeriodRow) {
@@ -99,7 +107,7 @@ export default function PeriodClosePage() {
               onView={view}
               onClose={close}
             />
-            <EntryPanel period={selected} entry={entry} loading={entryLoading} />
+            <EntryPanel period={selected} entry={entry} error={entryError} loading={entryLoading} />
           </div>
         )}
       </div>
@@ -195,10 +203,12 @@ function PeriodList({
 function EntryPanel({
   period,
   entry,
+  error,
   loading,
 }: {
   period: FiscalPeriodRow | null;
   entry: RevaluationEntry | null;
+  error: string | null;
   loading: boolean;
 }) {
   if (period === null) {
@@ -214,7 +224,13 @@ function EntryPanel({
         FX revaluation — {period.name}
       </h2>
       {loading && <p className="text-sm text-ink-muted">Loading entry…</p>}
-      {!loading && entry === null && (
+      {!loading && error !== null && (
+        <div className="rounded-xl border border-brand-200 bg-brand-50 px-4 py-3 text-sm text-brand-700">
+          This period&apos;s FX revaluation entry could not be read, so nothing is shown about it:{" "}
+          {error}
+        </div>
+      )}
+      {!loading && error === null && entry === null && (
         <div className="rounded-xl border border-line bg-surface-soft px-4 py-8 text-center text-sm text-ink-muted">
           No FX revaluation was posted for this period (no open foreign-currency exposure at close).
         </div>
@@ -228,6 +244,13 @@ function EntryPanel({
               {entry.memo ? ` · ${entry.memo}` : ""}
             </div>
           </div>
+          {entry.linesTruncated && (
+            <div className="border-b border-amber-200 bg-amber-50 px-4 py-2.5 text-xs text-amber-800">
+              This entry has more lines than this screen reads. The totals below are over the{" "}
+              {entry.lines.length} lines shown and say nothing about the rest, so the balance is not
+              asserted from them — open the entry in the journal to see it whole.
+            </div>
+          )}
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-line bg-surface-soft text-left text-[11px] font-semibold uppercase tracking-wider text-ink-faint">
@@ -251,7 +274,14 @@ function EntryPanel({
             <tfoot>
               <tr className="border-t-2 border-line bg-surface-soft font-semibold text-ink">
                 <td className="px-4 py-2.5 text-right">
-                  Totals {entry.balanced ? <span className="text-emerald-600">✓ balanced</span> : <span className="text-brand-700">⚠ unbalanced</span>}
+                  Totals{" "}
+                  {entry.balanced === null ? (
+                    <span className="font-normal text-amber-700">balance not determined</span>
+                  ) : entry.balanced ? (
+                    <span className="text-emerald-600">✓ balanced</span>
+                  ) : (
+                    <span className="text-brand-700">⚠ unbalanced</span>
+                  )}
                 </td>
                 <td className="px-4 py-2.5 text-right">{formatCell(entry.totalDebit, "money")}</td>
                 <td className="px-4 py-2.5 text-right">{formatCell(entry.totalCredit, "money")}</td>

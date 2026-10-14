@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 19,198 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 19,372 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -1277,6 +1277,77 @@ type errors.
   are the same line: ADR-0362's class reproduced inside the census arguing the deletion, and caught
   by the adversarial pass rather than by the author.
 
+  ADR-0367 is the fourth user-directed increment and the class is **a prefix is not the set**. Every
+  money reader issued one `listPage` with a hardcoded `limit` and discarded the `nextCursor` beside
+  it — 500 tax-split lines, 1000 journal lines, 1000 payments, 5000 for the FX revaluation and the
+  two finance reports, none overridden anywhere, so every one ran at its default in every
+  deployment. The item on file read *"silently under-report past it"*, which is right about six
+  sites and wrong about seven: those write a wrong row into the general ledger.
+  **The worst member was not on the list.** `journalPostingGuard` is the double-entry invariant for
+  the whole ledger and the cap made it wrong in **both directions from one read**, measured at the
+  real default: a 1001-line entry unbalanced by 9999 whose first 1000 happen to balance is
+  **allowed to post**, and a genuinely balanced 1001-line entry is **refused**
+  `422 unbalanced_journal_entry: debits (10000.00) must equal credits (0.00)` — a detail that is a
+  lie about the entry. A balancing prefix is the *ordinary* shape, because every GL posting effect
+  writes its lines as a balanced group. The field's own comment said *"a single entry should be well
+  under this"*, which is false for the two sources the entity model names: `JournalEntry.source`
+  enumerates `payroll` and `depreciation`, both jobs declared, and 5000 employees × 5 lines is
+  25 000 — **the cap sat below an artifact the manifest had already committed to.**
+  The measurement that decides the design is the site that looked *safe*.
+  `paymentApplicationEffect` settles a document once payments cover its total, so an under-reported
+  sum can only fail to settle — an argument resting on `Payment.amount`'s declared `min: 0`, which
+  **nothing enforces** (`FieldErrorCode` has no range member; `type.min` is read in exactly two
+  places, both change-detectors in `kernel/ddl/diff.ts`). Measured: an invoice of 400 with three
+  payments of 200 and a correction of −300 — true applied **300** — is written **`paid` with a
+  `paid_at` stamp** at a cap of 3 and correctly left `sent` at 99, and because that write bypasses
+  the issued-document lock by design the document then drops out of **both** the aging report and
+  the FX revaluation's open set. A live receivable disappears from the books. The same unenforced
+  declaration flipped the *other* safe verdict: the tax split's gate reconciles
+  `netTotal + taxTotal` and the code says in its own comment that withholding is **not** in that
+  quantity, so a dropped tail netting to ~0 applies a truncated withholding figure — `AR 360 /
+  Withholding 40, stamped 40` against the full set's `AR 260 / Withholding 140, stamped 140`, and
+  **both balance**. So the rule admits no per-site exception: *a prefix is not the set, whatever is
+  in the tail*, and no site may reason about sign or lean on a declaration nothing checks.
+  `drainList` is the primitive and `READ_CEILING_EFFECT` is a total map over **three positions**
+  whose content is the whole decision — a **guard** `refuses` (a decision from a prefix is not a
+  decision), an **effect** `aborts` (a row written from a prefix is a wrong row that *balances*, so
+  nothing downstream can see it), a **report** `declares` (a bounded reading that says how far it
+  looked is honest where silence is not, and an aging report over the first N documents is still the
+  only view an operator has). The report arm is convergence: `usage-handler.ts` already emits
+  `overflow` and `read-state-routes.ts` sets `truncated = page.nextCursor !== null`.
+  Two sites are **not** drained because they are not scans: `lookupPeriodEndRate` asked for 5000
+  rates with `sort: []`, which leaves `ORDER BY id ASC` over time-ordered ids, so it kept the
+  **oldest** and dropped the newest — the ones nearest period end — and returned a stale rate it
+  multiplied the whole revaluation by; it asks `lte` + `desc` + `limit: 1` now, exact in one row.
+  And `resolveAccountId`'s `?? page.records[0]` is dropped, converging on `resolveCurrencyId`, which
+  matters on the shipped store because ADR-0360 measures it enforcing 0 of 32 unique declarations.
+  **The prerequisite is the increment's own class one level down.** A drain on
+  `InMemoryEntityStore` was *unsound*, and the facts that made it look sound are why: the sort's
+  tiebreaker went through `compareValues` while `isAfter`'s last clause was a raw `>`. Measured with
+  `sort: []` — numeral ids visited 2 of 5, and mixed-case ids returned **the same cursor twice**, a
+  walk that never terminates. House ids are fixed-width so the two agreed on them, which is why it
+  went unnoticed; nothing strips a client-supplied `id`. `compareIds` is the one comparator and the
+  repair landed entirely on the **sort**, measured: the seek expression it replaced is identical over
+  168 inputs, so `compareValues` on the sort side is what disagreed — and making the *seek*
+  decimal-aware instead would have moved this store further from both Postgres stores, which is the
+  trap. The recurring rule held a **tenth** time: the pain was nine truncating reads, one level up
+  is a drainer, and the drainer is sound only once the comparator below it is one comparator.
+  Three things an adversarial pass found after the first commit, and all three were in work of mine.
+  **The transaction premise was false as a general claim**: `writeTxn` falls through to
+  `body(ctx.store)` on a non-transactional store and two effects wrote their header *before* their
+  own read, so a 5-line reversal at `maxLines: 3` left a second posted entry behind and a retry left
+  a third — both now read before they write anything, so *nothing was written* is a property of each
+  effect rather than a promise about the caller's store. **Four of six refusal messages interpolated
+  a record value**, one of them a record **id**, into a string `writeTxn` puts in a 500 body under a
+  comment of mine authorising it because the refusal carries "no row, no value, no tenant" — all six
+  are literals now, pinned by a test that reads the construction sites as text with a vacuity floor.
+  And a new test was **vacuous**: 1200 documents against a pre-increment cap of 5000 means a one-page
+  read was *right*, so it passed against the code it was written to refute; the fixture is past 5000
+  now and mutation-checked. The report ceilings are the fourth correction and mine: briefed at
+  100 000, they are **20 000**, because what bounds a report is its **response** — both return a row
+  per document, and at the real pack's widest money record (`Invoice`, 777 B of JSON) 100 000 is a
+  ~74 MiB body.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -1747,6 +1818,26 @@ packages exist at only one layer, noted below where that is true.
   FX revaluation and booking-rate stamping, WHT certificate clearing, payment application,
   journal reversal. Also entitlements, signed offline licences, plan catalog, AR/AP aging
   and WHT reconciliation reports.
+  **`list-drain.ts` is where a figure stops being computed from one page** (ADR-0367).
+  `drainList(store, tenantId, entity, query, {ceiling, pageSize?}, onPage)` loops on
+  `nextCursor !== null` and returns `{complete, records, pages, haltedBy?}`; `onPage` rather than a
+  returned array, because the caller decides what it holds — the balance guard folds two running
+  sums over an entry of any size, the reports fold payments into a per-document map, and only the
+  two mirror-the-rows effects need the rows. **No early stop, and that is a correctness rule rather
+  than simplicity**: a caller summing toward a threshold cannot halt when it crosses one, because a
+  later page may carry a negative term that takes it back under, which is the measured
+  `paymentApplicationEffect` defect. Termination is the cursor and never the row count — the three
+  stores all read `limit + 1`, so a short page does imply a null cursor, but that is an
+  implementation detail of three expressions rather than the contract. `DrainDidNotTerminate` covers
+  the two *store faults* (`cursor_did_not_advance`, `page_budget_exhausted`), which a row ceiling
+  alone cannot bound because an empty page with a non-null cursor is legal; the `+ 9` page slack is
+  for short and empty pages and is deliberately **not** what distinguishes an exactly-full set from
+  a truncated one (an earlier comment claimed that and the measurement refuted it — `records >=
+  ceiling` is tested before the budget, and the two cases differ in the *cursor* of the page that
+  exhausts the ceiling). `READ_CEILING_EFFECT` is a total map over `{guard, effect, report}` →
+  `{refuses, aborts, declares}`, and `BoundedReadDeclaration {complete, bounded}` lives beside
+  `DrainOutcome` because that is the type which *produces* the fact — both report bodies extend it
+  rather than restating it, so `complete` is a compiler obligation on every answer.
   **Recognition and settlement have one spelling each since ADR-0366**, and the two that went were
   not inert. `billGlPostingEffect` posted a Bill's gross total as `expense` and so **booked input tax
   into the expense account** — measured `expense D120` against the live
@@ -4871,6 +4962,14 @@ naming a file neither build authored. And `pgrep -f "next build"` is not the wai
 pattern matches the waiting shell's own command line, so the loop never exits. The same trap
 turned a `pkill -f 'operate-server.js --pack …'` into a killed shell in the same increment.
 
+**Never undo a mutation test with `git checkout --`** (ADR-0367). Mutation-checking a test means
+breaking the code, confirming the failure, and restoring — and on an increment with parallel slices
+in flight the file you are about to "restore" carries hundreds of uncommitted lines somebody else
+wrote. `git checkout --` would discard all of it with no way back. Reverse the edit you made, by the
+same string replacement that made it, and assert the mutation was present before you do. A subagent
+in that increment refused the instruction for exactly this reason and ran its mutations against an
+isolated copy of the package instead, which is the better answer when more than one test is involved.
+
 ## Conventions
 
 - **Module structure.** Each package: `package.json`, `tsconfig.json` (extends
@@ -5209,6 +5308,38 @@ opened them.
 
 **Load-bearing**
 
+- **Every money figure is read over the whole set, and what is left of it** (ADR-0367,
+  user-directed). Thirteen capped reads drain their cursor to a declared ceiling now, and the
+  position decides what reaching it does — a guard refuses, an effect aborts, a report declares.
+  What remains, in order: **(1)** a **grouped SQL aggregate** for the two reports, which is the one
+  place shape C is wanted rather than refused — they need the totals over *everything* and the rows
+  over *a page*, which is two reads, and the 20 000 ceiling exists because both return a row per
+  document. **(2)** **no flag reaches any ceiling** — not a CLI flag, not a manifest field, not an
+  environment variable — so every refusal deliberately names no remedy (ADR-0334). One flag per
+  site is nine and one shared flag is wrong, because the sites differ in kind. **(3)** the recorder
+  seam on `HandlerContext` (ADR-0359's open end) now has a second caller: until it exists, an
+  effect's ceiling refusal is a 500 whose only diagnosis is its own name. **(4)** a ceiling bounds
+  one request and **nothing bounds the fleet** — `createNodePgConnection` sets no `max` so pg-pool
+  defaults to 10, and there is no `statement_timeout`, `query_timeout` or
+  `idle_in_transaction_session_timeout` anywhere in `kernel-pg`, `api-gateway-runtime` or
+  `apps/operate-server`; seven of these sites drain inside a write transaction. **(5)** the two
+  mirror-the-rows effects still hold a document's children as derived payloads; streaming them would
+  make those O(1) too, at the cost of interleaving reads and writes on one table (safe here, since
+  the drain's filter can never match a row the effect creates). **(6)** `type.min`/`type.max` are
+  enforced by nothing — **81 fields in `erp-core` alone** — which is the reachability argument for
+  two members of this class and is register P1.2's shape inside a money column; it needs a
+  `FieldErrorCode` member, a `FieldRule` field and a DDL CHECK. **(7)** `field.indexed` and
+  `entity.indexes` are authored, merged, hashed, resolvable and **emitted by nothing** (162 + 50 in
+  `erp-core`, 219 + 67 across the seven packs) — ADR-0360's `unique` finding one declaration over,
+  and the reason `lookupPeriodEndRate`'s rewrite is *exact* but not *O(1)*. **(8)**
+  `computeAging` uses `asOf` only for `daysBetween` while the payments and the open-document set
+  carry no date bound, so `?asOf=` in the past subtracts payments made after it and omits documents
+  paid after it — both understate a historical snapshot, independently of truncation. **(9)**
+  `paymentApplicationEffect` sums payments without consulting `direction`, which its own settlement
+  config declares, so an outbound payment carrying the same `invoice_id` counts toward settling it.
+  **(10)** `lookupPeriodEndRate`'s filter omits `rate_type`, which has four enum values, so the
+  selection among same-date rate types is arbitrary — adding it changes which rows are candidates,
+  which is a domain decision.
 - **A password is settable over HTTP, and what is left of it** (ADR-0364, user-directed). The
   console provisions a person, moves their status, grants and revokes a membership and sets a first
   password, and `/account` is the self-service change — so onboarding is four console steps after
@@ -7197,7 +7328,7 @@ three make the rest honest, cheap or verifiable.
    P2 item 14's third clause, from the other end.)
 3. **No CI, no git hook, no smoke, e2e, load or migration test** — while `strategy/ci.ts` models
    triggers, budgets and a topological sort with no reader. No `.github/workflows`, no
-   `core.hooksPath`, so the eleven rules and 19,198 tests run only when a human types `pnpm -r test`,
+   `core.hooksPath`, so the eleven rules and 19,372 tests run only when a human types `pnpm -r test`,
    and this file's instruction never to use `--no-verify` describes a guardrail that does not
    exist. `operate-web` has **zero tests** against 15 pages and 34 unfenced `fetch` sites — the
    serialized-body boundary that shipped a broken console button for an hour (ADR-0335).

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { InMemoryEntityStore } from "./store.js";
+import { InMemoryEntityStore, type ListPage, type ListQuery } from "./store.js";
 import {
   journalPostingGuard,
   lockedDocumentGuard,
@@ -11,12 +11,28 @@ import {
 
 const TENANT = "11111111-1111-1111-1111-111111111111";
 
-async function seed() {
-  const store = new InMemoryEntityStore();
+/** One `[debit, credit]` pair per journal line. */
+type LineAmounts = readonly [number, number];
+
+function rep(n: number, row: LineAmounts): LineAmounts[] {
+  return Array.from({ length: n }, () => row);
+}
+
+async function seedWith(store: InMemoryEntityStore, rows: readonly LineAmounts[]): Promise<string> {
   const entry = await store.create(TENANT, "JournalEntry", { state: "draft", fiscal_period_id: "p_open" });
   await store.create(TENANT, "FiscalPeriod", { id: "p_open", status: "open" });
+  const entryId = String(entry.id);
+  for (const [debit, credit] of rows) {
+    await store.create(TENANT, "JournalLine", { journal_entry_id: entryId, debit, credit });
+  }
+  return entryId;
+}
+
+async function seed() {
+  const store = new InMemoryEntityStore();
+  const entryId = await seedWith(store, []);
   await store.create(TENANT, "FiscalPeriod", { id: "p_locked", status: "locked" });
-  return { store, entryId: String(entry.id) };
+  return { store, entryId };
 }
 
 function postInput(store: InMemoryEntityStore, entryId: string, after: Record<string, unknown>): WriteGuardInput {
@@ -89,6 +105,112 @@ describe("journalPostingGuard", () => {
     await store.create(TENANT, "JournalLine", { journal_entry_id: entryId, debit: 100, credit: 0 });
     await store.create(TENANT, "JournalLine", { journal_entry_id: entryId, debit: 0, credit: 100.004 });
     expect(await guard(postInput(store, entryId, { fiscal_period_id: "p_open" }))).toBeNull();
+  });
+
+  // The two directions a capped prefix got wrong, pinned at the cap that produced them and again at
+  // a ceiling the set fits under. Both shapes are 1001 lines, which is how they were measured.
+  it("no longer lets a balancing prefix hide a later imbalance", async () => {
+    // 500 debits of 100 and 500 credits of 100 balance exactly; the 1001st line is a debit of 9999,
+    // so the entry is really out by 9999. At a cap of 1000 the guard used to answer `null` and the
+    // entry posted unbalanced — a balancing prefix is the ordinary shape, because every GL posting
+    // effect writes its lines as a balanced group.
+    const store = new InMemoryEntityStore();
+    const entryId = await seedWith(store, [...rep(500, [100, 0]), ...rep(500, [0, 100]), [9999, 0]]);
+    const post = postInput(store, entryId, { fiscal_period_id: "p_open" });
+    expect(await journalPostingGuard({ maxLines: 1000 })(post)).toEqual({
+      status: 422,
+      error: "unverifiable_journal_entry",
+      detail: expect.stringContaining("more than 1000 lines"),
+    });
+    // Read in full, the imbalance is the verdict and the detail carries the entry's real totals.
+    expect(await guard(post)).toEqual({
+      status: 422,
+      error: "unbalanced_journal_entry",
+      detail: "debits (59999.00) must equal credits (50000.00)",
+    });
+  });
+
+  it("no longer refuses a balanced entry with a detail describing only its prefix", async () => {
+    // 1000 debits of 10 then one credit of 10000. At a cap of 1000 this correct entry was refused
+    // `unbalanced_journal_entry: debits (10000.00) must equal credits (0.00)`.
+    const store = new InMemoryEntityStore();
+    const entryId = await seedWith(store, [...rep(1000, [10, 0]), [0, 10_000]]);
+    const post = postInput(store, entryId, { fiscal_period_id: "p_open" });
+    expect(await guard(post)).toBeNull();
+    expect((await journalPostingGuard({ maxLines: 1000 })(post))?.error).toBe("unverifiable_journal_entry");
+  });
+
+  it("names the ceiling and no remedy when the line set exceeds it", async () => {
+    const store = new InMemoryEntityStore();
+    const entryId = await seedWith(store, rep(12, [10, 10]));
+    const r = await journalPostingGuard({ maxLines: 4 })(postInput(store, entryId, { fiscal_period_id: "p_open" }));
+    expect(r?.status).toBe(422);
+    expect(r?.error).toBe("unverifiable_journal_entry");
+    expect(r?.detail).toContain("more than 4 lines");
+    expect(r?.detail).toContain("whole set");
+    // `maxLines` is reachable by no CLI flag, no manifest field and no environment variable, so a
+    // detail telling an operator to raise it would name a remedy they cannot perform.
+    expect(r?.detail).not.toMatch(/maxLines|raise|increase|retry/i);
+  });
+
+  it("refuses an incomplete read rather than a balance verdict over the prefix", async () => {
+    // The prefix balances exactly, so both balance verdicts are reachable from it and neither is
+    // the entry's: the first four lines are 10/10 pairs and the fifth is a bare debit of 500.
+    const store = new InMemoryEntityStore();
+    const entryId = await seedWith(store, [...rep(4, [10, 10]), [500, 0]]);
+    const r = await journalPostingGuard({ maxLines: 4 })(postInput(store, entryId, { fiscal_period_id: "p_open" }));
+    expect(r?.error).toBe("unverifiable_journal_entry");
+  });
+
+  it("still names an empty entry when the empty set fit under the ceiling", async () => {
+    // Zero matched lines with nothing left to read is a complete read of an empty set, so the
+    // ceiling refusal must not swallow the message that names what to fix.
+    const { store, entryId } = await seed();
+    const r = await journalPostingGuard({ maxLines: 1 })(postInput(store, entryId, { fiscal_period_id: "p_open" }));
+    expect(r?.error).toBe("empty_journal_entry");
+  });
+
+  it("does not call an entry empty on the strength of a read that never ran", async () => {
+    // A ceiling of 0 reads no rows at all, so "this entry has no lines" is not a fact in hand —
+    // and without the completeness conjunct on the empty check, nothing distinguishes the two.
+    const store = new InMemoryEntityStore();
+    const entryId = await seedWith(store, rep(2, [10, 10]));
+    const r = await journalPostingGuard({ maxLines: 0 })(postInput(store, entryId, { fiscal_period_id: "p_open" }));
+    expect(r?.error).toBe("unverifiable_journal_entry");
+  });
+
+  it("totals a balanced entry that spans several pages", async () => {
+    class CountingStore extends InMemoryEntityStore {
+      linePages = 0;
+      override async listPage(tenantId: string, entity: string, query: ListQuery): Promise<ListPage> {
+        if (entity === "JournalLine") this.linePages += 1;
+        return super.listPage(tenantId, entity, query);
+      }
+    }
+    const store = new CountingStore();
+    const entryId = await seedWith(store, [...rep(1200, [10, 0]), [0, 12_000]]);
+    expect(await guard(postInput(store, entryId, { fiscal_period_id: "p_open" }))).toBeNull();
+    // 1201 lines at the drain's 500-row page: measured at exactly three round trips, the third
+    // short and carrying the null cursor that ends the walk.
+    expect(store.linePages).toBe(3);
+  });
+
+  it("leaves the create path alone: the balance arm is unreachable without an entry id", async () => {
+    // `input.id` is null on a create and the body carries no id either, so the guard returns before
+    // it reads a line — a `POST {state:"posted"}` with no lines passes. That is a separate defect
+    // and this refusal must not have moved it in either direction.
+    const store = new InMemoryEntityStore();
+    const input: WriteGuardInput = {
+      operation: "create",
+      entity: "JournalEntry",
+      tenantId: TENANT,
+      id: null,
+      before: null,
+      after: { state: "posted" },
+      store,
+    };
+    expect(await guard(input)).toBeNull();
+    expect(await journalPostingGuard({ maxLines: 0 })(input)).toBeNull();
   });
 });
 

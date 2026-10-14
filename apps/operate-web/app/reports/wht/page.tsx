@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { Topbar } from "@/components/Topbar";
+import { boundedReadNotice } from "@/lib/bounded-read";
 import { fetchWhtReconciliation } from "@/lib/api";
 import { formatCell } from "@/lib/format";
 import { slugForEntityName, useSchema } from "@/lib/schema";
@@ -94,6 +95,12 @@ export default function WhtReportPage() {
           </div>
         )}
 
+        {data && boundedReadNotice(data, "withholding history") !== null && (
+          <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            <span className="font-semibold">Partial figures. </span>
+            {boundedReadNotice(data, "withholding history")}
+          </div>
+        )}
         {error && (
           <div className="rounded-lg border border-brand-200 bg-brand-50 px-4 py-3 text-sm text-brand-700">
             Could not load the report: {error}. Is operate-server running?

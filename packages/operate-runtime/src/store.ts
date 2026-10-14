@@ -278,6 +278,40 @@ function isMissing(value: unknown): boolean {
 }
 
 /**
+ * Orders two record ids — **the one comparator the sort's tiebreaker and the keyset seek both use**,
+ * and deliberately NOT `compareValues`.
+ *
+ * It has to be one comparator or the keyset makes no progress, and it has to be *this* one. The sort
+ * used to fall through to `compareValues(a.id, b.id)` while the seek's last clause was a raw
+ * `String(row.id) > cursor.id` — two orderings of the same ids, which is only invisible while
+ * nothing walks a cursor to the end. Measured on the built store with `sort: []`: ids
+ * `["9","10","11","8","100"]` at `limit: 2` visited 2 of 5 and silently dropped three, and
+ * `["Zebra","apple","Bravo","cherry"]` returned the **same cursor twice** — a walk that never
+ * terminates. House-minted `rec_<base36>` ids are unaffected, which is why it went unnoticed: a
+ * client-supplied `id` is what reaches the disagreement, and nothing strips one.
+ *
+ * Plain lexicographic rather than `compareValues` for two reasons, and the second is decisive.
+ * Both Postgres stores order and seek on a TEXT id column under one collation — `ORDER BY <id> ASC`
+ * at `list-sql.ts` and `<id> > $n` in the seek — so matching them is what keeps three
+ * implementations of one contract agreeing about row order (the rule stated for `NULLS LAST`
+ * above). And `compareValues` is **not a total order on ids**: its decimal arm answers 0 for `"0"`
+ * and `"00"`, so two distinct ids would compare equal and the tiebreaker would not break the tie.
+ *
+ * So the repair landed entirely on the **sort**, which is worth knowing because the symptom appeared
+ * at the seek: `compareIds(row.id, cursor.id) > 0` and the `String(row.id ?? "") > cursor.id` it
+ * replaced are the same function (measured identical over 168 inputs, `cursor.id` already being a
+ * string), so the seek was lexicographic all along and `compareValues` on the sort side is what
+ * disagreed with it. Reading the disagreement the other way round — making the seek decimal-aware to
+ * match the sort — would have made this store self-consistent and moved it *further* from both
+ * Postgres stores, which is the trap the rule above exists to name.
+ */
+function compareIds(a: unknown, b: unknown): number {
+  const left = String(a ?? "");
+  const right = String(b ?? "");
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/**
  * Orders two values on one sort key, with **NULL last in both directions**.
  *
  * The presence test sits outside the direction flip on purpose. Expressed as a comparator result
@@ -408,7 +442,7 @@ function isAfter(row: EntityRecord, cursor: KeysetCursor, sort: readonly ListSor
     const dirCmp = s.direction === "desc" ? -cmp : cmp;
     if (dirCmp !== 0) return dirCmp > 0;
   }
-  return String(row["id"] ?? "") > cursor.id;
+  return compareIds(row["id"], cursor.id) > 0;
 }
 
 /**
@@ -435,7 +469,7 @@ export function applyListQuery(records: readonly EntityRecord[], query: ListQuer
       const cmp = orderBy(a[s.field], b[s.field], s.direction);
       if (cmp !== 0) return cmp;
     }
-    return compareValues(a["id"], b["id"]);
+    return compareIds(a["id"], b["id"]);
   });
   const cursor = decodeKeyset(query.cursor);
   let start = 0;

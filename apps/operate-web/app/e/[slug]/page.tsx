@@ -52,7 +52,40 @@ function Shell({ title, note }: { title: string; note?: string }) {
   );
 }
 
+/**
+ * The largest set the CSV export reads in full. Reaching it is *reported* — the file is named for
+ * its own truncation and the screen says so — rather than truncated in silence, which is the whole
+ * difference from what this bound used to mean: the drain below exited on `acc.length` with a live
+ * cursor in hand and handed the file over with no marker anywhere, so a caller believed they had
+ * exported every row matching the current filter.
+ */
 const CSV_EXPORT_MAX = 10000;
+
+/**
+ * Rows per round trip while draining. 500 because `MAX_PAGE_SIZE` is 500 server-side and
+ * `clampLimit` is `Math.min(n, maxLimit)` — measured against the built runtime, `?limit=500` is
+ * honoured for every entity and `?limit=5000` comes back as 500 with nothing reported. The export
+ * used to ride the table's own `?limit=50`, which is 200 sequential round trips to the ceiling
+ * against 20, and peak memory is unchanged either way because `acc` holds every row regardless.
+ */
+const CSV_EXPORT_PAGE_SIZE = 500;
+
+/** Rows per round trip for the table itself — the figure this list has always asked for. */
+const LIST_PAGE_SIZE = 50;
+
+/**
+ * Names a truncated export for what it is.
+ *
+ * The marker is in the **filename** and deliberately not in the file. A CSV has no comment syntax,
+ * so any row carrying the notice is a data row to every spreadsheet and every `read_csv`: it lands
+ * under the first column's header, and a sum over a money column either swallows it or goes NaN.
+ * And a filename travels with the file to wherever it is mailed or uploaded, which the on-screen
+ * notice beside it does not — the notice is read once by whoever clicked, the file is what gets
+ * acted on. So both, for different readers.
+ */
+function csvFilename(slug: string, rows: number, truncated: boolean): string {
+  return truncated ? `${slug}-truncated-${rows.toString()}-rows.csv` : `${slug}.csv`;
+}
 
 function csvCell(value: unknown): string {
   if (value === null || value === undefined) return "";
@@ -95,6 +128,32 @@ function triggerDownload(filename: string, text: string): void {
 }
 
 type ListSortState = { field: string; order: "asc" | "desc" };
+
+/**
+ * The `?`-prefixed filter/sort/search query at a given page size, without column projection.
+ *
+ * One builder with the page size as a parameter, because the table and the CSV export want
+ * different sizes over the identical filter — and a second `&limit=` appended to a built query
+ * would be *silently ignored*: the server reads a repeated key as an array and takes the first
+ * value, so the table's 50 would win over the export's 500 with nothing said.
+ */
+function listQueryString(
+  limit: number,
+  sort: ListSortState | null,
+  filters: Record<string, string>,
+  search: string | null,
+): string {
+  const p = new URLSearchParams();
+  p.set("limit", limit.toString());
+  if (sort !== null) {
+    p.set("sort", sort.field);
+    p.set("order", sort.order);
+  }
+  for (const [k, v] of Object.entries(filters)) if (v.trim() !== "") p.set(k, v.trim());
+  if (search !== null) p.set("q", search);
+  return `?${p.toString()}`;
+}
+
 interface ListUrlState {
   q: string;
   sort: ListSortState | null;
@@ -204,6 +263,8 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
   const canDelete = canAccess(schema, entity, "delete");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [exporting, setExporting] = useState(false);
+  /** What the last export left behind, or null when it read the whole set. */
+  const [exportTruncated, setExportTruncated] = useState<{ rows: number; filename: string } | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [transitionBusy, setTransitionBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -244,19 +305,11 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
     return m;
   }, [entity]);
 
-  // The filter/sort/search query, without column projection — CSV export rides this to fetch every
-  // field regardless of which columns the table shows.
-  const baseQuery = useMemo(() => {
-    const p = new URLSearchParams();
-    p.set("limit", "50");
-    if (sort) {
-      p.set("sort", sort.field);
-      p.set("order", sort.order);
-    }
-    for (const [k, v] of Object.entries(filters)) if (v.trim() !== "") p.set(k, v.trim());
-    if (serverSearch && debouncedQ.trim() !== "") p.set("q", debouncedQ.trim());
-    return `?${p.toString()}`;
-  }, [sort, filters, serverSearch, debouncedQ]);
+  const search = serverSearch && debouncedQ.trim() !== "" ? debouncedQ.trim() : null;
+  const baseQuery = useMemo(() => listQueryString(LIST_PAGE_SIZE, sort, filters, search), [sort, filters, search]);
+  // The same filter/sort/search without column projection, at the export's page size — the CSV
+  // carries every field regardless of which columns the table shows.
+  const exportQuery = useMemo(() => listQueryString(CSV_EXPORT_PAGE_SIZE, sort, filters, search), [sort, filters, search]);
 
   // Server-side projection to just the columns the table needs. `id` keeps rows navigable and the
   // state field keeps bulk-transition eligibility computable even when neither is a visible column.
@@ -271,6 +324,9 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
   // First page (and reload on query change): replaces the accumulated rows.
   const load = useCallback(() => {
     setBusy(true);
+    // The export notice names a row count under one filter, so it is stale the moment the query or
+    // the set moves — and this runs on both.
+    setExportTruncated(null);
     listRecords(entity.slug, query)
       .then((r: ListResult) => {
         setData(r.data);
@@ -334,9 +390,13 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
   async function exportCsv() {
     setExporting(true);
     setError(null);
+    setExportTruncated(null);
     try {
       const columns = entity.fields.map((f) => ({ key: f.name, label: f.label }));
       let exportRows: ReadonlyArray<Record<string, unknown>>;
+      // A selection can only hold ids the viewer has loaded, so that branch is the whole set it
+      // claims to be and no bound applies to it.
+      let truncated = false;
       if (selected.size > 0) {
         exportRows = data.filter((r) => selected.has(String(r["id"] ?? "")));
       } else {
@@ -345,14 +405,21 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
         do {
           const page: ListResult = await listRecords(
             entity.slug,
-            cursor === null ? baseQuery : `${baseQuery}&cursor=${encodeURIComponent(cursor)}`,
+            cursor === null ? exportQuery : `${exportQuery}&cursor=${encodeURIComponent(cursor)}`,
           );
           acc.push(...page.data);
           cursor = page.nextCursor;
         } while (cursor !== null && acc.length < CSV_EXPORT_MAX);
+        // Termination is `nextCursor === null` and nothing else — a short page is a legal answer —
+        // so a live cursor here is the one reading that separates "that was all of them" from
+        // "that was the first `CSV_EXPORT_MAX` of them". `acc` keeps the overshoot past the
+        // ceiling: those rows match the filter, and dropping them would be a second truncation.
+        truncated = cursor !== null;
         exportRows = acc;
       }
-      triggerDownload(`${entity.slug}.csv`, toCsv(exportRows, columns));
+      const filename = csvFilename(entity.slug, exportRows.length, truncated);
+      triggerDownload(filename, toCsv(exportRows, columns));
+      if (truncated) setExportTruncated({ rows: exportRows.length, filename });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -483,6 +550,17 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
 
         {notice && (
           <div className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-700">{notice}</div>
+        )}
+        {/* Amber rather than the emerald `notice` or the brand `error` above it: the export
+            succeeded, so it is not a failure, and it is not the confirmation an emerald banner
+            reads as either. */}
+        {exportTruncated !== null && (
+          <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            <span className="font-semibold">{exportTruncated.filename}</span> holds the first{" "}
+            {exportTruncated.rows} rows and more {entity.label.toLowerCase()} match this filter — the
+            export stops at {CSV_EXPORT_MAX}. Narrow the filter, or select the rows you need, to get
+            the rest.
+          </div>
         )}
         {error && (
           <div className="mb-4 rounded-lg border border-brand-200 bg-brand-50 px-4 py-3 text-sm text-brand-700">{error}</div>

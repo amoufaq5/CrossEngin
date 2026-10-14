@@ -33,6 +33,7 @@ import {
   type WithheldAddressing,
 } from "./list-query.js";
 import { applyLiteralDefaults, type LiteralDefaultPlan } from "./defaults.js";
+import { isReadCeilingExceeded } from "./list-drain.js";
 import { applySequenceDefaults, type SequenceAllocator, type SequenceFieldPlan } from "./sequences.js";
 import { applySettingsDefaults, type SettingsDefaultPlan } from "./settings-defaults.js";
 import { sequenceSpecResolver, type SettingsStore, type TenantSettings } from "./settings.js";
@@ -991,6 +992,35 @@ async function writeTxn(
     // field. See `uniqueConflict`.
     if (err instanceof UniqueViolation && callerKeys.includes(err.field)) {
       return uniqueConflict(err);
+    }
+    // The second exception, and it earns it on the same argument read the other way round. The
+    // reason the fixed body names nothing is that the exception reaching here is a *database* error
+    // carrying entities, columns and tenant ids that nobody chose to disclose. A
+    // `ReadCeilingExceeded` is not that: this code raised it deliberately and it carries an entity
+    // name, a deployment constant and a **literal** naming the figure — no row, no value, no
+    // tenant. The literal is what the rest of this rests on and it is pinned by a test, because the
+    // first version of these six refusals interpolated the document number, the period label and
+    // once a record id, which would have made this very comment the authorisation for the
+    // disclosure channel it claims not to be.
+    //
+    // So naming it costs nothing and buys the one thing the fixed 500 cannot give, which is telling
+    // an operator reading a client's report *which* of the two failures happened without the
+    // process log.
+    //
+    // It names no remedy, and that is deliberate rather than an omission: `maxLines` / `maxRows` /
+    // `maxPayments` are reachable by no CLI flag, no manifest field and no environment variable, so
+    // "raise the ceiling" is an instruction the reader cannot follow — and a remedy that cannot work
+    // is worse than naming none.
+    //
+    // 500 rather than a 4xx: the bound is the deployment's, the caller neither chose it nor can
+    // change it, and a retry gets the same answer — which is what a 500 says and a 409 would deny.
+    if (isReadCeilingExceeded(err)) {
+      return json(500, {
+        error: "read_ceiling_exceeded",
+        detail:
+          `'${err.entity}' has more than ${err.ceiling.toString()} rows matching a read this write ` +
+          `depends on, so ${err.computing} could not be computed over the whole set and nothing was written`,
+      });
     }
     // Unbound deliberately: the message is dropped, not moved, and that is the honest description
     // rather than a tidier one. This layer has no

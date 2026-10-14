@@ -320,6 +320,157 @@ describe("two spellings of one instant compare as one instant", () => {
   });
 });
 
+describe("one comparator orders the ids, so a keyset walk visits every row once", () => {
+  // `compareIds` is the sort's tiebreaker *and* the seek's last clause. They used to be two
+  // orderings of the same ids — `compareValues` for the sort (decimal-aware, then instant-aware,
+  // then `localeCompare`) against a raw `String(row.id) > cursor.id` for the seek — and a
+  // disagreement there does not reorder a page, it skips rows or stops the walk advancing.
+  //
+  // The existing walk tests above use ids `"a".."d"`: same case, length 1, so the two orderings
+  // agree on them and none of this is reachable from them. These shapes are the ones that reach it.
+
+  interface IdShape {
+    readonly name: string;
+    readonly why: string;
+    readonly ids: readonly string[];
+    /** The order a TEXT collation puts them in — what both Postgres stores order and seek under. */
+    readonly textOrder: readonly string[];
+  }
+
+  const SHAPES: readonly IdShape[] = [
+    {
+      name: "numeric-looking",
+      why: "compareValues reads them as decimals (8 < 9 < 10) where text orders '10' < '8'",
+      ids: ["9", "10", "11", "8", "100"],
+      textOrder: ["10", "100", "11", "8", "9"],
+    },
+    {
+      name: "mixed case",
+      why: "localeCompare folds case and puts 'apple' first, where text puts every uppercase id first",
+      ids: ["Zebra", "apple", "Bravo", "cherry"],
+      textOrder: ["Bravo", "Zebra", "apple", "cherry"],
+    },
+    {
+      name: "zero-padded",
+      why: "compareValues answers 0 for '0' and '00', so it is not a total order on ids at all",
+      ids: ["00", "0"],
+      textOrder: ["0", "00"],
+    },
+  ];
+
+  /** The house shape, which is why this went unnoticed rather than a test of the fix. */
+  const HOUSE_MINTED: IdShape = {
+    name: "house-minted",
+    why: "nextId pads the counter to four base-36 digits, so house ids are fixed-width",
+    ids: ["rec_m1a0001", "rec_m1a0002", "rec_m1a0010", "rec_m1a000a"],
+    textOrder: ["rec_m1a0001", "rec_m1a0002", "rec_m1a000a", "rec_m1a0010"],
+  };
+
+  interface Walk {
+    readonly visited: readonly string[];
+    readonly terminated: boolean;
+    /** The store handed back a cursor it had already issued — a walk that gets nowhere. */
+    readonly repeatedCursor: boolean;
+  }
+
+  /**
+   * Walks a set to the end, bounded, reporting *how* it failed rather than hanging — the two
+   * failures are different and a timeout would tell them apart only by reading the clock.
+   */
+  function walkAll(rows: readonly EntityRecord[], q: Omit<ListQuery, "cursor">): Walk {
+    const visited: string[] = [];
+    const issued = new Set<string>();
+    let cursor: string | null = null;
+    for (let guard = 0; guard <= rows.length + 4; guard += 1) {
+      const page = applyListQuery(rows, { ...q, cursor });
+      for (const r of page.records) visited.push(String(r["id"]));
+      if (page.nextCursor === null) return { visited, terminated: true, repeatedCursor: false };
+      if (issued.has(page.nextCursor)) return { visited, terminated: false, repeatedCursor: true };
+      issued.add(page.nextCursor);
+      cursor = page.nextCursor;
+    }
+    return { visited, terminated: false, repeatedCursor: false };
+  }
+
+  const completed = (ids: readonly string[]): EntityRecord[] =>
+    ids.map((id) => ({ id, state: "completed", n: "same" }));
+
+  for (const shape of [...SHAPES, HOUSE_MINTED]) {
+    describe(`ids that are ${shape.name} — ${shape.why}`, () => {
+      const rows = completed(shape.ids);
+
+      it("sorts in the text order both Postgres stores order and seek under", () => {
+        const page = applyListQuery(rows, { limit: 99, cursor: null, sort: [], filters: [] });
+        expect(page.records.map((r) => r["id"])).toEqual(shape.textOrder);
+      });
+
+      it("walks every row exactly once, one page at a time", () => {
+        const walk = walkAll(rows, { limit: 1, sort: [], filters: [] });
+        expect(walk.terminated).toBe(true);
+        expect(walk.repeatedCursor).toBe(false);
+        expect(walk.visited).toEqual(shape.textOrder);
+      });
+
+      it("walks every row exactly once two pages at a time", () => {
+        const walk = walkAll(rows, { limit: 2, sort: [], filters: [] });
+        expect(walk.terminated).toBe(true);
+        expect(walk.repeatedCursor).toBe(false);
+        expect(walk.visited).toEqual(shape.textOrder);
+      });
+
+      it("sorts in exactly the order the walk visits, which is the invariant", () => {
+        // Two derivations of one ordering: the comparator the sort runs, and the seek applied one
+        // page at a time. A comparator change that moved only one of them would show up here.
+        const sorted = applyListQuery(rows, { limit: 99, cursor: null, sort: [], filters: [] });
+        expect(walkAll(rows, { limit: 1, sort: [], filters: [] }).visited).toEqual(
+          sorted.records.map((r) => String(r["id"])),
+        );
+      });
+
+      it("walks a filtered set the same way, which is the shape every money reader uses", () => {
+        const mixed = [...rows, { id: "50", state: "draft", n: "same" }];
+        const walk = walkAll(mixed, {
+          limit: 2,
+          sort: [],
+          filters: [{ field: "state", op: "eq", value: "completed" }],
+        });
+        expect(walk.terminated).toBe(true);
+        expect(walk.visited).toEqual(shape.textOrder);
+      });
+
+      it("breaks a tie on every sort key by the same order", () => {
+        // The disagreement was never specific to `sort: []`: with every row's `n` equal, `orderBy`
+        // answers 0 on the only sort key and the tiebreaker is what decides — and `isAfter` falls
+        // through its loop to the same clause.
+        const walk = walkAll(rows, {
+          limit: 2,
+          sort: [{ field: "n", direction: "asc" }],
+          filters: [],
+        });
+        expect(walk.terminated).toBe(true);
+        expect(walk.repeatedCursor).toBe(false);
+        expect(walk.visited).toEqual(shape.textOrder);
+      });
+    });
+  }
+
+  it("holds a record with no id to the same comparator, which the seek's own clause needs", () => {
+    // The two spellings of the seek's last clause differ on exactly one input: `String(row.id)`
+    // renders a missing id `"undefined"` where `String(row.id ?? "")` renders `""`. `keysetOf`
+    // renders it `""` too, so under the raw form such a row sorted after every cursor — including
+    // the one minted from itself — and the walk returned it forever. Every *string* id is ordered
+    // identically by both spellings, so this is the only input that holds that clause to
+    // `compareIds` at all.
+    const rows: EntityRecord[] = [{ id: "a" }, {}, { id: "b" }];
+    const walk = walkAll(rows, { limit: 1, sort: [], filters: [] });
+    expect(walk.terminated).toBe(true);
+    expect(walk.repeatedCursor).toBe(false);
+    expect(walk.visited).toHaveLength(3);
+    // An absent id renders as the empty string, which sorts first.
+    expect(walk.visited.slice(1)).toEqual(["a", "b"]);
+  });
+});
+
 describe("an ordered filter excludes a missing value, as SQL does", () => {
   const rows: EntityRecord[] = [{ id: "a", n: "5" }, { id: "b" }, { id: "c", n: null }];
 

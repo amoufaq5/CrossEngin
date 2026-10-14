@@ -1,3 +1,5 @@
+import type { BoundedReadDeclaration } from "@/lib/bounded-read";
+
 export const AGING_BUCKETS = ["current", "1-30", "31-60", "61-90", "90+"] as const;
 
 export type AgingBucket = (typeof AGING_BUCKETS)[number];
@@ -22,7 +24,7 @@ export interface AgingReport {
   readonly documents: readonly AgingRow[];
 }
 
-export interface AgingResponse {
+export interface AgingResponse extends BoundedReadDeclaration {
   readonly asOf: string;
   readonly sections: {
     readonly ar?: AgingReport;
