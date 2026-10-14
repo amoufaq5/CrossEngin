@@ -1228,6 +1228,55 @@ type errors.
   **four** of `TENANT_STATUSES`' five, so `pending_deletion` was counted by the server on every
   request and shown by no tile, which is this increment's own headline two files over.
 
+  ADR-0366 is the third user-directed increment and the class is **superseded code is not inert**.
+  Two callerless GL posting effects, which the backlog called a one-line deletion, and **neither was
+  merely dead**. `billGlPostingEffect` is field for field a subset of `recognitionGlPostingEffect` as
+  `compile.ts:436` configures it — and *wrong* on the normal case: measured against the real store,
+  a bill of 120 with 20 of input tax gets `expense D120` from the dead one against the live one's
+  AP C120 / expense D100 / tax_input D20, so it **books input tax into the expense account**, and all
+  seven resolved packs declare the `TaxCode` + `BillLine` pair the live wiring gates its split on, so
+  the taxed case is the only case. It is also **unwireable**: both post an entry numbered
+  `${bill_number}-GL` while `JournalEntry.entry_number` is `unique: true`, which since ADR-0360
+  emits a real index — a `23505` inside the approval transaction on `pg-columns` (and ADR-0360's 409
+  arm does not apply, because an effect writes through `input.store.create` rather than a `writeTxn`
+  caller-key path), two identical posted entries double-counting expense and AP on the shipped `pg`
+  store where ADR-0360 measures 0 of 32 unique declarations enforced.
+  `paymentGlPostingEffect` is the sharper half, because **ADR-0124 retains it by name** — *"the
+  generic `paymentGlPostingEffect` remains for reuse"* — and the reuse route is not merely published
+  but **one line**: `writeEffects` replaces the inferred list while `additionalWriteEffects` one line
+  below it appends. So the retention is a loaded surface rather than a stale note: on any manifest
+  declaring a `Payment` entity, which is all seven packs, adding it that way posts the document's
+  full total on top of what a Payment already settled — measured **AR net −50, cash +170** for an
+  invoice of 120 with a Payment of 50 hand-marked paid — silently, because the entry numbers differ
+  so no constraint fires. One mechanism offered for that is wrong and is recorded: it is *not*
+  reached through `paymentApplicationEffect`, which settles via `store.update`, and `runWriteEffects`
+  has exactly one caller, so a store write runs no effects. It is reached through `mark_paid`, the
+  scenario the retention was wanted for. So the retention is **withdrawn with its measurement**,
+  which is the one thing a silent deletion would have lost.
+  **The real finding is the gap the deletion makes visible**, and it was in neither the backlog nor
+  the register: every live settlement-side effect is gated on `names.has("Payment")` and **no effect
+  `compile.ts` wires triggers on `paid` at all**, while `erp-core` declares a direct permission-gated
+  `mark_paid` on both documents plus two timer transitions — and on **`TaxReturn` as a third edge**
+  (`workflows-ext.ts:200-213`, granted at `:243`), which no effect and no `compile.ts` wiring names
+  at all. So a document hand-marked paid leaves **AR net +70** on an invoice of 120 that reads
+  `paid` — the control account is never cleared, with no other route to clear it (all eleven effects
+  enumerated; the only AR-clearing postings are the Payment-gated settlement, a credit note and a
+  reversal, all different business acts) — and a tax return reaching `paid` moves cash, leaves
+  `tax_payable` uncleared and posts nothing. Reachable **since ADR-0365**, which measured `erp_admin`
+  at 79 of 79 transitions, and which is why the plan ordered that increment first.
+  The methodological correction is worth more than the 314 lines, and it landed on this increment's
+  own measurement. The plan justified the batch partly by *"removes 2 of 6 `fx_rate: 1` sites"* and
+  *"2 of 7 unstamped entry sites"*. The first reproduces; every **surviving** GL posting effect
+  hardcodes it too, so the deletion takes the count from 6 to 4 and the *proportion* of offending
+  sites to **100%** — a count reduction inside a defect class is not progress against the class. The
+  second **does not reproduce**: the entry-create sites are **8**, because
+  `journalReversalEffect`'s receiver is named `created` rather than `entry` and a pattern keyed on
+  the variable name excludes it — and that excluded site is the **sole counterexample** to the claim
+  the figure was offered for (*"0 of the 7 sets `book_id` or `fiscal_period_id`"*), since the carry
+  loop sits three lines above it. The matching pattern's blind spot and the claim's only refutation
+  are the same line: ADR-0362's class reproduced inside the census arguing the deletion, and caught
+  by the adversarial pass rather than by the author.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -1698,6 +1747,21 @@ packages exist at only one layer, noted below where that is true.
   FX revaluation and booking-rate stamping, WHT certificate clearing, payment application,
   journal reversal. Also entitlements, signed offline licences, plan catalog, AR/AP aging
   and WHT reconciliation reports.
+  **Recognition and settlement have one spelling each since ADR-0366**, and the two that went were
+  not inert. `billGlPostingEffect` posted a Bill's gross total as `expense` and so **booked input tax
+  into the expense account** — measured `expense D120` against the live
+  `recognitionGlPostingEffect`'s AP C120 / expense D100 / tax_input D20 — and could not be wired
+  beside it anyway, since both emit `${bill_number}-GL` into a column ADR-0360 made a real unique
+  index. `paymentGlPostingEffect` was the generic that `recognitionGlPostingEffect` and
+  `paymentSettlementGlPostingEffect` replaced on two different axes (the tax split, and the trigger
+  moving from the document edge to the `Payment` record, which is what buys partial settlement and
+  realized FX). ADR-0124 retained it by name *"for reuse"*, and that retention is **withdrawn**: the
+  route is one line (`additionalWriteEffects` appends where `writeEffects` replaces), and on any
+  manifest declaring a `Payment` entity — all seven packs — taking it posts the document total on top
+  of what a Payment already settled, measured **AR net −50**, silently, because the entry numbers
+  differ so no constraint fires. What the deletion *reveals* is live and is register item 6b: nothing
+  posts on a document's own `→paid` edge, which three declared transitions reach with no `Payment`
+  row.
   **`writeTxn` takes the caller's own keys and answers 409 on a `UniqueViolation` only for a field
   they named** (ADR-0360) — the one exception to that catch's *"the body names nothing"* rule, and
   scoped by its own reason rather than by the field. Everything else reaching it is a condition the
@@ -7032,6 +7096,25 @@ by it**.
    13.40 net computes `1.00` against an exact `1.005` that should post `1.01`. A 3-decimal currency
    (KWD, BHD, JOD) loses a minor unit per line. Multi-increment, and it is the one P0 that is
    arithmetic rather than wiring.
+6b. **A document marked paid by hand clears no control account, on three declared edges** (found by
+   ADR-0366, in neither the backlog nor this register before it). Every settlement-side effect is
+   gated on `names.has("Payment")` — `paymentSettlementGlPostingEffect` at `compile.ts:473`,
+   `paymentApplicationEffect` at `:488` and `:498` — and **no effect `compile.ts` wires triggers on
+   `paid` at all**: every `triggerState` is `sent` or `approved`, and `settleableStates` are the
+   states a document is settled *from*. Meanwhile three permission-gated transitions reach `paid`
+   with no `Payment` row: `Invoice.mark_paid` and `Bill.mark_paid` (`workflows.ts:30-35`, `:147-151`,
+   plus the timer transitions `sent_to_paid_30d` and `approved_to_paid_due`) and
+   `TaxReturn.mark_paid` (`workflows-ext.ts:200-213`, granted at `:243`), which no effect names at
+   all. Measured against the real store: an invoice of 120 with a Payment of 50, hand-marked paid,
+   leaves **AR net +70** on a document that reads `paid`; a tax return reaching `paid` moves cash,
+   leaves `tax_payable` uncleared and posts nothing. All eleven effects were enumerated and there is
+   no other route — the only AR-clearing postings are the Payment-gated settlement, a credit note
+   and a reversal, which are different business acts. Reachable since ADR-0365 (`erp_admin` at 79 of
+   79 transitions; `GL_WRITERS = ["erp_admin", "controller"]`). The fix is a **new** effect with a
+   "no completed Payments cover this document" predicate: re-wiring ADR-0366's deleted
+   `paymentGlPostingEffect` is measured harmful on exactly this scenario (**AR net −50, cash +170**),
+   because it cannot tell "paid with no Payment rows" from "paid via payment application" and posts
+   the document total regardless of what was paid.
 7. ~~**`unique: true` emits no constraint on any entity table while the UI says the field is
    unique.**~~ — **closed by ADR-0360**, which corrected two of the three things this entry said.
    *"while the UI says the field is unique"* is **false**: `unique` occurs exactly once in the whole
