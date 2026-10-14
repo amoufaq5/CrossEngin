@@ -18,3 +18,4 @@ export * from "./settings-store.js";
 export * from "./entitlement-store.js";
 export * from "./subscription-store.js";
 export * from "./stripe-webhook.js";
+export * from "./search-extension.js";

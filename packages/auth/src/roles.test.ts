@@ -48,16 +48,52 @@ describe("resolveEffectiveRoles", () => {
     );
   });
 
-  it("throws UnknownRoleError on unknown primary role", () => {
-    expect(() => resolveEffectiveRoles(principal("nonexistent"), ROLES)).toThrow(
-      UnknownRoleError,
+  it("SKIPS an unknown primary role rather than throwing, so the decision is a denial", () => {
+    // These two tests asserted `toThrow(UnknownRoleError)` and that was the defect, pinned. All
+    // seven request-path callers resolve roles *before* deciding anything, so the throw reached the
+    // handler and became a 500 on every entity route for any session whose role the served manifest
+    // does not declare — live on the shipped deployment, where `--platform-admin-role
+    // platform_admin` is a platform role by design and `erp-core` declares fifteen of which it is
+    // not one. The answer owed is 403: an undeclared role holds no grants. A 500 is not a stricter
+    // 403, it is the different claim that the server failed.
+    //
+    // `node.ts` has said so since ADR-0339 — "throws `UnknownRoleError` for an undeclared name, and
+    // answers false — fail-closed" — which is two incompatible halves in one sentence, because a
+    // function that throws answers nothing. The code now does what that comment described.
+    expect(resolveEffectiveRoles(principal("nonexistent"), ROLES)).toEqual(new Set());
+  });
+
+  it("skips an unknown secondary role and keeps the declared ones", () => {
+    // Narrowing and not widening: the unknown name contributes nothing while `staff` still resolves
+    // with its parents, so a session with one good role and one typo is authorised on the good one
+    // alone. That is the direction that cannot grant anything it should not.
+    expect(resolveEffectiveRoles(principal("staff", ["unknown"]), ROLES)).toEqual(
+      new Set(["staff"]),
     );
   });
 
-  it("throws UnknownRoleError on unknown secondary role", () => {
-    expect(() => resolveEffectiveRoles(principal("staff", ["unknown"]), ROLES)).toThrow(
-      UnknownRoleError,
+  it("skips an unknown INHERITED parent, narrowing rather than raising", () => {
+    // The same rule one level in. A declared role whose `inherits` names something absent is an
+    // authoring error `validateRoleGraph` refuses — but if one reaches a live request, dropping the
+    // parent narrows the effective set, where throwing 500s a request that should have been decided.
+    const withMissingParent = new Map(ROLES);
+    withMissingParent.set("orphan" as never, { name: "orphan", inherits: ["ghost"] } as never);
+    expect(resolveEffectiveRoles(principal("orphan"), withMissingParent)).toEqual(
+      new Set(["orphan"]),
     );
+  });
+
+  it("still throws UnknownRoleError from validateRoleGraph, which is the authoring question", () => {
+    // The split is by question and not by name: `refuse` is "is this role graph coherent", asked of
+    // a manifest a reviewer is about to approve, and `skip` is "what may this session do". Only the
+    // second has an undeclared name as an ordinary input.
+    // A standalone map and not `new Map(ROLES)`: that fixture carries the cycle used two tests
+    // above, and `validateRoleGraph` walks every key, so it would raise
+    // `RoleInheritanceCycleError` first and this assertion would pass on the wrong error.
+    const broken = new Map([
+      ["dangling", { name: "dangling", inherits: ["nope"] }],
+    ] as never) as never;
+    expect(() => validateRoleGraph(broken)).toThrow(UnknownRoleError);
   });
 
   it("throws RoleInheritanceCycleError on a cycle", () => {

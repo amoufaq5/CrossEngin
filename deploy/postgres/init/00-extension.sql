@@ -42,3 +42,27 @@ EXCEPTION WHEN OTHERS THEN
     'pgcrypto could not be installed (%) -- at-rest encryption of phi/regulated columns is unavailable; operate-server will refuse to serve a manifest declaring one',
     SQLERRM;
 END $$;
+
+-- Backs `?q=` and every `[contains]` filter. `list-sql.ts` is shared by BOTH Postgres stores and
+-- emits `unaccent(<expr>::text) ILIKE …` unconditionally, so without this extension every search is
+-- `function unaccent(text) does not exist` -- a 500, not a slow query, and in the reference picker's
+-- typeahead an EMPTY DROPDOWN rather than an error, which reads as "no matching records".
+--
+-- It was created in exactly one place, `ensureColumnStoreExtensions`, whose only caller is the
+-- per-tenant COLUMN-store applier -- so `--store pg`, this compose file's default, never had it.
+-- The serving binary provisions it at boot now for both stores, and this line is the half that
+-- covers the deployment the binary cannot: `CREATE EXTENSION` needs privileges a least-privilege
+-- serving role does not hold, and these files run as the superuser.
+--
+-- Guarded like pgcrypto above and for the same reason: the entrypoint runs this file with
+-- ON_ERROR_STOP=1, so a failing CREATE EXTENSION aborts initialisation and the container never comes
+-- up. A deployment with no search still serves every list, record, filter and sort, so that trade is
+-- the wrong way round -- and the boot line says `unaccent: REFUSED` with the one statement to run.
+DO $$
+BEGIN
+  EXECUTE 'CREATE EXTENSION IF NOT EXISTS unaccent';
+EXCEPTION WHEN OTHERS THEN
+  RAISE WARNING
+    'unaccent could not be installed (%) -- ?q= and every [contains] filter will answer 500, and a reference picker will show an empty dropdown',
+    SQLERRM;
+END $$;

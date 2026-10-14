@@ -243,6 +243,7 @@ import {
   verifyLogin,
 } from "./auth-token-route.js";
 import { formatCredentialAuth, resolveCredentialAuth } from "./credential-auth-env.js";
+import { ensureSearchExtension, searchExtensionLine } from "@crossengin/operate-runtime-pg";
 import { aiModelLine, resolveAiModel } from "./ai-model-source.js";
 import { buildCredentialRoutes } from "./credential-routes.js";
 import { PostgresCredentialStore } from "./credential-store.js";
@@ -796,6 +797,17 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
   }
   const allocator = new PostgresSequenceAllocator(conn, schema);
   const settingsStore = new PostgresSettingsStore(conn, schema);
+  // `unaccent`, for BOTH stores, before either serves a request.
+  //
+  // `list-sql.ts` is shared by the document store and the column store -- it is where `?q=` and
+  // `[contains]` become SQL -- and it emits `unaccent(…)` unconditionally, while the extension was
+  // created only by `ensureColumnStoreExtensions`, whose single caller is the per-tenant column
+  // applier. So on `--store pg`, the shipped compose default, every search answered 500 and every
+  // reference picker's typeahead showed an empty dropdown. Provisioned here rather than in either
+  // store because the dependency belongs to the query builder they share, which is the level at
+  // which attaching it to one store's DDL is what made it absent from the other.
+  const searchExt = await ensureSearchExtension(conn);
+  console.info(searchExtensionLine(searchExt));
   if (options.store === "pg-columns") {
     const store = new ColumnMappedEntityStore(conn, manifest, {
       ...(options.schema !== null ? { schema: options.schema } : {}),
