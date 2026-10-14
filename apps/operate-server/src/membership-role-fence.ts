@@ -1,0 +1,293 @@
+/**
+ * Whether a membership grant names roles the tenant's served manifest declares.
+ *
+ * `GrantMembershipInputSchema.primaryRole` is `z.string().min(1)` and `secondaryRoles` is an array
+ * of the same, and nothing anywhere compared either against `manifest.roles`. So the operator's
+ * very first act after provisioning a colleague can hand them an account that authorizes nothing,
+ * and the symptom is indistinguishable from the product being broken: the grant stores cleanly,
+ * echoes back in the response, and mints a session that is refused everywhere.
+ *
+ * Measured against the real `rbacCheck` over resolved `erp-core`, which declares **15** roles
+ * (`ap_clerk` … `warehouse_clerk`) and does **not** declare `platform_admin`: granting
+ * `platform_admin` reaches **0 of 255** (entity, operation) pairs and **0 of 51** entities, where
+ * the control `erp_admin` reaches 250 of 255 and 50 of 51. Nothing in between — an undeclared
+ * primary role is a total denial, not a narrowed one.
+ *
+ * ## The two positions are not the same defect, and the difference is not declaredness
+ *
+ * A secondary role is granted, stored (`secondary_roles TEXT[] NOT NULL`), read back by
+ * `rowToMembership` and echoed in the API body — and then never reaches an authorization decision,
+ * for **two** independent reasons, either of which alone would be sufficient. `mintSessionToken`
+ * stamps `scope: input.role`, one string, from `roleFor`, which returns `membership.primaryRole`
+ * alone; and `principalRoles` is `(p) => ({primaryRole: p?.grantedScopes[0] ?? "anonymous"})`,
+ * which returns no `secondaryRoles` key at all, so every `...(secondaryRoles ?? [])` reader in the
+ * app takes the empty arm unconditionally however many scopes a token carries. `token-mint.ts`
+ * already states it: *"`secondaryRoles` is populated by nothing anywhere"*.
+ *
+ * So declaring a secondary role would not make it work. Its warning says the position is unread
+ * rather than offering the declared names as a remedy, because pointing an operator at the role
+ * catalog here would promise that a declared secondary role grants something — which is the one
+ * thing measurement says it does not (ADR-0334: a remedy that cannot work is worse than none).
+ *
+ * ## Why this warns and never refuses
+ *
+ * The directory answers from the manifest the deployment serves *this tenant*, and under
+ * `--tenant-manifests` (ADR-0314) a tenant may serve its own activated manifest declaring roles the
+ * boot pack does not. A refusal would therefore refuse a grant that is correct for that tenant, on
+ * the strength of a catalog that is not the one the tenant is served from. `checkMembershipRoles`
+ * has no refusing outcome at all, which is the same split `surveyViewPermissionOverrides` takes:
+ * report where the remedy belongs to somebody the refusal cannot reach.
+ *
+ * ## Why this is not the boot survey its siblings are
+ *
+ * An **unscoped** census is the trap, and that half is measured: `META_USER_TENANT_MEMBERSHIP`
+ * carries exactly one policy — `membership_tenant_isolation`, with no `command`, so `ALL`-scope —
+ * and **no platform read arm**, so a non-owner session with no tenant context reads **zero rows**
+ * and would report a clean deployment because it could see nothing: ADR-0333's silent-zero class,
+ * in the one table whose rows are the finding.
+ *
+ * A **scoped** census is a different matter and is genuinely available, which is worth writing down
+ * because the obvious reason to dismiss it is false: `META_TENANTS` declares no `rls` block at all —
+ * it carries no `tenant_id`, so it is platform-wide and skips RLS — and `membershipsForTenant`
+ * already reads one tenant's rows inside `withTenantContext` behind a strict scope filter. A
+ * per-tenant loop would therefore work. What it would not be is *this*: it answers for memberships
+ * that **already exist**, at a boot the operator who granted them is not watching, where this
+ * answers for the grant in front of them. The two are additive and neither substitutes.
+ *
+ * So the write is where this lives for a positive reason rather than for want of a read: the roles
+ * are in the request body, so the fact is in hand without reading that table at all, and the
+ * operator hears it at the one moment the remedy — name a declared role instead — is theirs.
+ */
+
+/**
+ * Answers which roles a tenant's served manifest declares. `null` = this deployment cannot say.
+ *
+ * Keyed on the tenant and not on the deployment, because under per-tenant manifests the answer
+ * genuinely differs per tenant and a deployment-wide set taken from the boot pack would be right
+ * only for the tenants serving it.
+ */
+export type MembershipRoleDirectory = (tenantId: string) => Promise<ReadonlySet<string> | null>;
+
+export const MEMBERSHIP_ROLE_VERDICTS = ["declared", "not_declared", "unresolved"] as const;
+export type MembershipRoleVerdict = (typeof MEMBERSHIP_ROLE_VERDICTS)[number];
+
+/**
+ * Which verdicts the operator is told about. A total map so a fourth verdict is a compile error.
+ *
+ * `warningVerdictOf` reads it, so the map decides rather than documenting a decision taken
+ * somewhere else — for every verdict but `declared`, which that function answers by comparison
+ * instead, for the soundness reason stated there. So the entry for `declared` is the one member of
+ * this map nothing branches on: it is here because a hole in a total map is what a total map exists
+ * to prevent, and the test asserting it is the *single* `false` is what keeps the map and
+ * `MembershipRoleWarning.verdict`'s excluded member from drifting apart.
+ */
+export const MEMBERSHIP_ROLE_VERDICT_WARNS: Readonly<Record<MembershipRoleVerdict, boolean>> = {
+  declared: false,
+  not_declared: true,
+  unresolved: true,
+};
+
+export const MEMBERSHIP_ROLE_POSITIONS = ["primary", "secondary"] as const;
+export type MembershipRolePosition = (typeof MEMBERSHIP_ROLE_POSITIONS)[number];
+
+/** The verdicts a warning can carry: every member of the enum that `_WARNS` admits. */
+type MembershipRoleWarningVerdict = Exclude<MembershipRoleVerdict, "declared">;
+
+export interface MembershipRoleWarning {
+  readonly position: MembershipRolePosition;
+  readonly role: string;
+  readonly verdict: Exclude<MembershipRoleVerdict, "declared">;
+  /** One sentence naming the consequence; never a remedy this deployment cannot perform. */
+  readonly detail: string;
+  /** The declared roles, sorted, for `not_declared`; null for `unresolved` (nothing was read). */
+  readonly declaredRoles: readonly string[] | null;
+}
+
+export interface MembershipRoleCheckInput {
+  readonly tenantId: string;
+  readonly primaryRole: string;
+  readonly secondaryRoles: readonly string[];
+}
+
+/** How many declared role names a `not_declared` detail offers before summarising the rest. */
+const NAMED_DECLARED_ROLE_LIMIT = 8;
+
+/**
+ * The verdict a warning carries, or `null` where the map says this one is silent.
+ *
+ * `declared` is excluded by **comparison** and not by a type predicate over the map, because the
+ * predicate form is an annotation standing in for a check (ADR-0362) in one line: the compiler
+ * cannot see that `MEMBERSHIP_ROLE_VERDICT_WARNS.declared` is `false`, so flipping that entry would
+ * have it narrow `declared` to a type that excludes it and push a warning whose `verdict` field is
+ * typed as something it is not. Written this way the narrowing is the compiler's, the map still
+ * decides for every verdict the type does admit, and a flipped `declared` goes silent — which is
+ * the direction the `MembershipRoleWarning` type already asserts.
+ */
+function warningVerdictOf(verdict: MembershipRoleVerdict): MembershipRoleWarningVerdict | null {
+  if (verdict === "declared") return null;
+  return MEMBERSHIP_ROLE_VERDICT_WARNS[verdict] ? verdict : null;
+}
+
+/**
+ * What one check knows about the tenant's role catalog.
+ *
+ * Discriminated rather than a `ReadonlySet | null` carried beside a `string[] | null`, so the pair
+ * ADR-0331 keeps apart cannot be held half-and-half. There is then no state in which a role
+ * classifies `not_declared` and the names it was compared against are absent — which is the state a
+ * `?? []` default would have to invent, and the value it would invent is the *claim* ("this manifest
+ * declares no role") standing in for the *gap* ("nobody looked"): this module's own distinction,
+ * defaulted away where it builds the warning that carries it.
+ */
+type RoleCatalog =
+  | {
+      readonly read: true;
+      readonly declares: ReadonlySet<string>;
+      readonly names: readonly string[];
+    }
+  | { readonly read: false };
+
+function nameSome(declared: readonly string[]): string {
+  if (declared.length <= NAMED_DECLARED_ROLE_LIMIT) return declared.join(", ");
+  const shown = declared.slice(0, NAMED_DECLARED_ROLE_LIMIT).join(", ");
+  return `${shown} (+${String(declared.length - NAMED_DECLARED_ROLE_LIMIT)} more)`;
+}
+
+/** The sentence a secondary warning ends on, whichever verdict it carries. */
+const SECONDARY_UNREAD =
+  "no secondary role reaches an authorization decision whether declared or not, since the mint" +
+  " stamps the primary role alone and principalRoles reads one scope";
+
+function unresolvedDetail(position: MembershipRolePosition, role: string): string {
+  // No remedy in either position, because none is known: nothing was read, so the grant may well be
+  // correct. Naming the role catalog here would be naming a catalog this call could not see.
+  return position === "secondary"
+    ? `secondary role '${role}' was not checked, and ${SECONDARY_UNREAD}`
+    : `primary role '${role}' was not checked: this deployment cannot say which roles the tenant's` +
+        ` manifest declares, so whether this membership authorizes anything is unknown`;
+}
+
+/** `declared` is non-nullable: a `not_declared` verdict is only reachable from a read catalog. */
+function notDeclaredDetail(
+  position: MembershipRolePosition,
+  role: string,
+  declared: readonly string[],
+): string {
+  if (position === "secondary") {
+    return `secondary role '${role}' is not declared by this tenant's manifest — and ${SECONDARY_UNREAD}`;
+  }
+  const consequence =
+    "so the session's one scope claim matches no grant and this membership authorizes nothing";
+  // The empty catalog gets no remedy for the same reason the `unresolved` case does not: there is
+  // no declared name to re-grant with, and making the manifest declare one is not an act available
+  // at a grant. A sentence offering "one of the declared roles" would name an empty list.
+  if (declared.length === 0) {
+    return (
+      `primary role '${role}' is not declared by this tenant's manifest, which declares no role at` +
+      ` all, ${consequence}`
+    );
+  }
+  return (
+    `primary role '${role}' is not declared by this tenant's manifest, ${consequence};` +
+    ` the roles a session can carry are ${nameSome(declared)}`
+  );
+}
+
+/**
+ * One role's warning, or `null` where it produces none.
+ *
+ * Exact membership, never trimmed or case-folded: `resolveEffectiveRoles` looks the role up in a
+ * `Map` keyed by the manifest's own names, so a name differing by a space or a capital is a
+ * different role there. Normalising here would make the fence agree with a comparison nothing
+ * performs and pass a grant the runtime then denies.
+ */
+function warningFor(
+  position: MembershipRolePosition,
+  role: string,
+  catalog: RoleCatalog,
+): MembershipRoleWarning | null {
+  if (!catalog.read) {
+    const verdict = warningVerdictOf("unresolved");
+    return verdict === null
+      ? null
+      : { position, role, verdict, detail: unresolvedDetail(position, role), declaredRoles: null };
+  }
+  if (catalog.declares.has(role)) return null;
+  const verdict = warningVerdictOf("not_declared");
+  return verdict === null
+    ? null
+    : {
+        position,
+        role,
+        verdict,
+        detail: notDeclaredDetail(position, role, catalog.names),
+        declaredRoles: catalog.names,
+      };
+}
+
+async function readCatalog(
+  tenantId: string,
+  directory: MembershipRoleDirectory,
+): Promise<RoleCatalog> {
+  let declares: ReadonlySet<string> | null;
+  try {
+    declares = await directory(tenantId);
+  } catch {
+    // A throw and a `null` are the same fact here — nobody looked. The fence is advisory and rides
+    // a privileged write, so an unreadable role catalog must not turn a correct grant into a 500.
+    declares = null;
+  }
+  if (declares === null) return { read: false };
+  // Sorted once per check, not per warning: every `not_declared` warning in one check describes the
+  // same catalog, and a Set's iteration order follows how the manifest was built, so sorting is
+  // what makes the line comparable between two boots.
+  return { read: true, declares, names: [...declares].sort() };
+}
+
+/**
+ * Every role this grant names that the tenant's manifest does not declare, or that could not be
+ * checked. Empty means every named role is declared.
+ *
+ * The directory is consulted **once**, before any role is classified. Two calls could answer
+ * differently — a manifest can be activated between them — and a warning set drawn from two
+ * answers would be about no single manifest, so the `declaredRoles` it reports would belong to
+ * neither. `readCatalog` carries the rest of that read, including why a throw is not propagated.
+ *
+ * Warnings come out in input order, primary first, and a role named twice warns once. The first
+ * occurrence is what survives, which puts a role named as both primary and secondary at the
+ * `primary` position — the consequential one, since that is the position a session reads.
+ */
+export async function checkMembershipRoles(
+  input: MembershipRoleCheckInput,
+  directory: MembershipRoleDirectory,
+): Promise<readonly MembershipRoleWarning[]> {
+  const catalog = await readCatalog(input.tenantId, directory);
+
+  const warnings: MembershipRoleWarning[] = [];
+  const seen = new Set<string>();
+  const positions: readonly (readonly [MembershipRolePosition, string])[] = [
+    ["primary", input.primaryRole],
+    ...input.secondaryRoles.map(
+      (role): readonly [MembershipRolePosition, string] => ["secondary", role],
+    ),
+  ];
+  for (const [position, role] of positions) {
+    if (seen.has(role)) continue;
+    seen.add(role);
+    const warning = warningFor(position, role, catalog);
+    if (warning !== null) warnings.push(warning);
+  }
+  return warnings;
+}
+
+/**
+ * One line per warning, for a log or an audit detail. Never includes a remedy that cannot work.
+ *
+ * An empty list renders as the empty string rather than an affirmative "all roles declared" line.
+ * That is the opposite of the boot surveys' rule, and for a stated reason: those say the clean case
+ * out loud because a boot log's silence cannot be told from a survey that did not run, whereas this
+ * runs per grant and its caller holds the array — it can already tell empty from unresolved, and an
+ * affirmative line would be one log entry per membership granted.
+ */
+export function formatMembershipRoleWarnings(ws: readonly MembershipRoleWarning[]): string {
+  return ws.map((w) => `[membership] ${w.verdict}: ${w.detail}`).join("\n");
+}

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useState, type ReactElement } from "react";
 
 import { Badge } from "@/components/Badge";
+import { RoleWarnings } from "@/components/RoleWarnings";
 import { Topbar } from "@/components/Topbar";
 import { formatCell, titleCase } from "@/lib/format";
 import {
@@ -24,6 +25,7 @@ import {
   type Membership,
   type MembershipAction,
   type MembershipStatus,
+  type RoleWarnings as RoleWarningsValue,
 } from "@/lib/users";
 
 const FIELDS: ReadonlyArray<{ key: keyof Tenant; label: string; kind?: "date" }> = [
@@ -204,6 +206,12 @@ export default function TenantDetailPage({ params }: { params: { id: string } })
   const [membersError, setMembersError] = useState<string | null>(null);
   const [registryUnmounted, setRegistryUnmounted] = useState(false);
   const [memberNotice, setMemberNotice] = useState<string | null>(null);
+  // Beside the notice rather than inside its sentence, because the two say different things: the
+  // notice is about the write, a warning is about the roles it accepted, and `Activate`/`Revoke`
+  // name no role at all. `[]` is the empty state and renders nothing, so it is also what the two
+  // actions reset it to — a grant's warnings left standing under "Membership revoked." would be
+  // about a role that action never touched.
+  const [grantWarnings, setGrantWarnings] = useState<RoleWarningsValue>([]);
   // Keyed `userId:action`, so only the clicked button shows its own progress.
   const [memberActing, setMemberActing] = useState<string | null>(null);
 
@@ -284,6 +292,7 @@ export default function TenantDetailPage({ params }: { params: { id: string } })
     setMemberActing(`${member.userId}:${action}`);
     setMembersError(null);
     setMemberNotice(null);
+    setGrantWarnings([]);
     try {
       const updated = await setMembershipStatus(id, member.userId, action);
       // Replaced in place rather than reloading: `(userId, tenantId)` is the natural key and this
@@ -319,6 +328,7 @@ export default function TenantDetailPage({ params }: { params: { id: string } })
     setGrantError(null);
     setGrantFieldErrors({});
     setMemberNotice(null);
+    setGrantWarnings([]);
     try {
       // Empties are dropped because the server's element schema is `z.string().min(1)`, so a
       // trailing comma would otherwise turn into a 400 carrying a zod issue array.
@@ -337,8 +347,13 @@ export default function TenantDetailPage({ params }: { params: { id: string } })
       setGrantStatus("");
       setGrantOpen(false);
       setMemberNotice(
-        `Granted ${granted.primaryRole} to ${granted.userId} as ${granted.status}.`,
+        `Granted ${granted.membership.primaryRole} to ${granted.membership.userId} as ` +
+          `${granted.membership.status}.`,
       );
+      // Beside the success notice and not instead of it: the grant landed either way, because the
+      // fence reports and never refuses — under per-tenant manifests a role this deployment cannot
+      // see may be one the tenant's own manifest declares.
+      setGrantWarnings(granted.roleWarnings);
       loadMembers();
     } catch (e) {
       setGrantError(describeGrantFailure(e));
@@ -520,6 +535,9 @@ export default function TenantDetailPage({ params }: { params: { id: string } })
                   {memberNotice}
                 </div>
               )}
+              {/* Under the success notice and above the error slot, because it is neither: the
+                  grant succeeded and the roles it accepted may still grant nothing. */}
+              <RoleWarnings warnings={grantWarnings} />
               {membersError && (
                 <div className="mt-4 rounded-lg border border-brand-200 bg-brand-50 px-4 py-3 text-sm text-brand-700">
                   {membersError}

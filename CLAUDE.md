@@ -1181,6 +1181,53 @@ type errors.
   that was the only thing the overlay's command added, so `environment:` (which merges, where a
   command replaces) is all it declares and there is nothing left to keep in step.
 
+  ADR-0365 is the second user-directed increment and the class is **a route that accepts input it
+  neither serves nor adjudicates** — three members on one surface, two in the request and one in the
+  response. The first is what lets ADR-0364's four-step onboarding end in an account that can do
+  nothing: a membership's `primaryRole` is `z.string().min(1)` and nothing compared it against
+  `manifest.roles`, so granting `platform_admin` — measured, **not** one of `erp-core`'s 15 declared
+  roles — stores cleanly, echoes back, mints a session and reaches **0 of 255** (entity, operation)
+  pairs and 0 of 51 entities against the `erp_admin` control's 250 and 50. Nothing in between: an
+  undeclared primary role is a total denial. **And the deployment invites the mistake** — the shipped
+  compose passes `--platform-user-role platform_admin` and an api-key spec naming the same role,
+  which is correct because the platform routes are guarded by `adminRoles` and never by the manifest,
+  so the role that authorizes everything the operator does is the one role that authorizes nothing
+  inside the ERP, and it is the name in front of them on the grant form.
+  The fence **warns and never refuses**, because the directory answers from the manifest *this
+  deployment* serves and ADR-0314 makes a tenant's own activated manifest real. Its argument for not
+  being a boot survey is **half of what the first draft claimed**, and the adversarial pass caught
+  the other half in the module's own comment: the *unscoped* census is refused on measurement (as a
+  non-owner with no tenant context `meta.user_tenant_membership` answers **0** where the owner
+  answers **4** — ADR-0333's silent-zero class in the one table whose rows are the finding), but
+  "the tenant list is itself a table a confined session cannot read" is **false** — `META_TENANTS`
+  has no `rls` key, no `tenant_id` and no `policies`, and live as a non-owner it enumerates — so a
+  *scoped* per-tenant census is available and the write-time placement rests on a positive reason
+  instead: the roles are in the request body, so the check costs no read, and the operator hears it
+  at the moment the remedy is theirs.
+  Beside it, two surfaces this repo's own rule already forbade: `?status=bogus` was **dropped** so
+  the response was every user — the rows the caller asked to exclude — and `?cursor=garbage` decoded
+  to offset 0 so a caller asking for page 5 got page 1, both under a 200. Both are 400 now, on both
+  list handlers, through one parser whose status vocabulary is its argument. `?email=` is **served**
+  rather than refused, exact and case-folded, because `meta.users.email` is UNIQUE so an equality is
+  one index lookup where the `ILIKE` the console wanted is the measured 66× cliff. And the third
+  member is a figure already computed: `counts()` had **zero** non-test callers.
+  Three things were sharper than the defects, and all three are this run's own classes landing inside
+  it. **The console's first renderer reinstated in the UI the exact promise the server withholds** —
+  it unioned `declaredRoles` from every `not_declared` warning and printed "This tenant's manifest
+  declares: …" under a *secondary*-only warning, which is ADR-0334's remedy-that-cannot-work one
+  layer out, since a declared secondary role reaches no authorization decision for **two**
+  independent reasons. **A brief of mine was wrong in the direction that hid a defect**: I wrote that
+  a stale cursor would now 400, and it does not (`encodeCursor` is `base64url("o:<offset>")` with no
+  filter binding, so it decodes perfectly and is honoured against the new filter's rows) — and that
+  framing "directed attention at a refusal rather than at a wrong answer", which is why an in-flight
+  `loadMore` landing after a filter change appended the previous query's rows under the new filter
+  and overwrote the cursor, unguarded until the review found it. And **three figures the register
+  itself carried were stale** (the method is `counts()` not `userCounts`; the tenants list renders
+  five tiles not three; `erp-core`'s unique-field count is 32, where 34 is resolved
+  `erp-healthcare`) — plus one real defect found in passing and closed: `TenantCounts` hand-listed
+  **four** of `TENANT_STATUSES`' five, so `pending_deletion` was counted by the server on every
+  request and shown by no tile, which is this increment's own headline two files over.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -4084,6 +4131,68 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   rather than casting, since `CredentialRecord.status` is a bare `string` constrained only by the
   column's CHECK, so a row from a later binary takes the fail-closed arm instead of indexing the map
   with a key it does not have.
+  **A membership grant says whether the role it names is one the tenant's manifest declares**
+  (ADR-0365, `membership-role-fence.ts`). `MembershipRoleDirectory` answers
+  `(tenantId) => Promise<ReadonlySet<string> | null>` and the `null` is the whole of it: an **empty
+  set** asserts *this manifest declares no role* and `null` says *nobody looked* (ADR-0331), so the
+  two produce different verdicts — `not_declared` carrying the sorted catalog, `unresolved` carrying
+  `declaredRoles: null` and **naming no remedy**, because nothing was read so the grant may well be
+  correct. A private discriminated `RoleCatalog` carries the set and its sorted names together, which
+  makes the conflation *unrepresentable* rather than merely avoided: the first implementation wrote
+  `declaredRoles: verdict === "unresolved" ? null : (declaredRoles ?? [])`, and that `?? []`
+  substitutes the claim for the gap in the one module whose central decision is to keep them apart —
+  unreachable as written, and the direction of a dead default is still the wrong one. A directory that
+  **throws** answers `unresolved` rather than propagating, since the fence is advisory and rides a
+  privileged write. It is consulted **once** per check and not once per role, because a manifest can
+  be activated between two calls and a warning set drawn from two answers describes no single
+  manifest. `warningVerdictOf` returns `null` for `declared` through compiler-established narrowing
+  and *then* reads the total map, where a type predicate over a map lookup would be an annotation
+  standing in for a check (ADR-0362).
+  It covers **both** write paths — `buildGrantMembershipHandler`, whose tenant is the path's, and
+  `provision`'s optional nested membership, which uses **that membership's** `tenantId` — and the
+  tenant it asks about is pinned by a test, because mutating either path to the wrong tenant left all
+  84 tests green. The warnings ride **two** places: the 201 body (always present, `[]` and never
+  omitted, since an absent field reads as *none* and is indistinguishable from *not checked*) and the
+  audit `detail`, set on the event **before** `record` so the row carries what the operator was told
+  (ADR-0313's ordering). The **two positions are not one defect**: an undeclared primary is a total
+  denial, while an undeclared secondary costs nothing extra because a declared one would not be read
+  either — `roleFor` returns `membership.primaryRole` alone and the mint stamps `scope: input.role`,
+  one string, *and* `principalRoles` returns **no `secondaryRoles` key at all**, so every
+  `...(secondaryRoles ?? [])` reader takes the empty arm whatever a token carries. So the secondary
+  warning names the mechanism and deliberately does **not** offer the declared names, which is the
+  promise the console's first renderer reinstated and the review removed.
+  `node.ts` builds the directory from the boot manifest's `manifestRoleNames` and answers `null` two
+  ways under `--per-tenant-manifests`: an unparseable stored manifest (one the gateway cache refuses
+  to build anyway) and one declaring `meta.extends`, whose parents contribute roles `roles` does not
+  hold and whose lineage is the cache's to resolve rather than a second resolution here.
+
+  **And both registry list handlers refuse a parameter they used to drop** (ADR-0365).
+  `parseRegistryListQuery` is one parser with the status vocabulary as its **argument**, which is why
+  it is one: the two handlers differ in nothing else, and two copies is how both came to drop
+  `?status=bogus` identically and in silence. `LIST_QUERY_REFUSAL_OUTPUTS` is a total map over the
+  three refusable parameters so a fourth is a compile error rather than a 400 with no explanation,
+  and each reason says **what the parameter used to do instead**, because that is the half a caller
+  cannot see. `decodeUserListCursor` answers `number | null` and the store's own offset read
+  **throws**, so a direct caller of `list()` is refused too and not only one arriving through a
+  route. `suppliedQueryValue` treats an empty value as absent — one rule for all four parameters,
+  since a form serialises an unset field as `?k=` and ADR-0359's class is about a value the caller
+  *did* supply being dropped; without it the console's own cleared email box would 400. The page
+  size is **not** adjudicated by ADR-0359's rule, which is which-rows versus order and does not
+  reach how-many: `?limit=abc` is refused because a caller named a page size and supplied something
+  that is not one, and `?limit=9999` clamps because `REGISTRY_LIST_MAX_LIMIT` is a platform decision.
+  `?email=` is served with no refusal of its own, for the inverse of the rule — an address nobody
+  holds narrows the answer to zero rows, which is the right answer rather than a mistake to report.
+  `GET /v1/platform/users/stats` is its own route and deliberately not folded into
+  `GET /v1/platform/stats`, which is mounted under a different grant, so merging would make user
+  counts require the tenant-administration grant. It is declared **before** the `{id}` route *and*
+  that parameter carries `UUID_SEGMENT_PATTERN`, each pinned by its own mutation — the pattern is
+  what decides, since `matchRoute` returns the first match and `pattern: null` matches any segment,
+  and the ordering costs nothing beside it. The pattern is **not** looser than the handler's parse,
+  which an earlier comment claimed: measured over 20,000 random hex segments it diverged from
+  `z.string().uuid()` **zero** times, so the handler's 400 for a non-uuid id is unreachable through
+  the matcher and a test pins the two agreeing. `MAX_LIMIT` became `REGISTRY_LIST_MAX_LIMIT` because
+  **eleven** sibling modules in this app hold the bare name privately, none exports it, and
+  `index.ts` re-exports this file with `export *`.
 - **`apps/operate-web`** — **long-running process** (Next.js app router + Tailwind, `next
   dev`/`next start` on :3000). The generic manifest-driven UI: a catch-all `/api/[...path]`
   proxy to operate-server, dynamic entity list/record/form pages under `/e/[slug]` rendered
@@ -7069,11 +7178,16 @@ three make the rest honest, cheap or verifiable.
     name the role you signed in with and not the person holding it, the shell's avatar initial is
     taken from a role name, and — the consequence that bites — **a person cannot be shown their
     own record**, because the detail page is reached by an id the client does not have. A
-    server-side `UiSchema` change, two fields wide. Beside it, `--platform-user-routes` exposes
-    `PostgresUserStore.userCounts` through **no route**, so the users list has no stat tiles where
-    the tenants list has three, and there is **no email search** — the list route drops a `?email=`
-    parameter, which ADR-0359's rule says must not be offered rather than silently ignored, so the
-    page says so in one line and the fix is a server-side filter.
+    server-side `UiSchema` change, two fields wide. The two clauses that stood beside it are
+    **closed by ADR-0365**, and all three of their figures were stale: the method is `counts()` and
+    not `userCounts`; the tenants list renders **five** tiles and not three; and a `?email=` filter
+    is served now rather than dropped, exact and case-folded. That increment also closed, in passing,
+    the defect those figures were describing from the wrong side — `TenantCounts` hand-listed **four**
+    of `TENANT_STATUSES`' five, so `pending_deletion` was counted by the server on every request and
+    shown by no tile, and both it and the users census are derived from their status vocabulary now.
+    What remains on that page is the filter chip list, which is still hand-written and still has no
+    `pending_deletion` entry — so the state ADR-0363's gate enforces is a figure you can read and a
+    set you cannot list. A curation rather than a census, which is why it was left.
 17. **14 packages, 15,006 source lines, zero importers**: `active-active`, `compliance`,
     `data-lineage`, `deploy`, `edge`, `finops`, `migration`, `ml-training`, `pwa`, `rate-limiting`,
     `sdk-clients`, `security`, `sso`, `workflow-signal-bridge` — ~17% of the package count, built,

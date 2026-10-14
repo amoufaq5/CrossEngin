@@ -46,13 +46,14 @@ export interface TenantPage {
   readonly nextCursor: string | null;
 }
 
-export interface TenantCounts {
-  readonly active: number;
-  readonly suspended: number;
-  readonly archived: number;
-  readonly deleted: number;
-  readonly total: number;
-}
+/**
+ * Derived from `TENANT_STATUSES` rather than hand-listed, because the hand-listed version named
+ * four of the five and so had no figure for `pending_deletion` at all — the state ADR-0334 added to
+ * the lifecycle and ADR-0363 made the request path enforce. The server's `TenantStatusCounts` is
+ * `Readonly<Record<TenantStatus, number>> & {total}`, so it has always *sent* five, and the only
+ * thing missing was a type that admitted the fifth and a tile that read it.
+ */
+export type TenantCounts = Readonly<Record<TenantStatus, number>> & { readonly total: number };
 
 export type TenantAction = "suspend" | "archive" | "reactivate";
 

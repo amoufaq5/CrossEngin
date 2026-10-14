@@ -65,6 +65,70 @@ export interface UserPage {
   readonly nextCursor: string | null;
 }
 
+/**
+ * Derived from `UserStatus` rather than written out, because the type this follows is already stale:
+ * `TenantCounts` in lib/platform.ts names four statuses against `TENANT_STATUSES`' five, so it has
+ * no figure for `pending_deletion` and the tenant console has no tile for it — the one state in
+ * which an operator most wants to find a tenant, which is the same drift this page's
+ * `STATUS_FILTERS` is derived to avoid. The server's `UserStatusCounts` is this shape exactly, so a
+ * fourth user status cannot leave this type asserting something false about the wire.
+ */
+export type UserCounts = Readonly<Record<UserStatus, number>> & { readonly total: number };
+
+export const ROLE_WARNING_POSITIONS = ["primary", "secondary"] as const;
+export type RoleWarningPosition = (typeof ROLE_WARNING_POSITIONS)[number];
+
+/**
+ * The two verdicts that surface. `declared` is the server's silent third, and it is deliberately
+ * absent here rather than present-and-filtered: a warning list carrying it would make "this role is
+ * fine" and "this role grants nothing" two members of one list for a reader to tell apart.
+ */
+export const ROLE_WARNING_VERDICTS = ["not_declared", "unresolved"] as const;
+export type RoleWarningVerdict = (typeof ROLE_WARNING_VERDICTS)[number];
+
+/**
+ * One role in one position that the grant accepted and the tenant's manifest does not declare.
+ *
+ * The two verdicts are **not** two gradings of one fact. `not_declared` is a statement about the
+ * role — the manifest was read, this name is not in it, so the grant resolves to nothing at serve
+ * time — and it carries `declaredRoles`. `unresolved` is a statement about the deployment: nothing
+ * could be read, so it says nothing at all about this role, and `declaredRoles` is `null` because
+ * there is no list to show rather than an empty one.
+ *
+ * `declaredRoles` is a **remedy only where `position` is `primary`**, and it arrives on both. A
+ * secondary role reaches no authorization decision whether declared or not, so a renderer that
+ * offers the names beside a secondary warning promises something the server's own `detail`
+ * deliberately does not — see `RoleWarnings`, which is where that gate lives.
+ */
+export interface RoleWarning {
+  readonly position: RoleWarningPosition;
+  readonly role: string;
+  readonly verdict: RoleWarningVerdict;
+  readonly detail: string;
+  readonly declaredRoles: readonly string[] | null;
+}
+
+/**
+ * What a write's `roleWarnings` came back as. `null` is **not** "none": it is "this response
+ * carried no readable answer", which a deployment running a binary from before the fence produces,
+ * and which the two call sites render as its own sentence rather than as silence.
+ *
+ * The server sends `[]` and never an omitted field for exactly this reason, so `null` here means
+ * the two ends disagree about the shape — a different fact from a clean grant, and the one a reader
+ * must not be shown as a clean grant (ADR-0331).
+ */
+export type RoleWarnings = ReadonlyArray<RoleWarning> | null;
+
+export interface ProvisionUserResult {
+  readonly user: PlatformUser;
+  readonly roleWarnings: RoleWarnings;
+}
+
+export interface GrantMembershipResult {
+  readonly membership: Membership;
+  readonly roleWarnings: RoleWarnings;
+}
+
 export interface MembershipPage {
   readonly data: ReadonlyArray<Membership>;
   readonly nextCursor: string | null;
@@ -132,25 +196,106 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
   return (await res.json()) as T;
 }
 
+function isStringArray(value: unknown): value is readonly string[] {
+  return Array.isArray(value) && value.every((entry: unknown) => typeof entry === "string");
+}
+
 /**
- * There is deliberately **no `email` parameter**, and its absence is the point.
+ * Built from checked parts rather than asserted with a predicate, so nothing here is an annotation
+ * standing in for a parse (ADR-0362). `find` does the membership test and the narrowing in one
+ * step, which is what keeps `position` and `verdict` from being a cast over an `includes`.
+ */
+function readRoleWarning(value: unknown): RoleWarning | null {
+  if (value === null || typeof value !== "object") return null;
+  const doc = value as Record<string, unknown>;
+  const position = ROLE_WARNING_POSITIONS.find((p) => p === doc.position);
+  const verdict = ROLE_WARNING_VERDICTS.find((v) => v === doc.verdict);
+  if (position === undefined || verdict === undefined) return null;
+  const { role, detail } = doc;
+  if (typeof role !== "string" || typeof detail !== "string") return null;
+  // Absent is refused along with the wrong type: the server sends the key on both verdicts, so a
+  // missing one is a shape this reader does not know rather than "no declared roles".
+  const declared = doc.declaredRoles;
+  const declaredRoles = declared === null ? null : isStringArray(declared) ? declared : undefined;
+  if (declaredRoles === undefined) return null;
+  // The pairing is refused, not just the type. `not_declared` is only reachable on the server from a
+  // catalog it *read*, so it always carries the names it was compared against — and a `null` there
+  // is the pair ADR-0331 keeps apart arriving half-and-half, which a renderer can only resolve by
+  // treating "nothing was read" as "this manifest declares no role at all": a claim standing in for
+  // a gap, in the sentence an operator acts on. Refusing it makes the whole set read as unreadable
+  // and say that instead, which is the one honest answer available.
+  if (verdict === "not_declared" && declaredRoles === null) return null;
+  return { position, verdict, role, detail, declaredRoles };
+}
+
+/**
+ * The whole list or `null`, and **never a readable prefix**.
  *
- * `buildListUsersHandler` reads exactly `status`, `limit` and `cursor`, and `PostgresUserStore.list`
- * builds its `WHERE` from `status` alone — so a client sending `?email=` would get *every* user
- * back under a 200 indistinguishable from a filtered one. That is ADR-0359's class precisely: a
- * surface whose drop changes **which rows come back**, answered with the rows the caller asked to
- * exclude. Offering it here and letting the server drop it would be worse than not offering it, so
- * the list pages and an operator reaches a known user by id.
+ * One unreadable element refuses the set, because the alternative is showing a shorter list under a
+ * banner that reads as complete — the operator would believe they had seen every warning. `null`
+ * renders as "the answer could not be read", which is the one honest thing to say when part of it
+ * cannot be: ADR-0344's rule that a set whose correspondence is broken fails whole rather than
+ * standing behind its prefix.
+ */
+function readRoleWarnings(doc: Record<string, unknown>): RoleWarnings {
+  const raw: unknown = doc.roleWarnings;
+  if (!Array.isArray(raw)) return null;
+  const warnings: RoleWarning[] = [];
+  for (const entry of raw as readonly unknown[]) {
+    const warning = readRoleWarning(entry);
+    if (warning === null) return null;
+    warnings.push(warning);
+  }
+  return warnings;
+}
+
+/**
+ * One POST read two ways: the record through the type parameter, as every other helper here does,
+ * and `roleWarnings` through a parse.
  *
- * Giving it a real email filter is a store change, a handler change and a row for
- * `pg-column-coverage` — a capability rather than part of this console's spine, and named as a
- * follow-up rather than faked.
+ * The split is deliberate and is the account page's reason one surface over: a `<T>` cast is
+ * tolerable where a missing field renders as a blank, and not where the field decides which of two
+ * opposite sentences a reader is shown — here, "this role grants nothing" against nothing at all.
+ */
+async function postJsonWithRoleWarnings<T>(
+  path: string,
+  body: unknown,
+): Promise<{ readonly body: T; readonly roleWarnings: RoleWarnings }> {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) await throwProblem(res);
+  const parsed: unknown = await res.json();
+  const doc: Record<string, unknown> =
+    parsed !== null && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+  return { body: doc as T, roleWarnings: readRoleWarnings(doc) };
+}
+
+/**
+ * `email` is an **exact** match, folded to lower case by the server before it is compared.
+ *
+ * Exact and not a prefix because the store's `WHERE email = $1` is what `users_email_key` serves.
+ * That constraint's index is a default-collation B-tree, which a `LIKE 'x%'` cannot use and an
+ * `ILIKE` never can, so a prefix or substring filter would be a sequential scan with a comparison
+ * per row — issued from a box somebody types into. A partial address therefore matches nothing at
+ * all, which is why the page applies it on submit rather than per keystroke: per keystroke it would
+ * answer "no such user" about every address still being typed.
+ *
+ * Sent only when non-empty, and that guard is **not** what makes an empty one safe: the handler
+ * reads every parameter through `suppliedQueryValue`, which maps a zero-length value to
+ * `undefined`, so `?email=` is already read as *no filter* rather than as a comparison against the
+ * empty address. It is dropped here for the reason `status` and `cursor` are dropped beside it — a
+ * parameter carrying nothing is not a filter, and a URL that names one invites the next reader to
+ * believe the guard is load-bearing when the server has its own.
  */
 export async function listUsers(
-  params: { status?: string; limit?: number; cursor?: string } = {},
+  params: { status?: string; email?: string; limit?: number; cursor?: string } = {},
 ): Promise<UserPage> {
   const p = new URLSearchParams();
   if (params.status && params.status !== "all") p.set("status", params.status);
+  if (params.email !== undefined && params.email !== "") p.set("email", params.email);
   if (params.limit !== undefined) p.set("limit", String(params.limit));
   if (params.cursor) p.set("cursor", params.cursor);
   const qs = p.toString();
@@ -161,6 +306,18 @@ export async function listUsers(
   return { data: json.data ?? [], nextCursor: json.page?.nextCursor ?? null };
 }
 
+/**
+ * The per-status census, under its **own** route and its own grant.
+ *
+ * Deliberately not folded into `platformStats()` beside it: that one is `/v1/platform/stats` over
+ * the tenant store under `--platform-admin-role`, so sharing a call would make a user census need
+ * the tenant-administration grant. The two are separate reads because they are separately gated.
+ */
+export async function fetchUserCounts(): Promise<UserCounts> {
+  const json = await getJson<{ counts: UserCounts }>(platformPath("/users/stats"));
+  return json.counts;
+}
+
 export async function getUser(id: string): Promise<PlatformUser> {
   const json = await getJson<{ user: PlatformUser }>(
     platformPath(`/users/${encodeURIComponent(id)}`),
@@ -168,9 +325,15 @@ export async function getUser(id: string): Promise<PlatformUser> {
   return json.user;
 }
 
-export async function provisionUser(body: ProvisionUserBody): Promise<PlatformUser> {
-  const json = await postJson<{ user: PlatformUser }>(platformPath("/users"), body);
-  return json.user;
+/**
+ * `roleWarnings` is read here and not only where a membership is sent, because whether this call
+ * *can* produce one is the server's business and not this helper's: the route checks the roles
+ * exactly when the body carries a membership, so a provision form that later grows one gets the
+ * warnings without this function being touched.
+ */
+export async function provisionUser(body: ProvisionUserBody): Promise<ProvisionUserResult> {
+  const res = await postJsonWithRoleWarnings<{ user: PlatformUser }>(platformPath("/users"), body);
+  return { user: res.body.user, roleWarnings: res.roleWarnings };
 }
 
 export type UserAction = "suspend" | "reactivate" | "retire";
@@ -216,14 +379,14 @@ export async function listMembers(
 export async function grantMembership(
   tenantId: string,
   body: GrantMembershipBody,
-): Promise<Membership> {
+): Promise<GrantMembershipResult> {
   // `body` and not `{...body, tenantId}`: the schema omits that key and is `.strict()`, so sending
   // the tenant twice is a 400 rather than a harmless repetition.
-  const json = await postJson<{ membership: Membership }>(
+  const res = await postJsonWithRoleWarnings<{ membership: Membership }>(
     platformPath(`/tenants/${encodeURIComponent(tenantId)}/members`),
     body,
   );
-  return json.membership;
+  return { membership: res.body.membership, roleWarnings: res.roleWarnings };
 }
 
 export type MembershipAction = "activate" | "revoke";

@@ -25,7 +25,11 @@ import {
   type CheckAdmissionSurvey,
 } from "@crossengin/kernel-pg";
 import { META_TABLES } from "@crossengin/kernel/bootstrap";
-import { producibleEntityEventNames, type Manifest } from "@crossengin/kernel/manifest";
+import {
+  ManifestSchema,
+  producibleEntityEventNames,
+  type Manifest,
+} from "@crossengin/kernel/manifest";
 import {
   InMemoryEntityStore,
   InMemorySequenceAllocator,
@@ -2487,6 +2491,36 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           store: new PostgresUserStore(conn, schemaOpt),
           principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
           adminRoles: new Set(options.platformUserRoles),
+          // Which roles the tenant being granted into actually declares. The grant boundary is the
+          // only place that question has both halves in hand, and a boot census over existing
+          // memberships could not stand in for it: `meta.user_tenant_membership` carries one
+          // `ALL`-scope isolation policy and no platform read arm, so a non-owner session reads
+          // **zero rows** and the survey would report a clean deployment because it could see
+          // nothing — ADR-0333's silent-zero class.
+          //
+          // `null` is the honest answer wherever this process cannot name the set the tenant is
+          // *served*, and it is reached two ways rather than one. Both matter, because a warning
+          // naming a role the tenant's own pack declares perfectly well is a remedy that cannot
+          // work, which ADR-0334 ranks below saying nothing.
+          roleDirectory: async (tenantId: string): Promise<ReadonlySet<string> | null> => {
+            const manifests = manifestStore;
+            // Without per-tenant manifests every tenant is served this one, so the boot set is
+            // authoritative for all of them — no store read, and the common case pays nothing.
+            if (!options.perTenantManifests || manifests === null) return manifestRoleNames;
+            const stored = await manifests.activeManifestFor(tenantId);
+            // No activated manifest means this tenant falls back to the boot one, which is the same
+            // answer `TenantGatewayCache.serverFor` gives for a `null` source read.
+            if (stored === null) return manifestRoleNames;
+            const parsed = ManifestSchema.safeParse(stored);
+            // An unparseable stored manifest is one the cache will refuse to build anyway, so the
+            // tenant is served nothing and no role set describes them.
+            if (!parsed.success) return null;
+            // A stored manifest that extends a lineage contributes roles from its parents that
+            // `roles` does not hold, and resolving that lineage is the gateway cache's job rather
+            // than a second resolution here that could answer differently.
+            if ((parsed.data.meta.extends ?? []).length > 0) return null;
+            return new Set(Object.keys(parsed.data.roles ?? {}));
+          },
           // Required rather than optional: every route here mints a principal or grants it a role
           // inside a tenant, so it is ADR-0313's privileged-write class without exception.
           //

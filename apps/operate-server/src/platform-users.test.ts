@@ -1,5 +1,7 @@
+import { matchRoute } from "@crossengin/api-gateway";
 import type { PgConnection } from "@crossengin/kernel-pg";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
 import {
   CreateUserInputSchema,
@@ -10,6 +12,7 @@ import {
   MEMBERSHIP_STATUS_TRANSITIONS,
   MembershipRecordSchema,
   PostgresUserStore,
+  REGISTRY_LIST_MAX_LIMIT,
   REGISTRY_REFUSED_OPERATION,
   USER_STATUSES,
   USER_STATUS_TRANSITIONS,
@@ -18,6 +21,8 @@ import {
   buildPlatformUserRoutes,
   canTransitionMembership,
   canTransitionUser,
+  decodeUserListCursor,
+  isUserListCursor,
   normalizeEmail,
   type UserRegistryAuditEvent,
 } from "./platform-users.js";
@@ -456,17 +461,51 @@ interface Recorded {
   readonly events: UserRegistryAuditEvent[];
 }
 
+/** The roles the default fake directory says the tenant declares — the ones `membershipRow` uses. */
+const DECLARED_ROLES = ["auditor", "erp_admin"] as const;
+
 function ctxFor(
   store: PostgresUserStore,
-  opts: { readonly roles?: readonly string[]; readonly auditThrows?: boolean } = {},
-): { ctx: Parameters<typeof buildPlatformUserRoutes>[0]; recorded: Recorded } {
+  opts: {
+    readonly roles?: readonly string[];
+    readonly auditThrows?: boolean;
+    /** What the role directory answers; `null` is "this process cannot say which roles exist". */
+    readonly declaredRoles?: readonly string[] | null;
+    readonly directoryThrows?: boolean;
+  } = {},
+): {
+  ctx: Parameters<typeof buildPlatformUserRoutes>[0];
+  recorded: Recorded;
+  directoryCalls: () => number;
+  /**
+   * The tenant ids the directory was asked about, in order.
+   *
+   * Recorded rather than discarded because the argument is the whole of which role catalog the
+   * grant is adjudicated against: `node.ts`'s directory reads it (`activeManifestFor(tenantId)`), so
+   * under per-tenant manifests a wrong tenant answers with a different tenant's roles. A fake that
+   * ignores its parameter leaves that decision unfenced — handing either path the user id in place
+   * of the tenant passed every test in this file.
+   */
+  directoryAsked: () => readonly string[];
+} {
   const recorded: Recorded = { events: [] };
+  let directoryCalls = 0;
+  const asked: string[] = [];
   return {
     recorded,
+    directoryCalls: () => directoryCalls,
+    directoryAsked: () => asked,
     ctx: {
       store,
       principalRoles: () => ({ primaryRole: (opts.roles ?? ["platform_admin"])[0] ?? "anonymous" }),
       adminRoles: new Set(["platform_admin"]),
+      roleDirectory: async (tenantId) => {
+        directoryCalls += 1;
+        asked.push(tenantId);
+        if (opts.directoryThrows === true) throw new Error("manifest store unreachable");
+        const declared = opts.declaredRoles === undefined ? DECLARED_ROLES : opts.declaredRoles;
+        return declared === null ? null : new Set(declared);
+      },
       audit: async (e) => {
         if (opts.auditThrows === true) throw new Error("audit down");
         recorded.events.push(e);
@@ -474,6 +513,30 @@ function ctxFor(
       clock: () => new Date(AT),
     },
     };
+}
+
+/**
+ * The `roleWarnings` a response or an audit detail carries, **parsed** rather than asserted.
+ *
+ * `.strict()` over the whole warning, so a body carrying a summary instead of the fence's own
+ * records — or an extra key — fails here rather than reading as a clean check.
+ */
+const RoleWarningsShape = z.array(
+  z
+    .object({
+      position: z.enum(["primary", "secondary"]),
+      role: z.string().min(1),
+      verdict: z.enum(["not_declared", "unresolved"]),
+      detail: z.string().min(1),
+      declaredRoles: z.array(z.string()).nullable(),
+    })
+    .strict(),
+);
+
+function warningsOf(carrier: unknown): z.infer<typeof RoleWarningsShape> {
+  const parsed = z.object({ roleWarnings: RoleWarningsShape }).safeParse(carrier);
+  if (!parsed.success) throw new Error(`no roleWarnings: ${parsed.error.message}`);
+  return parsed.data.roleWarnings;
 }
 
 function principal(): { readonly principalId: string } {
@@ -498,17 +561,18 @@ describe("buildPlatformUserRoutes", () => {
         store,
         principalRoles: () => ({ primaryRole: "platform_admin" }),
         adminRoles: new Set(["platform_admin"]),
+        roleDirectory: async () => null,
         audit: undefined as unknown as (e: UserRegistryAuditEvent) => Promise<void>,
       }),
     ).toThrow(/require an auditor/);
   });
 
-  it("exposes ten routes and no duplicate operation id", () => {
+  it("exposes eleven routes and no duplicate operation id", () => {
     const { conn } = fakeDb([]);
     const { ctx } = ctxFor(new PostgresUserStore(conn));
     const routes = buildPlatformUserRoutes(ctx);
-    expect(routes).toHaveLength(10);
-    expect(new Set(routes.map((r) => r.route.operationId)).size).toBe(10);
+    expect(routes).toHaveLength(11);
+    expect(new Set(routes.map((r) => r.route.operationId)).size).toBe(11);
   });
 
   it("401s with no principal and 403s with the wrong role", async () => {
@@ -688,15 +752,6 @@ describe("buildPlatformUserRoutes", () => {
     expect(recorded.events[0]?.detail).toEqual({ from: "active", to: "revoked" });
   });
 
-  it("ignores an unrecognised ?status rather than erroring, as the tenant list does", async () => {
-    const db = fakeDb([[userRow()]]);
-    const { ctx } = ctxFor(new PostgresUserStore(db.conn));
-    const list = handlerFor(buildPlatformUserRoutes(ctx), "platform.users.list");
-    const out = await list({ principal: principal(), params: {}, request: { query: { status: "zzz" } } });
-    expect(out.status).toBe(200);
-    expect(db.captured[0]?.sql).not.toMatch(/WHERE status/);
-  });
-
   it("404s a user that does not exist", async () => {
     const db = fakeDb([[]]);
     const { ctx } = ctxFor(new PostgresUserStore(db.conn));
@@ -771,6 +826,7 @@ describe("buildPlatformUserRoutes", () => {
         store: new PostgresUserStore(conn as unknown as PgConnection),
         principalRoles: () => ({ primaryRole: "platform_admin" }),
         adminRoles: new Set(["platform_admin"]),
+        roleDirectory: async () => new Set(DECLARED_ROLES),
         audit: async () => {
           calls += 1;
           if (calls > 1) throw new Error("audit down");
@@ -804,5 +860,503 @@ describe("buildPlatformUserRoutes", () => {
     // Such a read has no scope to name, so it would be owner-dependent by construction — correct as
     // the table's owner and empty as a non-owner (ADR-0333).
     expect(ops.some((op) => /users\..*tenants|memberships/.test(op))).toBe(false);
+  });
+});
+
+/* ------------------------------------------------------- the role fence, wired */
+
+describe("the membership role fence on both write paths", () => {
+  it("warns on the grant path and carries the warning in the 201 body", async () => {
+    const db = fakeDb([[membershipRow({ primary_role: "ghost_role" })]]);
+    const { ctx, directoryAsked } = ctxFor(new PostgresUserStore(db.conn));
+    const grant = handlerFor(buildPlatformUserRoutes(ctx), "platform.tenants.members.grant");
+    const out = await grant({
+      principal: principal(),
+      params: { tenantId: TENANT },
+      request: {},
+      parsedBody: { userId: USER, primaryRole: "ghost_role", status: "active" },
+    });
+    expect(out.status).toBe(201);
+    const warnings = warningsOf(out.body);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.role).toBe("ghost_role");
+    expect(warnings[0]?.verdict).toBe("not_declared");
+    expect(warnings[0]?.position).toBe("primary");
+    // The path's tenant and nothing else: the body does not carry one here (`GrantBodySchema` omits
+    // it), so the only other id in reach is the user's, and handing the directory that asks a
+    // different tenant's manifest which roles exist.
+    expect(directoryAsked()).toEqual([TENANT]);
+    // The record the fence produced, not a summary of it — `declaredRoles` is the sorted catalog the
+    // warning was drawn against, which is what makes the detail's remedy checkable by its reader.
+    expect(warnings[0]?.declaredRoles).toEqual([...DECLARED_ROLES]);
+  });
+
+  it("puts the grant's warning in the audit detail, which means before the record ran", async () => {
+    const db = fakeDb([[membershipRow({ primary_role: "ghost_role" })]]);
+    const { ctx, recorded } = ctxFor(new PostgresUserStore(db.conn));
+    const grant = handlerFor(buildPlatformUserRoutes(ctx), "platform.tenants.members.grant");
+    await grant({
+      principal: principal(),
+      params: { tenantId: TENANT },
+      request: {},
+      parsedBody: { userId: USER, primaryRole: "ghost_role", status: "active" },
+    });
+    // ADR-0313 puts the record before the write, so a detail assembled afterwards would never be in
+    // the row: the recorded event carrying it is the proof of the ordering.
+    expect(recorded.events[0]?.operation).toBe("platform.membership_granted");
+    expect(warningsOf(recorded.events[0]?.detail)[0]?.role).toBe("ghost_role");
+  });
+
+  it("reports an empty list for a declared role rather than omitting the field", async () => {
+    const db = fakeDb([[membershipRow()]]);
+    const { ctx, recorded } = ctxFor(new PostgresUserStore(db.conn));
+    const grant = handlerFor(buildPlatformUserRoutes(ctx), "platform.tenants.members.grant");
+    const out = await grant({
+      principal: principal(),
+      params: { tenantId: TENANT },
+      request: {},
+      parsedBody: { userId: USER, primaryRole: "erp_admin", secondaryRoles: ["auditor"], status: "active" },
+    });
+    expect(out.status).toBe(201);
+    // ADR-0331: an absent field reads as "none" and is indistinguishable from "not checked", and
+    // being told is the whole point of the fence — so `[]` is the claim, present on both carriers.
+    expect(warningsOf(out.body)).toEqual([]);
+    expect(warningsOf(recorded.events[0]?.detail)).toEqual([]);
+  });
+
+  it("warns on the provision path, against the membership's own tenant", async () => {
+    const db = fakeDb([[userRow()], [membershipRow()]]);
+    const { ctx, recorded, directoryAsked } = ctxFor(new PostgresUserStore(db.conn));
+    const provision = handlerFor(buildPlatformUserRoutes(ctx), "platform.users.provision");
+    const out = await provision({
+      principal: principal(),
+      params: {},
+      request: {},
+      parsedBody: {
+        user: { id: USER, email: "ada@example.com" },
+        membership: { tenantId: OTHER_TENANT, primaryRole: "ghost_role", status: "active" },
+      },
+    });
+    expect(out.status).toBe(201);
+    expect(warningsOf(out.body)[0]?.role).toBe("ghost_role");
+    expect(warningsOf(recorded.events[0]?.detail)[0]?.verdict).toBe("not_declared");
+    // The body's tenant, which is the title's claim and the one thing the test could not previously
+    // see. `OTHER_TENANT` is deliberately neither the caller's nor `USER`, so handing the directory
+    // either of those — the two mistakes available at this call site — fails here.
+    expect(directoryAsked()).toEqual([OTHER_TENANT]);
+  });
+
+  it("checks nothing and claims nothing when the provision body carries no membership", async () => {
+    const db = fakeDb([[userRow()]]);
+    const { ctx, recorded, directoryCalls } = ctxFor(new PostgresUserStore(db.conn));
+    const provision = handlerFor(buildPlatformUserRoutes(ctx), "platform.users.provision");
+    const out = await provision({
+      principal: principal(),
+      params: {},
+      request: {},
+      parsedBody: { user: { email: "ada@example.com" } },
+    });
+    expect(out.status).toBe(201);
+    expect(warningsOf(out.body)).toEqual([]);
+    expect(warningsOf(recorded.events[0]?.detail)).toEqual([]);
+    // No membership grants no role, so there is nothing to adjudicate and the directory is not asked.
+    expect(directoryCalls()).toBe(0);
+  });
+
+  it("reports `unresolved` and never `not_declared` when the directory cannot say", async () => {
+    const db = fakeDb([[membershipRow()]]);
+    const { ctx } = ctxFor(new PostgresUserStore(db.conn), { declaredRoles: null });
+    const grant = handlerFor(buildPlatformUserRoutes(ctx), "platform.tenants.members.grant");
+    const out = await grant({
+      principal: principal(),
+      params: { tenantId: TENANT },
+      request: {},
+      parsedBody: { userId: USER, primaryRole: "erp_admin", status: "active" },
+    });
+    expect(out.status).toBe(201);
+    const warnings = warningsOf(out.body);
+    expect(warnings.length).toBeGreaterThan(0);
+    // Nothing was read, so naming a role undeclared would be a claim about a catalog this
+    // deployment could not see — and `declaredRoles` has no list to report.
+    expect(warnings.every((w) => w.verdict === "unresolved")).toBe(true);
+    expect(warnings.every((w) => w.declaredRoles === null)).toBe(true);
+  });
+
+  it("does not gate the write when the directory throws", async () => {
+    const db = fakeDb([[membershipRow()]]);
+    const { ctx } = ctxFor(new PostgresUserStore(db.conn), { directoryThrows: true });
+    const grant = handlerFor(buildPlatformUserRoutes(ctx), "platform.tenants.members.grant");
+    const out = await grant({
+      principal: principal(),
+      params: { tenantId: TENANT },
+      request: {},
+      parsedBody: { userId: USER, primaryRole: "erp_admin", status: "active" },
+    });
+    // A warning changes no status code and no control flow, so an unreachable role catalog must not
+    // turn a legal grant into a 500 — `checkMembershipRoles` folds the throw into `unresolved`.
+    expect(out.status).toBe(201);
+    const warnings = warningsOf(out.body);
+    // `erp_admin` is a *declared* role in the default fake, so a throw folded to "all declared"
+    // yields `[]` — on which `every` is vacuously true. The length is what distinguishes the two,
+    // and without it this test passed for a fence that swallowed the throw entirely.
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.verdict).toBe("unresolved");
+    expect(warnings[0]?.declaredRoles).toBeNull();
+  });
+
+  it("asks the directory once per grant, not once per role", async () => {
+    const db = fakeDb([[membershipRow()]]);
+    const { ctx, directoryCalls } = ctxFor(new PostgresUserStore(db.conn));
+    const grant = handlerFor(buildPlatformUserRoutes(ctx), "platform.tenants.members.grant");
+    await grant({
+      principal: principal(),
+      params: { tenantId: TENANT },
+      request: {},
+      parsedBody: {
+        userId: USER,
+        primaryRole: "erp_admin",
+        secondaryRoles: ["auditor", "ghost_a", "ghost_b"],
+        status: "active",
+      },
+    });
+    expect(directoryCalls()).toBe(1);
+  });
+
+  it("does not consult the directory for a body that never parsed", async () => {
+    const db = fakeDb([]);
+    const { ctx, directoryCalls } = ctxFor(new PostgresUserStore(db.conn));
+    const grant = handlerFor(buildPlatformUserRoutes(ctx), "platform.tenants.members.grant");
+    const out = await grant({
+      principal: principal(),
+      params: { tenantId: TENANT },
+      request: {},
+      parsedBody: { userId: USER, primaryRole: "r" },
+    });
+    expect(out.status).toBe(400);
+    expect(directoryCalls()).toBe(0);
+  });
+});
+
+/* ----------------------------------------------- ?email= and the refused surfaces */
+
+describe("the user list query surfaces", () => {
+  it("binds ?email as a normalised exact match", async () => {
+    const db = fakeDb([[userRow()]]);
+    const { ctx } = ctxFor(new PostgresUserStore(db.conn));
+    const list = handlerFor(buildPlatformUserRoutes(ctx), "platform.users.list");
+    const out = await list({
+      principal: principal(),
+      params: {},
+      request: { query: { email: "Ada@Example.COM" } },
+    });
+    expect(out.status).toBe(200);
+    expect(db.captured[0]?.sql).toMatch(/ WHERE email = \$1/);
+    // Exact, never a LIKE: `users_email_key` is UNIQUE, so an equality is one indexed row.
+    expect(db.captured[0]?.sql).not.toMatch(/LIKE|ILIKE/i);
+    expect(db.captured[0]?.params).toEqual(["ada@example.com", 51, 0]);
+  });
+
+  it("composes ?email with ?status as two predicates", async () => {
+    const db = fakeDb([[userRow()]]);
+    const { ctx } = ctxFor(new PostgresUserStore(db.conn));
+    const list = handlerFor(buildPlatformUserRoutes(ctx), "platform.users.list");
+    await list({
+      principal: principal(),
+      params: {},
+      request: { query: { status: "suspended", email: "ada@example.com" } },
+    });
+    expect(db.captured[0]?.sql).toMatch(/ WHERE status = \$1 AND email = \$2/);
+    expect(db.captured[0]?.params).toEqual(["suspended", "ada@example.com", 51, 0]);
+  });
+
+  it("binds an ?email that is not an address rather than refusing it", async () => {
+    const db = fakeDb([[]]);
+    const { ctx } = ctxFor(new PostgresUserStore(db.conn));
+    const list = handlerFor(buildPlatformUserRoutes(ctx), "platform.users.list");
+    const out = await list({ principal: principal(), params: {}, request: { query: { email: "nope" } } });
+    // The surface is served, so nothing is dropped and ADR-0359 has nothing to refuse: the predicate
+    // is bound and zero rows is the right answer to a value the registry cannot hold.
+    expect(out.status).toBe(200);
+    expect(db.captured[0]?.params).toEqual(["nope", 51, 0]);
+  });
+
+  it("treats an empty ?email as the parameter not being supplied", async () => {
+    const db = fakeDb([[userRow()]]);
+    const { ctx } = ctxFor(new PostgresUserStore(db.conn));
+    const list = handlerFor(buildPlatformUserRoutes(ctx), "platform.users.list");
+    await list({ principal: principal(), params: {}, request: { query: { email: "" } } });
+    expect(db.captured[0]?.sql).not.toMatch(/WHERE/);
+  });
+
+  it("400s an undeclared ?status on the users list and names the admissible set", async () => {
+    const db = fakeDb([[userRow()]]);
+    const { ctx } = ctxFor(new PostgresUserStore(db.conn));
+    const list = handlerFor(buildPlatformUserRoutes(ctx), "platform.users.list");
+    const out = await list({ principal: principal(), params: {}, request: { query: { status: "bogus" } } });
+    // Dropping it returned every row, which is the rows the parameter asked to exclude (ADR-0359).
+    expect(out.status).toBe(400);
+    const body = out.body as { error: string; detail: string; parameter: string };
+    expect(body.error).toBe("status_not_a_declared_value");
+    expect(body.parameter).toBe("status");
+    expect(body.detail).toMatch(/active, suspended, deleted/);
+    expect(db.captured).toHaveLength(0);
+  });
+
+  it("400s an undeclared ?status on the members list too, with its own vocabulary", async () => {
+    const db = fakeDb([[membershipRow()]]);
+    const { ctx } = ctxFor(new PostgresUserStore(db.conn));
+    const members = handlerFor(buildPlatformUserRoutes(ctx), "platform.tenants.members.list");
+    const out = await members({
+      principal: principal(),
+      params: { tenantId: TENANT },
+      request: { query: { status: "deleted" } },
+    });
+    // `deleted` is a *user* status and no membership has one — one defect, two handlers, so the
+    // shared parser is what keeps the two from drifting apart again.
+    expect(out.status).toBe(400);
+    expect((out.body as { detail: string }).detail).toMatch(/active, invited, revoked/);
+    expect(db.captured).toHaveLength(0);
+  });
+
+  it("accepts a declared ?status on the members list", async () => {
+    const db = fakeDb([[membershipRow()]]);
+    const { ctx } = ctxFor(new PostgresUserStore(db.conn));
+    const members = handlerFor(buildPlatformUserRoutes(ctx), "platform.tenants.members.list");
+    const out = await members({
+      principal: principal(),
+      params: { tenantId: TENANT },
+      request: { query: { status: "invited" } },
+    });
+    expect(out.status).toBe(200);
+    expect(db.captured[1]?.params).toEqual([TENANT, "invited", 51, 0]);
+  });
+
+  it("400s a cursor it did not issue rather than handing back page 1", async () => {
+    const db = fakeDb([[userRow()]]);
+    const { ctx } = ctxFor(new PostgresUserStore(db.conn));
+    const list = handlerFor(buildPlatformUserRoutes(ctx), "platform.users.list");
+    const out = await list({ principal: principal(), params: {}, request: { query: { cursor: "garbage" } } });
+    expect(out.status).toBe(400);
+    expect((out.body as { error: string }).error).toBe("cursor_unreadable");
+    expect(db.captured).toHaveLength(0);
+  });
+
+  it("accepts a cursor it issued and binds its offset", async () => {
+    const first = fakeDb([[userRow({ id: USER }), userRow({ id: OTHER_TENANT })]]);
+    const store = new PostgresUserStore(first.conn);
+    const page = await store.list({ limit: 1 });
+    const cursor = page.nextCursor;
+    expect(cursor).not.toBeNull();
+
+    const second = fakeDb([[userRow()]]);
+    const { ctx } = ctxFor(new PostgresUserStore(second.conn));
+    const list = handlerFor(buildPlatformUserRoutes(ctx), "platform.users.list");
+    const out = await list({
+      principal: principal(),
+      params: {},
+      request: { query: { cursor: cursor ?? "", limit: "1" } },
+    });
+    expect(out.status).toBe(200);
+    expect(second.captured[0]?.params).toEqual([2, 1]);
+  });
+
+  it("400s a ?limit that is not a decimal integer", async () => {
+    const db = fakeDb([[userRow()]]);
+    const { ctx } = ctxFor(new PostgresUserStore(db.conn));
+    const list = handlerFor(buildPlatformUserRoutes(ctx), "platform.users.list");
+    for (const limit of ["abc", "1.5", "0x10", "nine"]) {
+      const out = await list({ principal: principal(), params: {}, request: { query: { limit } } });
+      expect(out.status).toBe(400);
+      expect((out.body as { error: string }).error).toBe("limit_not_an_integer");
+    }
+    expect(db.captured).toHaveLength(0);
+  });
+
+  it("clamps a well-formed ?limit that is out of range rather than refusing it", async () => {
+    const db = fakeDb([[userRow()], [userRow()]]);
+    const { ctx } = ctxFor(new PostgresUserStore(db.conn));
+    const list = handlerFor(buildPlatformUserRoutes(ctx), "platform.users.list");
+    // The asymmetry is ADR-0359's rule split: a malformed value is a caller mistake they can act
+    // on, while `REGISTRY_LIST_MAX_LIMIT` is a platform decision the caller does not get to overrule.
+    const high = await list({ principal: principal(), params: {}, request: { query: { limit: "9999" } } });
+    expect(high.status).toBe(200);
+    expect(db.captured[0]?.params).toEqual([REGISTRY_LIST_MAX_LIMIT + 1, 0]);
+    const low = await list({ principal: principal(), params: {}, request: { query: { limit: "0" } } });
+    expect(low.status).toBe(200);
+    expect(db.captured[1]?.params).toEqual([2, 0]);
+  });
+
+  it("clamps a signed ?limit rather than refusing it, which is why the shape admits a sign", async () => {
+    const db = fakeDb([[userRow()]]);
+    const { ctx } = ctxFor(new PostgresUserStore(db.conn));
+    const list = handlerFor(buildPlatformUserRoutes(ctx), "platform.users.list");
+    const out = await list({ principal: principal(), params: {}, request: { query: { limit: "-5" } } });
+    expect(out.status).toBe(200);
+    expect(db.captured[0]?.params).toEqual([2, 0]);
+  });
+
+  it("names the predicate first when several parameters are wrong at once", async () => {
+    const db = fakeDb([[userRow()]]);
+    const { ctx } = ctxFor(new PostgresUserStore(db.conn));
+    const list = handlerFor(buildPlatformUserRoutes(ctx), "platform.users.list");
+    // The parser's stated precedence: the predicate, then the position within it, then the page
+    // size — so a caller who got several wrong is told first about the one that most changed what
+    // came back. Unpinned, the next person to reorder those three `if`s decides it by accident.
+    const all = await list({
+      principal: principal(),
+      params: {},
+      request: { query: { status: "bogus", cursor: "garbage", limit: "abc" } },
+    });
+    expect((all.body as { parameter: string }).parameter).toBe("status");
+    const two = await list({
+      principal: principal(),
+      params: {},
+      request: { query: { cursor: "garbage", limit: "abc" } },
+    });
+    expect((two.body as { parameter: string }).parameter).toBe("cursor");
+    expect(db.captured).toHaveLength(0);
+  });
+
+  it("ignores a parameter that names nothing", async () => {
+    const db = fakeDb([[userRow()]]);
+    const { ctx } = ctxFor(new PostgresUserStore(db.conn));
+    const list = handlerFor(buildPlatformUserRoutes(ctx), "platform.users.list");
+    const out = await list({
+      principal: principal(),
+      params: {},
+      request: { query: { utm_source: "ad" } },
+    });
+    // ADR-0359's own distinction: `?utm_source=ad` names nothing this surface declined to serve.
+    expect(out.status).toBe(200);
+    expect(db.captured[0]?.sql).not.toMatch(/WHERE/);
+  });
+
+  it("answers the offset for a cursor it issued and null for anything else", () => {
+    const issued = Buffer.from("o:120", "utf8").toString("base64url");
+    expect(decodeUserListCursor(issued)).toBe(120);
+    expect(isUserListCursor(issued)).toBe(true);
+    for (const raw of ["garbage", "", Buffer.from("x:1", "utf8").toString("base64url")]) {
+      expect(decodeUserListCursor(raw)).toBeNull();
+      expect(isUserListCursor(raw)).toBe(false);
+    }
+    // A digit run past the safe-integer range is a cursor nobody issued, not an enormous offset.
+    expect(decodeUserListCursor(Buffer.from("o:99999999999999999999", "utf8").toString("base64url"))).toBeNull();
+  });
+
+  it("makes the store throw on a cursor it did not issue, rather than serving page 1", async () => {
+    const db = fakeDb([[userRow()]]);
+    const store = new PostgresUserStore(db.conn);
+    await expect(store.list({ cursor: "garbage" })).rejects.toThrow(/cursor/);
+    await expect(store.membershipsForTenant(TENANT, { cursor: "garbage" })).rejects.toThrow(/cursor/);
+    expect(db.captured).toHaveLength(0);
+  });
+});
+
+/* ------------------------------------------------- the stats route and the matcher */
+
+describe("the user stats route", () => {
+  it("serves the store's counts and records nothing", async () => {
+    const db = fakeDb([[{ status: "active", count: 4 }, { status: "deleted", count: 1 }]]);
+    const { ctx, recorded } = ctxFor(new PostgresUserStore(db.conn));
+    const stats = handlerFor(buildPlatformUserRoutes(ctx), "platform.users.stats");
+    const out = await stats({ principal: principal(), params: {}, request: {} });
+    expect(out.status).toBe(200);
+    expect((out.body as { counts: { active: number; total: number } }).counts).toEqual({
+      active: 4,
+      suspended: 0,
+      deleted: 1,
+      total: 5,
+    });
+    // A read of aggregate figures over the registry, like the list and get routes beside it; the
+    // rule that records a read here is about reading the *trail*.
+    expect(recorded.events).toHaveLength(0);
+  });
+
+  it("is admin-guarded by the same guard as every other route", async () => {
+    const db = fakeDb([[]]);
+    const { ctx } = ctxFor(new PostgresUserStore(db.conn), { roles: ["erp_admin"] });
+    const stats = handlerFor(buildPlatformUserRoutes(ctx), "platform.users.stats");
+    expect((await stats({ principal: null, params: {}, request: {} })).status).toBe(401);
+    expect((await stats({ principal: principal(), params: {}, request: {} })).status).toBe(403);
+  });
+
+  it("resolves /v1/platform/users/stats through the real matcher, not the id route", () => {
+    const db = fakeDb([]);
+    const { ctx } = ctxFor(new PostgresUserStore(db.conn));
+    const routes = buildPlatformUserRoutes(ctx).map((r) => r.route);
+    const match = matchRoute(routes, "GET", "/v1/platform/users/stats", "v1", new Date(AT));
+    expect(match.outcome).toBe("matched");
+    expect(match.route?.operationId).toBe("platform.users.stats");
+  });
+
+  it("still resolves an id-shaped segment to the get route", () => {
+    const db = fakeDb([]);
+    const { ctx } = ctxFor(new PostgresUserStore(db.conn));
+    const routes = buildPlatformUserRoutes(ctx).map((r) => r.route);
+    const match = matchRoute(routes, "GET", `/v1/platform/users/${USER}`, "v1", new Date(AT));
+    expect(match.outcome).toBe("matched");
+    expect(match.route?.operationId).toBe("platform.users.get");
+    expect(match.pathParameters["id"]).toBe(USER);
+  });
+
+  it("answers no_route for a segment that is neither a literal sibling nor an id", () => {
+    const db = fakeDb([]);
+    const { ctx } = ctxFor(new PostgresUserStore(db.conn));
+    const routes = buildPlatformUserRoutes(ctx).map((r) => r.route);
+    // Without the uuid pattern this matched `platform.users.get` and answered a 400 from inside a
+    // handler that was never meant for it. There is no such route, which is the honest answer.
+    const match = matchRoute(routes, "GET", "/v1/platform/users/not-a-uuid", "v1", new Date(AT));
+    expect(match.outcome).toBe("no_route");
+    expect(match.route).toBeNull();
+  });
+
+  it("admits exactly what the handler's own parse admits, so the matcher routes nothing it refuses", () => {
+    const db = fakeDb([]);
+    const { ctx } = ctxFor(new PostgresUserStore(db.conn));
+    const segs =
+      buildPlatformUserRoutes(ctx).find((r) => r.route.operationId === "platform.users.get")?.route
+        .pathSegments ?? [];
+    const seg = segs.find((s) => s.kind === "parameter");
+    const raw = seg !== undefined && seg.kind === "parameter" ? seg.pattern : null;
+    expect(raw).not.toBeNull();
+    const pattern = new RegExp(`^${raw ?? ""}$`);
+    // `z.string().uuid()` on the resolved zod is a bare hex-and-dashes shape — it pins neither the
+    // version nor the variant nibble — so the two coincide and the handler's 400 is unreachable
+    // through the matcher. Pinned because the comment on the pattern rests on it: should the parse
+    // ever narrow, the matcher would route a segment the handler refuses, which is the 400 the
+    // pattern exists to stop.
+    for (const candidate of [
+      "99999999-9999-4999-8999-999999999999",
+      "11111111-1111-1111-1111-111111111111",
+      "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
+      "00000000-0000-0000-0000-000000000000",
+      "not-a-uuid",
+      "stats",
+      "99999999999999999999999999999999",
+    ]) {
+      expect(pattern.test(candidate)).toBe(z.string().uuid().safeParse(candidate).success);
+    }
+  });
+
+  it("declares the uuid pattern on the id segment and nowhere it decides nothing", () => {
+    const db = fakeDb([]);
+    const { ctx } = ctxFor(new PostgresUserStore(db.conn));
+    const routes = buildPlatformUserRoutes(ctx);
+    const patternOf = (op: string, name: string): string | null | undefined => {
+      const segs = routes.find((r) => r.route.operationId === op)?.route.pathSegments ?? [];
+      const seg = segs.find((s) => s.kind === "parameter" && s.name === name);
+      return seg !== undefined && seg.kind === "parameter" ? seg.pattern : undefined;
+    };
+    expect(patternOf("platform.users.get", "id")).toMatch(/^\[0-9a-fA-F\]\{8\}-/);
+    // `tenantId` has no literal sibling at its position, so there is nothing for the matcher to
+    // separate and the handler's own parse is the whole fence there.
+    expect(patternOf("platform.tenants.members.list", "tenantId")).toBeNull();
+  });
+
+  it("orders stats ahead of the id route as well, so neither fence stands alone", () => {
+    const db = fakeDb([]);
+    const { ctx } = ctxFor(new PostgresUserStore(db.conn));
+    const ops = buildPlatformUserRoutes(ctx).map((r) => r.route.operationId);
+    expect(ops.indexOf("platform.users.stats")).toBeLessThan(ops.indexOf("platform.users.get"));
   });
 });

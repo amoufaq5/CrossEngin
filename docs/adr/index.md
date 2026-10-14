@@ -1,10 +1,10 @@
 # ADR index
 
-359 records. Generated from the ADR files themselves — regenerate rather than
+360 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 280  **Proposed:** 79
+- **Accepted:** 281  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -371,3 +371,4 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0362](0362-a-predicate-deciding-from-a-subset-of-its-own-facts.md) | A predicate deciding from a proper subset of its own facts | — | Accepted | 2026-10-12 |
 | [0363](0363-a-guard-asking-a-proxy-for-its-own-question.md) | A guard asking a proxy for its own question | — | Accepted | 2026-10-13 |
 | [0364](0364-an-argument-that-expired-and-nothing-noticed.md) | An argument that expired, and nothing noticed | — | Accepted | 2026-10-13 |
+| [0365](0365-a-route-that-accepts-what-it-neither-serves-nor-adjudicates.md) | A route that accepts what it neither serves nor adjudicates | — | Accepted | 2026-10-14 |

@@ -5,6 +5,12 @@ import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
 import { withTenantContext } from "@crossengin/operate-runtime-pg";
 import { z } from "zod";
 
+import {
+  checkMembershipRoles,
+  type MembershipRoleDirectory,
+  type MembershipRoleWarning,
+} from "./membership-role-fence.js";
+
 /**
  * The writer `meta.users` and `meta.user_tenant_membership` never had.
  *
@@ -202,7 +208,15 @@ const MEMBERSHIP_COLUMNS =
   " created_at, updated_at";
 
 const DEFAULT_LIMIT = 50;
-const MAX_LIMIT = 200;
+
+/**
+ * The page-size ceiling both registry lists clamp to.
+ *
+ * Exported under a qualified name rather than as `MAX_LIMIT`, which **eleven** sibling modules in
+ * this app hold privately and none exports: `index.ts` re-exports this file with `export *`, so the
+ * bare name would be a collision waiting for the second of them to be exported.
+ */
+export const REGISTRY_LIST_MAX_LIMIT = 200;
 
 /** Thrown when an INSERT hits `users_email_key` → maps to 409. */
 export class DuplicateUserError extends Error {
@@ -237,6 +251,16 @@ export class UnknownPrincipalError extends Error {
 
 export interface UserListQuery {
   readonly status?: UserStatus;
+  /**
+   * An **exact** match, folded through `normalizeEmail` — the same function the write path uses, so
+   * a lookup for `Alice@Example.com` finds the row stored as `alice@example.com`.
+   *
+   * Exact and deliberately not a prefix or a substring: `users_email_key` is a UNIQUE constraint,
+   * so an equality resolves one indexed row, where a `LIKE`/`ILIKE` is the unindexed scan that is a
+   * standing open defect on this repo's entity list surfaces. Offering a substring search here
+   * would import it into the registry every console page load walks.
+   */
+  readonly email?: string;
   readonly limit?: number;
   readonly cursor?: string;
 }
@@ -261,21 +285,46 @@ function encodeCursor(offset: number): string {
   return Buffer.from(`o:${offset}`, "utf8").toString("base64url");
 }
 
-function decodeCursor(cursor: string | undefined): number {
+/**
+ * The offset a cursor names, or `null` when it is not one this surface issued.
+ *
+ * `null` rather than `0`, which is the whole of ADR-0359's class on this parameter: a cursor that
+ * decoded to 0 handed the caller page 1 under a 200 they could not tell from the page they asked
+ * for. `decodeAuditReadCursor` already answers this way and its store throws on the `null`.
+ *
+ * An **absent** cursor is not a refusal — it is the first page — so it is answered by the caller
+ * rather than folded in here. That is what lets one function serve both the handlers' 400 and the
+ * store's throw without either re-deciding the format.
+ */
+export function decodeUserListCursor(cursor: string): number | null {
+  // `Buffer.from(…, "base64url")` drops characters outside the alphabet rather than throwing, so
+  // the shape test on the decoded text is the whole validation and there is nothing to catch.
+  const match = /^o:(\d+)$/.exec(Buffer.from(cursor, "base64url").toString("utf8"));
+  if (match === null) return null;
+  const offset = Number.parseInt(match[1] ?? "", 10);
+  return Number.isSafeInteger(offset) ? offset : null;
+}
+
+/** Whether a raw query value is a cursor this surface issued — the handlers' half of that answer. */
+export function isUserListCursor(raw: string): boolean {
+  return decodeUserListCursor(raw) !== null;
+}
+
+function cursorOffset(cursor: string | undefined): number {
   if (cursor === undefined || cursor.length === 0) return 0;
-  try {
-    const match = /^o:(\d+)$/.exec(Buffer.from(cursor, "base64url").toString("utf8"));
-    return match === null ? 0 : Number.parseInt(match[1] ?? "0", 10);
-  } catch {
-    return 0;
-  }
+  const offset = decodeUserListCursor(cursor);
+  // Refuses rather than falling to 0. The handlers 400 an unreadable cursor before the store is
+  // reached, so this answers a direct caller — and answering 0 there would be the same wrong page
+  // under a different surface.
+  if (offset === null) throw new Error(`invalid user list cursor: ${JSON.stringify(cursor)}`);
+  return offset;
 }
 
 function clampLimit(limit: number | undefined): number {
   if (limit === undefined || !Number.isFinite(limit)) return DEFAULT_LIMIT;
   const n = Math.floor(limit);
   if (n < 1) return 1;
-  return n > MAX_LIMIT ? MAX_LIMIT : n;
+  return n > REGISTRY_LIST_MAX_LIMIT ? REGISTRY_LIST_MAX_LIMIT : n;
 }
 
 function pgCode(err: unknown): string | null {
@@ -471,13 +520,18 @@ export class PostgresUserStore {
 
   async list(query: UserListQuery = {}): Promise<UserListPage> {
     const limit = clampLimit(query.limit);
-    const offset = decodeCursor(query.cursor);
+    const offset = cursorOffset(query.cursor);
     const params: unknown[] = [];
-    let where = "";
+    const clauses: string[] = [];
     if (query.status !== undefined) {
       params.push(query.status);
-      where = ` WHERE status = $${String(params.length)}`;
+      clauses.push(`status = $${String(params.length)}`);
     }
+    if (query.email !== undefined) {
+      params.push(normalizeEmail(query.email));
+      clauses.push(`email = $${String(params.length)}`);
+    }
+    const where = clauses.length === 0 ? "" : ` WHERE ${clauses.join(" AND ")}`;
     params.push(limit + 1);
     const limitParam = params.length;
     params.push(offset);
@@ -607,7 +661,7 @@ export class PostgresUserStore {
     query: { readonly status?: MembershipStatus; readonly limit?: number; readonly cursor?: string } = {},
   ): Promise<MembershipListPage> {
     const limit = clampLimit(query.limit);
-    const offset = decodeCursor(query.cursor);
+    const offset = cursorOffset(query.cursor);
     const scope = scopeFilter(tenantId, 1);
     const params: unknown[] = [...scope.params];
     let where = ` WHERE ${scope.sql}`;
@@ -718,6 +772,16 @@ export interface PlatformUserRoutesContext {
    * surface is that grant, so the refusal is unconditional rather than per route.
    */
   readonly audit: UserRegistryAuditor;
+  /**
+   * Which roles the tenant a membership is being granted into actually declares, or `null` wherever
+   * this process cannot name that set.
+   *
+   * Required, not optional, following `audit` above it: an optional field can be forgotten with the
+   * type still valid (ADR-0330's rule), and forgetting *this* one means the fence silently does
+   * nothing on the two surfaces it exists to guard — the permissive direction, and indistinguishable
+   * from a deployment whose roles all check out. The compiler asks instead.
+   */
+  readonly roleDirectory: MembershipRoleDirectory;
   readonly clock?: () => Date;
 }
 
@@ -793,13 +857,159 @@ async function recordRefusal(
 
 function firstQueryValue(value: string | readonly string[] | undefined): string | undefined {
   if (value === undefined) return undefined;
-  return Array.isArray(value) ? value[0] : (value as string);
+  // `typeof` rather than `Array.isArray`, whose `arg is any[]` narrows this union in the **positive**
+  // direction only: inside the `if` the value really is a `string[]`, and the `else` keeps the whole
+  // union, because `readonly string[]` is not assignable to `any[]` and so is not subtracted. That
+  // is why the cast this replaces sat in the `else` arm (ADR-0362). `typeof` narrows both arms.
+  return typeof value === "string" ? value : value[0];
+}
+
+/**
+ * The first value a caller actually supplied for a parameter, treating an empty one as absent.
+ *
+ * A form serialises an unset field as `?k=`, and ADR-0359's class is about a value the caller *did*
+ * supply being dropped — so an empty value is the parameter not being named, and the refusals below
+ * read a present, non-empty one. One rule for all four parameters rather than per-parameter
+ * judgement, which is how `?cursor=` and `?limit=` would otherwise come to disagree about the same
+ * character.
+ */
+function suppliedQueryValue(value: string | readonly string[] | undefined): string | undefined {
+  const first = firstQueryValue(value);
+  return first === undefined || first.length === 0 ? undefined : first;
 }
 
 function queryOf(input: Parameters<Handler>[0]): Record<string, string | string[]> {
-  return (
-    (input.request as { query?: Record<string, string | string[]> } | undefined)?.query ?? {}
-  );
+  // `IncomingRequest.query` is defaulted by its schema, so the type says it is always present; an
+  // adapter or a test double that assembled the request by hand may not have set it, and an empty
+  // map is the honest reading of "this caller named no parameters".
+  return input.request.query ?? {};
+}
+
+/**
+ * The list parameters whose supplied value can be refused outright.
+ *
+ * Module-private, unlike every `*_STATUSES` vocabulary above: what a client branches on is the
+ * `error` code, not the parameter name, so exporting this would be a declaration with no reader.
+ */
+const LIST_QUERY_REFUSALS = ["status", "cursor", "limit"] as const;
+type ListQueryRefusal = (typeof LIST_QUERY_REFUSALS)[number];
+
+/**
+ * Why each refusable parameter is refused, a **total map** so a fourth is a compile error rather
+ * than a 400 with no explanation (`UNSERVED_LIST_OUTPUTS`' shape).
+ *
+ * Each reason says what the parameter used to do instead, because that is the half a caller cannot
+ * see: all three were *dropped*, and a dropped predicate is a 200 carrying the rows the parameter
+ * asked to exclude.
+ */
+const LIST_QUERY_REFUSAL_OUTPUTS: Readonly<
+  Record<ListQueryRefusal, { readonly error: string; readonly reason: string }>
+> = {
+  status: {
+    error: "status_not_a_declared_value",
+    reason:
+      "not a value the column's CHECK admits, so the filter was previously dropped and the response" +
+      " carried every row — including the ones this parameter asked to exclude",
+  },
+  cursor: {
+    error: "cursor_unreadable",
+    reason:
+      "not a cursor this surface issued, so it previously decoded to offset 0 and the response was" +
+      " page 1 under a 200 indistinguishable from the page that was asked for",
+  },
+  limit: {
+    error: "limit_not_an_integer",
+    reason:
+      "not a decimal integer, so it previously fell to the default page size; a well-formed page" +
+      ` size outside 1..${String(REGISTRY_LIST_MAX_LIMIT)} is clamped rather than refused`,
+  },
+};
+
+interface ListQueryRefusalDetail {
+  readonly parameter: ListQueryRefusal;
+  readonly value: string;
+  /** The whole admissible set where there is one to print, and `null` where the shape is the rule. */
+  readonly admissible: readonly string[] | null;
+}
+
+function listQueryRefused(refusal: ListQueryRefusalDetail): HandlerOutput {
+  const { error, reason } = LIST_QUERY_REFUSAL_OUTPUTS[refusal.parameter];
+  const admissible =
+    refusal.admissible === null ? "" : ` Admissible: ${refusal.admissible.join(", ")}.`;
+  return json(400, {
+    error,
+    detail: `'?${refusal.parameter}=${refusal.value}' is ${reason}.${admissible}`,
+    parameter: refusal.parameter,
+  });
+}
+
+interface RegistryListParams<S extends string> {
+  readonly status: S | undefined;
+  readonly limit: number | undefined;
+  readonly cursor: string | undefined;
+}
+
+type RegistryListParse<S extends string> =
+  | { readonly ok: true; readonly query: RegistryListParams<S> }
+  | { readonly ok: false; readonly refusal: ListQueryRefusalDetail };
+
+/**
+ * A decimal integer, optionally signed. A negative page size is in shape and out of range, so it
+ * clamps to 1 rather than being refused — the split the parser's own doc comment states.
+ */
+const DECIMAL_INT_RE = /^[+-]?\d+$/;
+
+/**
+ * The three parameters both registry list handlers read, adjudicated once.
+ *
+ * One parser with the status vocabulary as its argument rather than one per handler: the two differ
+ * in nothing else, and two copies is how both came to drop `?status=bogus` identically and in
+ * silence.
+ *
+ * Refusals are returned in the order the parameters narrow the answer — the predicate, then the
+ * position within it, then the page size — so a caller who got several wrong is told first about
+ * the one that most changed what came back.
+ *
+ * An **unknown** parameter stays ignored. `?utm_source=ad` names nothing this surface declined to
+ * serve, which is ADR-0359's own distinction between a parameter that was dropped and one that
+ * never applied.
+ *
+ * The page size is decided on a different axis, and saying which one matters because ADR-0359's rule
+ * does not reach it: that rule refuses a surface whose drop changes WHICH rows come back and reports
+ * one whose drop changes only their ORDER, while a dropped `?limit` changes **how many** — neither
+ * half. So the two parameters above are refused under the rule and this one is adjudicated on
+ * malformed-versus-out-of-range. `?limit=abc` is malformed — the caller named a page size and
+ * supplied something that is not one, which is a mistake they can act on — so it is refused.
+ * `?limit=9999` is well formed and out of range, and `REGISTRY_LIST_MAX_LIMIT` is a platform decision
+ * the caller does not get to overrule, so it clamps.
+ */
+function parseRegistryListQuery<S extends string>(
+  query: Readonly<Record<string, string | readonly string[]>>,
+  statuses: readonly S[],
+): RegistryListParse<S> {
+  const statusRaw = suppliedQueryValue(query["status"]);
+  // `find` rather than `includes` plus a cast: the membership test and the narrowing are one step,
+  // so no annotation stands in for the check (ADR-0362).
+  const status = statusRaw === undefined ? undefined : statuses.find((s) => s === statusRaw);
+  if (statusRaw !== undefined && status === undefined) {
+    return { ok: false, refusal: { parameter: "status", value: statusRaw, admissible: statuses } };
+  }
+  const cursor = suppliedQueryValue(query["cursor"]);
+  if (cursor !== undefined && !isUserListCursor(cursor)) {
+    return { ok: false, refusal: { parameter: "cursor", value: cursor, admissible: null } };
+  }
+  const limitRaw = suppliedQueryValue(query["limit"]);
+  if (limitRaw !== undefined && !DECIMAL_INT_RE.test(limitRaw)) {
+    return { ok: false, refusal: { parameter: "limit", value: limitRaw, admissible: null } };
+  }
+  return {
+    ok: true,
+    query: {
+      status,
+      limit: limitRaw === undefined ? undefined : Number.parseInt(limitRaw, 10),
+      cursor,
+    },
+  };
 }
 
 function buildListUsersHandler(ctx: PlatformUserRoutesContext): Handler {
@@ -807,18 +1017,35 @@ function buildListUsersHandler(ctx: PlatformUserRoutesContext): Handler {
     const denial = guard(ctx, input.principal);
     if (denial !== null) return denial;
     const query = queryOf(input);
-    const statusRaw = firstQueryValue(query["status"]);
-    const status =
-      statusRaw !== undefined && (USER_STATUSES as readonly string[]).includes(statusRaw)
-        ? (statusRaw as UserStatus)
-        : undefined;
-    const limitRaw = firstQueryValue(query["limit"]);
+    const parsed = parseRegistryListQuery(query, USER_STATUSES);
+    if (!parsed.ok) return listQueryRefused(parsed.refusal);
     const page = await ctx.store.list({
-      status,
-      limit: limitRaw === undefined ? undefined : Number.parseInt(limitRaw, 10),
-      cursor: firstQueryValue(query["cursor"]),
+      ...parsed.query,
+      // No refusal of its own: an `?email=` that is not an address names nothing this registry can
+      // hold, and zero rows is the right answer to it rather than a mistake to report.
+      email: suppliedQueryValue(query["email"]),
     });
     return json(200, { data: page.data, page: { nextCursor: page.nextCursor } });
+  };
+}
+
+/**
+ * The aggregate figures, which `counts()` has computed since it was written and nothing asked for.
+ *
+ * Not audited, and the two reads beside it are why: `platform.users.list` and `platform.users.get`
+ * serve the registry unrecorded, and this serves strictly less of it — per-status totals over the
+ * same rows. The rule that records a read in this repo is about reading the *trail*
+ * (`--audit-read-routes`), where the subject of the read is every tenant's conduct.
+ *
+ * Its own route and deliberately **not** folded into `GET /v1/platform/stats`: that one mounts under
+ * a different grant (`--platform-admin-role`) over `PostgresTenantStore`, so merging them would make
+ * a user census require the tenant-administration grant.
+ */
+function buildUserStatsHandler(ctx: PlatformUserRoutesContext): Handler {
+  return async ({ principal }) => {
+    const denial = guard(ctx, principal);
+    if (denial !== null) return denial;
+    return json(200, { counts: await ctx.store.counts() });
   };
 }
 
@@ -843,6 +1070,25 @@ function buildProvisionHandler(ctx: PlatformUserRoutesContext): Handler {
       return json(400, { error: "invalid_request", detail: parsed.error.issues });
     }
     const { user, membership } = parsed.data;
+    // After the body parses and before the record, because the warnings ride on the audit detail and
+    // ADR-0313 puts the record before the write — a detail added afterwards would not be in the row.
+    // `[]` and never an omitted field: an absent list reads as "none" and would be indistinguishable
+    // from "not checked" (ADR-0331), and being told is the whole point of the fence. A body with no
+    // membership grants no role, so the empty list is the claim rather than a gap.
+    const roleWarnings: readonly MembershipRoleWarning[] =
+      membership === undefined
+        ? []
+        : await checkMembershipRoles(
+            {
+              // The membership's own tenant, which is the body's and deliberately not the caller's
+              // (see `ProvisionBodySchema`): the roles are adjudicated against the tenant the grant
+              // lands in, and a platform operator provisions into tenants they do not belong to.
+              tenantId: membership.tenantId,
+              primaryRole: membership.primaryRole,
+              secondaryRoles: membership.secondaryRoles,
+            },
+            ctx.roleDirectory,
+          );
     const event: Omit<UserRegistryAuditEvent, "at"> = {
       operation: USER_PROVISIONED_OPERATION,
       tenantId: membership?.tenantId ?? null,
@@ -862,13 +1108,14 @@ function buildProvisionHandler(ctx: PlatformUserRoutesContext): Handler {
                 primaryRole: membership.primaryRole,
                 status: membership.status,
               },
+        roleWarnings,
       },
     };
     const unrecordable = await record(ctx, event);
     if (unrecordable !== null) return unrecordable;
     try {
       const created = await ctx.store.provision(user, membership);
-      return json(201, { user: created.user, membership: created.membership });
+      return json(201, { user: created.user, membership: created.membership, roleWarnings });
     } catch (err) {
       if (err instanceof DuplicateUserError) {
         return recordRefusal(ctx, event, "user_exists", json(409, { error: "user_exists", detail: err.message }));
@@ -957,18 +1204,9 @@ function buildListMembersHandler(ctx: PlatformUserRoutesContext): Handler {
     if (!z.string().uuid().safeParse(tenantId).success) {
       return json(400, { error: "invalid_request", detail: "tenantId must be a uuid" });
     }
-    const query = queryOf(input);
-    const statusRaw = firstQueryValue(query["status"]);
-    const status =
-      statusRaw !== undefined && (MEMBERSHIP_STATUSES as readonly string[]).includes(statusRaw)
-        ? (statusRaw as MembershipStatus)
-        : undefined;
-    const limitRaw = firstQueryValue(query["limit"]);
-    const page = await ctx.store.membershipsForTenant(tenantId, {
-      status,
-      limit: limitRaw === undefined ? undefined : Number.parseInt(limitRaw, 10),
-      cursor: firstQueryValue(query["cursor"]),
-    });
+    const parsed = parseRegistryListQuery(queryOf(input), MEMBERSHIP_STATUSES);
+    if (!parsed.ok) return listQueryRefused(parsed.refusal);
+    const page = await ctx.store.membershipsForTenant(tenantId, parsed.query);
     return json(200, { data: page.data, page: { nextCursor: page.nextCursor } });
   };
 }
@@ -990,6 +1228,13 @@ function buildGrantMembershipHandler(ctx: PlatformUserRoutesContext): Handler {
     // The tenant is the path's, never the body's: two places naming it is two chances to disagree,
     // and the path is the one the grant's own scope predicate is built from.
     const input: GrantMembershipInput = { ...parsed.data, tenantId };
+    // After the body parses and before the record, for the reason `buildProvisionHandler` states:
+    // the warnings ride on the audit detail, so they have to exist by the time `record` runs. They
+    // gate nothing — no status code and no control flow turns on them.
+    const roleWarnings = await checkMembershipRoles(
+      { tenantId, primaryRole: input.primaryRole, secondaryRoles: input.secondaryRoles },
+      ctx.roleDirectory,
+    );
     const event: Omit<UserRegistryAuditEvent, "at"> = {
       operation: MEMBERSHIP_GRANTED_OPERATION,
       tenantId,
@@ -1000,13 +1245,14 @@ function buildGrantMembershipHandler(ctx: PlatformUserRoutesContext): Handler {
         primaryRole: input.primaryRole,
         secondaryRoles: input.secondaryRoles,
         status: input.status,
+        roleWarnings,
       },
     };
     const unrecordable = await record(ctx, event);
     if (unrecordable !== null) return unrecordable;
     try {
       const membership = await ctx.store.grantMembership(input);
-      return json(201, { membership });
+      return json(201, { membership, roleWarnings });
     } catch (err) {
       if (err instanceof DuplicateMembershipError) {
         return recordRefusal(
@@ -1074,15 +1320,45 @@ function buildMembershipTransitionHandler(
   };
 }
 
+/**
+ * A single path segment shaped like a UUID.
+ *
+ * On `platform.users.get` this is load-bearing rather than defensive. `matchRoute` returns the
+ * **first** route whose segments match and a parameter with `pattern: null` matches any single
+ * segment, so without it `/v1/platform/users/stats` is swallowed by the id route and answered
+ * `400 id must be a uuid`. The matcher is the thing that decides which route a path reaches, so the
+ * matcher is the thing asked; placing `stats` ahead of `get` costs nothing and is done as well, but
+ * ordering alone would leave the next literal sibling in the same trap.
+ *
+ * It admits the **same set** as `z.string().uuid()` rather than a looser one, which is measured and
+ * not assumed: on the zod this app resolves (3.25.76) that check is a bare hex-and-dashes shape — it
+ * pins neither the version nor the variant nibble, so `11111111-1111-1111-1111-111111111111` parses
+ * — and over 20,000 random segments of this shape the two agreed every time. So the handler's own
+ * parse is a redundant second reader here and not a narrower one, and claiming it refuses something
+ * the matcher admitted would be a division of labour that does not exist. What the pattern therefore
+ * buys is the matcher's answer rather than a handler's: a segment that is not id-shaped is a clean
+ * `no_route` — there is no such route — instead of a 400 from inside a handler never meant for it.
+ * `buildGetUserHandler`'s own 400 is unreachable through the matcher as a consequence, and stays as
+ * the fence for a direct call.
+ *
+ * Should that check ever narrow, the pattern must narrow with it or the matcher would route a
+ * segment to a handler that refuses it, which is the 400 this exists to stop.
+ *
+ * Not applied to `tenantId` or `userId`: neither has a literal sibling at its position, so there is
+ * nothing for the matcher to separate and the handler's parse is the whole fence there.
+ */
+const UUID_SEGMENT_PATTERN =
+  "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
+
 function route(
   operationId: string,
   method: RouteDefinition["method"],
-  segments: ReadonlyArray<string | { param: string }>,
+  segments: ReadonlyArray<string | { param: string; pattern?: string }>,
 ): RouteDefinition {
   const pathSegments: PathSegment[] = segments.map((s) =>
     typeof s === "string"
       ? { kind: "literal", value: s }
-      : { kind: "parameter", name: s.param, pattern: null },
+      : { kind: "parameter", name: s.param, pattern: s.pattern ?? null },
   );
   return {
     id: `rt_${operationId.replace(/[^a-z0-9]+/gi, "_")}`,
@@ -1124,16 +1400,19 @@ export function buildPlatformUserRoutes(
   const v = (
     op: string,
     method: RouteDefinition["method"],
-    segs: ReadonlyArray<string | { param: string }>,
+    segs: ReadonlyArray<string | { param: string; pattern?: string }>,
     handler: Handler,
   ): ExtraGatewayRoute => ({ route: route(op, method, segs), handler });
   return [
     v("platform.users.list", "GET", ["v1", "platform", "users"], buildListUsersHandler(ctx)),
     v("platform.users.provision", "POST", ["v1", "platform", "users"], buildProvisionHandler(ctx)),
+    // Ahead of `platform.users.get`, whose parameter would otherwise match `stats` — belt and
+    // braces beside `UUID_SEGMENT_PATTERN`, which is what actually separates the two.
+    v("platform.users.stats", "GET", ["v1", "platform", "users", "stats"], buildUserStatsHandler(ctx)),
     v(
       "platform.users.get",
       "GET",
-      ["v1", "platform", "users", { param: "id" }],
+      ["v1", "platform", "users", { param: "id", pattern: UUID_SEGMENT_PATTERN }],
       buildGetUserHandler(ctx),
     ),
     v(

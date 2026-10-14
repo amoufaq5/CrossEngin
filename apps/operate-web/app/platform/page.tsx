@@ -5,8 +5,9 @@ import { useCallback, useEffect, useState } from "react";
 
 import { Badge } from "@/components/Badge";
 import { Topbar } from "@/components/Topbar";
-import { formatCell } from "@/lib/format";
+import { formatCell, titleCase } from "@/lib/format";
 import {
+  TENANT_STATUSES,
   listTenants,
   platformStats,
   type Tenant,
@@ -69,12 +70,23 @@ export default function PlatformConsolePage() {
     <>
       <Topbar title="Platform" subtitle="Tenant management · super-admin" />
       <div className="px-8 py-6">
-        <section className="mb-8 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
+        {/*
+          The per-status tiles are derived from `TENANT_STATUSES` rather than written out, so a
+          status the lifecycle gains cannot leave its figure untiled. That is not hypothetical: the
+          hand-written version named four of the five and `pending_deletion` — counted by the server
+          on every request — was shown nowhere. `accent` names `active` rather than a position, for
+          the same reason.
+        */}
+        <section className="mb-8 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
           <Stat label="Total tenants" value={counts ? counts.total : null} accent />
-          <Stat label="Active" value={counts ? counts.active : null} accent />
-          <Stat label="Suspended" value={counts ? counts.suspended : null} />
-          <Stat label="Archived" value={counts ? counts.archived : null} />
-          <Stat label="Deleted" value={counts ? counts.deleted : null} />
+          {TENANT_STATUSES.map((s) => (
+            <Stat
+              key={s}
+              label={titleCase(s)}
+              value={counts ? counts[s] : null}
+              accent={s === "active"}
+            />
+          ))}
         </section>
 
         <div className="mb-4 flex flex-wrap items-center gap-3">
