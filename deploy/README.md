@@ -343,8 +343,8 @@ and what is not:
 | **Platform → Tenants → one tenant** | Grant a membership (user id, primary role, and a status you must choose), activate or revoke one, and see every member of that tenant. |
 | **Platform → Users** | List every `meta.users` row with a per-status census, filter by status or by exact email address, provision a new one, and open one to suspend / reactivate / retire it. |
 | **Platform → Users → one user** | **Set their password.** This is the route that did not exist before ADR-0364 and the reason onboarding needed a shell. It cannot be aimed at yourself. |
-| **Platform → Design Reviews** | Approve or reject a manifest the Architect designed, with a field-level diff. |
-| **AI Studio** (`/setup`) | Describe a business in prose and have the Architect design a manifest for it; activating one makes it that tenant's live schema. |
+| **Platform → Design Reviews** | Approve or reject a manifest the Architect designed, with a field-level diff. This page used to 404: the routes behind it mount on `--design-review`, which the compose did not pass. It does now, via `--require-design-review`. The diff covers five of the manifest's sixteen sections and has **no `jobs` and no `views` layer**, so read it as "what entities, roles, permissions and classifications changed", not as the whole change. |
+| **AI Studio** (`/setup`) | Describe a business in prose and have the Architect design a manifest for it. Activating one **merges it over this deployment's pack** — before ADR-0368 it replaced the pack outright, so a design with four entities took the other forty-seven away from that tenant. Activation now requires a platform reviewer's approval. It does **not** create typed Postgres tables on `--store pg`; the new entities live in the shared JSONB record table. |
 | **/account** | Change your own password. Needs the current one, so it is the one credential act that needs no grant. |
 
 Four things it deliberately does **not** do, so you know where the edges are:
@@ -564,6 +564,49 @@ retried forever.
   user — but a key belonging to a real person needs the field *and* a registry row:
   see [Create your first user](#create-your-first-user).
 
+## Approving a tenant's design
+
+A design is not live until **you** approve it. The compose passes
+`--require-design-review`, so the flow has four parties and two of them are you:
+
+1. The tenant's own `erp_admin` opens **AI Studio** and describes their business.
+2. The Architect designs a manifest. It is stored as a proposal, enrolled as
+   `pending`, and the tenant can read their own diff.
+3. The tenant presses Activate and gets **403 `review_required`** carrying the
+   proposal's `reviewStatus`. Nothing has changed for them.
+4. You open **Platform → Design Reviews**, read the diff, and approve or reject. Only
+   then does their Activate succeed.
+
+Three things to know before the first one arrives.
+
+**Approval is the only gate, so read the diff rather than the summary.** It covers
+five of the manifest's sixteen sections — entities, relations, roles, permissions
+and workflows. A lifecycle the Architect added **is** shown (`lifecycle added with
+3 states`), and narrowing an existing one is flagged **breaking**. There is no
+`jobs` layer and no `views` layer, and both of those *are* served, so a design can
+change what a request gets in a way the diff does not show you.
+
+**The diff does not show you `meta.extends`.** Measured: adding it produces zero
+counts and zero warnings. So the one thing every AI design now declares — which pack
+it builds on — is invisible on the page where you approve it. It is checked at build
+time rather than trusted (a tenant may extend only this deployment's own pack, and
+anything else is refused), so this is a gap in what you can *see* and not in what is
+*enforced*. Until it is closed, read the proposal's own JSON if the lineage matters
+to you.
+
+**An activated manifest merges over this deployment's pack; it does not replace it.**
+That is new in ADR-0368. Before it, `meta.extends` on a stored manifest was parsed
+and never followed, so activating a four-entity design took the other forty-seven
+entities, fifteen roles and nineteen workflows away from that tenant. A tenant may
+extend **only the pack this deployment serves** — naming anything else is refused at
+build time with `lineage_parent_unknown` and the tenant is served a 503 rather than
+quietly being given the base pack.
+
+**Turning the gate off later does not un-gate old proposals, and turning it on
+stranded the ones minted before it.** The activation gate denies `not_required` as
+well as `rejected`, so any proposal created before this flag went live must be
+designed again. If you had drafts on this deployment before upgrading, that is why.
+
 ## Running the model here too
 
 The compose file above runs the database, API, UI and TLS on one box. The **model**
@@ -582,8 +625,10 @@ residency or procurement constraint, not a preference.
 
 ### A — hosted model
 
-Add `--ai-design` to the `api` service command in `docker-compose.yml`, put
-`ANTHROPIC_API_KEY` (or `OPENAI_API_KEY`) in `.env`, and `docker compose up -d`.
+`--ai-design` is already on the `api` command. Put `ANTHROPIC_API_KEY` (or
+`OPENAI_API_KEY`) in `.env` and `docker compose up -d`. Until one of them is set the
+routes still mount and `POST /v1/ai/design` answers **503** — deliberately, so a
+missing key is not a failed boot.
 
 ### B — self-hosted model, all on this VM
 

@@ -267,9 +267,21 @@ services:
       - https://${DOMAIN:-localhost}/
       - --jwt-audience
       - crossengin-operate
-      # Mounts /v1/ai — a tenant describes their business, the Architect designs a manifest, a
-      # reviewer approves it, and activating it makes it that tenant's live schema. Safe to carry
-      # unconditionally, on two measured grounds. With no provider configured it MOUNTS AND WARNS
+      # Mounts /v1/ai — a tenant describes their business and the Architect designs a manifest.
+      # This comment used to go on "a reviewer approves it, and activating it makes it that
+      # tenant's live schema", and BOTH halves were false on this file. Approval is false no
+      # longer: `--require-design-review` is passed below. The second half is still false and is
+      # stated here rather than implied, because an operator reads it and plans around it — on
+      # `--store pg` NO per-tenant Postgres schema is ever applied. `applyTenantManifestSchema`'s
+      # only caller is `TenantColumnStoreRegistry.ensure`, and that registry is constructed only
+      # for a `ColumnMappedEntityStore`, so an activated manifest's entities land in the shared
+      # JSONB table keyed (tenant_id, entity, record_id) — correct and isolated, but not the typed
+      # tables ADR-0314 describes. `--store pg-columns` is what turns that on, and it is a store
+      # decision rather than a flag: see the OPERATE_PACK note above, since the column store
+      # refuses a classified field with no COLUMN_ENCRYPTION_SECRET and the Architect's own prompt
+      # instructs the model to classify PHI.
+      #
+      # Safe to carry unconditionally, on two measured grounds. With no provider configured it MOUNTS AND WARNS
       # (`[ai-design] no AI provider configured …`) and POST /v1/ai/design answers 503 rather than
       # refusing the boot. And it implies --per-tenant-manifests, which is additive here: a tenant
       # with no activated manifest resolves `kind: "none"` and is served this boot pack by
@@ -299,6 +311,34 @@ services:
       - --ai-design-role
       - erp_admin
       - --ai-design-role
+      - platform_admin
+      # Nothing may activate a manifest until a platform reviewer approves it. ONE flag, because
+      # `--require-design-review` sets `designReview` too (cli.ts) — and passing `--design-review`
+      # ALONE would be worse than passing neither: the review routes would mount over a
+      # permanently empty queue, since enrolment is gated on `requireDesignReview` and the
+      # catalog's `review_status` default is `not_required`, which the activation gate denies. So
+      # a reviewer would see "nothing pending" while every proposal activated unreviewed.
+      #
+      # Without it `reviewGate` is simply absent from the design routes and the activation handler
+      # skips the check, so the TENANT'S OWN erp_admin designs a manifest, reviews their own diff
+      # in /setup and clicks Activate. That is not a missing feature, it is a one-click path to a
+      # tenant replacing their own ERP: before this increment an activated manifest REPLACED the
+      # boot pack outright, and with lineage resolution it now merges over it — in either case a
+      # model's output decides what the tenant is served, and a model replying with the fifteen
+      # characters `{"entities":[]}` is an accepted design.
+      #
+      # It is a behaviour change for proposals minted beforehand, deliberately: the gate denies
+      # `not_required` as well as `rejected`, so any draft created before this flag became live is
+      # permanently unactivatable and has to be designed again. That is the correct direction —
+      # turning review on must not leave a back door open behind it — and it is why this is a
+      # sentence here rather than a surprise.
+      - --require-design-review
+      # The role that decides reviews. Stated rather than defaulted even though `platform_admin`
+      # IS the default, because this is the one grant that separates "designs the system" from
+      # "approves the system", and a four-eyes-shaped decision should be visible in the file an
+      # operator edits rather than read out of a CLI default. A tenant's own `erp_admin` holds
+      # --ai-design-role above and NOT this one, which is what makes the separation real.
+      - --design-review-role
       - platform_admin
       # Both ceilings are per tenant. The monthly one bounds the bill; the per-REQUEST one is
       # refused before the call rather than discovered after it, and is OFF by default — so without

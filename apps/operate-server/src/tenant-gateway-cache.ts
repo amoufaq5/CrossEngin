@@ -1,8 +1,14 @@
-import { ManifestSchema, tryValidateManifest, type Manifest } from "@crossengin/kernel/manifest";
+import {
+  ManifestSchema,
+  resolveManifest,
+  tryValidateManifest,
+  type Manifest,
+} from "@crossengin/kernel/manifest";
 
 import type { RawHttpRequest, RawHttpResponse } from "./http.js";
 import type { ApiKeySpec } from "./principals.js";
 import type { OperateHttpServer } from "./server.js";
+import { permittedParentSentence, type TenantManifestLineage } from "./tenant-manifest-lineage.js";
 
 const DEFAULT_TTL_MS = 30_000;
 const DEFAULT_REFUSAL_RETRY_MS = 60_000;
@@ -54,7 +60,8 @@ export function resolveRequestTenant(raw: RawHttpRequest, apiKeys: readonly ApiK
 }
 
 /**
- * Why a tenant's own manifest parsed, validated, and still could not be compiled into a gateway.
+ * Why a tenant's own manifest parsed and still could not be served: either its `meta.extends`
+ * lineage could not be resolved, or the resolved manifest validated and would not compile.
  *
  * `unknown` is a member rather than a fall-through, so the map below has no hole: a throw this
  * module does not recognise has to be *classified* somewhere, and naming it makes the
@@ -63,6 +70,9 @@ export function resolveRequestTenant(raw: RawHttpRequest, apiKeys: readonly ApiK
 export const GATEWAY_BUILD_REFUSAL_KINDS = [
   "abac_obligation_unevaluable",
   "column_encryption_unavailable",
+  "lineage_cycle",
+  "lineage_override_undeclared",
+  "lineage_parent_unknown",
   "unknown",
 ] as const;
 
@@ -93,6 +103,14 @@ export const GATEWAY_BUILD_REFUSALS: Record<
 > = {
   abac_obligation_unevaluable: { permanent: true },
   column_encryption_unavailable: { permanent: true },
+  // The three lineage refusals are permanent for a reason the other two do not share: they are
+  // properties of the *stored manifest* read against this deployment's permitted parent, and
+  // neither half can change under a running process — an operator who changes `--pack` restarts
+  // it, and a tenant who edits their manifest has to re-activate, which `ManifestActivationPoller`
+  // answers by invalidating the entry outright.
+  lineage_cycle: { permanent: true },
+  lineage_override_undeclared: { permanent: true },
+  lineage_parent_unknown: { permanent: true },
   unknown: { permanent: false },
 };
 
@@ -100,6 +118,27 @@ export const GATEWAY_BUILD_REFUSALS: Record<
 const REFUSAL_BY_ERROR_NAME: Readonly<Record<string, GatewayBuildRefusalKind>> = {
   AbacObligationsUnevaluable: "abac_obligation_unevaluable",
   ColumnEncryptionUnavailable: "column_encryption_unavailable",
+  ExtendsCycleError: "lineage_cycle",
+  UndeclaredEntityOverrideError: "lineage_override_undeclared",
+  UnknownParentManifestError: "lineage_parent_unknown",
+};
+
+/**
+ * Whether a refusal's logged detail carries the permitted-parent clause.
+ *
+ * A total map rather than a test for a `lineage_` name prefix, so a seventh kind has to say
+ * whether the clause is true of it instead of inheriting an answer from how it was spelled.
+ * `unknown` is `false` because nothing is known about it — a resolve throw that is not one of the
+ * three classifies there, and naming a permitted parent beside a cause nobody identified would
+ * assert a diagnosis.
+ */
+const REFUSAL_NAMES_PERMITTED_PARENT: Record<GatewayBuildRefusalKind, boolean> = {
+  abac_obligation_unevaluable: false,
+  column_encryption_unavailable: false,
+  lineage_cycle: true,
+  lineage_override_undeclared: true,
+  lineage_parent_unknown: true,
+  unknown: false,
 };
 
 /**
@@ -136,6 +175,20 @@ export type GatewayResolution =
 
 export interface TenantGatewayCacheOptions {
   source: { activeManifestFor(tenantId: string): Promise<Record<string, unknown> | null> };
+  /**
+   * The parent manifest a tenant's `meta.extends` may name, and the slug a refusal may report.
+   *
+   * **Required, not optional.** `meta.extends` on a stored manifest was parsed and never followed
+   * for the whole life of the per-tenant-manifest feature, so an activated design *replaced* the
+   * deployment's pack for that tenant rather than extending it — the inheritance mechanism was
+   * applied at boot, to the built-in packs whose lineage is known at build time, and withheld from
+   * the only input whose lineage is a runtime question. An optional option defaulting to "do not
+   * resolve" would keep that answer as the default, reachable by anyone who forgets the argument.
+   *
+   * Resolution runs unconditionally: a manifest with no `extends` resolves to itself with zero
+   * registry lookups, so there is nothing to gate on and no flag to get wrong.
+   */
+  lineage: TenantManifestLineage;
   /**
    * Compiles the tenant's gateway. It receives the tenant id, and may be async, because a build
    * can have to *provision* before it can serve: the per-tenant column store applies this
@@ -180,10 +233,11 @@ interface CacheEntry {
  * A TTL cache of per-tenant compiled `OperateHttpServer`s built from each tenant's stored active
  * manifest, answering a three-way `GatewayResolution` per tenant.
  *
- * A tenant with no stored manifest, or one that fails `ManifestSchema` or kernel
+ * A tenant with no stored manifest, or one whose *resolved* form fails `ManifestSchema` or kernel
  * cross-validation, resolves `none` and is cached until ttl expiry — the caller falls back to the
  * deployment's gateway, which is the per-tenant-manifest feature behaving as designed. A manifest
- * that passes both gates and cannot be *compiled* resolves `refused`, which the caller answers
+ * whose `meta.extends` lineage cannot be resolved against this deployment's permitted parent, and
+ * one that passes both gates and cannot be *compiled*, resolve `refused`, which the caller answers
  * rather than falling back: serving a tenant the deployment's entities, roles and permissions is
  * not a degraded form of serving their own, and on the shipped `--store pg` the fallback store is
  * the same object holding the same `(tenant_id, entity, record_id)` rows, so it is the tenant's
@@ -196,6 +250,7 @@ interface CacheEntry {
 export class TenantGatewayCache {
   private readonly source: TenantGatewayCacheOptions["source"];
   private readonly build: TenantGatewayCacheOptions["build"];
+  private readonly lineage: TenantManifestLineage;
   private readonly ttlMs: number;
   private readonly refusalRetryMs: number;
   private readonly now: () => number;
@@ -209,6 +264,7 @@ export class TenantGatewayCache {
   constructor(opts: TenantGatewayCacheOptions) {
     this.source = opts.source;
     this.build = opts.build;
+    this.lineage = opts.lineage;
     this.ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS;
     this.refusalRetryMs = opts.refusalRetryMs ?? DEFAULT_REFUSAL_RETRY_MS;
     this.now = opts.now ?? Date.now;
@@ -240,7 +296,29 @@ export class TenantGatewayCache {
       );
       return this.remember(tenantId, { kind: "none" });
     }
-    const validated = tryValidateManifest(parsed.data);
+    // POSITION, which is the whole point of this step: it sits between the schema parse and
+    // cross-validation because an unresolved child referencing a parent's entity *fails*
+    // standalone validation — a relation to an inherited `Patient` reads as
+    // `relation references unknown entity 'Patient'`. Validating first would send every
+    // legitimately-extending manifest down the `reportInvalid` path, which is precisely how the
+    // unresolved behaviour stayed invisible: it looked like the tenant's manifest being wrong.
+    let resolved: Manifest;
+    try {
+      resolved = await resolveManifest(parsed.data, { registry: this.lineage.registry });
+    } catch (err) {
+      // A lineage failure is `refused`, never the `none` fallback, and that is a decision rather
+      // than a convenience. `none` serves this tenant the *deployment's* gateway, so a tenant
+      // whose activated manifest cannot be interpreted would be served the base pack with nothing
+      // saying their activation did nothing — ADR-0314's "their data is in a different place than
+      // they think". Both of the outcomes this manifest used to get are wrong: silent replacement
+      // of the pack it meant to extend, or silent fallback to the pack it meant to replace. A
+      // named 503 is the only honest one.
+      const reason = refusalKindOf(err);
+      this.reportBuildRefused(tenantId, reason, this.detailFor(reason, err));
+      return this.remember(tenantId, this.refusal(reason));
+    }
+
+    const validated = tryValidateManifest(resolved);
     if (!validated.ok) {
       this.reportInvalid(
         tenantId,
@@ -250,7 +328,10 @@ export class TenantGatewayCache {
     }
     let built: OperateHttpServer;
     try {
-      built = await this.build(parsed.data, tenantId);
+      // The resolved manifest and not `parsed.data`: handing the unresolved child to the builder
+      // is the original defect restated, since the inherited entities, roles, workflows and
+      // transitions would be absent from the gateway that is actually compiled.
+      built = await this.build(resolved, tenantId);
     } catch (err) {
       // ORDERING, which is the one thing here that must not be got wrong: the refusal above —
       // `refused` instead of a fallback — has to land *before* or *with* this memo, never after.
@@ -260,7 +341,7 @@ export class TenantGatewayCache {
       // sense the uncached version was the lesser of the two bugs, and the memo is only safe
       // because the caller now refuses.
       const reason = refusalKindOf(err);
-      this.reportBuildRefused(tenantId, reason, err instanceof Error ? err.message : String(err));
+      this.reportBuildRefused(tenantId, reason, this.detailFor(reason, err));
       return this.remember(tenantId, this.refusal(reason));
     }
     return this.remember(tenantId, { kind: "server", server: built });
@@ -272,6 +353,17 @@ export class TenantGatewayCache {
 
   invalidateAll(): void {
     this.entries.clear();
+  }
+
+  /**
+   * The log detail for a refusal: the thrown message, plus what this deployment permitted where
+   * that is the fact an operator is missing. One method and not a composition at each catch, so
+   * the two call sites cannot report one cause two ways.
+   */
+  private detailFor(kind: GatewayBuildRefusalKind, err: unknown): string {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!REFUSAL_NAMES_PERMITTED_PARENT[kind]) return message;
+    return `${message} — ${permittedParentSentence(this.lineage.permittedParentSlug)}`;
   }
 
   /** A refusal carrying the window this cache will actually hold it for. */

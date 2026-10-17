@@ -9,7 +9,13 @@ import { MockLlmProvider } from "@crossengin/ai-providers";
 import { AnthropicProvider } from "@crossengin/ai-providers-anthropic";
 import { DEFAULT_LOCAL_MODEL, LocalLlmProvider } from "@crossengin/ai-providers-local";
 import { OpenAiProvider } from "@crossengin/ai-providers-openai";
-import { ManifestSchema, tryValidateManifest } from "@crossengin/kernel/manifest";
+import {
+  ManifestSchema,
+  resolveManifest,
+  tryValidateManifest,
+  type Manifest,
+} from "@crossengin/kernel/manifest";
+import { buildErpCorePack } from "@crossengin/pack-erp-core";
 
 import {
   DESIGN_EXAMPLE_MANIFEST,
@@ -17,12 +23,12 @@ import {
   DESIGN_FAILURE_KINDS,
   DESIGN_FAULTS,
   DESIGN_PROGRESS_CHARS_STEP,
-  DESIGN_SYSTEM_PROMPT,
   MAX_DESIGN_ATTEMPTS,
   MAX_DESIGN_DESCRIPTION_CHARS,
   MAX_DESIGN_RESPONSE_CHARS,
   buildDesignDesigner,
   buildDesignProviderFromEnv,
+  buildDesignSystemPrompt,
   designManifest,
   ensureRolesInManifest,
   extractJsonObject,
@@ -66,15 +72,31 @@ function textTurn(text: string, usage?: { input: number; output: number; cost: n
 
 const VALID_JSON = JSON.stringify(DESIGN_EXAMPLE_MANIFEST);
 
+/**
+ * The example with its one reference aimed at an entity that does not exist — the fixture seven
+ * tests use to reach the cross-validation arm.
+ *
+ * It **throws** rather than returning the manifest unchanged when it cannot find the field to
+ * break, and that is the whole point of the guard: the previous version looked for `WorkOrder`
+ * behind an `if (target !== undefined)`, so renaming the example's entity turned it into a silent
+ * no-op and seven tests went on passing while asserting the opposite of their own titles. A
+ * fixture that cannot produce the condition it is named for must fail, not pass.
+ */
 function brokenManifestJson(): string {
   const clone = JSON.parse(VALID_JSON) as Record<string, unknown>;
   const entities = clone["entities"] as {
     name: string;
     fields: { name: string; type: { kind: string; target?: string } }[];
   }[];
-  const workOrder = entities.find((e) => e.name === "WorkOrder");
-  const customerField = workOrder?.fields.find((f) => f.name === "customer");
-  if (customerField?.type.target !== undefined) customerField.type.target = "Missing";
+  const visit = entities.find((e) => e.name === "ServiceVisit");
+  const customerField = visit?.fields.find((f) => f.name === "customer");
+  if (customerField?.type.target === undefined) {
+    throw new Error(
+      "brokenManifestJson: no ServiceVisit.customer reference field to break — " +
+        "DESIGN_EXAMPLE_MANIFEST changed shape and this fixture no longer breaks anything",
+    );
+  }
+  customerField.type.target = "Missing";
   return JSON.stringify(clone);
 }
 
@@ -95,15 +117,199 @@ function phaseSequence(events: readonly DesignProgress[]): string[] {
   return events.map((e) => e.phase).filter((phase, i, all) => phase !== all[i - 1]);
 }
 
+/** The example as a child of the given pack: the shape the with-parent prompt asks for. */
+function exampleExtending(slug: string): Manifest {
+  return ManifestSchema.parse({
+    ...DESIGN_EXAMPLE_MANIFEST,
+    meta: { ...(DESIGN_EXAMPLE_MANIFEST["meta"] as Record<string, unknown>), extends: [slug] },
+  });
+}
+
 describe("DESIGN_EXAMPLE_MANIFEST fixture", () => {
   it("parses under ManifestSchema and passes kernel cross-validation", () => {
     const parsed = ManifestSchema.parse(DESIGN_EXAMPLE_MANIFEST);
     expect(tryValidateManifest(parsed)).toEqual({ ok: true });
   });
 
-  it("is embedded verbatim in DESIGN_SYSTEM_PROMPT", () => {
-    expect(DESIGN_SYSTEM_PROMPT).toContain(JSON.stringify(DESIGN_EXAMPLE_MANIFEST, null, 2));
-    expect(DESIGN_SYSTEM_PROMPT).toContain("ONLY a single JSON object");
+  it("is embedded verbatim in the prompt, with and without a parent", () => {
+    const json = JSON.stringify(DESIGN_EXAMPLE_MANIFEST, null, 2);
+    expect(buildDesignSystemPrompt({ parentPack: null })).toContain(json);
+    expect(
+      buildDesignSystemPrompt({ parentPack: { slug: "operate-erp/core", entityNames: ["Invoice"] } }),
+    ).toContain(json);
+    expect(buildDesignSystemPrompt({ parentPack: null })).toContain("ONLY a single JSON object");
+  });
+
+  it("declares a lifecycle whose transitions are all granted", () => {
+    const parsed = ManifestSchema.parse(DESIGN_EXAMPLE_MANIFEST);
+    const workflow = parsed.workflows?.["service_visit_lifecycle"];
+    expect(workflow?.kind).toBe("entityLifecycle");
+    if (workflow?.kind !== "entityLifecycle") throw new Error("expected an entityLifecycle");
+    expect(workflow.entity).toBe("ServiceVisit");
+    expect(workflow.stateField).toBe("status");
+    const granted = Object.keys(parsed.permissions?.["ServiceVisit"]?.transitions ?? {}).sort();
+    expect(granted).toEqual(workflow.transitions.map((t) => t.name).sort());
+  });
+
+  // The state column's enum values are the states the store writes into it. Nothing in the kernel
+  // compares the two, so a worked example that got it wrong would teach the model a value set no
+  // transition can satisfy.
+  it("gives the state field an enum covering exactly the declared states", () => {
+    const parsed = ManifestSchema.parse(DESIGN_EXAMPLE_MANIFEST);
+    const workflow = parsed.workflows?.["service_visit_lifecycle"];
+    if (workflow?.kind !== "entityLifecycle") throw new Error("expected an entityLifecycle");
+    const entity = parsed.entities?.find((e) => e.name === workflow.entity);
+    const field = entity?.fields.find((f) => f.name === workflow.stateField);
+    expect(field?.type.kind).toBe("enum");
+    const values = field?.type.kind === "enum" ? [...field.type.values].sort() : [];
+    expect(values).toEqual(workflow.states.map((s) => s.name).sort());
+  });
+
+  // Every entity name in the example is outside the seven shipped packs, so the example never
+  // contradicts the "do not reuse a parent entity name" list the with-parent prompt prints.
+  it("declares no entity name that erp-core already declares", () => {
+    const core = buildErpCorePack();
+    const parentNames = new Set((core.entities ?? []).map((e) => e.name));
+    const parsed = ManifestSchema.parse(DESIGN_EXAMPLE_MANIFEST);
+    const collisions = (parsed.entities ?? [])
+      .map((e) => e.name)
+      .filter((name) => parentNames.has(name));
+    expect(collisions).toEqual([]);
+  });
+
+  // The end-to-end proof that what the with-parent prompt asks for is a thing the platform
+  // accepts: the example plus `extends` validates on its own (which is all `designManifest`
+  // checks), resolves against the real pack, and the merged result validates too.
+  it("validates as a child of the real erp-core pack, before and after resolution", async () => {
+    const core = buildErpCorePack();
+    const child = exampleExtending(core.meta.slug);
+    expect(tryValidateManifest(child)).toEqual({ ok: true });
+
+    const resolved = await resolveManifest(child, {
+      registry: {
+        getManifest: async (id): Promise<Manifest | null> =>
+          id === core.meta.slug ? core : null,
+      },
+    });
+    expect(tryValidateManifest(resolved)).toEqual({ ok: true });
+    expect(resolved.meta.extends).toBeUndefined();
+    expect(resolved.meta.manifestResolution?.parents.map((p) => p.slug)).toEqual([core.meta.slug]);
+    // The child's two entities and its workflow are added to the parent's, not substituted for them.
+    expect((resolved.entities ?? []).length).toBe((core.entities ?? []).length + 2);
+    expect(Object.keys(resolved.workflows ?? {}).length).toBe(
+      Object.keys(core.workflows ?? {}).length + 1,
+    );
+    expect((resolved.entities ?? []).map((e) => e.name)).toContain("Invoice");
+  });
+
+  // Why the with-parent prompt prints the parent's entity names at all: this is the one rule in it
+  // that `designManifest`'s retry loop cannot enforce. A colliding child passes every check the
+  // design loop makes and throws two layers later, at resolution, after a reviewer approved it.
+  it("shows an entity-name collision is invisible to the design loop and fatal at resolution", async () => {
+    const core = buildErpCorePack();
+    const colliding = ManifestSchema.parse({
+      manifestVersion: "1.0",
+      meta: {
+        name: "Collides",
+        slug: "generated/collides",
+        version: "0.1.0",
+        extends: [core.meta.slug],
+      },
+      entities: [
+        {
+          name: "Invoice",
+          fields: [{ name: "memo", type: { kind: "text", maxLength: 20 } }],
+          traits: ["auditable"],
+        },
+      ],
+      roles: { app_admin: { name: "app_admin", label: { en: "A" }, description: "d" } },
+      permissions: { Invoice: { list: { roles: ["app_admin"] } } },
+    });
+    expect(tryValidateManifest(colliding)).toEqual({ ok: true });
+
+    await expect(
+      resolveManifest(colliding, {
+        registry: {
+          getManifest: async (id): Promise<Manifest | null> =>
+            id === core.meta.slug ? core : null,
+        },
+      }),
+    ).rejects.toThrow(/already exists in an inherited manifest/);
+  });
+});
+
+describe("buildDesignSystemPrompt", () => {
+  const CORE_SLUG = "operate-erp/core";
+  const parentPack = { slug: CORE_SLUG, entityNames: ["Invoice", "Payment", "WorkOrder"] };
+
+  it("names no parent and no extends instruction when parentPack is null", () => {
+    const prompt = buildDesignSystemPrompt({ parentPack: null });
+    expect(prompt).not.toContain("extends");
+    expect(prompt).not.toContain("overrides");
+    expect(prompt).not.toContain(CORE_SLUG);
+    expect(prompt).toContain("Example of a complete valid manifest:");
+  });
+
+  it("names the parent slug and demands meta.extends when one is given", () => {
+    const prompt = buildDesignSystemPrompt({ parentPack });
+    expect(prompt).toContain(`This deployment already serves the pack "${CORE_SLUG}"`);
+    expect(prompt).toContain(`meta MUST carry extends: ["${CORE_SLUG}"]`);
+    expect(prompt).toContain("declare ONLY what the described business ADDS");
+  });
+
+  // Read as text so a reworded prompt that drops a rule fails here rather than in production.
+  it("states the overrides rule with its consequence, and lists the taken names", () => {
+    const prompt = buildDesignSystemPrompt({ parentPack });
+    expect(prompt).toContain('"overrides": true');
+    expect(prompt).toContain("DISCARDS the parent's version");
+    expect(prompt).toContain("Do NOT reuse one of the parent's 3 entity names");
+    expect(prompt).toContain("Invoice, Payment, WorkOrder");
+  });
+
+  it("states that the child is validated before it is merged", () => {
+    const prompt = buildDesignSystemPrompt({ parentPack });
+    expect(prompt).toContain("validated on its own BEFORE it is merged");
+    expect(prompt).toContain("A field pointing at a parent entity is refused.");
+  });
+
+  it("tells the model the example is standalone while its own reply must not be", () => {
+    expect(buildDesignSystemPrompt({ parentPack })).toContain(
+      "It is standalone — yours must also carry meta.extends",
+    );
+  });
+
+  it("reports an empty parent entity list as the claim it is", () => {
+    const prompt = buildDesignSystemPrompt({ parentPack: { slug: CORE_SLUG, entityNames: [] } });
+    expect(prompt).toContain(`meta MUST carry extends: ["${CORE_SLUG}"]`);
+    expect(prompt).toContain("Do NOT reuse one of the parent's 0 entity names");
+  });
+
+  it("states the workflow shape in both forms", () => {
+    for (const prompt of [
+      buildDesignSystemPrompt({ parentPack: null }),
+      buildDesignSystemPrompt({ parentPack }),
+    ]) {
+      expect(prompt).toContain('kind: "entityLifecycle"');
+      expect(prompt).toContain("stateField MUST name one of that entity's own declared fields");
+      expect(prompt).toContain("Declare an enum field on the entity whose values are exactly the state names");
+      expect(prompt).toContain("Every from and every to MUST be the name of a declared state");
+      // The whole shape, not the prefix: `toContain("permissions.<Entity>.transitions")` alone is
+      // satisfied by `…transitionsMUT`, which a mutation check caught.
+      expect(prompt).toContain(
+        "permissions.<Entity>.transitions = { <transition_name>: { roles: [...] } }",
+      );
+      expect(prompt).toContain("every state must be reachable from initialState");
+      expect(prompt).toContain('no transition may lead out of a "terminal" state');
+    }
+  });
+
+  it("stays inside the size budget for the model's context", () => {
+    const withParent = buildDesignSystemPrompt({
+      parentPack: { slug: CORE_SLUG, entityNames: Array.from({ length: 51 }, (_, i) => `Entity${i}`) },
+    });
+    expect(buildDesignSystemPrompt({ parentPack: null }).length).toBeLessThan(9668);
+    expect(withParent.length).toBeLessThan(9668);
+    expect(withParent.length).toBeGreaterThan(buildDesignSystemPrompt({ parentPack: null }).length);
   });
 });
 
@@ -167,6 +373,60 @@ describe("normalizeGeneratedManifest", () => {
     expect((out["meta"] as Record<string, unknown>)["version"]).toBe("0.1.0");
     expect(out["entities"]).toEqual([{ name: "Thing" }]);
   });
+
+  // The two keys the prompt newly asks the model for. Both rewriters copy by spread, so neither
+  // drops a top-level key nor a meta key — but the prompt change is inert if either ever does,
+  // and `ManifestSchema` strips unknown keys, so these are the fences for that whole path.
+  it("keeps a workflows key the model supplied", () => {
+    const workflows = DESIGN_EXAMPLE_MANIFEST["workflows"];
+    const out = normalizeGeneratedManifest({ ...DESIGN_EXAMPLE_MANIFEST }, { name: "X" });
+    expect(out["workflows"]).toEqual(workflows);
+  });
+
+  it("keeps meta.extends while still repairing the rest of meta", () => {
+    const out = normalizeGeneratedManifest({
+      meta: { name: "Clinic", slug: "NOT A SLUG", version: "v9", extends: ["operate-erp/core"] },
+    });
+    expect(out["meta"]).toEqual({
+      name: "Clinic",
+      slug: "generated/clinic",
+      version: "0.1.0",
+      extends: ["operate-erp/core"],
+    });
+  });
+});
+
+describe("the model's reply survives the rewriters and the schema", () => {
+  // End to end over the two rewriters plus `ManifestSchema`, because that is the whole path
+  // between what the model says and what `tryValidateManifest` sees.
+  const reply: Record<string, unknown> = {
+    ...DESIGN_EXAMPLE_MANIFEST,
+    meta: {
+      ...(DESIGN_EXAMPLE_MANIFEST["meta"] as Record<string, unknown>),
+      extends: ["operate-erp/core"],
+    },
+  };
+
+  it("carries workflows and meta.extends through to the parsed manifest", () => {
+    const rewritten = ensureRolesInManifest(normalizeGeneratedManifest(reply, { name: "X" }), [
+      "erp_admin",
+    ]);
+    const parsed = ManifestSchema.parse(rewritten);
+    expect(parsed.meta.extends).toEqual(["operate-erp/core"]);
+    expect(Object.keys(parsed.workflows ?? {})).toEqual(["service_visit_lifecycle"]);
+    expect(tryValidateManifest(parsed)).toEqual({ ok: true });
+  });
+
+  it("grafts the operator role into the transition grants too", () => {
+    const rewritten = ensureRolesInManifest(normalizeGeneratedManifest(reply, { name: "X" }), [
+      "erp_admin",
+    ]);
+    const parsed = ManifestSchema.parse(rewritten);
+    expect(parsed.permissions?.["ServiceVisit"]?.transitions).toEqual({
+      start: { roles: ["app_admin", "app_user", "erp_admin"] },
+      close: { roles: ["app_admin", "erp_admin"] },
+    });
+  });
 });
 
 describe("designManifest — happy path", () => {
@@ -174,7 +434,7 @@ describe("designManifest — happy path", () => {
     const { provider, requests } = scriptedProvider([
       textTurn("```json\n" + VALID_JSON + "\n```"),
     ]);
-    const result = await designManifest({ provider, description: "a field service business" });
+    const result = await designManifest({ provider, parentPack: null, description: "a field service business" });
     expect(result.ok).toBe(true);
     expect(result.attempts).toBe(1);
     expect(result.manifestHash).toMatch(/^[0-9a-f]{64}$/);
@@ -185,18 +445,21 @@ describe("designManifest — happy path", () => {
 
   it("sends the DESIGN system prompt, planner task, jsonMode, and default maxTokens", async () => {
     const { provider, requests } = scriptedProvider([textTurn(VALID_JSON)]);
-    await designManifest({ provider, description: "desc" });
+    await designManifest({ provider, parentPack: null, description: "desc" });
     const req = requests[0];
     expect(req?.task).toBe("planner");
     expect(req?.jsonMode).toBe(true);
     expect(req?.maxTokens).toBe(8192);
-    expect(req?.messages[0]).toEqual({ role: "system", content: DESIGN_SYSTEM_PROMPT });
+    expect(req?.messages[0]).toEqual({
+      role: "system",
+      content: buildDesignSystemPrompt({ parentPack: null }),
+    });
     expect(req?.messages[1]?.content).toContain("desc");
   });
 
   it("threads model and name into the request", async () => {
     const { provider, requests } = scriptedProvider([textTurn(VALID_JSON)]);
-    await designManifest({ provider, description: "desc", name: "Acme", model: "claude-opus-4-7" });
+    await designManifest({ provider, parentPack: null, description: "desc", name: "Acme", model: "claude-opus-4-7" });
     expect(requests[0]?.model).toBe("claude-opus-4-7");
     expect(requests[0]?.messages[1]?.content).toContain("Application name: Acme");
   });
@@ -207,6 +470,7 @@ describe("designManifest — happy path", () => {
     ]);
     const result = await designManifest({
       provider,
+      parentPack: null,
       description: "desc",
       providerLabel: "anthropic/claude-sonnet-4-6",
     });
@@ -219,7 +483,7 @@ describe("designManifest — happy path", () => {
     delete bare["meta"];
     delete bare["manifestVersion"];
     const { provider } = scriptedProvider([textTurn(JSON.stringify(bare))]);
-    const result = await designManifest({ provider, description: "desc", name: "Bare App" });
+    const result = await designManifest({ provider, parentPack: null, description: "desc", name: "Bare App" });
     expect(result.ok).toBe(true);
     const meta = result.manifest?.["meta"] as Record<string, unknown>;
     expect(meta["name"]).toBe("Bare App");
@@ -233,7 +497,7 @@ describe("designManifest — retry loop", () => {
       textTurn(brokenManifestJson()),
       textTurn(VALID_JSON),
     ]);
-    const result = await designManifest({ provider, description: "desc" });
+    const result = await designManifest({ provider, parentPack: null, description: "desc" });
     expect(result.ok).toBe(true);
     expect(result.attempts).toBe(2);
     expect(requests).toHaveLength(2);
@@ -255,7 +519,7 @@ describe("designManifest — retry loop", () => {
       textTurn(schemaInvalid),
       textTurn(VALID_JSON),
     ]);
-    const result = await designManifest({ provider, description: "desc" });
+    const result = await designManifest({ provider, parentPack: null, description: "desc" });
     expect(result.ok).toBe(true);
     expect(result.attempts).toBe(2);
     const corrective = requests[1]?.messages.filter((m) => m.role === "user").at(-1);
@@ -267,7 +531,7 @@ describe("designManifest — retry loop", () => {
       textTurn("I cannot answer in JSON, sorry."),
       textTurn(VALID_JSON),
     ]);
-    const result = await designManifest({ provider, description: "desc" });
+    const result = await designManifest({ provider, parentPack: null, description: "desc" });
     expect(result.ok).toBe(true);
     expect(result.attempts).toBe(2);
     const corrective = requests[1]?.messages.filter((m) => m.role === "user").at(-1);
@@ -279,7 +543,7 @@ describe("designManifest — retry loop", () => {
       new Error("boom"),
       textTurn(VALID_JSON),
     ]);
-    const result = await designManifest({ provider, description: "desc" });
+    const result = await designManifest({ provider, parentPack: null, description: "desc" });
     expect(result.ok).toBe(true);
     expect(result.attempts).toBe(2);
     expect(requests[1]?.messages).toHaveLength(2);
@@ -287,7 +551,7 @@ describe("designManifest — retry loop", () => {
 
   it("gives up after maxAttempts when every response is invalid", async () => {
     const { provider, requests } = scriptedProvider([textTurn(brokenManifestJson())]);
-    const result = await designManifest({ provider, description: "desc" });
+    const result = await designManifest({ provider, parentPack: null, description: "desc" });
     expect(result.ok).toBe(false);
     expect(result.attempts).toBe(MAX_DESIGN_ATTEMPTS);
     expect(requests).toHaveLength(MAX_DESIGN_ATTEMPTS);
@@ -299,7 +563,7 @@ describe("designManifest — retry loop", () => {
 
   it("honors a maxAttempts override", async () => {
     const { provider, requests } = scriptedProvider([textTurn("not json")]);
-    const result = await designManifest({ provider, description: "desc", maxAttempts: 2 });
+    const result = await designManifest({ provider, parentPack: null, description: "desc", maxAttempts: 2 });
     expect(result.ok).toBe(false);
     expect(result.attempts).toBe(2);
     expect(requests).toHaveLength(2);
@@ -310,7 +574,7 @@ describe("designManifest — retry loop", () => {
       textTurn(brokenManifestJson(), { input: 100, output: 40, cost: 0.02 }),
       textTurn(VALID_JSON, { input: 200, output: 60, cost: 0.03 }),
     ]);
-    const result = await designManifest({ provider, description: "desc" });
+    const result = await designManifest({ provider, parentPack: null, description: "desc" });
     expect(result.ok).toBe(true);
     expect(result.usage).toEqual({ inputTokens: 300, outputTokens: 100, cost: 0.05 });
   });
@@ -321,6 +585,7 @@ describe("designManifest — size limits", () => {
     const { provider, requests } = scriptedProvider([textTurn(VALID_JSON)]);
     const result = await designManifest({
       provider,
+      parentPack: null,
       description: "x".repeat(MAX_DESIGN_DESCRIPTION_CHARS + 1),
     });
     expect(result.ok).toBe(false);
@@ -333,7 +598,7 @@ describe("designManifest — size limits", () => {
     const { provider } = scriptedProvider([
       textTurn("{".repeat(MAX_DESIGN_RESPONSE_CHARS + 1)),
     ]);
-    const result = await designManifest({ provider, description: "desc", maxAttempts: 1 });
+    const result = await designManifest({ provider, parentPack: null, description: "desc", maxAttempts: 1 });
     expect(result.ok).toBe(false);
     expect(result.attempts).toBe(1);
     expect(result.issues[0]).toContain(`${MAX_DESIGN_RESPONSE_CHARS}`);
@@ -345,6 +610,7 @@ describe("buildDesignDesigner", () => {
     const { provider, requests } = scriptedProvider([textTurn(VALID_JSON)]);
     const designer = buildDesignDesigner({
       provider,
+      parentPack: null,
       model: "claude-opus-4-7",
       maxTokens: 4096,
       providerLabel: "anthropic/claude-opus-4-7",
@@ -452,12 +718,27 @@ describe("ensureRolesInManifest", () => {
     expect(tryValidateManifest(parsed)).toEqual({ ok: true });
     const roles = grafted["roles"] as Record<string, unknown>;
     expect(Object.keys(roles)).toContain("erp_admin");
-    const perms = grafted["permissions"] as Record<string, Record<string, { roles: string[] }>>;
+    // `transitions` is a record of named grants rather than a grant, so it is walked one level
+    // deeper; the loop used to assume every op was a grant, which held only while the example
+    // declared no lifecycle. A vacuous pass is impossible here: both arms assert.
+    const perms = grafted["permissions"] as Record<string, Record<string, unknown>>;
+    let asserted = 0;
     for (const entity of Object.keys(perms)) {
-      for (const op of Object.keys(perms[entity] ?? {})) {
-        expect(perms[entity]?.[op]?.roles).toContain("erp_admin");
+      for (const [op, grant] of Object.entries(perms[entity] ?? {})) {
+        if (op === "transitions") {
+          const named = grant as Record<string, { roles: string[] }>;
+          expect(Object.keys(named).length).toBeGreaterThan(0);
+          for (const name of Object.keys(named)) {
+            expect(named[name]?.roles).toContain("erp_admin");
+            asserted += 1;
+          }
+          continue;
+        }
+        expect((grant as { roles: string[] }).roles).toContain("erp_admin");
+        asserted += 1;
       }
     }
+    expect(asserted).toBe(12);
   });
 
   it("is a no-op for an empty role list and never duplicates an existing role", () => {
@@ -481,12 +762,13 @@ describe("ensureRolesInManifest", () => {
     ]);
     const result = await designManifest({
       provider,
+      parentPack: null,
       description: "field service business",
       ensureRoles: ["erp_admin"],
     });
     expect(result.ok).toBe(true);
     const perms = (result.manifest ?? {})["permissions"] as Record<string, Record<string, { roles: string[] }>>;
-    expect(perms["WorkOrder"]?.["update"]?.roles).toContain("erp_admin");
+    expect(perms["ServiceVisit"]?.["update"]?.roles).toContain("erp_admin");
   });
 });
 
@@ -504,7 +786,7 @@ describe("ensureRolesInManifest — transition + field grants", () => {
           transitions: { archive: { roles: ["app_admin"] } },
           fields: { contact_email: { read: { roles: ["app_admin"] } } },
         },
-        WorkOrder: (DESIGN_EXAMPLE_MANIFEST as { permissions: Record<string, unknown> }).permissions["WorkOrder"],
+        ServiceVisit: (DESIGN_EXAMPLE_MANIFEST as { permissions: Record<string, unknown> }).permissions["ServiceVisit"],
       },
     };
     const grafted = ensureRolesInManifest(manifest, ["erp_admin"]);
@@ -523,6 +805,7 @@ describe("designManifest — progress", () => {
     const { events, listener } = collector();
     const result = await designManifest({
       provider,
+      parentPack: null,
       description: "desc",
       onProgress: listener,
     });
@@ -544,6 +827,7 @@ describe("designManifest — progress", () => {
     const { events, listener } = collector();
     const result = await designManifest({
       provider,
+      parentPack: null,
       description: "desc",
       onProgress: listener,
     });
@@ -565,7 +849,7 @@ describe("designManifest — progress", () => {
   it("numbers attempts from 1 and carries maxAttempts on every event", async () => {
     const { provider } = scriptedProvider([textTurn("not json"), textTurn(VALID_JSON)]);
     const { events, listener } = collector();
-    await designManifest({ provider, description: "desc", maxAttempts: 2, onProgress: listener });
+    await designManifest({ provider, parentPack: null, description: "desc", maxAttempts: 2, onProgress: listener });
     expect(events.every((e) => e.maxAttempts === 2)).toBe(true);
     expect(events[0]?.attempt).toBe(1);
     expect(new Set(events.map((e) => e.attempt))).toEqual(new Set([1, 2]));
@@ -577,6 +861,7 @@ describe("designManifest — progress", () => {
     const { events, listener } = collector();
     const result = await designManifest({
       provider,
+      parentPack: null,
       description: "desc",
       maxAttempts: 2,
       onProgress: listener,
@@ -594,7 +879,7 @@ describe("designManifest — progress", () => {
     const total = 4000;
     const { provider } = scriptedProvider([chunkedTurn("x".repeat(total), chunkSize)]);
     const { events, listener } = collector();
-    await designManifest({ provider, description: "desc", maxAttempts: 1, onProgress: listener });
+    await designManifest({ provider, parentPack: null, description: "desc", maxAttempts: 1, onProgress: listener });
     const generating = events.filter((e) => e.phase === "generating");
     const expected = total / DESIGN_PROGRESS_CHARS_STEP + 1;
     expect(generating.length).toBeLessThanOrEqual(expected);
@@ -607,7 +892,7 @@ describe("designManifest — progress", () => {
   it("resets outputChars at the start of each attempt", async () => {
     const { provider } = scriptedProvider([textTurn("y".repeat(1200)), textTurn(VALID_JSON)]);
     const { events, listener } = collector();
-    await designManifest({ provider, description: "desc", onProgress: listener });
+    await designManifest({ provider, parentPack: null, description: "desc", onProgress: listener });
     const firstOfAttemptTwo = events.find((e) => e.attempt === 2);
     expect(firstOfAttemptTwo?.phase).toBe("generating");
     expect(firstOfAttemptTwo?.outputChars).toBe(0);
@@ -624,6 +909,7 @@ describe("designManifest — progress", () => {
     let calls = 0;
     const result = await designManifest({
       provider,
+      parentPack: null,
       description: "desc",
       onProgress: (): void => {
         calls += 1;
@@ -640,6 +926,7 @@ describe("designManifest — progress", () => {
     const { events, listener } = collector();
     const result = await designManifest({
       provider,
+      parentPack: null,
       description: "desc",
       onProgress: listener,
     });
@@ -652,7 +939,7 @@ describe("designManifest — progress", () => {
 
   it("buildDesignDesigner accepts a per-call listener", async () => {
     const { provider } = scriptedProvider([textTurn(VALID_JSON)]);
-    const designer = buildDesignDesigner({ provider });
+    const designer = buildDesignDesigner({ provider, parentPack: null });
     const { events, listener } = collector();
     const result = await designer({ description: "desc", onProgress: listener });
     expect(result.ok).toBe(true);
@@ -662,7 +949,7 @@ describe("designManifest — progress", () => {
   it("buildDesignDesigner uses the builder listener, and a per-call listener wins", async () => {
     const { provider } = scriptedProvider([textTurn(VALID_JSON)]);
     const builderSink = collector();
-    const designer = buildDesignDesigner({ provider, onProgress: builderSink.listener });
+    const designer = buildDesignDesigner({ provider, parentPack: null, onProgress: builderSink.listener });
     await designer({ description: "desc" });
     expect(builderSink.events.length).toBeGreaterThan(0);
 
@@ -780,7 +1067,7 @@ describe("buildDesignProviderFromEnv — self-hosted model", () => {
       textTurn("not json", { input: 100, output: 200, cost: 0 }),
       textTurn(VALID_JSON, { input: 150, output: 900, cost: 0 }),
     ]);
-    const result = await designManifest({ provider, description: "a field service business" });
+    const result = await designManifest({ provider, parentPack: null, description: "a field service business" });
     expect(result.ok).toBe(true);
     expect(result.usage).toEqual({ inputTokens: 250, outputTokens: 1100, cost: 0 });
   });
@@ -819,7 +1106,7 @@ describe("designManifest — diagnosable failure classification (ADR-0280)", () 
 
   async function failWith(text: string): Promise<Awaited<ReturnType<typeof designManifest>>> {
     const { provider } = mockProvider([textTurn(text)]);
-    return designManifest({ provider, description: "desc", maxAttempts: 1 });
+    return designManifest({ provider, parentPack: null, description: "desc", maxAttempts: 1 });
   }
 
   it("every failure kind maps to exactly one fault", () => {
@@ -839,7 +1126,7 @@ describe("designManifest — diagnosable failure classification (ADR-0280)", () 
 
   it("classifies leading prose then JSON as a prose-wrapped recovery, not a failure", async () => {
     const { provider } = mockProvider([textTurn(`Certainly! Here it is:\n\n${VALID_JSON}\n\nEnjoy.`)]);
-    const r = await designManifest({ provider, description: "desc", maxAttempts: 1 });
+    const r = await designManifest({ provider, parentPack: null, description: "desc", maxAttempts: 1 });
     expect(r.ok).toBe(true);
     expect(r.failure).toBeNull();
     expect(r.recovery).toBe("surrounding_prose");
@@ -847,7 +1134,7 @@ describe("designManifest — diagnosable failure classification (ADR-0280)", () 
 
   it("recovers a fenced manifest and still reports the fence", async () => {
     const { provider } = mockProvider([textTurn(`\`\`\`json\n${VALID_JSON}\n\`\`\``)]);
-    const r = await designManifest({ provider, description: "desc", maxAttempts: 1 });
+    const r = await designManifest({ provider, parentPack: null, description: "desc", maxAttempts: 1 });
     expect(r.ok).toBe(true);
     expect(r.recovery).toBe("code_fence");
     expect(r.diagnosis).toHaveLength(1);
@@ -899,14 +1186,14 @@ describe("designManifest — diagnosable failure classification (ADR-0280)", () 
 
   it("classifies an empty reply as empty_response", async () => {
     const { provider } = mockProvider([[]]);
-    const r = await designManifest({ provider, description: "desc", maxAttempts: 1 });
+    const r = await designManifest({ provider, parentPack: null, description: "desc", maxAttempts: 1 });
     expect(r.failure).toBe("empty_response");
     expect(r.diagnosis[0]?.shape).toBe("empty");
   });
 
   it("classifies a provider throw as a provider fault, not a model one", async () => {
     const { provider } = mockProvider([new Error("connect ECONNREFUSED")]);
-    const r = await designManifest({ provider, description: "desc", maxAttempts: 1 });
+    const r = await designManifest({ provider, parentPack: null, description: "desc", maxAttempts: 1 });
     expect(r.failure).toBe("provider_error");
     expect(r.fault).toBe("provider");
     expect(r.diagnosis[0]?.shape).toBeNull();
@@ -916,6 +1203,7 @@ describe("designManifest — diagnosable failure classification (ADR-0280)", () 
     const { provider, requests } = mockProvider([textTurn(VALID_JSON)]);
     const r = await designManifest({
       provider,
+      parentPack: null,
       description: "x".repeat(MAX_DESIGN_DESCRIPTION_CHARS + 1),
     });
     expect(r.failure).toBe("description_too_long");
@@ -928,7 +1216,7 @@ describe("designManifest — diagnosable failure classification (ADR-0280)", () 
       textTurn("no json at all"),
       textTurn(`\`\`\`json\n${VALID_JSON}\n\`\`\``),
     ]);
-    const r = await designManifest({ provider, description: "desc" });
+    const r = await designManifest({ provider, parentPack: null, description: "desc" });
     expect(r.ok).toBe(true);
     expect(r.diagnosis.map((d) => d.failure)).toEqual(["not_json", null]);
     expect(r.diagnosis.map((d) => d.attempt)).toEqual([1, 2]);
@@ -945,7 +1233,7 @@ describe("designManifest — diagnosable failure classification (ADR-0280)", () 
       textTurn('```json\n{"entities": [,]}\n```'),
       textTurn(VALID_JSON),
     ]);
-    await designManifest({ provider, description: "desc" });
+    await designManifest({ provider, parentPack: null, description: "desc" });
     const corrective = requests[1]?.messages.filter((m) => m.role === "user").at(-1);
     expect(corrective?.content).toContain("code fence");
   });
@@ -958,7 +1246,7 @@ describe("designManifest — diagnosable failure classification (ADR-0280)", () 
       textTurn('{"reply": "no"}'),
       textTurn(VALID_JSON),
     ]);
-    const out = await designManifest({ provider, description: "desc" });
+    const out = await designManifest({ provider, parentPack: null, description: "desc" });
     expect(out.ok).toBe(false);
     // One call, not two: the second turn was never asked for.
     expect(requests).toHaveLength(1);
@@ -970,7 +1258,7 @@ describe("designManifest — diagnosable failure classification (ADR-0280)", () 
       textTurn("not json at all"),
       textTurn(VALID_JSON),
     ]);
-    const out = await designManifest({ provider, description: "desc" });
+    const out = await designManifest({ provider, parentPack: null, description: "desc" });
     expect(out.ok).toBe(true);
     expect(requests).toHaveLength(2);
   });
@@ -980,7 +1268,7 @@ describe("designManifest — diagnosable failure classification (ADR-0280)", () 
       textTurn(VALID_JSON.slice(0, 200)),
       textTurn(VALID_JSON),
     ]);
-    await designManifest({ provider, description: "desc" });
+    await designManifest({ provider, parentPack: null, description: "desc" });
     const corrective = requests[1]?.messages.filter((m) => m.role === "user").at(-1);
     expect(corrective?.content).toContain("smaller manifest");
   });
@@ -990,6 +1278,7 @@ describe("designManifest — diagnosable failure classification (ADR-0280)", () 
     const { provider } = mockProvider([textTurn("[1, 2, 3]"), textTurn(VALID_JSON)]);
     await designManifest({
       provider,
+      parentPack: null,
       description: "desc",
       onProgress: (p) => void seen.push(p),
     });
@@ -1029,14 +1318,14 @@ describe("designManifest — per-request cost ceiling (ADR-0267)", () => {
 
   it("leaves a run unpriced when no ceiling is configured", async () => {
     const { provider, requests } = pricedProvider([textTurn(VALID_JSON)], PAID);
-    const r = await designManifest({ provider, description: "desc" });
+    const r = await designManifest({ provider, parentPack: null, description: "desc" });
     expect(r.ok).toBe(true);
     expect(requests).toHaveLength(1);
   });
 
   it("admits a request whose estimate fits under the ceiling", async () => {
     const { provider, requests } = pricedProvider([textTurn(VALID_JSON)], PAID);
-    const r = await designManifest({ provider, description: "desc", maxRequestDollars: 1 });
+    const r = await designManifest({ provider, parentPack: null, description: "desc", maxRequestDollars: 1 });
     expect(r.ok).toBe(true);
     expect(requests).toHaveLength(1);
   });
@@ -1045,6 +1334,7 @@ describe("designManifest — per-request cost ceiling (ADR-0267)", () => {
     const { provider, requests } = pricedProvider([textTurn(VALID_JSON)], PAID);
     const r = await designManifest({
       provider,
+      parentPack: null,
       description: "desc",
       maxRequestDollars: 0.000001,
     });
@@ -1057,7 +1347,7 @@ describe("designManifest — per-request cost ceiling (ADR-0267)", () => {
 
   it("refuses a configured ceiling it cannot compute (provider publishes no pricing)", async () => {
     const { provider, requests } = pricedProvider([textTurn(VALID_JSON)], undefined);
-    const r = await designManifest({ provider, description: "desc", maxRequestDollars: 10 });
+    const r = await designManifest({ provider, parentPack: null, description: "desc", maxRequestDollars: 10 });
     expect(r.ok).toBe(false);
     expect(r.failure).toBe("request_cost_ceiling");
     expect(r.issues[0]).toContain("no pricing");
@@ -1067,7 +1357,7 @@ describe("designManifest — per-request cost ceiling (ADR-0267)", () => {
   it("a free-priced self-hosted provider is never refused by the ceiling", async () => {
     const free: ProviderPricing = { inputPerMillionTokens: 0, outputPerMillionTokens: 0 };
     const { provider } = pricedProvider([textTurn(VALID_JSON)], free);
-    const r = await designManifest({ provider, description: "desc", maxRequestDollars: 0 });
+    const r = await designManifest({ provider, parentPack: null, description: "desc", maxRequestDollars: 0 });
     expect(r.ok).toBe(true);
   });
 
@@ -1079,6 +1369,7 @@ describe("designManifest — per-request cost ceiling (ADR-0267)", () => {
     const { provider } = pricedProvider([chunkedTurn(RUNAWAY, 500), textTurn(VALID_JSON)], PAID);
     const r = await designManifest({
       provider,
+      parentPack: null,
       description: "desc",
       maxTokens: 500,
       maxRequestDollars: 0.05,
@@ -1098,6 +1389,7 @@ describe("designManifest — per-request cost ceiling (ADR-0267)", () => {
     );
     const r = await designManifest({
       provider,
+      parentPack: null,
       description: "desc",
       maxTokens: 500,
       maxRequestDollars: 0.05,
@@ -1112,7 +1404,7 @@ describe("designManifest — per-request cost ceiling (ADR-0267)", () => {
       [textTurn(VALID_JSON, { input: 10, output: 10, cost: 5 })],
       PAID,
     );
-    const r = await designManifest({ provider, description: "desc", maxRequestDollars: 0.5 });
+    const r = await designManifest({ provider, parentPack: null, description: "desc", maxRequestDollars: 0.5 });
     expect(r.ok).toBe(true);
     expect(r.usage?.cost).toBe(5);
     expect(requests).toHaveLength(1);
@@ -1123,7 +1415,7 @@ describe("designManifest — per-request cost ceiling (ADR-0267)", () => {
       [textTurn("not json", { input: 10, output: 10, cost: 5 })],
       PAID,
     );
-    const r = await designManifest({ provider, description: "desc", maxRequestDollars: 0.5 });
+    const r = await designManifest({ provider, parentPack: null, description: "desc", maxRequestDollars: 0.5 });
     expect(r.ok).toBe(false);
     expect(r.failure).toBe("not_json");
     expect(r.attempts).toBe(1);
@@ -1147,6 +1439,7 @@ describe("designManifest — per-request cost ceiling (ADR-0267)", () => {
     );
     const r = await designManifest({
       provider,
+      parentPack: null,
       description: "desc",
       maxTokens: 1000,
       maxRequestDollars: 0.05,
@@ -1167,6 +1460,7 @@ describe("designManifest — per-request cost ceiling (ADR-0267)", () => {
     );
     const r = await designManifest({
       provider,
+      parentPack: null,
       description: "desc",
       maxTokens: 1000,
       maxRequestDollars: 1,

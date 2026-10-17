@@ -1,6 +1,7 @@
-import { tryValidateManifest, type Manifest } from "@crossengin/kernel/manifest";
+import { manifestHash, tryValidateManifest, type Manifest } from "@crossengin/kernel/manifest";
 import { InMemoryEntityStore } from "@crossengin/operate-runtime";
 import { ColumnEncryptionUnavailable } from "@crossengin/operate-runtime-pg";
+import { ERP_CORE_PACK_SLUG, buildErpCorePack } from "@crossengin/pack-erp-core";
 import { describe, expect, it } from "vitest";
 
 import type { RawHttpRequest, RawHttpResponse } from "./http.js";
@@ -15,6 +16,7 @@ import {
   type GatewayBuildRefusalKind,
   type TenantGatewayCacheOptions,
 } from "./tenant-gateway-cache.js";
+import { buildTenantManifestLineage } from "./tenant-manifest-lineage.js";
 
 const TENANT_1 = "00000000-0000-4000-8000-000000000001";
 const TENANT_2 = "00000000-0000-4000-8000-000000000002";
@@ -70,6 +72,36 @@ function obligationManifest(slug: string, entityName: string): Manifest {
   };
 }
 
+const BOOT = buildErpCorePack();
+
+/**
+ * The lineage every construction below uses: the real `erp-core` pack as the one permitted parent.
+ * A `lineage` is required, so each of these call sites had to be given one — which is the forcing
+ * function the required option buys.
+ */
+const LINEAGE = buildTenantManifestLineage({ slug: ERP_CORE_PACK_SLUG, manifest: BOOT });
+const NO_PARENT_LINEAGE = buildTenantManifestLineage(null);
+
+/** A tenant manifest extending the boot pack, with one entity of its own. */
+function extendingManifest(slug: string, entityName: string, over: Partial<Manifest> = {}): Manifest {
+  return {
+    manifestVersion: "1.0",
+    meta: { name: slug, slug, version: "1.0.0", extends: [ERP_CORE_PACK_SLUG] },
+    entities: [{ name: entityName, fields: [{ name: "name", type: { kind: "text" } }] }],
+    roles: { operator: { name: "operator" } },
+    permissions: {
+      [entityName]: {
+        list: { roles: ["operator"] },
+        read: { roles: ["operator"] },
+        create: { roles: ["operator"] },
+        update: { roles: ["operator"] },
+        delete: { roles: ["operator"] },
+      },
+    },
+    ...over,
+  };
+}
+
 function compile(manifest: Manifest): OperateHttpServer {
   const { httpServer } = buildOperateHttpServer({
     manifest,
@@ -114,6 +146,7 @@ function makeCache(
   const builds: Manifest[] = [];
   const cache = new TenantGatewayCache({
     source,
+    lineage: LINEAGE,
     build: (manifest) => {
       builds.push(manifest);
       return compile(manifest);
@@ -337,6 +370,353 @@ describe("TenantGatewayCache", () => {
   });
 });
 
+describe("TenantGatewayCache — a tenant's meta.extends is followed, not merely parsed", () => {
+  it("builds from the RESOLVED manifest: the parent's entities and roles are present", async () => {
+    const source = fakeSource({
+      [TENANT_1]: extendingManifest("tenant/acme", "Widget") as Record<string, unknown>,
+    });
+    const { cache, builds } = makeCache(source, { now: () => 0 });
+    expect((await cache.serverFor(TENANT_1)).kind).toBe("server");
+    expect(builds).toHaveLength(1);
+    const built = builds[0]!;
+    // The union, measured against the genuine pack rather than a fixture.
+    expect(built.entities?.length).toBe((BOOT.entities?.length ?? 0) + 1);
+    expect(built.entities?.some((e) => e.name === "Widget")).toBe(true);
+    expect(built.entities?.some((e) => e.name === "Invoice")).toBe(true);
+    expect(Object.keys(built.roles ?? {})).toContain("operator");
+    expect(Object.keys(built.roles ?? {})).toContain("erp_admin");
+    expect(Object.keys(built.workflows ?? {}).length).toBe(Object.keys(BOOT.workflows ?? {}).length);
+  });
+
+  it("routes an INHERITED entity: 403 with lineage against 404 without, over one URL", async () => {
+    // The discriminator is 403-vs-404 and not 200: `/v1/vendors` exists only because the parent's
+    // entities were merged in, and it refuses because `operator` is absent from the parent's own
+    // grant for `Vendor` — so the status proves the route *and* the inherited permissions arrived.
+    // Unresolved, the same request was a 404: the entity did not exist in the compiled gateway.
+    async function statusFor(stored: Manifest): Promise<number> {
+      const { cache } = makeCache(fakeSource({ [TENANT_1]: stored as Record<string, unknown> }), {
+        now: () => 0,
+      });
+      const dispatch = buildPerTenantDispatch({
+        defaultDispatch: async () => ({ status: 599, headers: {}, body: null }),
+        cache,
+        apiKeys: API_KEYS,
+      });
+      const res = await dispatch(req("/v1/vendors", { "x-api-key": "key-a" }), null);
+      // 599 would mean the tenant fell through to the deployment's gateway rather than its own.
+      expect(res.status).not.toBe(599);
+      return res.status;
+    }
+    expect(await statusFor(extendingManifest("tenant/acme", "Widget"))).toBe(403);
+    expect(await statusFor(tinyManifest("tenant/flat", "Widget"))).toBe(404);
+  });
+
+  it("stamps meta.manifestResolution onto what is built, naming the parent's hash", async () => {
+    const source = fakeSource({
+      [TENANT_1]: extendingManifest("tenant/acme", "Widget") as Record<string, unknown>,
+    });
+    const { cache, builds } = makeCache(source, { now: () => 0 });
+    await cache.serverFor(TENANT_1);
+    expect(builds[0]!.meta.manifestResolution?.parents).toEqual([
+      {
+        slug: ERP_CORE_PACK_SLUG,
+        version: BOOT.meta.version,
+        hash: manifestHash(BOOT),
+        parentId: ERP_CORE_PACK_SLUG,
+      },
+    ]);
+    // Resolved means resolved: nothing downstream can be asked to follow it again.
+    expect(builds[0]!.meta.extends).toBeUndefined();
+  });
+
+  it("a manifest with no extends is handed to the build content-identical to what was stored", async () => {
+    const stored = tinyManifest("t-one", "Widget");
+    const source = fakeSource({ [TENANT_1]: stored as Record<string, unknown> });
+    const { cache, builds } = makeCache(source, { now: () => 0 });
+    expect((await cache.serverFor(TENANT_1)).kind).toBe("server");
+    expect(JSON.stringify(builds[0])).toBe(JSON.stringify(stored));
+    expect(builds[0]!.meta.manifestResolution).toBeUndefined();
+  });
+
+  it("resolution runs unconditionally and costs a no-extends manifest zero lookups", async () => {
+    const ids: string[] = [];
+    const source = fakeSource({ [TENANT_1]: tinyManifest("t-one", "Widget") as Record<string, unknown> });
+    const { cache } = makeCache(source, {
+      now: () => 0,
+      lineage: {
+        permittedParentSlug: ERP_CORE_PACK_SLUG,
+        registry: {
+          async getManifest(id: string): Promise<Manifest | null> {
+            ids.push(id);
+            return LINEAGE.registry.getManifest(id);
+          },
+        },
+      },
+    });
+    expect((await cache.serverFor(TENANT_1)).kind).toBe("server");
+    expect(ids).toEqual([]);
+  });
+
+  it("cross-validates the resolved form, so a child referencing a parent's entity is served", async () => {
+    const referencing = extendingManifest("tenant/acme", "Widget", {
+      entities: [
+        {
+          name: "Widget",
+          fields: [
+            { name: "name", type: { kind: "text" } },
+            { name: "currency_id", type: { kind: "uuid" } },
+          ],
+        },
+      ],
+      relations: [
+        { kind: "many_to_one", from: "Widget", to: "Currency", field: "currency_id", onDelete: "restrict" },
+      ],
+    });
+    // The premise: standalone it does not validate, which is why the resolve step precedes it.
+    expect(tryValidateManifest(referencing).ok).toBe(false);
+    const invalid: string[] = [];
+    const source = fakeSource({ [TENANT_1]: referencing as Record<string, unknown> });
+    const { cache } = makeCache(source, {
+      now: () => 0,
+      onInvalidManifest: (tenantId) => invalid.push(tenantId),
+    });
+    expect((await cache.serverFor(TENANT_1)).kind).toBe("server");
+    expect(invalid).toEqual([]);
+  });
+
+  it("still reports a resolved manifest that fails cross-validation as invalid, not refused", async () => {
+    // A relation to an entity neither the child nor the parent declares: resolution succeeds and
+    // cross-validation of the *resolved* form is what refuses it, so the `none` arm is intact.
+    const colliding = extendingManifest("tenant/acme", "Widget", {
+      entities: [
+        {
+          name: "Widget",
+          fields: [
+            { name: "name", type: { kind: "text" } },
+            { name: "ghost_id", type: { kind: "uuid" } },
+          ],
+        },
+      ],
+      relations: [
+        { kind: "many_to_one", from: "Widget", to: "Nonexistent", field: "ghost_id", onDelete: "restrict" },
+      ],
+    });
+    const invalid: string[] = [];
+    const refusals: GatewayBuildRefusalKind[] = [];
+    const source = fakeSource({ [TENANT_1]: colliding as Record<string, unknown> });
+    const { cache } = makeCache(source, {
+      now: () => 0,
+      onInvalidManifest: (tenantId) => invalid.push(tenantId),
+      onBuildRefused: (_t, kind) => refusals.push(kind),
+    });
+    expect(await cache.serverFor(TENANT_1)).toEqual({ kind: "none" });
+    expect(invalid).toEqual([TENANT_1]);
+    expect(refusals).toEqual([]);
+  });
+
+  it("honours a declared override of an inherited entity", async () => {
+    const overriding = extendingManifest("tenant/acme", "Widget", {
+      entities: [
+        {
+          name: "Currency",
+          overrides: true,
+          fields: [
+            { name: "code", type: { kind: "text" }, required: true },
+            { name: "house_label", type: { kind: "text" } },
+          ],
+        },
+      ],
+      permissions: { Currency: { list: { roles: ["operator"] }, read: { roles: ["operator"] } } },
+    });
+    const source = fakeSource({ [TENANT_1]: overriding as Record<string, unknown> });
+    const { cache, builds } = makeCache(source, { now: () => 0 });
+    expect((await cache.serverFor(TENANT_1)).kind).toBe("server");
+    expect(builds[0]!.entities?.length).toBe(BOOT.entities?.length);
+    expect(
+      builds[0]!.entities?.find((e) => e.name === "Currency")?.fields.map((f) => f.name),
+    ).toEqual(["code", "house_label"]);
+  });
+});
+
+describe("TenantGatewayCache — a lineage that cannot be resolved is refused, never fallen back from", () => {
+  function lineageCase(
+    stored: Manifest,
+    extra: Partial<TenantGatewayCacheOptions> = {},
+  ): {
+    cache: TenantGatewayCache;
+    builds: Manifest[];
+    refusals: Array<{ tenantId: string; kind: GatewayBuildRefusalKind; detail: string }>;
+    invalid: string[];
+  } {
+    const refusals: Array<{ tenantId: string; kind: GatewayBuildRefusalKind; detail: string }> = [];
+    const invalid: string[] = [];
+    const { cache, builds } = makeCache(fakeSource({ [TENANT_1]: stored as Record<string, unknown> }), {
+      now: () => 0,
+      onBuildRefused: (tenantId, kind, detail) => refusals.push({ tenantId, kind, detail }),
+      onInvalidManifest: (tenantId) => invalid.push(tenantId),
+      ...extra,
+    });
+    return { cache, builds, refusals, invalid };
+  }
+
+  it("refuses lineage_parent_unknown and NAMES the permitted parent in the detail", async () => {
+    const stored = extendingManifest("tenant/acme", "Widget");
+    const { cache, refusals, builds } = lineageCase({
+      ...stored,
+      meta: { ...stored.meta, extends: ["operate-erp/retail"] },
+    });
+    expect(await cache.serverFor(TENANT_1)).toEqual({
+      kind: "refused",
+      reason: "lineage_parent_unknown",
+      retryAfterSeconds: 60,
+    });
+    expect(builds).toHaveLength(0);
+    expect(refusals).toHaveLength(1);
+    expect(refusals[0]!.detail).toContain("operate-erp/retail");
+    // The remedy, which the kernel's own message cannot carry — it was never told what was allowed.
+    expect(refusals[0]!.detail).toContain("permits extending only 'operate-erp/core'");
+  });
+
+  it("refuses lineage_cycle when the tenant's own slug collides with the permitted parent's", async () => {
+    const stored = extendingManifest("tenant/acme", "Widget");
+    const { cache, refusals } = lineageCase({
+      ...stored,
+      meta: { ...stored.meta, slug: ERP_CORE_PACK_SLUG },
+    });
+    expect(await cache.serverFor(TENANT_1)).toMatchObject({
+      kind: "refused",
+      reason: "lineage_cycle",
+    });
+    expect(refusals[0]!.detail).toContain("cycle");
+    expect(refusals[0]!.detail).toContain("permits extending only 'operate-erp/core'");
+  });
+
+  it("refuses lineage_override_undeclared for a collision the tenant did not declare", async () => {
+    const { cache, refusals } = lineageCase(extendingManifest("tenant/acme", "Invoice"));
+    expect(await cache.serverFor(TENANT_1)).toMatchObject({
+      kind: "refused",
+      reason: "lineage_override_undeclared",
+    });
+    expect(refusals[0]!.detail).toContain("Invoice");
+    expect(refusals[0]!.detail).toContain("overrides: true");
+  });
+
+  it("reports a lineage refusal through onBuildRefused and NOT through onInvalidManifest", async () => {
+    const stored = extendingManifest("tenant/acme", "Widget");
+    const { cache, refusals, invalid } = lineageCase({
+      ...stored,
+      meta: { ...stored.meta, extends: ["nope/missing"] },
+    });
+    await cache.serverFor(TENANT_1);
+    // `none` would serve this tenant the deployment's gateway with nothing saying their
+    // activation did nothing, which is the outcome the refusal exists to replace.
+    expect(invalid).toEqual([]);
+    expect(refusals.map((r) => r.kind)).toEqual(["lineage_parent_unknown"]);
+  });
+
+  it("memoises all three lineage refusals: the source is read once within the window", async () => {
+    const stored = extendingManifest("tenant/acme", "Widget");
+    const cases: ReadonlyArray<readonly [GatewayBuildRefusalKind, Manifest]> = [
+      ["lineage_parent_unknown", { ...stored, meta: { ...stored.meta, extends: ["nope/missing"] } }],
+      ["lineage_cycle", { ...stored, meta: { ...stored.meta, slug: ERP_CORE_PACK_SLUG } }],
+      ["lineage_override_undeclared", extendingManifest("tenant/acme", "Invoice")],
+    ];
+    for (const [kind, manifest] of cases) {
+      const source = fakeSource({ [TENANT_1]: manifest as Record<string, unknown> });
+      const { cache } = makeCache(source, { now: () => 0 });
+      expect(await cache.serverFor(TENANT_1)).toMatchObject({ kind: "refused", reason: kind });
+      expect(await cache.serverFor(TENANT_1)).toMatchObject({ kind: "refused", reason: kind });
+      expect(await cache.serverFor(TENANT_1)).toMatchObject({ kind: "refused", reason: kind });
+      expect(source.calls).toEqual([TENANT_1]);
+    }
+  });
+
+  it("invalidate(tenant) clears a memoised lineage refusal, so re-activation is picked up at once", async () => {
+    const stored = extendingManifest("tenant/acme", "Widget");
+    const source = fakeSource({
+      [TENANT_1]: { ...stored, meta: { ...stored.meta, extends: ["nope/missing"] } } as Record<
+        string,
+        unknown
+      >,
+    });
+    const { cache } = makeCache(source, { now: () => 0 });
+    await cache.serverFor(TENANT_1);
+    cache.invalidate(TENANT_1);
+    await cache.serverFor(TENANT_1);
+    expect(source.calls).toEqual([TENANT_1, TENANT_1]);
+  });
+
+  it("refuses every extends and says no parent is extensible when the deployment registers none", async () => {
+    const { cache, refusals } = lineageCase(extendingManifest("tenant/acme", "Widget"), {
+      lineage: NO_PARENT_LINEAGE,
+    });
+    expect(await cache.serverFor(TENANT_1)).toMatchObject({
+      kind: "refused",
+      reason: "lineage_parent_unknown",
+    });
+    expect(refusals[0]!.detail).toContain("no manifest a tenant may extend");
+    expect(refusals[0]!.detail).not.toContain("null");
+  });
+
+  it("does not append the permitted-parent clause to a non-lineage refusal", async () => {
+    const { cache, refusals } = refusingCache(new ColumnEncryptionUnavailable("no key", []));
+    await cache.serverFor(TENANT_1);
+    expect(refusals[0]!.kind).toBe("column_encryption_unavailable");
+    expect(refusals[0]!.detail).toBe("no key");
+    expect(refusals[0]!.detail).not.toContain("permits extending");
+  });
+
+  it("classifies a registry throw as the transient `unknown`, uncached and unexplained", async () => {
+    const { cache, refusals } = lineageCase(extendingManifest("tenant/acme", "Widget"), {
+      lineage: {
+        permittedParentSlug: ERP_CORE_PACK_SLUG,
+        registry: {
+          async getManifest(): Promise<Manifest | null> {
+            throw new Error("parent directory unavailable");
+          },
+        },
+      },
+    });
+    expect(await cache.serverFor(TENANT_1)).toMatchObject({ kind: "refused", reason: "unknown" });
+    // Nothing is known about it, so no permitted parent is asserted beside it.
+    expect(refusals[0]!.detail).toBe("parent directory unavailable");
+    await cache.serverFor(TENANT_1);
+    expect(refusals).toHaveLength(2);
+  });
+
+  it("answers 503 for a lineage refusal and never the default gateway", async () => {
+    const stored = extendingManifest("tenant/acme", "Widget");
+    const source = fakeSource({
+      [TENANT_1]: { ...stored, meta: { ...stored.meta, extends: ["nope/missing"] } } as Record<
+        string,
+        unknown
+      >,
+    });
+    const { cache } = makeCache(source, { now: () => 0 });
+    let defaultCalls = 0;
+    const dispatch = buildPerTenantDispatch({
+      defaultDispatch: async () => {
+        defaultCalls += 1;
+        return { status: 200, headers: {}, body: null };
+      },
+      cache,
+      apiKeys: API_KEYS,
+    });
+    const res = await dispatch(req("/v1/widgets", { "x-api-key": "key-a" }), null);
+    expect(res.status).toBe(503);
+    expect(defaultCalls).toBe(0);
+    const body = JSON.parse(new TextDecoder().decode(res.body ?? new Uint8Array())) as Record<
+      string,
+      unknown
+    >;
+    expect(body).toMatchObject({ status: 503, tenantId: TENANT_1, reason: "lineage_parent_unknown" });
+    // The detail is log-only; the permitted parent and the thrown message stay out of the response.
+    const text = new TextDecoder().decode(res.body ?? new Uint8Array());
+    expect(text).not.toContain("nope/missing");
+    expect(text).not.toContain("permits extending");
+  });
+});
+
 describe("buildPerTenantDispatch — two tenants, two manifests, one edge", () => {
   function makeEdge(): {
     dispatch: (raw: RawHttpRequest, body: Uint8Array | null) => Promise<RawHttpResponse>;
@@ -425,6 +805,7 @@ describe("TenantGatewayCache — capacity", () => {
       },
     };
     const cache = new TenantGatewayCache({
+      lineage: LINEAGE,
       source,
       build: () => {
         throw new Error("never built");
@@ -449,6 +830,7 @@ describe("per-tenant gateways — observability parity", () => {
     const executions: { operationId: string | null; outcome: string }[] = [];
     const source = fakeSource({ [TENANT_1]: tinyManifest("t-one", "Widget") as Record<string, unknown> });
     const cache = new TenantGatewayCache({
+      lineage: LINEAGE,
       source,
       build: (manifest) =>
         buildOperateHttpServer({
@@ -484,9 +866,21 @@ describe("GATEWAY_BUILD_REFUSALS — the permanence vocabulary", () => {
     }
   });
 
-  it("names exactly the two deliberate refusals as permanent", () => {
+  it("names exactly the deliberate refusals as permanent: two build, three lineage", () => {
     const permanent = GATEWAY_BUILD_REFUSAL_KINDS.filter((k) => GATEWAY_BUILD_REFUSALS[k].permanent);
-    expect([...permanent].sort()).toEqual(["abac_obligation_unevaluable", "column_encryption_unavailable"]);
+    expect([...permanent].sort()).toEqual([
+      "abac_obligation_unevaluable",
+      "column_encryption_unavailable",
+      "lineage_cycle",
+      "lineage_override_undeclared",
+      "lineage_parent_unknown",
+    ]);
+  });
+
+  it("carries a kind for each of the three kernel lineage throws", () => {
+    for (const kind of ["lineage_cycle", "lineage_override_undeclared", "lineage_parent_unknown"] as const) {
+      expect(GATEWAY_BUILD_REFUSAL_KINDS).toContain(kind);
+    }
   });
 
   it("leaves `unknown` transient, which is the uncached direction", () => {
@@ -508,6 +902,7 @@ function refusingCache(
   const refusals: Array<{ tenantId: string; kind: GatewayBuildRefusalKind; detail: string }> = [];
   const invalid: Array<{ tenantId: string; issues: readonly string[] }> = [];
   const cache = new TenantGatewayCache({
+    lineage: LINEAGE,
     source: fakeSource({ [TENANT_1]: tinyManifest("t-one", "Widget") as Record<string, unknown> }),
     build: (): OperateHttpServer => {
       attempts += 1;
@@ -526,6 +921,7 @@ describe("TenantGatewayCache — a build that fails is refused, never swapped fo
     const source = fakeSource({ [TENANT_1]: obligationManifest("t-one", "Widget") as Record<string, unknown> });
     const refusals: GatewayBuildRefusalKind[] = [];
     const cache = new TenantGatewayCache({
+      lineage: LINEAGE,
       source,
       // The real compile path: no `abac` option is declared, so `buildOperateHttpServer` throws.
       build: (manifest) => compile(manifest),
@@ -624,6 +1020,7 @@ describe("TenantGatewayCache — a build that fails is refused, never swapped fo
     const refusals: GatewayBuildRefusalKind[] = [];
     const invalid: string[] = [];
     const cache = new TenantGatewayCache({
+      lineage: LINEAGE,
       source: fakeSource({ [TENANT_1]: { nonsense: true } }),
       build: () => compile(tinyManifest("t-one", "Widget")),
       now: () => 0,
@@ -637,6 +1034,7 @@ describe("TenantGatewayCache — a build that fails is refused, never swapped fo
 
   it("does not throw when onBuildRefused is not wired", async () => {
     const cache = new TenantGatewayCache({
+      lineage: LINEAGE,
       source: fakeSource({ [TENANT_1]: tinyManifest("t-one", "Widget") as Record<string, unknown> }),
       build: (): OperateHttpServer => {
         throw new ColumnEncryptionUnavailable("no key", []);
@@ -730,7 +1128,12 @@ describe("buildPerTenantDispatch — a refused tenant gets 503 and never the def
 
   it("leaks nothing from an ABAC obligation refusal either, which names policy keys", async () => {
     const source = fakeSource({ [TENANT_1]: obligationManifest("t-one", "Widget") as Record<string, unknown> });
-    const cache = new TenantGatewayCache({ source, build: (m) => compile(m), now: () => 0 });
+    const cache = new TenantGatewayCache({
+      source,
+      lineage: LINEAGE,
+      build: (m) => compile(m),
+      now: () => 0,
+    });
     const dispatch = buildPerTenantDispatch({
       defaultDispatch: async () => ({ status: 500, headers: {}, body: null }),
       cache,
@@ -750,6 +1153,7 @@ describe("buildPerTenantDispatch — a refused tenant gets 503 and never the def
     let defaultCalls = 0;
     const defaultServer = compile(tinyManifest("default", "Fallback"));
     const cache = new TenantGatewayCache({
+      lineage: LINEAGE,
       source,
       build: (): OperateHttpServer => {
         throw new Error("never built");
@@ -773,6 +1177,7 @@ describe("buildPerTenantDispatch — a refused tenant gets 503 and never the def
     let defaultCalls = 0;
     const defaultServer = compile(tinyManifest("default", "Fallback"));
     const cache = new TenantGatewayCache({
+      lineage: LINEAGE,
       source: {
         activeManifestFor: async (): Promise<Record<string, unknown> | null> => {
           throw new Error("store unavailable");

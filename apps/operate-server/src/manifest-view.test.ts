@@ -110,13 +110,13 @@ describe("projectManifestView — the design example", () => {
       name: "Field Service",
       slug: "generated/field-service",
       version: "0.1.0",
-      description: "Work-order tracking for a field service business.",
+      description: "Service-visit tracking for a field service business.",
     });
   });
 
   it("projects exactly two entities in manifest order, labelled by name", () => {
-    expect(view.entities.map((entity) => entity.name)).toEqual(["Customer", "WorkOrder"]);
-    expect(view.entities.map((entity) => entity.label)).toEqual(["Customer", "WorkOrder"]);
+    expect(view.entities.map((entity) => entity.name)).toEqual(["Customer", "ServiceVisit"]);
+    expect(view.entities.map((entity) => entity.label)).toEqual(["Customer", "ServiceVisit"]);
   });
 
   it("marks auditable entities from their traits", () => {
@@ -147,7 +147,7 @@ describe("projectManifestView — the design example", () => {
     ]);
   });
 
-  it("projects the WorkOrder reference field with its target", () => {
+  it("projects the ServiceVisit reference field with its target", () => {
     const customer = view.entities[1]?.fields.find((field) => field.name === "customer");
     expect(customer?.type).toBe("reference → Customer");
     expect(customer?.kind).toBe("reference");
@@ -155,7 +155,7 @@ describe("projectManifestView — the design example", () => {
     expect(customer?.required).toBe(true);
   });
 
-  it("projects the WorkOrder enum and decimal fields", () => {
+  it("projects the ServiceVisit enum and decimal fields", () => {
     const types = Object.fromEntries(
       (view.entities[1]?.fields ?? []).map((field) => [field.name, field.type]),
     );
@@ -170,7 +170,7 @@ describe("projectManifestView — the design example", () => {
     expect(view.relations).toEqual([
       {
         kind: "many_to_one",
-        from: "WorkOrder",
+        from: "ServiceVisit",
         to: "Customer",
         field: "customer",
         onDelete: "restrict",
@@ -178,10 +178,12 @@ describe("projectManifestView — the design example", () => {
     ]);
   });
 
+  // 12 grants, not 10 and 7: the example declares a lifecycle, and `countGrantsForRole` counts
+  // each transition grant beside the five CRUD operations.
   it("projects roles with i18n labels and grant counts", () => {
     expect(view.roles).toEqual([
-      { name: "app_admin", label: "Administrator", description: "Full access to every entity.", grantCount: 10 },
-      { name: "app_user", label: "Staff User", description: "Day-to-day operational access.", grantCount: 7 },
+      { name: "app_admin", label: "Administrator", description: "Full access to every entity.", grantCount: 12 },
+      { name: "app_user", label: "Staff User", description: "Day-to-day operational access.", grantCount: 8 },
     ]);
   });
 
@@ -192,9 +194,24 @@ describe("projectManifestView — the design example", () => {
       roles: 2,
       relations: 1,
       sensitiveFields: 2,
-      lifecycles: 0,
+      lifecycles: 1,
     });
-    expect(view.entities.every((entity) => entity.lifecycle === null)).toBe(true);
+  });
+
+  it("projects the ServiceVisit lifecycle and leaves Customer without one", () => {
+    expect(view.entities[0]?.lifecycle).toBeNull();
+    const lifecycle = view.entities[1]?.lifecycle;
+    expect(lifecycle?.stateField).toBe("status");
+    expect(lifecycle?.initialState).toBe("open");
+    expect(lifecycle?.states).toEqual([
+      { name: "open", label: "Open", category: "active" },
+      { name: "in_progress", label: "In Progress", category: "active" },
+      { name: "closed", label: "Closed", category: "terminal" },
+    ]);
+    expect(lifecycle?.transitions).toEqual([
+      { name: "start", from: ["open"], to: "in_progress" },
+      { name: "close", from: ["open", "in_progress"], to: "closed" },
+    ]);
   });
 });
 

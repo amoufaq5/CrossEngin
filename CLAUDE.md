@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 359 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 363 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 19,372 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 19,435 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -1348,6 +1348,81 @@ type errors.
   per document, and at the real pack's widest money record (`Invoice`, 777 B of JSON) 100 000 is a
   ~74 MiB body.
 
+  ADR-0368 is the fifth user-directed increment and the class is **inheritance ran where the
+  lineage was already known**. `resolveManifest` — the whole `meta.extends` mechanism, with its
+  merge, its `overrides: true` marker and its three refusals — had exactly one non-test caller,
+  `loadBuiltinPack`, which runs over the seven *built-in* packs at boot, whose lineage is fixed at
+  build time and could have been composed by hand. A **tenant's** activated manifest is the only
+  input in the system whose lineage is a runtime question, and it reaches
+  `TenantGatewayCache.serverFor`, which parsed, validated and built and resolved nothing. So
+  `meta.extends` on a stored manifest was read and never followed, and **activating a design
+  replaced the pack**: a four-entity design took the other forty-seven entities, fifteen roles,
+  nineteen workflows and seventy-nine transitions away from that tenant — the general ledger, AR/AP,
+  inventory and HR among them. The mechanism was *applied to the input that did not need it*, and
+  `node.ts` asserted the opposite in prose — *"resolving that lineage is the gateway cache's job
+  rather than a second resolution here"* — returning `null` from `roleDirectory` for any manifest
+  carrying `extends`, on a premise that did not hold.
+  Two more defects composed with it into one hazard rather than three gaps. The **approval gate was
+  supplied under a flag nothing passed**: `reviewGate` reaches the design routes only under
+  `--require-design-review`, so the activation handler's `if (ctx.reviewGate !== undefined)` was
+  skipped and the tenant's own `erp_admin` designed a manifest, reviewed their own diff and clicked
+  Activate — while the compose comment claimed *"a reviewer approves it, and activating it makes it
+  that tenant's live schema"*, both halves false, and `/setup` claimed *"you review everything
+  before anything goes live"*. And the **design spec asked for six of the manifest's sixteen
+  sections**: 4,834 characters mentioning neither `workflow` nor `extends`, with no `workflows` key
+  in the worked example, so **every AI design had zero workflows and zero transitions** and every
+  one was standalone and therefore a replacement.
+  The ordering is the decision and it **reverses the plan's**. Batch 19 said "gate first"; a gate
+  over a manifest that replaces the pack is *worse than no gate*, because it launders the
+  replacement through a human shown a diff covering five of sixteen sections — ADR-0337's
+  falsely-true direction. So lineage first, then the gate, then the prompt; the plan's own
+  gate-before-key still holds inside that. Resolution goes **between parse and validation**, which
+  is measured and not reasoned: a child extending core and referencing `Account` is *refused* by
+  `tryValidateManifest` unresolved and *ok* resolved, yielding the **52-entity / 16-role union in
+  one `getManifest` call** — so resolution after validation would have been inert. The parent policy
+  is **the deployment's own manifest and nothing else**, because the boot manifest is the one this
+  deployment has already surveyed, provisioned and declared, and one registry entry is *sufficient
+  and complete* since `stripExtendsFromMeta` leaves a resolved manifest carrying no `extends`, so
+  handing it back resolves to itself with zero further lookups and no possible loop. A resolution
+  failure is a **`refused`** and not the `{kind:"none"}` fallback, because `none` serves the
+  deployment's gateway and a tenant whose activation did nothing would never be told — ADR-0314's
+  "their data is in a different place than they think".
+  Three things were sharper than the defect. **The prompt half had to ship with it or the mechanism
+  ships with no producer** — this file's own most-found class, committed inside the increment naming
+  it — so the Architect is told to emit `extends` and is given the parent's entity names, since
+  redeclaring one without `overrides: true` is refused at resolution. **Two CLI refusals** close
+  flags that would otherwise be *silently inert*, which is worse than absent because an operator who
+  asked for an approval gate and got none believes their tenants' designs are reviewed: a review
+  gate needs Postgres (`reviewStore` is built only inside `designReview && conn !== undefined`) and
+  needs `--ai-design`, because `source: "ai"` is the **only** proposal producer in the workspace
+  while `MANIFEST_PROPOSAL_SOURCES` declares a `manual` nothing writes. And **my own first test was
+  wrong rather than the code**: `--ai-design --require-design-review` with no store answers the
+  *Architect's* store refusal, because first-refusal-wins and that is the better sentence — which
+  makes the review-store arm reachable only on a deployment that did not ask for the Architect, and
+  it is kept as its own condition anyway so removing the producer arm cannot silently take the store
+  requirement with it.
+  One figure was corrected mid-increment and it is the **plan's**, not this file's: the batch plan
+  records the reviewer's diff as covering "4 of 16 sections" against this register's 5, and **the
+  register is right**. Those four line references are the four *layer functions*, missing that
+  relations and roles ride on other layers and that `classificationLayer` is a second read of
+  entities. `ManifestDiffView` covers entities, relations, roles, permissions and **workflows** —
+  `LifecycleWorkflow` is `Extract<…, {kind: "entityLifecycle"}>` and `lifecycleLayer` reports
+  "lifecycle added with N states" — so **a workflow this increment teaches the Architect to emit is
+  shown to the reviewer**, and the two halves compose rather than passing each other. Measured end
+  to end: adding a lifecycle is `additive`, narrowing one reports `states removed: …; transitions
+  removed: …` at **`breaking`**. The wrong figure had reached five files before it was measured,
+  which is the whole argument for measuring a number before repeating it.
+  **And `meta.extends` is invisible in that diff** — adding it leaves the view `comparable` with
+  every count zero and no warnings — so the one fact every AI design now declares is absent from
+  the page where it is approved. Enforced rather than trusted (resolution refuses any parent but
+  the deployment's own), so it is a gap in what a reviewer can *see*. The trap underneath it cost
+  two independent readings, mine and a slice's, and is worth knowing before touching this function:
+  `diffManifests` returns `emptyView()` — `comparable: false`, every count zero — whenever either
+  side fails `parseManifest`, so **an unparseable manifest and an unchanged one differ only in the
+  `comparable` flag**. Both of us concluded "workflows are not in the diff" from a fixture using
+  `initial` and string states where the schema wants `initialState` and state objects, and read the
+  empty view as the answer.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -1900,6 +1975,28 @@ packages exist at only one layer, noted below where that is true.
   migrates additively (`ADD COLUMN IF NOT EXISTS`), so a manifest that gains a field no
   longer bricks the boot. Plus sequence allocator, settings, entitlement, subscription
   stores, Stripe webhook ingest and dangling-link pruning.
+  **And that manifest's `meta.extends` lineage is resolved** (ADR-0368), which until then it was not:
+  `resolveManifest` had one non-test caller, `loadBuiltinPack`, so the inheritance mechanism ran over
+  the built-in packs whose lineage is fixed at build time and was withheld from the only input whose
+  lineage is a runtime question — and an activated design therefore **replaced** the deployment's
+  pack. `tenant-manifest-lineage.ts` holds the policy (`TENANT_PARENT_POLICY`: a tenant may extend
+  only the manifest this deployment itself serves) and `buildTenantManifestLineage` returns the
+  registry and the permitted slug **as one object**, derived from one argument, so a registry whose
+  permitted slug says something else cannot be formed. `TenantGatewayCache` takes it as a **required**
+  option and resolves **between `safeParse` and `tryValidateManifest`** — measured, not reasoned: a
+  child referencing an inherited `Account` is *refused* by validation unresolved and *ok* resolved,
+  giving the 52-entity / 16-role union in **one** `getManifest` call, so resolution after validation
+  would have been inert. One entry is sufficient *and complete* because `stripExtendsFromMeta` leaves
+  a resolved manifest carrying no `extends`. Three new `GATEWAY_BUILD_REFUSAL_KINDS`
+  (`lineage_parent_unknown`, `lineage_cycle`, `lineage_override_undeclared`), all **permanent**,
+  classified through the existing `REFUSAL_BY_ERROR_NAME` by `Error.name`; a resolution failure is a
+  **`refused`** and not the `{kind:"none"}` fallback, because `none` serves the deployment's gateway
+  and a tenant whose activation did nothing would never be told. `REFUSAL_NAMES_PERMITTED_PARENT` is a
+  total map rather than a `lineage_` prefix test, and `unknown` is `false` there deliberately — naming
+  a permitted parent beside an unidentified cause asserts a diagnosis. Verified live as a non-owner:
+  the child's own entity answers 403 and an inherited one 200 on **one** gateway, and each of the
+  three refusals is a 503 whose log reads *"extends unknown parent 'operate-erp/retail' — this
+  deployment permits extending only 'operate-erp/core'"*.
   **A tenant serving its own activated manifest gets its own Postgres schema** (ADR-0314), not a share of
   the boot tables — two tenants author independently, so A's `Invoice` and B's `Invoice` are different
   types with the same name, and `ADD COLUMN IF NOT EXISTS` matches on *name only*, so a shared table would
@@ -7328,7 +7425,7 @@ three make the rest honest, cheap or verifiable.
    P2 item 14's third clause, from the other end.)
 3. **No CI, no git hook, no smoke, e2e, load or migration test** — while `strategy/ci.ts` models
    triggers, budgets and a topological sort with no reader. No `.github/workflows`, no
-   `core.hooksPath`, so the eleven rules and 19,372 tests run only when a human types `pnpm -r test`,
+   `core.hooksPath`, so the eleven rules and 19,435 tests run only when a human types `pnpm -r test`,
    and this file's instruction never to use `--no-verify` describes a guardrail that does not
    exist. `operate-web` has **zero tests** against 15 pages and 34 unfenced `fetch` sites — the
    serialized-body boundary that shipped a broken console button for an hour (ADR-0335).
@@ -7737,7 +7834,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 359 records; 280 Accepted, 79 Proposed (the
+title or status change cannot drift. 363 records; 284 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

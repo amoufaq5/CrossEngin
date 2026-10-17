@@ -264,10 +264,34 @@ export default function SetupPage() {
             <h2 className="text-2xl font-black tracking-tight text-ink">
               Describe your company — AI builds your system
             </h2>
+            {/*
+              This paragraph used to read "designs the entities, roles, and workflows, and you
+              review everything before anything goes live", and two of those three claims were
+              false. `workflows` was absent from the Architect's own spec and its worked example,
+              so every design had zero transitions — fixed in the same increment as this copy.
+              "everything" is still not true and is not claimed: the reviewer's diff covers five
+              of the manifest's sixteen sections and has no `jobs` and no `views` layer, so a
+              change that alters what a request gets can pass unseen. Five and not four — the
+              figure the batch plan carried counted the four layer FUNCTIONS in `manifest-diff.ts`
+              and missed that relations and roles ride on other layers, and that `lifecycleLayer`
+              covers an `entityLifecycle` workflow. Measured on the real `diffManifests`: adding a
+              lifecycle reports `lifecycle added with 3 states` and narrowing one is `breaking`, so
+              a workflow this increment teaches the Architect to emit IS shown to the reviewer.
+              What is NOT shown is `meta.extends` — zero counts, zero warnings — so the reviewer
+              cannot see which pack a design builds on, even though the build refuses any parent
+              but this deployment's own.
+
+              It also no longer says WHO approves. Whether a platform reviewer must sign off is a
+              property of the deployment (`--require-design-review`), not of this page, and the
+              activation route is what reports it — a 403 carrying `review_required` and the
+              proposal's own `reviewStatus`. Asserting it here would be a promise this bundle
+              cannot keep on a deployment that did not pass the flag.
+            */}
             <p className="mt-1 max-w-2xl text-sm text-ink-muted">
               Explain what your business does and what you need to manage. The AI Architect
-              designs the entities, roles, and workflows, and you review everything before
-              anything goes live.
+              designs the entities, roles, permissions and workflows, and builds on top of the
+              system you already have rather than replacing it. You review the design before
+              activating it, and your platform operator may also have to approve it first.
             </p>
 
             <div className="mt-6 space-y-5">

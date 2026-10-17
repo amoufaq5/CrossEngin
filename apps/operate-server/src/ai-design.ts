@@ -165,13 +165,24 @@ const MAX_ASSISTANT_ECHO_CHARS = 4000;
 const SLUG_REGEX = /^[a-z0-9][a-z0-9-]*(\/[a-z0-9][a-z0-9-]*)*$/;
 const SEMVER_REGEX = /^\d+\.\d+\.\d+$/;
 
+/**
+ * The worked example the model is shown, and the one artifact in this module that is asserted to
+ * be a manifest the platform actually accepts — standalone *and* as a child of a real pack.
+ *
+ * Its entity names are deliberately absent from all seven shipped packs (`Customer` and
+ * `ServiceVisit`; the union of the packs is 66 names). That is not tidiness: with a parent in play
+ * the prompt lists the parent's entity names as the set a design must not reuse, and an example
+ * declaring one of them would contradict the list printed above it — which a model resolves by
+ * following the example. This entity used to be called `WorkOrder`, which `erp-core` and
+ * `erp-construction` both declare.
+ */
 export const DESIGN_EXAMPLE_MANIFEST: Record<string, unknown> = {
   manifestVersion: "1.0",
   meta: {
     name: "Field Service",
     slug: "generated/field-service",
     version: "0.1.0",
-    description: "Work-order tracking for a field service business.",
+    description: "Service-visit tracking for a field service business.",
   },
   entities: [
     {
@@ -183,9 +194,14 @@ export const DESIGN_EXAMPLE_MANIFEST: Record<string, unknown> = {
       traits: ["auditable"],
     },
     {
-      name: "WorkOrder",
+      name: "ServiceVisit",
       fields: [
         { name: "title", type: { kind: "text", maxLength: 200 }, required: true },
+        // The lifecycle's state column. Its enum values are exactly the workflow's state names,
+        // which nothing validates and every reader assumes: the states are what the store writes
+        // into this column, so a value set that does not cover them is a CHECK no transition can
+        // satisfy. The example has to be right about it because it is the only place the model
+        // sees the two lined up.
         { name: "status", type: { kind: "enum", values: ["open", "in_progress", "closed"] } },
         { name: "customer", type: { kind: "reference", target: "Customer" }, required: true },
         {
@@ -198,7 +214,13 @@ export const DESIGN_EXAMPLE_MANIFEST: Record<string, unknown> = {
     },
   ],
   relations: [
-    { kind: "many_to_one", from: "WorkOrder", field: "customer", to: "Customer", onDelete: "restrict" },
+    {
+      kind: "many_to_one",
+      from: "ServiceVisit",
+      field: "customer",
+      to: "Customer",
+      onDelete: "restrict",
+    },
   ],
   roles: {
     app_admin: {
@@ -220,35 +242,117 @@ export const DESIGN_EXAMPLE_MANIFEST: Record<string, unknown> = {
       update: { roles: ["app_admin"] },
       delete: { roles: ["app_admin"] },
     },
-    WorkOrder: {
+    ServiceVisit: {
       list: { roles: ["app_admin", "app_user"] },
       read: { roles: ["app_admin", "app_user"] },
       create: { roles: ["app_admin", "app_user"] },
       update: { roles: ["app_admin", "app_user"] },
       delete: { roles: ["app_admin"] },
+      transitions: {
+        start: { roles: ["app_admin", "app_user"] },
+        close: { roles: ["app_admin"] },
+      },
+    },
+  },
+  workflows: {
+    service_visit_lifecycle: {
+      kind: "entityLifecycle",
+      entity: "ServiceVisit",
+      stateField: "status",
+      initialState: "open",
+      states: [
+        { name: "open", label: { en: "Open" }, category: "active" },
+        { name: "in_progress", label: { en: "In Progress" }, category: "active" },
+        { name: "closed", label: { en: "Closed" }, category: "terminal" },
+      ],
+      transitions: [
+        { name: "start", from: "open", to: "in_progress", trigger: { kind: "userAction" } },
+        {
+          name: "close",
+          from: ["open", "in_progress"],
+          to: "closed",
+          trigger: { kind: "userAction" },
+        },
+      ],
     },
   },
 };
 
-export const DESIGN_SYSTEM_PROMPT: string = [
-  "You are the CrossEngin AI Architect. You turn a natural-language business description into exactly one CrossEngin Manifest.",
-  "Respond with ONLY a single JSON object — no prose, no markdown, no code fences.",
-  "",
-  "Manifest spec:",
-  '- manifestVersion: the literal string "1.0".',
-  '- meta: { name, slug (kebab-case path like "generated/field-service"), version (semver like "0.1.0"), description? }.',
-  '- entities: array of { name (PascalCase), fields (at least 1), traits? }. Give every entity the "auditable" trait.',
-  "- Each field: { name (snake_case), type, required?, classification? }.",
-  "- Field type kinds: text {maxLength?}, long_text, integer {min?, max?}, decimal {precision, scale}, boolean, date, datetime, uuid, enum {values: [...]}, reference {target: EntityName}, json, email, phone, url, currency_amount.",
-  '- Classify sensitive fields: "pii" (emails, names, addresses), "phi" (health data), "commercial_sensitive" (costs, margins, prices), "regulated". Any "phi"/"regulated" field REQUIRES its entity to carry the "auditable" trait.',
-  '- relations: array of { kind: "many_to_one", from: EntityName, field: field_name, to: EntityName, onDelete: "restrict"|"cascade"|"set_null" } — one per reference field. Many-to-many associations use { kind: "many_to_many", left, right }.',
-  "- roles: record keyed by role name (snake_case); each value { name (MUST equal its record key), label: { en: string }, description }.",
-  "- permissions: record keyed by entity name; each value { list, read, create, update, delete }, each of those { roles: [...] }. Grant only roles declared in roles, for entities declared in entities.",
-  "- Every reference target, relation endpoint, permission entity, and granted role must resolve to something declared in the same manifest.",
-  "",
-  "Example of a complete valid manifest:",
-  JSON.stringify(DESIGN_EXAMPLE_MANIFEST, null, 2),
-].join("\n");
+/**
+ * The pack a design is to be built on top of, when there is one.
+ *
+ * Grouped rather than two parameters because the two must agree and the incoherent pairing is
+ * otherwise formable: entity names supplied beside a null slug would be silently dropped, and a
+ * slug with no names would print "do not reuse the parent's entity names" followed by nothing.
+ * `entityNames: []` is the claim that the parent declares no entity, which is a different fact
+ * from "nobody looked" — the latter is spelled by a null `parentPack`.
+ */
+export interface DesignParentPack {
+  /** The identifier a child names in `meta.extends`, e.g. `operate-erp/core`. */
+  readonly slug: string;
+  /** Every entity name the parent resolves to; the set a design may not reuse. */
+  readonly entityNames: readonly string[];
+}
+
+/**
+ * The system prompt, composed against the pack this deployment serves.
+ *
+ * `parentPack` is required and nullable rather than optional, because the two cases are different
+ * claims and neither is a safe default: a null says this deployment serves no named pack, so a
+ * design is standalone and replaces nothing, while a pack says the design is an overlay. An
+ * optional parameter would make "standalone" the silent answer for a caller that forgot it, which
+ * is the manifest that *replaces* the deployment's ERP.
+ *
+ * The parent's entity names are printed, and the reason is that this is the one rule in the whole
+ * prompt the design loop cannot enforce for itself. Every other rule here — references resolve,
+ * roles are declared, states are reachable — is caught by `tryValidateManifest` inside
+ * `designManifest` and fed back as a corrective retry. An entity name colliding with the parent's
+ * is not: measured against the real `erp-core`, a child redeclaring `WorkOrder` validates
+ * `{ ok: true }` through the entire design loop and throws `UndeclaredEntityOverrideError` later,
+ * at `resolveManifest`, after the design was returned and a reviewer approved it. Printing the
+ * names is what lets the model avoid it, and 601 characters for `erp-core`'s 51 is the whole cost.
+ */
+export function buildDesignSystemPrompt(opts: {
+  readonly parentPack: DesignParentPack | null;
+}): string {
+  const parent = opts.parentPack;
+  return [
+    "You are the CrossEngin AI Architect. You turn a natural-language business description into exactly one CrossEngin Manifest.",
+    "Respond with ONLY a single JSON object — no prose, no markdown, no code fences.",
+    ...(parent !== null
+      ? [
+          "",
+          `This deployment already serves the pack "${parent.slug}". Your manifest EXTENDS it; it does not replace it.`,
+          `- meta MUST carry extends: ["${parent.slug}"]. Everything the parent declares is inherited, so declare ONLY what the described business ADDS.`,
+          "- The parent already provides a complete ERP — general ledger, invoicing, purchasing, inventory, projects, HR and tax. Do not re-create any of it.",
+          `- Do NOT reuse one of the parent's ${parent.entityNames.length} entity names. Replacing an inherited entity requires "overrides": true on that entity, and that DISCARDS the parent's version together with every relation, permission and workflow built on it. Choose a name outside this list: ${parent.entityNames.join(", ")}`,
+          "- Your manifest is validated on its own BEFORE it is merged with the parent, so every reference target, relation endpoint, permissions key and workflow entity must name an entity YOUR manifest declares. A field pointing at a parent entity is refused.",
+        ]
+      : []),
+    "",
+    "Manifest spec:",
+    '- manifestVersion: the literal string "1.0".',
+    '- meta: { name, slug (kebab-case path like "generated/field-service"), version (semver like "0.1.0"), description? }.',
+    '- entities: array of { name (PascalCase), fields (at least 1), traits? }. Give every entity the "auditable" trait.',
+    "- Each field: { name (snake_case), type, required?, classification? }.",
+    "- Field type kinds: text {maxLength?}, long_text, integer {min?, max?}, decimal {precision, scale}, boolean, date, datetime, uuid, enum {values: [...]}, reference {target: EntityName}, json, email, phone, url, currency_amount.",
+    '- Classify sensitive fields: "pii" (emails, names, addresses), "phi" (health data), "commercial_sensitive" (costs, margins, prices), "regulated". Any "phi"/"regulated" field REQUIRES its entity to carry the "auditable" trait.',
+    '- relations: array of { kind: "many_to_one", from: EntityName, field: field_name, to: EntityName, onDelete: "restrict"|"cascade"|"set_null" } — one per reference field. Many-to-many associations use { kind: "many_to_many", left, right }.',
+    "- roles: record keyed by role name (snake_case); each value { name (MUST equal its record key), label: { en: string }, description }.",
+    "- permissions: record keyed by entity name; each value { list, read, create, update, delete }, each of those { roles: [...] }. Grant only roles declared in roles, for entities declared in entities.",
+    '- workflows: record keyed by workflow name (snake_case). Give every entity that moves through stages one, as { kind: "entityLifecycle", entity: EntityName, stateField: field_name, initialState: state_name, states: [...], transitions: [...] }.',
+    '- stateField MUST name one of that entity\'s own declared fields. Declare an enum field on the entity whose values are exactly the state names, and point stateField at it.',
+    '- Each state: { name (snake_case), label: { en: string }, category: "active"|"terminal" }. initialState must be one of them; every state must be reachable from initialState by following transitions; no transition may lead out of a "terminal" state.',
+    '- Each transition: { name (snake_case), from: state_name | [state_names], to: state_name, trigger: { kind: "userAction" } }. Every from and every to MUST be the name of a declared state.',
+    "- Say who may fire each transition: permissions.<Entity>.transitions = { <transition_name>: { roles: [...] } }. A name used there must be a transition declared in that entity's workflow, and the roles must be declared in roles.",
+    "- Every reference target, relation endpoint, permission entity, workflow entity, and granted role must resolve to something declared in the same manifest.",
+    "",
+    parent !== null
+      ? "Example of a complete valid manifest. It is standalone — yours must also carry meta.extends, and must not reuse a parent entity name:"
+      : "Example of a complete valid manifest:",
+    JSON.stringify(DESIGN_EXAMPLE_MANIFEST, null, 2),
+  ].join("\n");
+}
 
 /**
  * The top-level JSON object in a model reply, or `null`. A thin read of
@@ -414,6 +518,14 @@ export function ensureRolesInManifest(
 export async function designManifest(opts: {
   provider: DesignCompletionProvider;
   description: string;
+  /**
+   * The pack this design extends, or `null` for a deployment that serves no named pack.
+   *
+   * Required and nullable: see `buildDesignSystemPrompt`. The costly direction is a caller that
+   * omits it on a deployment that *does* serve a pack, which produces a standalone manifest whose
+   * activation replaces the tenant's ERP — so the compiler asks rather than defaulting.
+   */
+  parentPack: DesignParentPack | null;
   name?: string;
   model?: string;
   maxTokens?: number;
@@ -503,7 +615,7 @@ export async function designManifest(opts: {
     ...(opts.name !== undefined ? ["", `Application name: ${opts.name}`] : []),
   ].join("\n");
   const messages: LlmMessage[] = [
-    { role: "system", content: DESIGN_SYSTEM_PROMPT },
+    { role: "system", content: buildDesignSystemPrompt({ parentPack: opts.parentPack }) },
     { role: "user", content: userPrompt },
   ];
   const sessionId = `design-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -821,6 +933,8 @@ export async function designManifest(opts: {
 
 export function buildDesignDesigner(opts: {
   provider: DesignCompletionProvider;
+  /** The pack every design from this designer extends, or `null`. See `designManifest`. */
+  parentPack: DesignParentPack | null;
   model?: string;
   maxTokens?: number;
   providerLabel?: string | null;
@@ -839,6 +953,7 @@ export function buildDesignDesigner(opts: {
     return designManifest({
       provider: opts.provider,
       description: input.description,
+      parentPack: opts.parentPack,
       ...(input.name !== undefined ? { name: input.name } : {}),
       ...(opts.model !== undefined ? { model: opts.model } : {}),
       ...(opts.maxTokens !== undefined ? { maxTokens: opts.maxTokens } : {}),

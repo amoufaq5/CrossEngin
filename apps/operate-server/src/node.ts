@@ -28,6 +28,7 @@ import { META_TABLES } from "@crossengin/kernel/bootstrap";
 import {
   ManifestSchema,
   producibleEntityEventNames,
+  resolveManifest,
   type Manifest,
 } from "@crossengin/kernel/manifest";
 import {
@@ -323,6 +324,7 @@ import { PostgresTenantManifestStore, manifestSummary } from "./tenant-manifests
 import { buildDesignDesigner, buildDesignProviderFromEnv } from "./ai-design.js";
 import { buildAiDesignRoutes } from "./ai-design-routes.js";
 import { TenantGatewayCache, buildPerTenantDispatch } from "./tenant-gateway-cache.js";
+import { buildTenantManifestLineage } from "./tenant-manifest-lineage.js";
 import {
   ManifestActivationPoller,
   PostgresActivationWatermarkSource,
@@ -1098,6 +1100,16 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // this increment exists to end, so it is said rather than left to be inferred from a field that
   // stayed redacted.
   const manifestRoleNames = new Set(Object.keys(manifest.roles ?? {}));
+  // The one lineage for this process, built once and read twice — by `roleDirectory` below and by
+  // `TenantGatewayCache` at the bottom. One object rather than two constructions of the same
+  // policy, because the whole point of the directory is to answer for the set the tenant is
+  // *served*, and two registries could resolve one stored manifest differently.
+  //
+  // The parent is always this deployment's own manifest, so `null` is unreachable from here: a
+  // `--pack` deployment and a `--manifest` file deployment both have one. The arm stays nullable on
+  // the contract because *permitting no extension at all* is a coherent thing for a deployment to
+  // declare, and a caller has to say which it means rather than inherit a default (ADR-0331).
+  const tenantLineage = buildTenantManifestLineage({ slug: manifest.meta.slug, manifest });
   const undeclaredGrantees = [
     ...new Set([
       ...options.sensitiveFieldRoles,
@@ -2515,11 +2527,25 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             // An unparseable stored manifest is one the cache will refuse to build anyway, so the
             // tenant is served nothing and no role set describes them.
             if (!parsed.success) return null;
-            // A stored manifest that extends a lineage contributes roles from its parents that
-            // `roles` does not hold, and resolving that lineage is the gateway cache's job rather
-            // than a second resolution here that could answer differently.
-            if ((parsed.data.meta.extends ?? []).length > 0) return null;
-            return new Set(Object.keys(parsed.data.roles ?? {}));
+            // A stored manifest that extends a lineage contributes roles its own `roles` does not
+            // hold, so the set has to be read off the RESOLVED manifest. This arm used to return
+            // `null` here, on the stated premise that "resolving that lineage is the gateway
+            // cache's job" — and that premise was false: the cache did not resolve anything
+            // either, so `meta.extends` was parsed and never followed anywhere (ADR-0368). It is
+            // true now, and the agreement is structural rather than asserted: both readers take
+            // `tenantLineage`, the same object, so one stored manifest cannot resolve two ways.
+            //
+            // A resolution failure still answers `null` and does not propagate. `null` is the
+            // claim *this process cannot name the set this tenant is served*, which is exactly
+            // right for a manifest the cache is about to refuse to build — and a throw here would
+            // surface as a failed membership grant rather than as the warning the directory exists
+            // to produce.
+            try {
+              const resolved = await resolveManifest(parsed.data, { registry: tenantLineage.registry });
+              return new Set(Object.keys(resolved.roles ?? {}));
+            } catch {
+              return null;
+            }
           },
           // Required rather than optional: every route here mints a principal or grants it a role
           // inside a tenant, so it is ADR-0313's privileged-write class without exception.
@@ -2851,6 +2877,19 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             model: providerBuild.model,
             providerLabel: providerBuild.providerLabel,
             ensureRoles: options.aiDesignRoles,
+            // The pack every design from this deployment extends, and it is the PRODUCER half of
+            // the lineage `tenantLineage` resolves. Shipping one without the other is the defect
+            // ADR-0368 is about: the mechanism applied to an input nothing produces, or an input
+            // nothing resolves. `entityNames` comes off the resolved boot manifest, so it is the
+            // real set a design may not redeclare — redeclaring one without `overrides: true`
+            // raises `UndeclaredEntityOverrideError` at resolution and refuses the activation.
+            parentPack: {
+              slug: manifest.meta.slug,
+              // `?? []` and not a non-null assertion: `ManifestSchema.entities` is `.optional()`,
+              // and `[]` is the honest claim here — a parent declaring no entity forbids the model
+              // nothing, which is exactly what a design against an empty pack should be told.
+              entityNames: (manifest.entities ?? []).map((e) => e.name),
+            },
           })
         : null;
     if (providerBuild === null) {
@@ -4176,6 +4215,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           });
     gatewayCache = new TenantGatewayCache({
       source: manifestStore,
+      // The same object `roleDirectory` reads, so the set a membership warning names and the set
+      // the tenant is actually served are one resolution rather than two.
+      lineage: tenantLineage,
       // Tenant gateways mirror the default server's cross-cutting wiring — extra routes (AI
       // design, platform admin), the subscription gate, the residency guard, the per-request
       // observer chain (SLO burn/latency, usage metering, audit chain), write effects and job

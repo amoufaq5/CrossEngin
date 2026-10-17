@@ -1,10 +1,10 @@
 # ADR index
 
-362 records. Generated from the ADR files themselves — regenerate rather than
+363 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 283  **Proposed:** 79
+- **Accepted:** 284  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -374,3 +374,4 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0365](0365-a-route-that-accepts-what-it-neither-serves-nor-adjudicates.md) | A route that accepts what it neither serves nor adjudicates | — | Accepted | 2026-10-14 |
 | [0366](0366-superseded-code-is-not-inert.md) | Superseded code is not inert | — | Accepted | 2026-10-14 |
 | [0367](0367-a-prefix-is-not-the-set.md) | A prefix is not the set | — | Accepted | 2026-10-14 |
+| [0368](0368-inheritance-ran-where-the-lineage-was-already-known.md) | Inheritance ran where the lineage was already known | — | Accepted | 2026-10-17 |

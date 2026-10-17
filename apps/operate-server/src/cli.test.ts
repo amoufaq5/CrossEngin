@@ -117,6 +117,52 @@ describe("parseServeArgs", () => {
     );
   });
 
+  it("--require-design-review implies --design-review and defaults its role", () => {
+    const opts = parseServeArgs([
+      "--pack", "erp-core", "--store", "pg", "--ai-design", "--require-design-review",
+    ]);
+    expect(opts.requireDesignReview).toBe(true);
+    // The implication is the whole reason one flag is enough on the shipped compose: passing
+    // `--design-review` alone would mount the console over a queue nothing enrols into.
+    expect(opts.designReview).toBe(true);
+    expect(opts.designReviewRoles).toEqual(["platform_admin"]);
+
+    const bare = parseServeArgs(["--pack", "erp-core", "--store", "pg", "--ai-design", "--design-review"]);
+    expect(bare.designReview).toBe(true);
+    expect(bare.requireDesignReview).toBe(false);
+  });
+
+  it("refuses a review gate that would be silently inert", () => {
+    // No Postgres: `reviewStore` is never built, so nothing enrols a proposal and `reviewGate` is
+    // never passed — the activation handler skips the check and every proposal activates unreviewed.
+    //
+    // WITH `--ai-design` the message is the Architect's own store refusal, which fires first and is
+    // the right thing to say: the operator needs Postgres for the Architect at all, so naming the
+    // review gate would send them to the narrower of two problems. That ordering is asserted rather
+    // than worked around, because it is why the review store arm below is only ever reached on a
+    // deployment that did not ask for the Architect.
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--ai-design", "--require-design-review"]),
+    ).toThrow(/--ai-design \/ --per-tenant-manifests require a Postgres store/);
+    expect(() => parseServeArgs(["--pack", "erp-core", "--design-review"])).toThrow(
+      /--design-review \/ --require-design-review require a Postgres store/,
+    );
+
+    // No producer: `source: "ai"` is the only thing that writes a proposal, so a reviewer without
+    // the Architect gets a console over a queue that can never be non-empty.
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--require-design-review"]),
+    ).toThrow(/require --ai-design/);
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--design-review"]),
+    ).toThrow(/require --ai-design/);
+
+    // Both arms are refusals of a *gate*, not of the Architect: --ai-design alone still parses.
+    expect(
+      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--ai-design"]).designReview,
+    ).toBe(false);
+  });
+
   it("requires a value for a value-flag", () => {
     expect(() => parseServeArgs(["--pack"])).toThrow(/requires a value/);
   });

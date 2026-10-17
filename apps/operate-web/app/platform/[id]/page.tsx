@@ -638,6 +638,26 @@ export default function TenantDetailPage({ params }: { params: { id: string } })
                           setGrantFieldErrors((p) => ({ ...p, primaryRole: undefined }));
                         }}
                       />
+                      {/*
+                        The helper text below used to say "Free text, because no route serves the
+                        list", and that was FALSE: `GET /v1/meta/schema` is registered with no flag
+                        and returns every declared role with its label, and this app already has a
+                        cached fetcher for it. What is true is narrower and is why the control is
+                        still free text — that route answers for the CALLER'S tenant, and a platform
+                        operator administering someone else's tenant would be offered their own
+                        roles. Since an activated manifest now merges over the boot pack rather than
+                        replacing it (ADR-0368), the caller's set is usually a subset of what is
+                        valid here, but "usually" is not a property, and a picker that grows more
+                        wrong as per-tenant manifests become more common is the wrong direction. The
+                        honest fix is a platform route over the directory `membership-role-fence.ts`
+                        already builds, answering for the ADMINISTERED tenant; until then the server
+                        answers reactively, below.
+
+                        This comment sits here and not inside the ternary because a parenthesised
+                        ternary branch holds exactly ONE expression, so a comment plus a `<p>` there
+                        is a syntax error — which `next build` caught and `tsc --noEmit` would not
+                        have, since the web app is outside the vitest workspace.
+                      */}
                       {grantFieldErrors.primaryRole ? (
                         <p className="mt-1 text-xs text-brand-600">
                           {grantFieldErrors.primaryRole}
@@ -645,9 +665,10 @@ export default function TenantDetailPage({ params }: { params: { id: string } })
                       ) : (
                         <p className="mt-1 text-xs text-ink-faint">
                           Must name a role this tenant&rsquo;s manifest declares. Free text, because
-                          no route serves the list &mdash; but the grant is checked against it and a
-                          role that is not declared comes back named below, with the ones that are.
-                          An undeclared role is still accepted and stored; it grants nothing at
+                          the route that serves the list answers for <em>your</em> tenant rather
+                          than this one &mdash; but the grant is checked against the right manifest,
+                          and a role that is not declared comes back named below, with the ones that
+                          are. An undeclared role is still accepted and stored; it grants nothing at
                           serve time.
                         </p>
                       )}

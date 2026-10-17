@@ -1441,6 +1441,34 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   if ((aiDesign || perTenantManifests) && store === "memory") {
     throw new CliUsageError("--ai-design / --per-tenant-manifests require a Postgres store (--store pg or pg-columns)");
   }
+  // Both of these refuse a flag that would otherwise be SILENTLY INERT, which is the one thing
+  // worse than not having it: an operator who asked for an approval gate and got none believes
+  // their tenants' designs are reviewed. `--require-design-review` sets `designReview` too, so one
+  // condition covers both spellings.
+  //
+  // The store arm: `reviewStore` is built only inside `options.designReview && conn !== undefined`,
+  // so without Postgres the review routes do not mount, nothing enrols a proposal as `pending`,
+  // and `reviewGate` is never passed to the design routes — the activation handler skips the check
+  // entirely and every proposal activates unreviewed. It is reached only on a deployment that did
+  // NOT pass `--ai-design`, because that flag's own store refusal above fires first and is the
+  // better sentence there; it is kept as its own condition rather than left to that entailment, so
+  // removing the producer arm below cannot silently take the store requirement with it.
+  if (designReview && store === "memory") {
+    throw new CliUsageError(
+      "--design-review / --require-design-review require a Postgres store (--store pg or pg-columns)",
+    );
+  }
+  // The producer arm: a review queue has exactly one thing that can fill it. `source: "ai"` in
+  // `buildDesignRoutes` is the only proposal producer in the workspace — `MANIFEST_PROPOSAL_SOURCES`
+  // declares `manual` and nothing writes it — so a reviewer without `--ai-design` is handed a
+  // console over a queue that can never be non-empty, and "nothing pending" is indistinguishable
+  // from "nothing to approve".
+  if (designReview && !aiDesign) {
+    throw new CliUsageError(
+      "--design-review / --require-design-review require --ai-design: the only producer of a" +
+        " reviewable proposal is the Architect, so the queue would never be non-empty",
+    );
+  }
   if (tenantDeletionRoutes && store === "memory") {
     throw new CliUsageError(
       "--tenant-deletion-routes requires a Postgres store (--store pg or pg-columns)",

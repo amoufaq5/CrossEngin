@@ -191,7 +191,11 @@ describe("auditEmitterAvailable", () => {
   const AUDIT_WRITING_ARGS: ReadonlyArray<readonly string[]> = [
     ["--ai-design"],
     ["--per-tenant-manifests"],
-    ["--design-review"],
+    // `--design-review` travels with its prerequisite since ADR-0368: the CLI refuses it alone,
+    // because `source: "ai"` is the only producer of a reviewable proposal, so a reviewer without
+    // the Architect is a console over a queue that can never be non-empty. The pair is still one
+    // entry here — the list is "each audit-writing flag", and the flag is what writes the row.
+    ["--design-review", "--ai-design"],
     ["--audit-read-routes"],
     ["--tenant-erasure-routes"],
     ["--tenant-deletion-routes"],
