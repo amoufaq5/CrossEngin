@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 19,468 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 19,478 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -1481,6 +1481,25 @@ type errors.
   carrying **no** secondary roles and before this it generalised for the same reason everything
   else about this column did: the list was unread. Found by a slice reading the function rather
   than the brief, which asserted the old rule in both halves.
+  **An adversarial pass over the committed diff then found nine more, two of this ADR's own claims
+  false and one of its comments measurably wrong** (ADR-0369's addendum). The one that changes the
+  security story: the boot line argued that an undeclared scope grants nothing *"and every platform
+  gate is a `.has`"*, so the only reachable widening would be a scope matching a **declared
+  manifest role** — and the gates test **CLI-supplied** sets, where `platform_admin` is measured as
+  *not* one of `erp-core`'s fifteen declared roles. So the old reasoning called the dangerous case
+  safe: an IdP emitting `scope: "openid profile platform_admin"` used to resolve `openid` and be
+  refused everywhere, and now reaches tenant provision and delete. Still reported (no shipped
+  configuration passes a JWKS flag, and every alternative without a contract change is worse), at
+  **warning** level, naming the flag; the instrument that settles it is a reader that knows which
+  `kid` verified the token, which `PrincipalResolverInput` does not carry. Two more worth keeping:
+  **the console's 400 arm enumerated the causes and so ruled the new one out** — "the user id must
+  be a uuid, and a role must not be empty", both satisfied when the cause is a space, no field
+  highlighted (ADR-0364's addendum class inside the increment whose README it edits); and
+  **`.min(1)` does not short-circuit a `ZodEffects` refinement** — measured on zod 3.25.76, a
+  failing string check marks the result *dirty* rather than aborting, so `""` came back carrying
+  `too_small` **and** a sentence about whitespace it does not contain, past a comment asserting that
+  could not happen and a test reading `issues[0]` alone. The predicate is two composed functions
+  now, one per reader.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -7507,7 +7526,7 @@ three make the rest honest, cheap or verifiable.
    P2 item 14's third clause, from the other end.)
 3. **No CI, no git hook, no smoke, e2e, load or migration test** — while `strategy/ci.ts` models
    triggers, budgets and a topological sort with no reader. No `.github/workflows`, no
-   `core.hooksPath`, so the eleven rules and 19,468 tests run only when a human types `pnpm -r test`,
+   `core.hooksPath`, so the eleven rules and 19,478 tests run only when a human types `pnpm -r test`,
    and this file's instruction never to use `--no-verify` describes a guardrail that does not
    exist. `operate-web` has **zero tests** against 15 pages and 34 unfenced `fetch` sites — the
    serialized-body boundary that shipped a broken console button for an hour (ADR-0335).

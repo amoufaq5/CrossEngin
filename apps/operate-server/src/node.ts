@@ -1171,7 +1171,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       options.jwksKeys.length > 0 || options.jwksFile !== null || options.jwksUrl !== null,
   });
   if (scopeRoleReading !== null) {
-    console.info(`[auth] ${scopeRoleReading}`);
+    // `console.error` for the warning level, which is where every other boot warning in this file
+    // goes: the external-token clause names a privilege widening that reaches tenant deletion, and
+    // an operator who has configured a foreign JWKS is the one population that can meet it.
+    const say = scopeRoleReading.level === "warn" ? console.error : console.info;
+    say(`[auth] ${scopeRoleReading.message}`);
   }
   const schemaOpt = options.schema !== null ? { schema: options.schema } : {};
   // ADR-0350. The boot manifest's own typed entity tables, which the shared-table erasure now

@@ -144,25 +144,34 @@ describe("formatScopeRoleReading", () => {
   });
 
   it("names the membership's list for a deployment that mints its own tokens", () => {
-    const line = formatScopeRoleReading({ credentialLogin: true, externalJwks: false });
-    expect(line).toContain("every role its membership grants");
-    expect(line).toContain("primary role first");
+    const read = formatScopeRoleReading({ credentialLogin: true, externalJwks: false });
+    expect(read?.message).toContain("every role its membership grants");
+    expect(read?.message).toContain("primary role first");
+    // Not a warning: this clause is the capability, not the widening.
+    expect(read?.level).toBe("info");
   });
 
   it("names the one behaviour change for a deployment trusting a foreign token", () => {
     // The increment's only change on a configuration that worked before it: such a token had its
     // first scope read as the role and the rest ignored. Reported, never refused — a refusal would
     // refuse a deployment that works, and an undeclared scope grants nothing anywhere.
-    const line = formatScopeRoleReading({ credentialLogin: false, externalJwks: true });
-    expect(line).toContain("did not mint");
-    expect(line).toContain("scopes past the first");
+    const read = formatScopeRoleReading({ credentialLogin: false, externalJwks: true });
+    expect(read?.message).toContain("did not mint");
+    expect(read?.message).toContain("scopes past the FIRST");
+    // The stake, which the first draft of this line got wrong in the reassuring direction: the
+    // platform gates test CLI-supplied role sets and `platform_admin` is not a manifest role, so
+    // the dangerous case is the one the old reasoning called safe.
+    expect(read?.message).toContain("--platform-admin-role");
+    expect(read?.level).toBe("warn");
   });
 
   it("says both when both are configured, because both are true", () => {
     // Reachable: `--credential-login` refuses `--jwks-url` at parse, so the combination is this
     // deployment's own key beside a foreign `--jwks-key`/`--jwks-file` entry.
-    const line = formatScopeRoleReading({ credentialLogin: true, externalJwks: true });
-    expect(line).toContain("every role its membership grants");
-    expect(line).toContain("did not mint");
+    const read = formatScopeRoleReading({ credentialLogin: true, externalJwks: true });
+    expect(read?.message).toContain("every role its membership grants");
+    expect(read?.message).toContain("did not mint");
+    // The widening decides the level wherever it is present.
+    expect(read?.level).toBe("warn");
   });
 });

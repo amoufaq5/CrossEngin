@@ -12,7 +12,7 @@ import { z } from "zod";
 
 import type { CredentialRecord, PostgresCredentialStore } from "./credential-store.js";
 import type { RawHttpRequest, RawHttpResponse } from "./http.js";
-import { roleNameIsScopeSafe, type SessionRoles } from "./token-mint.js";
+import { dedupedSessionRoles, roleNameIsScopeSafe, type SessionRoles } from "./token-mint.js";
 
 /**
  * `POST /v1/auth/token` -- the one surface that turns a password into a session token.
@@ -375,12 +375,15 @@ export const LOGIN_REFUSED_PROBLEM = Object.freeze({
   detail: "The tenant, email address or password was not accepted.",
 });
 
+/** What the mint hands back. Named so the handler can hold it across a `try`. */
+export interface MintedToken {
+  readonly token: string;
+  readonly expiresAt: string;
+}
+
 export interface AuthTokenRouteContext {
   readonly verify: (request: AuthTokenRequest) => Promise<LoginOutcome>;
-  readonly mint: (outcome: Extract<LoginOutcome, { ok: true }>) => {
-    readonly token: string;
-    readonly expiresAt: string;
-  };
+  readonly mint: (outcome: Extract<LoginOutcome, { ok: true }>) => MintedToken;
   /**
    * Clears the attempt counter, stamps `last_login_at`, and -- when `rehashTo` is non-null --
    * replaces the stored hash. One call rather than two, so a caller cannot reset the counter and
@@ -485,7 +488,28 @@ export function buildAuthTokenInterceptor(
       return json(401, LOGIN_REFUSED_PROBLEM);
     }
 
-    const minted = ctx.mint(outcome);
+    // Wrapped for the same reason `ctx.verify` is, and the gap was found by review after ADR-0369
+    // had closed the one defect that travelled through it. `mintSessionToken` throws for two
+    // reasons: a role name the scope claim cannot carry, which `verifyLogin` now refuses before
+    // reaching here, and a `lifetimeSeconds` outside its bounds — which `cli.ts` validates against
+    // the same constants, so the shipped binary cannot produce it, and a programmatic `serve()`
+    // can. Uncaught, either escapes to the listener's generic catch, which puts `err.message` in
+    // a **500** problem document: the disclosure-plus-retryable-status pair this route exists not
+    // to have. Closing the member and leaving the channel open is what the review caught, so the
+    // channel is closed — the 503 its sibling returns, because a login that cannot be minted is
+    // exactly "unavailable" and the password was correct.
+    let minted: MintedToken;
+    try {
+      minted = ctx.mint(outcome);
+    } catch (err) {
+      ctx.onError?.(err);
+      return json(503, {
+        type: "https://crossengin.io/errors/login-unavailable",
+        title: "Login unavailable",
+        status: 503,
+        detail: "The session token could not be minted. Retry shortly.",
+      });
+    }
     try {
       await ctx.onSuccess(outcome.userId, outcome.rehashTo);
     } catch (err) {
@@ -505,7 +529,13 @@ export function buildAuthTokenInterceptor(
       // naming only the primary would *understate* what it had just minted: this is an existing
       // field completed, not a speculative one added (the client does not need it -- `/account`
       // reads the same list off `UiViewer.roles`, which is derived from the token).
-      secondaryRoles: outcome.roles.secondaryRoles,
+      //
+      // Read back out of the minted claim rather than echoed from the row, which is the whole
+      // point and was wrong on the first pass: `sessionScope` de-duplicates and the row does not,
+      // so a membership naming its primary in `secondary_roles` got a body claiming a secondary
+      // the token does not carry. A field added so the body would not understate the session
+      // cannot be allowed to misstate it, so it reports what was actually signed.
+      secondaryRoles: dedupedSessionRoles(outcome.roles).secondaryRoles,
     });
   };
 }

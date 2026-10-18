@@ -187,6 +187,29 @@ const NOT_DECLARED_COST: Readonly<Record<MembershipRolePosition, string>> = {
     "so it resolves to no grant and adds nothing to what the rest of this membership authorizes",
 };
 
+/**
+ * The primary's cost on an **empty** catalog, which is not the same sentence.
+ *
+ * `NOT_DECLARED_COST.primary` qualifies the denial with *unless a declared secondary role carries
+ * one* — true wherever a catalog has names in it, and self-contradictory where it has none: if the
+ * manifest declares no role at all then no secondary can be declared either, so the qualifier
+ * offers a possibility the same clause has just ruled out.
+ *
+ * Found by review, and the review is also where the cause is: sharing one map across both branches
+ * was the fix for *two sentence builders stating one difference inconsistently*, and it produced
+ * the inconsistency one axis across, because only the non-empty branch wanted the qualifier. The
+ * axis is `(position, catalogEmpty)` and not `position`, so the second axis is written down rather
+ * than folded into the first. The secondary's cost needs no variant: *adds nothing to what the
+ * rest of this membership authorizes* is true whatever the catalog holds.
+ *
+ * `RoleWarnings.tsx` carried the unqualified sentence for this branch all along, which is how the
+ * disagreement was visible: the server's `detail` lands in the 201 body and in the audit row, and
+ * the console's copy said something else about the same fact.
+ */
+const NOT_DECLARED_COST_EMPTY_CATALOG =
+  "so it resolves to no grant and, with no role declared for a secondary to carry either, this" +
+  " membership authorizes nothing";
+
 /** The same difference where nothing was read: what is *unknown* is per position too. */
 const UNRESOLVED_COST: Readonly<Record<MembershipRolePosition, string>> = {
   primary: "so whether this membership authorizes anything is unknown",
@@ -214,9 +237,11 @@ function notDeclaredDetail(
   // not an act available at a grant. A sentence offering "one of the declared roles" would name an
   // empty list.
   if (declared.length === 0) {
+    const cost =
+      position === "primary" ? NOT_DECLARED_COST_EMPTY_CATALOG : NOT_DECLARED_COST[position];
     return (
       `${position} role '${role}' is not declared by this tenant's manifest, which declares no` +
-      ` role at all, ${NOT_DECLARED_COST[position]}`
+      ` role at all, ${cost}`
     );
   }
   return (

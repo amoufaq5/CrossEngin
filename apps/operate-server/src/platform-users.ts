@@ -10,7 +10,7 @@ import {
   type MembershipRoleDirectory,
   type MembershipRoleWarning,
 } from "./membership-role-fence.js";
-import { roleNameIsScopeSafe } from "./token-mint.js";
+import { roleNameHasNoWhitespace, roleNameIsScopeSafe } from "./token-mint.js";
 
 /**
  * The writer `meta.users` and `meta.user_tenant_membership` never had.
@@ -182,7 +182,13 @@ export { roleNameIsScopeSafe };
 const ScopeSafeRoleNameSchema = z
   .string()
   .min(1)
-  .refine(roleNameIsScopeSafe, { message: ROLE_NAME_SCOPE_SAFE_MESSAGE });
+  // `roleNameHasNoWhitespace` and **not** `roleNameIsScopeSafe`, which also refuses emptiness.
+  // Measured on this deployment's zod (3.25.76): a failing `.min(1)` marks the result *dirty*
+  // rather than aborting it, so the refinement runs anyway and the total predicate made `""` come
+  // back carrying `too_small` **and** a sentence about whitespace a `""` does not contain. The
+  // comment on the message above used to assert that could not happen. `.min(1)` owns emptiness
+  // and this owns the delimiter; the mint takes the total form, having no `.min(1)` in front of it.
+  .refine(roleNameHasNoWhitespace, { message: ROLE_NAME_SCOPE_SAFE_MESSAGE });
 
 export const UserRecordSchema = z
   .object({

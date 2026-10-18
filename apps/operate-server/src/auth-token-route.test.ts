@@ -402,6 +402,38 @@ describe("buildAuthTokenInterceptor", () => {
     expect(parse(res!)).toMatchObject({ role: "ap_clerk", secondaryRoles: ["hr_manager"] });
   });
 
+  it("reports the roles the TOKEN carries, not the row, where the two differ", async () => {
+    // The one case they diverge, and it was live on the first pass: `sessionScope` de-duplicates
+    // and the row does not, so echoing the row claimed a secondary role the token does not carry.
+    // A field added so the body would not understate the session must not misstate it.
+    const res = await interceptor({
+      verify: async () => ({
+        ok: true,
+        userId: USER,
+        tenantId: TENANT,
+        roles: { primaryRole: "erp_admin", secondaryRoles: ["erp_admin", "hr_manager"] },
+        rehashTo: null,
+      }),
+    })(req, body({ tenant: "acme", email: "a@b.test", password: "x" }));
+    expect(parse(res!)).toMatchObject({ role: "erp_admin", secondaryRoles: ["hr_manager"] });
+  });
+
+  it("answers 503 and discloses nothing when the mint throws", async () => {
+    // The channel, not just the one traveller through it. `ctx.verify` was wrapped and `ctx.mint`
+    // was not, so a throw there escaped to the listener's generic catch, which puts `err.message`
+    // in a 500 — the disclosure-plus-retryable-status pair this route exists not to have. Found by
+    // review after the one reachable thrower had already been refused upstream.
+    const res = await interceptor({
+      mint: () => {
+        throw new Error("a secret-shaped internal detail");
+      },
+    })(req, body({ tenant: "acme", email: "a@b.test", password: "x" }));
+    expect(res?.status).toBe(503);
+    const parsed = parse(res!);
+    expect(JSON.stringify(parsed)).not.toContain("secret-shaped");
+    expect(parsed["detail"]).toBe("The session token could not be minted. Retry shortly.");
+  });
+
   it("answers ONE body for every refusal", async () => {
     // The property the whole module is built around: the caller cannot tell an unknown email from
     // a wrong password from a suspended tenant.

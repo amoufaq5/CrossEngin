@@ -466,6 +466,29 @@ describe("the verdict and its declared list travel together", () => {
     );
     expect(secondary?.detail).not.toContain("authorizes nothing");
   });
+
+  it("does NOT qualify the empty-catalog primary with a secondary that cannot be declared", async () => {
+    // The assertion above is satisfied by the qualified string's suffix, which is the hazard the
+    // comment two tests up names and then reproduces: `toContain("authorizes nothing")` passes on
+    // `… unless a declared secondary role carries one, this membership authorizes nothing`, and on
+    // an empty catalog that qualifier offers a possibility the same clause has ruled out — no role
+    // is declared, so no secondary can be. Found by review, and this is the negative assertion the
+    // branch needed.
+    const [primary] = await checkMembershipRoles(
+      grant({ primaryRole: "ghost", secondaryRoles: [] }),
+      directoryOf(),
+    );
+    expect(primary?.detail).not.toContain("unless a declared secondary role carries one");
+    expect(primary?.detail).toContain("with no role declared for a secondary to carry either");
+  });
+
+  it("DOES qualify it when the catalog has names in it, which is the case the qualifier is for", async () => {
+    const [primary] = await checkMembershipRoles(
+      grant({ primaryRole: "ghost", secondaryRoles: [] }),
+      directoryOf("erp_admin", "hr_manager"),
+    );
+    expect(primary?.detail).toContain("unless a declared secondary role carries one");
+  });
 });
 
 describe("the retired unread-position limitation is not reinstated", () => {

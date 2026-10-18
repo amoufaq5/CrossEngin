@@ -100,6 +100,12 @@ export function principalRolesFromScopes(scopes: readonly string[]): PrincipalRo
   return { primaryRole: scopes[0] ?? ANONYMOUS_ROLE, secondaryRoles: scopes.slice(1) };
 }
 
+/** A boot line and how loudly to say it. */
+export interface ScopeRoleReading {
+  readonly message: string;
+  readonly level: "info" | "warn";
+}
+
 /**
  * The boot line for how this deployment reads a token's scopes, or `null` when no JWT path is
  * configured at all.
@@ -108,13 +114,28 @@ export function principalRolesFromScopes(scopes: readonly string[]): PrincipalRo
  * which is ADR-0361's rule: the fact lands where the next reader is.
  *
  * The second clause is the increment's one behaviour change on a configuration that worked before
- * it. A deployment trusting an externally-issued token -- `--jwks-url`, or a static `--jwks-key`
- * holding a foreign key -- had its token's first scope read as the role and the rest ignored; now
- * the rest are secondary roles. **Reported and never refused**, on two measurements: a refusal
- * would refuse a deployment that works, and an undeclared scope grants nothing anywhere (the
- * redaction path maps an unknown name to its unprivileged sentinel, `resolveEffectiveRoles` skips
- * it, and every platform gate is a `.has`), so the only reachable change is an IdP emitting a
- * second scope that *is* a declared role name -- which is what a role list means.
+ * it, and it is a **warning** rather than a note, because the first draft of this comment got the
+ * stake wrong in the reassuring direction. It argued that "an undeclared scope grants nothing
+ * anywhere … and every platform gate is a `.has`", from which the only reachable change would be
+ * an IdP emitting a second scope that *is* a declared manifest role. The third clause is a
+ * non-sequitur: `.has` is the mechanism, not a guarantee, and the platform gates test
+ * **CLI-supplied** sets rather than the manifest's role map — `new Set(options.platformAdminRoles)`
+ * and a dozen siblings. Measured: `platform_admin` is **not** one of `erp-core`'s fifteen declared
+ * roles, so under the old reasoning it was the safe case and it is in fact the dangerous one. An
+ * IdP emitting `scope: "openid profile platform_admin"` used to resolve `primaryRole = "openid"`
+ * and be refused everywhere; it now reaches `/v1/platform/tenants` — provision and delete.
+ *
+ * Still reported rather than refused, on a measurement and for want of a better instrument: no
+ * shipped configuration passes a JWKS flag, and every alternative available without a contract
+ * change is worse. Reading only the first scope when an external JWKS is configured would make a
+ * `--credential-login` deployment's own secondary roles silently inert, which is this repo's
+ * most-found class; refusing the combination would refuse a deployment that works. The fix that
+ * would actually settle it is a reader that knows **which key verified the token**, and
+ * `PrincipalResolverInput` does not carry the matched `kid`.
+ *
+ * RFC 6749 §3.3 also makes `scope` an unordered set, so on a foreign token the increment promotes
+ * an arbitrary element's authority rather than widening an ordered list. Our own mint writes the
+ * primary first by construction.
  *
  * There is deliberately no survey beside it and no affirmative line for an api-key-only
  * deployment. A survey of which memberships grant a secondary role is the unscoped census
@@ -125,18 +146,25 @@ export function principalRolesFromScopes(scopes: readonly string[]): PrincipalRo
 export function formatScopeRoleReading(opts: {
   readonly credentialLogin: boolean;
   readonly externalJwks: boolean;
-}): string | null {
+}): ScopeRoleReading | null {
   const clauses: string[] = [];
   if (opts.credentialLogin) {
     clauses.push("a session carries every role its membership grants, primary role first");
   }
   if (opts.externalJwks) {
     clauses.push(
-      "a token this deployment did not mint has its scopes past the first read as secondary roles",
+      "a token this deployment did not mint has its scopes past the FIRST read as secondary" +
+        " roles, so a scope matching any role named in a --*-role flag now grants what that role" +
+        " grants — including --platform-admin-role, which reaches tenant provision and delete." +
+        " Emit exactly the roles you mean",
     );
   }
   if (clauses.length === 0) return null;
-  return `session roles: ${clauses.join("; ")}`;
+  return {
+    message: `session roles: ${clauses.join("; ")}`,
+    // The widening is the only clause worth interrupting an operator for.
+    level: opts.externalJwks ? "warn" : "info",
+  };
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

@@ -109,6 +109,21 @@ function describeMemberListFailure(e: unknown): {
 }
 
 /**
+ * The comma-separated secondary-role input, as a list.
+ *
+ * One function because the validation and the request body must read the field the same way — two
+ * splits are two chances for the pre-check to pass a value the body then sends. Empties are
+ * dropped because the server's element schema is `z.string().min(1)`, so a trailing comma would
+ * otherwise become a 400 carrying a zod issue array.
+ */
+function secondaryRolesFrom(raw: string): readonly string[] {
+  return raw
+    .split(",")
+    .map((r) => r.trim())
+    .filter((r) => r !== "");
+}
+
+/**
  * No `illegal_transition` branch: a grant creates a row rather than moving one, so that 409 is not
  * reachable here. The duplicate is, and it is the one worth naming — the unique key is
  * `(user_id, tenant_id)`, so re-granting an existing membership is a conflict and not a second row.
@@ -129,10 +144,16 @@ function describeGrantFailure(e: unknown): string {
         "row has gone away). Provision the user first, from /platform/users."
       );
     case 400:
-      // The server's detail is a zod issue array, so it is described rather than shown.
+      // The server's detail is a zod issue array, so it is described rather than shown — and this
+      // sentence has to enumerate every cause, which is exactly how it went wrong once. It read
+      // "the user id must be a uuid, and a role must not be empty" and ADR-0369 added a third
+      // refusal (whitespace in a role name) whose cause the enumeration therefore RULED OUT: both
+      // listed clauses were satisfied, no field was highlighted, and the operator had no way to
+      // learn that the space was the problem. Describing a zod issue array means owning this list.
       return (
         "The registry rejected these details. The user id must be a uuid, and a role must not be " +
-        "empty."
+        "empty or contain a space — the session's scope claim is space-delimited, so a role name " +
+        "with a space in it would be read back as two roles."
       );
     case 403:
       return "Your role does not grant membership administration (--platform-user-role).";
@@ -228,6 +249,7 @@ export default function TenantDetailPage({ params }: { params: { id: string } })
   const [grantFieldErrors, setGrantFieldErrors] = useState<{
     userId?: string;
     primaryRole?: string;
+    secondaryRoles?: string;
     status?: string;
   }>({});
 
@@ -309,16 +331,36 @@ export default function TenantDetailPage({ params }: { params: { id: string } })
   async function submitGrant(): Promise<void> {
     const userId = grantUserId.trim();
     const primaryRole = grantPrimaryRole.trim();
-    const errs: { userId?: string; primaryRole?: string; status?: string } = {};
+    const errs: {
+      userId?: string;
+      primaryRole?: string;
+      secondaryRoles?: string;
+      status?: string;
+    } = {};
     if (userId === "") errs.userId = "A user id is required";
     else if (!UUID_RE.test(userId)) {
       errs.userId = "That is not a uuid — copy the id from /platform/users";
     }
     if (primaryRole === "") errs.primaryRole = "A primary role is required";
+    else if (/\s/.test(primaryRole)) {
+      errs.primaryRole = "A role name cannot contain a space — the session's scope claim is space-delimited";
+    }
+    // Checked client-side as well as server-side because the 400 arm can only *describe* a zod
+    // issue array, so a refusal that reaches it highlights no field. The server is still the
+    // authority (`roleNameIsScopeSafe`); this is what puts the message next to the input.
+    const spacedSecondary = secondaryRolesFrom(grantSecondary).find((r) => /\s/.test(r));
+    if (spacedSecondary !== undefined) {
+      errs.secondaryRoles = `Secondary role ${JSON.stringify(spacedSecondary)} cannot contain a space`;
+    }
     if (grantStatus === "") errs.status = "Choose whether this grants access now or only invites";
     // The unchosen status leads the disjunction so that the body below is typed by this guard
     // rather than by a second check beside it that could drift from it.
-    if (grantStatus === "" || errs.userId !== undefined || errs.primaryRole !== undefined) {
+    if (
+      grantStatus === "" ||
+      errs.userId !== undefined ||
+      errs.primaryRole !== undefined ||
+      errs.secondaryRoles !== undefined
+    ) {
       setGrantFieldErrors(errs);
       setGrantError("Please fix the highlighted fields.");
       return;
@@ -330,12 +372,7 @@ export default function TenantDetailPage({ params }: { params: { id: string } })
     setMemberNotice(null);
     setGrantWarnings([]);
     try {
-      // Empties are dropped because the server's element schema is `z.string().min(1)`, so a
-      // trailing comma would otherwise turn into a 400 carrying a zod issue array.
-      const secondaryRoles = grantSecondary
-        .split(",")
-        .map((r) => r.trim())
-        .filter((r) => r !== "");
+      const secondaryRoles = secondaryRolesFrom(grantSecondary);
       const body: GrantMembershipBody =
         secondaryRoles.length === 0
           ? { userId, primaryRole, status: grantStatus }
@@ -684,11 +721,19 @@ export default function TenantDetailPage({ params }: { params: { id: string } })
                         placeholder="hr_manager, erp_viewer"
                         value={grantSecondary}
                         disabled={granting}
+                        aria-invalid={grantFieldErrors.secondaryRoles !== undefined}
                         onChange={(e) => setGrantSecondary(e.target.value)}
                       />
-                      <p className="mt-1 text-xs text-ink-faint">
-                        Optional, comma separated. The same rule applies to each.
-                      </p>
+                      {grantFieldErrors.secondaryRoles ? (
+                        <p className="mt-1 text-xs text-brand-600">
+                          {grantFieldErrors.secondaryRoles}
+                        </p>
+                      ) : (
+                        <p className="mt-1 text-xs text-ink-faint">
+                          Optional, comma separated. The same rule applies to each, and each is
+                          additive: a session carries every role its membership grants.
+                        </p>
+                      )}
                     </div>
                   </div>
 

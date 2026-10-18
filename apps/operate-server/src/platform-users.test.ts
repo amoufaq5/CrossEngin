@@ -213,9 +213,14 @@ describe("contracts", () => {
       // The element and not merely the field: the refusal has to say which of a list it refused.
       expect(secondary[0]?.path).toEqual(["secondaryRoles", 0]);
     }
-    // `min(1)` settles emptiness first, so the reader gets zod's accurate sentence rather than one
-    // about whitespace a `""` does not contain.
-    expect(refused({ primaryRole: "" })[0]?.code).toBe("too_small");
+    // `min(1)` owns emptiness, so the reader gets zod's accurate sentence — and must NOT also get
+    // one about whitespace a `""` does not contain. Asserting `issues[0].code` alone was blind to
+    // exactly that: measured on zod 3.25.76, a failing `.min(1)` marks the result *dirty* rather
+    // than aborting it, so a refinement beside it still runs, and the total predicate put BOTH
+    // issues on the empty string. Found by review; the whole issue list is what pins it.
+    const empty = refused({ primaryRole: "" });
+    expect(empty[0]?.code).toBe("too_small");
+    expect(empty.map((i) => i.message)).not.toContain(ROLE_NAME_SCOPE_SAFE_MESSAGE);
     // The control, including the `[]` default, so the fence is not refusing the ordinary case.
     const ok = GrantMembershipInputSchema.safeParse({ ...body, primaryRole: "erp_admin" });
     expect(ok.success).toBe(true);

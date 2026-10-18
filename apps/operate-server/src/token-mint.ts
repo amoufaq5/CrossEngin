@@ -121,25 +121,55 @@ const B64URL_JSON = (value: unknown): string => B64URL(Buffer.from(JSON.stringif
  * The `scope` claim's one delimiter, the same single space the gateway splits on
  * (`runtime.ts`: `scope.split(" ").filter((s) => s.length > 0)`).
  *
- * A constant rather than a literal in the join, because the refusal below and the join must be
- * about the same character: a fence against a delimiter spelled separately from the delimiter is a
- * fence against a different one.
+ * A constant so the join has one spelling and a test can pin it against the gateway's reader. It
+ * is **not** what the refusal below is derived from, and a comment here used to claim it was: the
+ * fence is `/\s/`, which references this constant nowhere, so changing this would change the join
+ * and leave the fence covering a different character — exactly the failure that claim said the
+ * constant prevented. The fence is a deliberate superset of the delimiter instead; see
+ * `roleNameHasNoWhitespace`.
  */
 export const SCOPE_DELIMITER = " ";
 
 const ROLE_NAME_WHITESPACE_RE = /\s/;
 
 /**
- * Whether a role name survives a round trip through the `scope` claim.
+ * Whether a role name is free of the character the claim is delimited by.
  *
- * It lives here, beside the delimiter it is about, and `platform-users.ts` imports it for its
- * grant-time refusal — **one predicate, two messages**. The messages differ because the readers
- * do: a 400 names the consequence for the operator typing the grant, and `sessionScope`'s throw
- * names the stored role for the operator reading a log. The *rule* may not differ, and before this
- * convergence it was spelled twice, which is the shape that eventually disagrees.
+ * Deliberately **narrower** than `roleNameIsScopeSafe` and exported separately, because a zod
+ * field already answers emptiness with `.min(1)` and a refinement beside it must not answer it
+ * again: measured on this deployment's zod (3.25.76), a failing `.min(1)` marks the result *dirty*
+ * rather than aborting it, so the refinement still runs and `""` comes back carrying **both**
+ * `too_small` and a message saying the name "may not contain whitespace" — about a value that
+ * contains none. A comment here used to assert that could not happen. It is the class this module
+ * is full of, in a string, so the two halves of the rule are two functions and each reader takes
+ * the one it needs.
+ *
+ * The set is `/\s/` and the delimiter is one character, U+0020, so this is a **conservative
+ * superset** and not a derivation of the delimiter: measured against the gateway's real reader
+ * (`scope.split(" ").filter((s) => s.length > 0)`), U+0020 is the only character that breaks the
+ * round trip, and a tab, NBSP, U+3000 or a BOM would survive it and are refused anyway. Refusing a
+ * name that would have worked is the safe direction and the cost is nil — 0 of the 130 role names
+ * declared across the seven packs contains whitespace of any kind.
+ */
+export function roleNameHasNoWhitespace(role: string): boolean {
+  return !ROLE_NAME_WHITESPACE_RE.test(role);
+}
+
+/**
+ * Whether a role name survives a round trip through the `scope` claim at all.
+ *
+ * The total form: non-empty **and** free of whitespace, because an empty name is dropped by the
+ * gateway's `.filter((s) => s.length > 0)` and so would promote the next role to the position it
+ * vacated. `sessionScope` wants this one, having no `.min(1)` in front of it;
+ * `platform-users.ts`'s field schema wants the narrow half above.
+ *
+ * One rule, composed, with two messages — because the readers differ: a 400 names the consequence
+ * for the operator typing the grant, and `sessionScope`'s throw names the stored role for the
+ * operator reading a log. Before this convergence the *rule* was spelled twice, which is the shape
+ * that eventually disagrees.
  */
 export function roleNameIsScopeSafe(role: string): boolean {
-  return role.length > 0 && !ROLE_NAME_WHITESPACE_RE.test(role);
+  return role.length > 0 && roleNameHasNoWhitespace(role);
 }
 
 /**
@@ -170,6 +200,23 @@ export function roleNameIsScopeSafe(role: string): boolean {
  * and a refusal in the kernel would refuse a configuration that works.
  */
 export function sessionScope(roles: SessionRoles): string {
+  const deduped = dedupedSessionRoles(roles);
+  return [deduped.primaryRole, ...deduped.secondaryRoles].join(SCOPE_DELIMITER);
+}
+
+/**
+ * The role list as the claim will carry it: primary first, de-duplicated, secondary order
+ * preserved — and the same refusal, because the de-duplication and the fence are one pass over
+ * one list.
+ *
+ * Exported so the login's 200 body can report **what was signed** rather than what the row held.
+ * The two diverge in exactly one case and it was live on the first pass: a membership naming its
+ * primary in `secondary_roles` has that duplicate removed from the claim, so echoing the row gave
+ * a body claiming a secondary role the token does not carry. A field added so the body would not
+ * *understate* the session must not be allowed to *misstate* it, and the only way to be sure is
+ * for both to read one function.
+ */
+export function dedupedSessionRoles(roles: SessionRoles): SessionRoles {
   const ordered: string[] = [];
   for (const role of [roles.primaryRole, ...roles.secondaryRoles]) {
     if (!roleNameIsScopeSafe(role)) {
@@ -181,7 +228,9 @@ export function sessionScope(roles: SessionRoles): string {
     }
     if (!ordered.includes(role)) ordered.push(role);
   }
-  return ordered.join(SCOPE_DELIMITER);
+  // `ordered[0]` is `roles.primaryRole`: the loop pushes it first and the refusal above has
+  // already established it is non-empty, so the fallback is unreachable rather than a default.
+  return { primaryRole: ordered[0] ?? roles.primaryRole, secondaryRoles: ordered.slice(1) };
 }
 
 /**

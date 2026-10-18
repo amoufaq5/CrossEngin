@@ -1,6 +1,9 @@
 import { ed25519PublicKeyFromSeed, generateEd25519Keypair, verifyEd25519 } from "@crossengin/crypto";
 import { describe, expect, it } from "vitest";
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { principalRolesFromScopes } from "./principals.js";
 import {
   DEFAULT_SESSION_TOKEN_SECONDS,
@@ -8,7 +11,10 @@ import {
   MIN_SESSION_TOKEN_SECONDS,
   SCOPE_DELIMITER,
   TOKEN_NOT_BEFORE_SKEW_SECONDS,
+  dedupedSessionRoles,
   mintSessionToken,
+  roleNameHasNoWhitespace,
+  roleNameIsScopeSafe,
   sessionScope,
 } from "./token-mint.js";
 
@@ -247,5 +253,83 @@ describe("sessionScope", () => {
       primaryRole: "erp_admin",
       secondaryRoles: ["hr_manager"],
     });
+  });
+});
+
+describe("the fence against the gateway's own reader", () => {
+  it("pins the delimiter against the expression runtime.ts actually splits on", () => {
+    // ADR-0362's rule: a test comparing a rule against a derivation of itself written in the test
+    // asserts agreement with nothing. The round-trip tests above split with
+    // `.split(SCOPE_DELIMITER)` and omit the `.filter((s) => s.length > 0)` the gateway applies, so
+    // they would not notice the gateway moving to `/\s+/` or to `scp`. The agreement that matters
+    // is with `packages/api-gateway-runtime/src/runtime.ts`, which this package cannot import
+    // without a cycle — so it is pinned by reading that file as text, which is
+    // `manifest-event-names.ts`' relationship to `META_TABLES`.
+    const runtime = readFileSync(
+      resolve(import.meta.dirname, "../../../packages/api-gateway-runtime/src/runtime.ts"),
+      "utf8",
+    );
+    expect(runtime).toContain('scope.split(" ").filter((s: string) => s.length > 0)');
+    // And the constant this module joins on is that same character, so the two agree today.
+    expect(SCOPE_DELIMITER).toBe(" ");
+  });
+
+  it("refuses only what that expression would break, and errs wide deliberately", () => {
+    // U+0020 is the ONLY character that breaks the round trip, so the `/\s/` fence is a
+    // conservative superset: a tab, an NBSP, an ideographic space and a BOM all survive
+    // `split(" ")` and are refused anyway. Measured and stated, because the comment on
+    // SCOPE_DELIMITER used to claim the fence was derived from the delimiter — it is not.
+    const breaksTheRoundTrip = (name: string): boolean =>
+      `a${SCOPE_DELIMITER}${name}`.split(" ").filter((s) => s.length > 0).length !== 2;
+    for (const name of ["hr manager"]) {
+      expect(breaksTheRoundTrip(name), name).toBe(true);
+      expect(roleNameHasNoWhitespace(name), name).toBe(false);
+    }
+    for (const name of ["hr\tmanager", "hr manager", "hr　manager", "hr﻿manager"]) {
+      // Would have survived; refused anyway. Wide, and wide is the safe direction.
+      expect(breaksTheRoundTrip(name), name).toBe(false);
+      expect(roleNameHasNoWhitespace(name), name).toBe(false);
+    }
+    // And the fence is not so wide that it catches an ordinary name: `+` needs no escaping here,
+    // because the claim is a JSON string rather than a form body.
+    for (const name of ["hr+manager", "hr-manager", "hr.manager", "HR_Manager"]) {
+      expect(roleNameHasNoWhitespace(name), name).toBe(true);
+    }
+  });
+
+  it("splits the predicate so a zod field does not answer emptiness twice", () => {
+    // `roleNameIsScopeSafe` is total for the mint, which has no `.min(1)` in front of it;
+    // `roleNameHasNoWhitespace` is what a zod field refines on, because a failing `.min(1)` marks
+    // the result dirty rather than aborting it and the total form made `""` come back carrying a
+    // sentence about whitespace it does not contain.
+    expect(roleNameIsScopeSafe("")).toBe(false);
+    expect(roleNameHasNoWhitespace("")).toBe(true);
+    expect(roleNameIsScopeSafe("ok")).toBe(true);
+  });
+});
+
+describe("dedupedSessionRoles", () => {
+  it("answers what the claim will carry, so the login body cannot misstate the session", () => {
+    // The one case where the row and the claim diverge, which was live on the first pass: the body
+    // echoed the row and claimed a secondary role the token does not carry.
+    expect(
+      dedupedSessionRoles({ primaryRole: "erp_admin", secondaryRoles: ["erp_admin", "hr_manager"] }),
+    ).toEqual({ primaryRole: "erp_admin", secondaryRoles: ["hr_manager"] });
+  });
+
+  it("agrees with sessionScope by construction", () => {
+    for (const roles of [
+      { primaryRole: "a", secondaryRoles: [] },
+      { primaryRole: "a", secondaryRoles: ["a", "b", "b", "c"] },
+    ]) {
+      const d = dedupedSessionRoles(roles);
+      expect(sessionScope(roles)).toBe([d.primaryRole, ...d.secondaryRoles].join(SCOPE_DELIMITER));
+    }
+  });
+
+  it("carries the same refusal, because the fence and the dedup are one pass", () => {
+    expect(() => dedupedSessionRoles({ primaryRole: "hr manager", secondaryRoles: [] })).toThrow(
+      /space-delimited/,
+    );
   });
 });

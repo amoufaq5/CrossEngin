@@ -136,13 +136,20 @@ function Verdicts({ warnings }: { warnings: ReadonlyArray<RoleWarning> }): React
             //
             // The primary sentence needs no qualifier here and is given none: if the manifest
             // declares no role at all then no secondary can be declared either, so on an empty
-            // catalog the denial really is unconditional.
+            // catalog the denial really is unconditional. (The server says the same thing through
+            // its own `NOT_DECLARED_COST_EMPTY_CATALOG`; for one increment it did not, and this
+            // branch is where the disagreement was visible.)
+            //
+            // Not a per-position ternary, which is what it was, because the secondary arm was
+            // unreachable AND would have been false: `declared` is the union of `declaredRoles`
+            // over the not_declared warnings, `readRoleWarning` refuses a `not_declared` carrying
+            // none, and the primary is always classified first — so an empty union implies an
+            // empty catalog implies `primaryUndeclared`. A dead branch whose sentence is wrong is
+            // the thing the message two files over has its own doc comment forbidding.
             <p className="mt-2 text-xs font-medium">
-              {primaryUndeclared
-                ? "A primary role the manifest does not declare grants nothing: this person can sign in and every request is then refused."
-                : "A secondary role the manifest does not declare adds nothing to a primary that still works."}{" "}
-              This tenant&rsquo;s manifest declares no roles at all, so no name would have made this
-              membership authorize anything.
+              A primary role the manifest does not declare grants nothing: this person can sign in
+              and every request is then refused. This tenant&rsquo;s manifest declares no roles at
+              all, so no name would have made this membership authorize anything.
             </p>
           )}
         </div>
