@@ -1,4 +1,6 @@
+import { readFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
+import { resolve } from "node:path";
 import { InMemoryEntityStore } from "@crossengin/operate-runtime";
 import { describe, expect, it } from "vitest";
 
@@ -253,3 +255,44 @@ function get(port: number, path: string, apiKey: string): Promise<number> {
     req.end();
   });
 }
+
+describe("the two durable job producers report their failures", () => {
+  /**
+   * `JobScheduler` and `PostgresEntityEventSink` both route **every** failure to an `onError`
+   * callback — the scheduler's own doc comment says "a per-tenant enqueue error is routed to
+   * `onError` and the loop continues" — and `serve()` constructed both without one. That made the
+   * only failure either has completely silent, and the failure is not hypothetical:
+   * `meta.job_runs` carries one `ALL`-scope tenant-isolation policy and no platform arm while both
+   * producers issue an unscoped `conn.query`, so as any non-owner role the INSERT is refused
+   * `42501`. Measured on a live cluster before the fix: the scheduler wrote 0 rows and logged 0
+   * lines over 8 ticks, and `POST /v1/leads` answered **201** with the record stored, no job run
+   * enqueued and nothing logged — while the boot survey went on reporting that runs accumulate.
+   *
+   * Pinned by reading the file as text because both constructions live inside `serve()`, which
+   * needs a live Postgres and a bound port to reach. That is this app's own idiom for a wiring
+   * fact a unit test cannot hold (`unique-enforcement.test.ts`, `token-mint.test.ts`).
+   */
+  const src = readFileSync(resolve(import.meta.dirname, "./node.ts"), "utf8");
+
+  it("passes onError to the cron scheduler", () => {
+    const ctor = src.slice(src.indexOf("jobScheduler = new JobScheduler({"));
+    expect(ctor.slice(0, ctor.indexOf("});")), "JobScheduler construction").toContain("onError:");
+  });
+
+  it("passes onError to the entity-event sink", () => {
+    const ctor = src.slice(src.indexOf("new PostgresEntityEventSink("));
+    expect(ctor.slice(0, ctor.indexOf("});")), "PostgresEntityEventSink construction").toContain(
+      "onError:",
+    );
+  });
+
+  it("names a remedy in both, because the measured cause has one", () => {
+    // ADR-0334's rule: naming a fix that would not work is worse than naming none — and here one
+    // works, so it is named. A bare "enqueue failed" would send an operator to the job handlers.
+    for (const prefix of ["[schedule] enqueue failed", "[entity-events] enqueue failed"]) {
+      const at = src.indexOf(prefix);
+      expect(at, prefix).toBeGreaterThan(-1);
+      expect(src.slice(at, at + 400), prefix).toContain("42501");
+    }
+  });
+});

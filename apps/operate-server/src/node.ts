@@ -1349,7 +1349,22 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // after the manifest's default financial effects. Enabled by --emit-entity-events over a pg store.
   const additionalWriteEffects: WriteEffect[] = [];
   if (options.emitEntityEvents && conn !== undefined) {
-    const sink = new PostgresEntityEventSink(conn, Object.values(manifest.jobs ?? {}), schemaOpt);
+    const sink = new PostgresEntityEventSink(conn, Object.values(manifest.jobs ?? {}), {
+      ...schemaOpt,
+      // The same omission as the scheduler's, one file over and with a worse consequence, because
+      // this one is on the request path: `emit` swallows every failure by contract so that a
+      // failed enqueue never fails the user's write, and with no `onError` the swallow was total.
+      // Measured as a non-owner: `POST /v1/leads` answers **201**, the record lands, and no job
+      // run is enqueued and nothing is logged — so an event-triggered job silently never fires,
+      // which is indistinguishable from the pack declaring none.
+      onError: (err) =>
+        console.error(
+          "[entity-events] enqueue failed — if this is 42501, meta.job_runs has one ALL-scope" +
+            " isolation policy and no platform arm, so the serving role must own the table or" +
+            " bypass its policy for an event-triggered job to fire",
+          err,
+        ),
+    });
     additionalWriteEffects.push(
       entityEventEffect({ sink, ...(options.eventPrefix !== null ? { eventPrefix: options.eventPrefix } : {}) }),
     );
@@ -3685,6 +3700,21 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       tenants,
       intervalMs: options.scheduleMs,
       ...schemaOpt,
+      // Every sibling scheduler in this file passes one and this did not, which made its only
+      // failure mode **silent**: `meta.job_runs` carries one `ALL`-scope tenant-isolation policy
+      // and no platform arm, and the enqueue is an unscoped `conn.query`, so as any non-owner
+      // role it is refused `42501` — 0 rows, 0 log lines, over every tick, while the boot survey
+      // below goes on telling the operator that runs are accumulating. The class's own doc
+      // comment says "a per-tenant enqueue error is routed to `onError` and the loop continues",
+      // which describes a channel nobody was on. The remedy is named because the measured cause
+      // has one: the deployment's role either owns `meta.job_runs` or bypasses its policy.
+      onError: (err) =>
+        console.error(
+          "[schedule] enqueue failed — if this is 42501, meta.job_runs has one ALL-scope" +
+            " isolation policy and no platform arm, so the serving role must own the table or" +
+            " bypass its policy for the scheduler to write",
+          err,
+        ),
     });
     // Said at boot, because the comment above has been describing a fleet that did not exist: the
     // scheduler's enqueue is idempotent and durable, so with nothing claiming, `meta.job_runs`

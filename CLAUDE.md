@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 19,478 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 19,481 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -5084,7 +5084,17 @@ The eleventh is `manifest-event-names.ts` (ADR-0362), and it is the first that f
 **declaration against a producer** rather than a store against the catalog. `matchEventJobs`
 compares a job's `eventName` to an emitted event's name with `===`, so the two halves of an event
 job are joined by one string that nothing compared — and measured over the real `resolveManifest`,
-**55 of 55 (pack, declaration) instances named an event no deployment could emit**. It is a
+**28 of 55 (pack, declaration) instances named an event no deployment could emit** — over exactly
+**9 distinct names**, which is the number of declarations the rule carries, so the rule's own data
+was right. This file said **55 of 55** for two increments and ADR-0362's prose says it too; the
+figure is refuted by `producibleEntityEventNames` over the real resolved packs, three ways
+(a script, the binary's own survey, and a live `POST /v1/leads` that enqueued a real run). **27 are
+producible**, on four names — `lead.created`, `quote.sent`, `salesorder.fulfilled`,
+`workorder.completed` — because those four happen to be written in the grammar's own
+`<entity>.<verb>` shape. The ADR's *reasoning* survives intact and is in fact confirmed by the
+correction: `workorder.completed` is producible on six packs and **not** on `erp-construction`,
+whose overlay replaces core's `WorkOrder` lifecycle and takes that transition target with it, which
+is precisely why the rule is per resolved pack rather than over the union. It is a
 workspace rule and deliberately **not** a `validateJobs` error, which ADR-0348's split would ask
 for, on one measurement: `validateManifest` is error-only with no warning channel, so a validation
 error would refuse 8 of 12 declarations and with them **all seven packs** — for five the remedy
@@ -5273,8 +5283,9 @@ isolated copy of the package instead, which is the better answer when more than 
   is irrelevant again, and so is a real one: `matchEventJobs` compares two strings with `===`, both
   satisfy one permissive regex (`EVENT_NAME_REGEX` types *both* sides of the comparison), and a
   name nothing emits is a perfectly well-formed string. So the two halves of an event job were
-  joined by a value nothing compared, and **55 of 55 (pack, declaration) instances named an event
-  no deployment could emit** — while the survey written to report it told an operator to register
+  joined by a value nothing compared, and **28 of 55 (pack, declaration) instances named an event
+  no deployment could emit** (this file carried **55 of 55** for two increments; see the ADR-0362
+  entry above for the re-measurement and why the reasoning survives it) — while the survey written to report it told an operator to register
   a handler. The honest fence is one function building every name and the survey enumerating its
   domain, plus a rule per **resolved pack**, since an overlay replacing a lifecycle takes its
   transition targets with it and an over-wide producible set under-reports.
@@ -7526,7 +7537,7 @@ three make the rest honest, cheap or verifiable.
    P2 item 14's third clause, from the other end.)
 3. **No CI, no git hook, no smoke, e2e, load or migration test** — while `strategy/ci.ts` models
    triggers, budgets and a topological sort with no reader. No `.github/workflows`, no
-   `core.hooksPath`, so the eleven rules and 19,478 tests run only when a human types `pnpm -r test`,
+   `core.hooksPath`, so the eleven rules and 19,481 tests run only when a human types `pnpm -r test`,
    and this file's instruction never to use `--no-verify` describes a guardrail that does not
    exist. `operate-web` has **zero tests** against 15 pages and 34 unfenced `fetch` sites — the
    serialized-body boundary that shipped a broken console button for an hour (ADR-0335).
@@ -7659,8 +7670,11 @@ land with or before it.
    and the test pinning `retail.salesorder.placed` is titled *"applies an optional event prefix"*
    while five of its six cases pin the two-part form. So arity was never the discriminator — the
    **separator** is (`.` against `_`, with the domain first) — and dropping the prefix would have
-   fixed nothing. Measured stronger than this entry claimed: **0 of 294** producible names matches
-   any of the 12, **55 of 55** (resolved pack, declaration) instances are unreachable, and trying
+   fixed nothing. Measured stronger than this entry claimed, and **wrongly**: ADR-0362
+   recorded **0 of 294** producible names matching any of the 12 and **55 of 55** instances
+   unreachable, and the real figures are **27 of 55 producible** over four names with **28
+   unreachable** over nine — which is the nine declarations the rule actually carries, so only the
+   prose was wrong. Trying
    every declared name's own first segment as a prefix across all seven packs gives **0 matches**,
    so the failure is structural rather than a misconfiguration. The verdict claim was right and
    narrower than stated: the survey only runs under `--schedule-ms` or `--workflow-workers`, so

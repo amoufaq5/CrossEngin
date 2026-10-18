@@ -1,0 +1,462 @@
+error: invalid --port: gate
+
+operate-server — serve a resolved CrossEngin manifest as a live multi-tenant API
+
+Usage:
+  operate-server --pack <name> [options]
+  operate-server --manifest <file.json> [options]
+
+Subcommands (each takes --help):
+  prune-links          Remove a tenant's dangling m2m links
+  verify-chain         Verify the audit chain's links, signatures and anchors
+  replay               Re-derive each subsystem's projections from its log and report drift
+  rekey                Move one tenant's at-rest column key to a fresh random data key
+  set-credential       Set a user's login password (the bootstrap path; no mail channel)
+
+Manifest source (exactly one):
+  --pack <name>        Built-in vertical pack: erp-core, erp-retail, erp-healthcare, erp-grocery, erp-government, erp-education, erp-construction
+  --manifest <file>    Path to a resolved manifest JSON document
+
+Options:
+  --port <n>           Port to listen on (default 8787)
+  --store <kind>       Entity store: memory | pg (JSONB) | pg-columns (typed
+                       per-entity tables) (default memory)
+  --allow-plaintext-phi
+                       Serve a manifest with phi/regulated fields from a store
+                       that cannot encrypt them (pg | memory). Off by default:
+                       those stores hold a classified field as plaintext, so a
+                       manifest declaring one is refused at boot unless this
+                       says otherwise. Not applicable to pg-columns, which
+                       encrypts (set COLUMN_ENCRYPTION_SECRET in the
+                       environment -- never argv, which ps can read).
+  --allow-cursor-disclosure
+                       Serve plaintext keyset cursors on a list whose abac
+                       policy filters rows. Off by default: nextCursor is
+                       base64url JSON derived from the last row the STORE
+                       returned, which under filtering may be a row the caller
+                       was never shown -- so it names withheld rows' positions,
+                       and at limit=1 their ids. Set CURSOR_ENCRYPTION_SECRET in
+                       the environment (never argv) to seal them instead; this
+                       flag only accepts the disclosure, and does not suppress
+                       sealing when a secret is set.
+  --column-key-mode <m>
+                       How the at-rest column key is obtained: derived | envelope
+                       (default derived). derived recomputes it per tenant from
+                       COLUMN_ENCRYPTION_SECRET and stores nothing, so it cannot
+                       be destroyed and an erased tenant's PHI stays recoverable
+                       from any backup for as long as that secret exists.
+                       envelope stores a wrapped per-tenant data key, so
+                       destroying the row bounds recovery to backups taken
+                       before it, until those expire. A tenant that already has
+                       a schema is seeded from the derived key to keep its
+                       ciphertext readable, and is then NOT shreddable; one
+                       provisioned fresh gets a random key and is. Use
+                       'operate-server rekey' to move a seeded tenant to a
+                       random key, which is what makes a destruction mean
+                       anything.
+  --column-key-ttl-ms <n>  How long a resolved per-tenant column key is served
+                       from memory (1000..300000, default 30000). A rekey
+                       changes that key out of process, so until the entry
+                       expires this process's reads of the rekeyed tenant raise
+                       'Wrong key or corrupt data' and its WRITES would store
+                       new values under the old key. Lower it before a rekey,
+                       or quiesce the tenant for the window.
+  --schema <name>      Postgres schema for the entity store (default meta;
+                       public for pg-columns)
+  --scheme <proto>     Default request scheme: http | https (default http)
+  --api-key <spec>     API key binding key:role:tenant[:principalId] (repeatable;
+                       the token IS a credential and argv is readable via ps, so
+                       prefer OPERATE_API_KEY_SPECS — newline/comma-separated)
+  --jwks-key <spec>    JWKS public key kid:base64-ed25519-pubkey (repeatable)
+  --jwks-file <file>   JSON [{kid, publicKeyBase64}, ...] of the IdP's keys
+  --jwks-url <url>     Remote JWKS endpoint (cached, refetched on kid rotation)
+  --jwks-refresh-ms <n> Background JWKS refresh interval (with --jwks-url; >=1000)
+  --jwt-issuer <iss>   Expected JWT issuer (required with a JWKS)
+  --jwt-audience <aud> Expected JWT audience (required with a JWKS)
+  --credential-login   Mount POST /v1/auth/token, which turns a password into a session
+                       token the gateway's own JWKS stage verifies. Needs a Postgres
+                       store, --jwt-issuer, --jwt-audience, and CREDENTIAL_PEPPER
+                       plus OPERATE_TOKEN_SIGNING_KEY in the environment (never argv --
+                       ADR-0301). The token's public key is DERIVED from the signing
+                       seed, so there is no second declaration to keep in step, which
+                       is also why this is mutually exclusive with --jwks-url
+  --session-token-ttl <n>
+                       Session token lifetime in seconds (60..86400,
+                       default 3600). Also how long a revoked or downgraded
+                       membership keeps its old role: the role is read at mint time and
+                       frozen in the token, so this is the staleness window
+  --login-lockout-attempts <n>
+                       Consecutive wrong passwords before an account locks (>= 3,
+                       default 10). A lower value is REFUSED rather than raised
+                       for you: a threshold of 1 locks a real user out on one typo
+  --login-lockout-seconds <n>
+                       How long that lock lasts (>= 30, default 900)
+  --license <file>     Offline Ed25519 license token file (on-prem entitlement)
+  --license-key <b64>  Licensor Ed25519 public key, base64 (required with --license)
+  --stripe-webhook-secret <s>  Enable POST /v1/webhooks/stripe → billing_subscriptions
+                       (needs --store pg|pg-columns; also enforces the subscription gate)
+  --plan-catalog <file>  Plan-catalog JSON {plans:[...]} resolving webhook record caps
+                       by plan/price id (requires --stripe-webhook-secret)
+  --stripe-api-key <sk>  Stripe secret key — enables POST /v1/meta/billing-portal
+                       (needs --store pg|pg-columns + --billing-portal-return-url)
+  --billing-portal-return-url <url>  Where Stripe returns the customer after the portal
+  --schedule-ms <n>    Cron scheduler tick interval (ms, >=1000) — enqueues the
+                       manifest's scheduled jobs into job_runs (needs --store pg|pg-columns)
+  --schedule-tenant <uuid>  Tenant the scheduler fires jobs for (repeatable; one of this
+                       or --schedule-all-tenants is required with --schedule-ms)
+  --schedule-all-tenants  Fire the scheduler for every active tenant in meta.tenants
+                       (DB-backed; mutually exclusive with --schedule-tenant)
+  --prune-links-ms <n>  Dangling-link prune sweep interval (ms, >=1000) — periodically
+                       prunes every active tenant's dangling m2m links (needs --store pg)
+  --notification-drain-ms <n>  Notification delivery drain interval (ms, >=1000) — sends every
+                       active tenant's queued dispatches, applying per-recipient preferences
+                       and suppressions, and records an attempt per recipient
+                       (needs --store pg|pg-columns)
+  --bounce-webhook     Serve POST /v1/notifications/bounces/{tenantId}/{ses|twilio|twilio_voice},
+                       which records provider bounces and complaints as suppressions. The
+                       source is the path segment, not sniffed from the payload: a call
+                       callback posted to /twilio would be parsed as a messaging one. Needs
+                       NOTIFICATION_BOUNCE_SECRET in the environment (>=32 chars); the
+                       per-tenant key is HMAC-SHA256(secret, "bounce-webhook:"+tenantId),
+                       which the signing edge must derive the same way
+                       (needs --store pg|pg-columns)
+  --bounce-transient-hours <n>  How long a soft/transient bounce suppresses an address.
+                       Omitted, a transient bounce suppresses nothing
+                       (needs --bounce-webhook)
+  --bounce-fax-observations
+                       Count consecutive Twilio AnsweredBy=fax verdicts per number in
+                       meta.notification_fax_observations. Counts only: suppression needs
+                       --bounce-fax-suppress-after. One fax verdict is a detector's guess from a
+                       few hundred ms of audio and must never suppress on its own. Needs
+                       TWILIO_VOICE_MACHINE_DETECTION, or Twilio never reports AnsweredBy at all
+                       (needs --bounce-webhook and --store pg)
+  --bounce-fax-suppress-after <n>
+                       Consecutive fax verdicts before a PERMANENT voice_call hard_bounce is
+                       recorded. >= 2, refused rather than clamped. Unset means never suppress,
+                       which is the default. Permanent rather than bounded because the suppression
+                       store's only conflict action is DO NOTHING, so a bounded row cannot be
+                       renewed - it would mean blocked for N days and then never blockable again
+  --bounce-fax-window-hours <n>
+                       How long a run of fax verdicts stays one run (default 168). A verdict
+                       arriving later restarts the run at one: a number gets reassigned, and
+                       verdicts months apart are not evidence about the same device
+  --notification-admin-role <r>  Role treated as a tenant admin when resolving a
+                       tenant_admins audience (repeatable; default erp_admin +
+                       tenant_admin + platform_admin)
+  --notification-audit-role <r>  Role permitted to read the whole tenant's notifications
+                       via ?scope=tenant (repeatable; nobody by default — the inbox is
+                       per-recipient)
+  --emit-entity-events  Emit a domain event per entity create/update/delete/transition,
+                       firing event-triggered jobs into job_runs (needs --store pg|pg-columns)
+  --event-prefix <p>   Namespace prefix for emitted event names (with --emit-entity-events)
+  --enable-job-invoke  Expose POST /v1/meta/jobs/invoke to run userInvoked jobs on demand
+                       (needs --store pg|pg-columns)
+  --job-invoke-role <role>  Restrict job invocation to this role (repeatable; with
+                       --enable-job-invoke). Omit to allow any authenticated tenant principal
+  --job-invoke-action-role <action:role>  Per-action role override (repeatable); an action
+                       listed here uses its own roles instead of --job-invoke-role
+  --workflow-cancel-role <r>  Role permitted to cancel a workflow instance (repeatable). Mounts the
+                       engine over meta.workflow_definitions. Fail-closed on empty. Needs --store pg
+  --workflow-workers   Mount the three durable workers that DRIVE the workflow queues — timer,
+                       activity and job. Without them the engine is present and nothing polls it,
+                       so a due timer never fires and --schedule-ms enqueues runs nothing drains.
+                       Each worker refuses for a named reason it prints (no_definitions,
+                       activities_run_inline, no_job_handlers). Needs --store pg|pg-columns
+  --workflow-worker-config <file>  WorkflowWorkerConfig JSON: batchLimit (1-200, default 20),
+                       leaseMs (>=1000, default 30000), idlePollMs — the latency a due timer pays —
+                       activePollMs, drainTimeoutMs, noticeIntervalMs (repeat-notice collapse
+                       window). The renewal heartbeat is derived at leaseMs/3, not configured
+  --workflow-defer-activities  Leave a scheduled activity at rest for the activity worker instead
+                       of running its handler inline. REQUIRES --workflow-workers: with no worker
+                       claiming, every instance stalls at its first activity and nothing says so
+  --rate-limit-policy <rlp_id>:<limit>:<windowSeconds>  Declare a rate-limit policy (repeatable).
+                       Until this existed, api-gateway-pg had ZERO importers: the checker, the
+                       idempotency store, the route registry, the pipeline-execution store and the
+                       replayer were all unreachable from this binary, and meta.rate_limit_decisions
+                       had never held a row. A starting point: rlp_conservativedefault:600:60.
+                       Needs --store pg|pg-columns
+  --rate-limit-default-policy <rlp_id>  Which declared policy governs a route that names none
+                       (required when more than one is declared; unambiguous with exactly one)
+  --idempotency-store memory|pg  Where the gateway's replay guard lives. Default memory, which is
+                       PER PROCESS: a retried POST landing on another replica, or on this one after
+                       a restart, is not deduplicated -- including on --tenant-deletion-routes, the
+                       one route that requires a key because a retry mints a second tombstone.
+                       pg deduplicates a sequential retry fleet-wide; two CONCURRENT retries of one
+                       key can still both execute (there is no reserve step). Needs --store pg or
+                       pg-columns
+  --gateway-execution-capture <rate>  Persist this fraction of PipelineExecution rows, which is what
+                       gives GatewayReplayer anything to read. No default: ~2100 B/row incl. indexes
+                       is ~6.6 TB/yr at 100 req/s and ~66 TB/yr at 1,000 req/s unsampled, so the
+                       rate is required rather than assumed. 0 is refused -- omit the flag instead.
+                       A uniform sample, not an outcome filter: pass_with_4xx_or_5xx is a drift code
+                       about a row whose outcome disagrees with its status, so filtering on that
+                       outcome discards exactly the rows where the claim is false. Needs --store pg
+                       or pg-columns
+  --gateway-execution-capture-operation <operationId>  Narrow the capture to these operations
+                       (repeatable). Requires --gateway-execution-capture
+  --platform-user-routes  Mount the platform user registry under /v1/platform/users — provision a
+                       principal, grant it a membership in a tenant, retire it. NOTHING wrote
+                       meta.users before this, while 42 catalogued columns reference it NOT NULL
+                       ON DELETE RESTRICT (ten on tables with a live writer), and every notification
+                       audience resolved to the empty set. Needs --store pg|pg-columns
+  --platform-user-role <role>  Role permitted to administer the registry (repeatable, fail-closed).
+                       Separate from --platform-admin-role, which administers tenants
+  --credential-admin-role <role>  Role permitted to set ANOTHER user's password, over
+                       POST /v1/platform/users/{id}/credential (repeatable, fail-closed: with no
+                       role the route is not mounted at all). Until this existed, setting a password
+                       needed shell access — 'set-credential' is a subcommand because there is no
+                       mail channel, which is right about the FIRST password and does not generalise
+                       past it, so onboarding broke at step 3 of 4. Its own grant and not
+                       --platform-user-role's: meta.users has no RLS, so this route's role check is
+                       the entire authorisation with no policy behind it. Requires
+                       --credential-login. The route refuses being aimed at the caller — changing
+                       your own password is POST /v1/account/password, which needs no grant and
+                       mounts with --credential-login
+  --preference-routes  Mount the per-user notification preference routes. Without them every user's
+                       preferences are the built-in defaults for ever, so the consent half of
+                       computeDispatchEligibility was unreachable. Needs --store pg|pg-columns
+  --preference-role <role>  Role permitted to read and set one's OWN preferences (repeatable,
+                       fail-closed). A body naming another user is refused, not ignored
+  --preference-admin-role <role>  Additive on --preference-role: may set another user's preference,
+                       recorded before the write so an unrecordable privileged write is refused
+  --tenant-status-gate  Enforce meta.tenants.status on EVERY request: a suspended, archived or
+                       pending_deletion tenant is read-only and a deleted one is refused outright.
+                       Without it the status is a column nothing on the request path reads, so a
+                       tenant whose Article 17 erasure is queued goes on accepting writes into data
+                       about to be destroyed. /v1/platform routes are exempt — they act on the
+                       deployment, not on the caller's tenant. Opt-in: a credential whose tenant has
+                       no meta.tenants row is refused 403, and a boot survey names those tenants
+                       before the first request. Needs --store pg|pg-columns
+  --tenant-status-ttl-ms <ms>  How long a resolved tenant status is cached (1000..300000, default
+                       30000). This is how long a state change takes to bite; the floor keeps the
+                       gate off the per-request query path. With --tenant-status-gate
+  --pack-catalog <file>  Marketplace pack-catalog JSON ({packs:[...]}) — enables the admin pack
+                       routes GET /v1/admin/packs, POST /v1/admin/packs/install,
+                       POST /v1/admin/packs/{id}/uninstall (needs --store pg|pg-columns)
+  --marketplace-authoring  Enable the third-party authoring routes under /v1/authoring/packs —
+                       submit a signed pack version, review it, publish/withdraw (needs --store pg)
+  --platform-admin     Expose the platform super-admin routes under /v1/platform — list/create/suspend/
+                       archive/reactivate tenants + stats over meta.tenants (needs --store pg|pg-columns)
+  --platform-admin-role <role>  Role allowed to call the /v1/platform routes (repeatable; default
+                       platform_admin). Fail-closed: only these roles reach tenant management
+  --ai-design          Expose the in-product AI Architect under /v1/ai — POST a business description,
+                       get a validated manifest proposal, activate it as the tenant's live system
+                       (needs --store pg|pg-columns + ANTHROPIC_API_KEY or OPENAI_API_KEY, optional
+                       OPENAI_BASE_URL for a self-hosted OSS model). Implies --per-tenant-manifests
+  --ai-design-role <role>  Role allowed to call the /v1/ai routes (repeatable; default erp_admin +
+                       platform_admin). Fail-closed
+  --ai-model <id>      Model override for the AI designer (defaults per provider; passed through
+                       verbatim to a self-hosted endpoint)
+  --audit-verdict-routes  Enable GET /v1/audit-integrity/verdicts — the readable projection of each
+                       audit-integrity pass (needs --store pg|pg-columns)
+  --audit-verdict-platform-role <role>  Role granted the cross-tenant view, which includes the
+                       platform chain's own verdicts (repeatable). Fail-closed: none ⇒ nobody
+  --audit-verdict-tenant-role <role>  Role granted its OWN tenant's verdicts (repeatable).
+                       Fail-closed: none ⇒ nobody
+  --manifest-refresh-ms <n>  Poll interval (ms, >=1000) invalidating the per-tenant gateway
+                       cache when another replica activates a manifest (default: TTL only)
+  --ai-max-usd-per-month <n>  Per-tenant monthly USD ceiling on AI design spend
+  --ai-max-request-dollars <n>  Per-REQUEST USD ceiling, refused before the call rather than
+                       discovered after it. The monthly ceiling still applies; this bounds one
+                       prompt. Off by default
+  --notification-template-routes  Expose template authoring under /v1/notification-templates —
+                       draft, submit, approve/reject, retire (needs --store pg)
+  --notification-template-author-role <r>  Role permitted to draft and submit (repeatable;
+                       default erp_admin)
+  --notification-template-approver-role <r>  Role permitted to approve or reject (repeatable;
+                       default platform_admin). Four-eyes: nobody approves their own draft
+  --notification-template-unconditional-role <r>  Role permitted to author a template in a
+                       non-suppressible category (security_alert, transactional), which overrides a
+                       recipient's preferences AND suppressions (repeatable). Default none
+  --audit-read-routes  Expose the read-only audit trail under /v1/audit — list and fetch entries
+                       with their chain anchors (needs --store pg + --audit-chain-config)
+  --audit-read-tenant-role <r>  Role permitted to read its OWN tenant's trail (repeatable;
+                       default erp_admin). Fail-closed
+  --audit-read-platform-role <r>  Role permitted to read ANY tenant's trail (repeatable; default
+                       platform_admin). Elevates via app.platform_audit, which is SELECT-only
+  --audit-read-sensitive-role <r>  Role permitted to see pii/phi/regulated payload fields
+                       unredacted (repeatable). Default none: every reader gets the redacted view
+  --audit-read-sensitive-class <class>=<role>  Narrower: grants ONE class to a role. A class named
+                       here is authoritative for that class and --audit-read-sensitive-role no
+                       longer reaches it, which is what makes "pii but not phi" expressible;
+                       "<class>=" with no role withholds it from everyone
+  --audit-read-max-range-days <n>  Largest queryable time range in days (>=1)
+  --sensitive-field-role <r>  The same grant, for the ENTITY routes rather than the audit trail
+                       (repeatable). Default none, which is why 39 of the 46 classified fields in
+                       the packs are unreadable by every role: only the 7 carrying an explicit
+                       per-field read grant come back. Governs reads and writes through one rule
+  --sensitive-field-class <class>=<role>  Per-class entity grant, same grammar and same
+                       authoritative-per-class rule as --audit-read-sensitive-class;
+                       "<class>=" withholds it from everyone. Does NOT imply the write mask below
+  --abac-policy <key>=<attr>:<op>[:<operand>]  Declare an ABAC policy a manifest grant's abac key
+                       resolves against (repeatable). The attribute is the PRINCIPAL's, read from
+                       meta.user_tenant_membership.abac_attributes. Ops over a declared VALUE:
+                       eq, ne, in (comma list), present — e.g. clinical_only=department:eq:clinical.
+                       Ops over a field of the RECORD: eq_record, ne_record, in_record — e.g.
+                       same_dept=department:eq_record:department, owns=user_id:eq_record:owner_id.
+                       A per-field read grant is answered per record, so a list page can disclose
+                       the field on one row and withhold it on the next. A record op is refused at
+                       boot on an entity create or list grant, where no call site can supply one.
+                       Declaring any policy also switches on the attribute directory, and needs a
+                       Postgres store
+  --classified-write-mask  Enforce the classification default on writes: a sensitive field with no
+                       declared update grant is writable only by a privileged role. Off by default
+                       because a declared per-field update grant is enforced either way, and
+                       because the default alone would make 12 required fields across 7 entities
+                       (Patient, Employee, Lead, Opportunity, FixedAsset, Student, Permit)
+                       writable by nobody. Refuses at boot, naming them, rather than 403ing on
+                       the first create
+  --read-state-routes  Expose per-viewer notification read state: POST /v1/notifications/{id}/read,
+                       POST /v1/notifications/read-through, GET /v1/notifications/unread. The viewer
+                       is ALWAYS the credential — a body naming one is refused, not ignored. Closes
+                       ADR-0309's gap, where the web badge stood in recency for unread. Needs --store pg
+  --read-state-role <r>  Role permitted to record its own read state and read its own unread count
+                       (repeatable). Default none ⇒ the routes refuse everyone
+  --read-state-backfill-role <r>  Role permitted to assert source=system_backfill on the watermark
+                       route (repeatable). Default none ⇒ nobody. ADDITIVE on top of
+                       --read-state-role, which is checked first. A backfill marks a whole backlog
+                       read in one call, so it is recorded BEFORE the write and an unrecordable one
+                       is refused. Watermark only: a row-wise backfill is unbounded
+  --read-state-unread-scan <n>  Notices one unread answer may examine (1-1000, default 200).
+                       The answer reports examined + truncated, so a client renders "200+" rather
+                       than a quietly wrong total; an exact count needs a store-side anti-join
+  --tenant-erasure-routes  Expose GET /v1/platform/tenants/{id}/schema and POST .../erase-schema —
+                       survey exactly what a tenant's own schema holds, then drop it. ADR-0314 gave a
+                       tenant its own schema and nothing removed it, so a GDPR Article 17 tombstone
+                       was signed over data that survived. Needs --store pg + --audit-chain-config:
+                       an erasure is recorded before it is reported, and an unrecorded one is refused
+  --tenant-erasure-role <r>  Role permitted to survey and erase (repeatable). Default none ⇒ nobody.
+                       Four-eyes is separate and not overridable: the caller may not be the approver
+  --tenant-deletion-routes  Expose POST /v1/platform/tenants/{id}/delete and GET .../tombstones —
+                       the GDPR Article 17 flow. Erase the tenant's schema, attest what was
+                       destroyed, assemble and anchor a tombstone, store it: all in ONE transaction,
+                       so no outcome destroys data without a proof of it. Then retire the tenant
+                       row, in that order, because the anchor references meta.tenants. The only
+                       route that reaches 'deleted'. Needs --store pg + --audit-chain-config
+  --tenant-deletion-role <r>  Role permitted to delete a tenant (repeatable). Default none ⇒
+                       nobody. Separate from --tenant-erasure-role: erasing a schema is a step this
+                       contains. Four-eyes is not overridable — the caller may not be the approver
+  --tenant-tombstone-read-role <r>  Role permitted to read a tenant's tombstones (repeatable;
+                       defaults to the delete roles), so an auditor can read receipts without
+                       being able to delete
+  --deletion-request-routes  Expose the GDPR deletion-request handle under /v1/platform/
+                       deletion-requests — POST to submit, POST .../verify, POST .../reject, GET
+                       .../{id} to poll. The caller holds a handle instead of an open connection
+                       while a large tenant's deletion runs (needs --store pg + --audit-chain-config)
+  --deletion-request-submit-role <r>  Role permitted to submit a deletion request (repeatable).
+                       Default none ⇒ every request refused
+  --deletion-request-verify-role <r>  Role permitted to verify or reject one (repeatable). Default
+                       none ⇒ refused. Separate from submitting: the verifier may not be the submitter
+  --deletion-request-read-role <r>  Role permitted to poll a handle (repeatable; defaults to the
+                       submit and verify roles together)
+  --deletion-request-reconcile-role <r>  Role permitted to GET .../stranded and POST
+                       .../{id}/reconcile — resolving a request a failed run left in_progress, from
+                       the tombstone evidence (repeatable). Default none => nobody
+  --deletion-stranded-after-ms <n>  How long a request must sit in_progress before an ABSENCE of
+                       evidence is read as "never committed" (>=60000, default 3600000). A tombstone
+                       naming the request is conclusive at any age; an absence never is
+  --deletion-capabilities <file>  JSON: one of "erases" | "retains" | "absent" for every one of the
+                       six deletion subsystems. REQUIRED by the deletion routes and the runner,
+                       because every default is wrong: "absent" signs an Article 17 proof that is
+                       silent about a place the tenant's data may still be, and that silence is the
+                       defect ADR-0317 was written for. It replaced a field read from the request
+                       BODY with [] as its default, so a remote caller chose the proof's reach
+  --deletion-escalation-config <file>  JSON ({severity?, category?, declaredBy?, alertPolicy}) —
+                       declares an incident and pages when a deletion proof does not verify or two
+                       tombstones name one request. These are the findings the forensic chain
+                       CANNOT raise, because nothing in it commits to a tombstone's scope. One
+                       incident per request, closed out when the finding resolves
+  --deletion-request-deadline-days <n>  Days from submission to the Article 12(3) deadline
+                       (default 30, max 90). Per deployment, not per request
+  --deletion-runner-ms <n>  Run verified deletion requests out of band every n ms (>=1000). The
+                       first tick is one interval AFTER boot, never at boot: the work is
+                       irreversible and a boot is when a misconfiguration is most likely
+  --deletion-runner-executed-by <a>  Actor unattended deletions execute as (default
+                       system:deletion-runner)
+  --deletion-runner-approved-by <a>  Who authorised unattended execution (default
+                       system:retention-policy). Must differ from the executor
+  --deletion-runner-batch-size <n>  Requests the runner may take per tick (1..100, default 5).
+                       Each one is a whole tenant's data, and they run serially
+  --max-request-body-route <prefix>=<size>  Per-route override, longest path prefix winning
+                       (repeatable). Lets --max-request-body be set small, with the few routes that
+                       legitimately take a large body named. Per-*tenant* is not expressible here:
+                       the tenant comes from the credential and the limit is chosen before the body
+                       is read
+  --max-request-body <size>  Largest buffered request body — bytes or a size like 25mb (default
+                       10mb, floor 1kb, ceiling 1gb). Not disableable; out-of-band values are
+                       refused at boot rather than clamped
+  --design-review      Expose the platform design-review queue (/v1/platform/design-reviews)
+  --design-review-role <r>  Role permitted to decide reviews (repeatable; default platform_admin)
+  --require-design-review   Require platform approval before a tenant activates a proposal
+                       (implies --design-review)
+  --per-tenant-manifests  Serve each tenant's activated custom manifest (meta.operate_tenant_manifests),
+                       falling back to the boot pack for tenants without one (needs --store pg|pg-columns)
+  --region <id>        This instance's serving region (e.g. eu-central) — with --residency-file,
+                       enables data-residency edge routing (redirect/deny by tenant home region)
+  --residency-file <file>  Residency directory JSON ({tenants:[{tenantId, profile}]}) mapping each
+                       tenant to its residency profile (requires --region)
+  --residency-store    Use the Postgres tenant_residency_profiles table as the residency directory
+                       (requires --region + --store pg|pg-columns; alternative to --residency-file)
+  --slo-config <file>  JSON SLO config ({alertPolicy, systemActorUserId, availability?, latency?}) —
+                       auto-enforces availability/latency SLOs over the live request stream, declaring
+                       incidents + paging + optional flag rollback on a burn/latency breach
+  --slo-defaults       Derive default availability + latency SLOs from the manifest (one per entity
+                       operation, read vs. write targets) and enforce them — no config file needed.
+                       Mutually exclusive with --slo-config
+  --slo-defaults-override <file>  Partial override layered onto --slo-defaults ({alertPolicy?,
+                       systemActorUserId?, target/interval tweaks, extraAvailability?, extraLatency?}) —
+                       real paging + tuning without re-declaring every SLO. Requires --slo-defaults
+  --dr-readiness-config <file>  JSON DR-readiness config ({tenantId?, intervalMs?, input:{runbooks,
+                       backups, replication}}) — periodically folds live failover/drill executions into
+                       the declared infra, assesses readiness, and persists a snapshot (needs --store pg)
+  --access-reviews-config <file>  JSON access-reviews config ({systemActorUserId, campaigns, grants,
+                       principals}) — runs attestation campaigns on a schedule: starts due campaigns,
+                       generates items from the live grants, auto-revokes lapsed access (needs --store pg)
+  --access-reviews-live-grants  Source the review grants from this instance's configured API-key
+                       principals (their live role assignments) instead of the config's static grants.
+                       Requires --access-reviews-config
+  --certification-config <file>  JSON certification config ({tenantId?, intervalMs?, schema?, frameworks?,
+                       drReadiness?, accessReviews?, forensicChain?}) — periodically certifies each
+                       framework (SOC 2 / HIPAA / …) from live control-evidence (encryption coverage, DR
+                       readiness, sealed access reviews, tamper-evident audit chain) and persists a sealed
+                       report per framework (needs --store pg)
+  --audit-chain-config <file>  JSON audit-chain config ({schema?, actorReference?, privateKeyBase64,
+                       publicKeyBase64, outcomes?, operations?, sampleRate?, tenantOverrides?}) — appends a
+                       signed, hash-linked audit-log entry per (sampled/filtered) request into the
+                       tamper-evident chain and registers its sealing key in the key registry (needs
+                       --store pg)
+  --checkpoint-config <file>  JSON checkpoint config ({schema?, intervalMs?, checkpointedBy?, tenants?,
+                       includePlatform?, allTenants?, tenantStatuses?}) — periodically anchors a chain
+                       checkpoint per tenant (allTenants: every active tenant from the live registry,
+                       tenantStatuses: which statuses to include) so verifying a long chain stays bounded.
+                       includePlatform defaults to TRUE and is paired with the integrity proof's: the
+                       proof's truncation check has no witness without a checkpoint
+                       (needs --store pg + --audit-chain-config)
+  --integrity-proof-config <file>  JSON integrity-proof config ({schema?, intervalMs?, verifiedBy?,
+                       tenants?, includePlatform?, allTenants?, tenantStatuses?, auditRowLimit?,
+                       fromCheckpoint?, recordVerdict?, escalation?}) — periodically runs BOTH
+                       halves of the audit-integrity proof (each audit row against its anchor, and
+                       the chain's own links + signatures), checks for chain truncation against the
+                       latest checkpoint, and appends the verdict to the chain as a security_event.
+                       With escalation ({severity?, category?, declaredBy?, alertPolicy}) a
+                       compromised verdict declares an incident and pages once per episode.
+                       includePlatform defaults to TRUE: three escalators write platform-scope rows,
+                       so leaving it off meant writing rows nothing verified
+                       (needs --store pg + --audit-chain-config)
+  --audit-sampling-refresh-ms <n>  Refresh interval (ms, >=1000) for live per-tenant audit sampling read
+                       from meta.operate_tenant_settings (overrides the config map without a redeploy);
+                       enables the live policy cache (needs --store pg + --audit-chain-config)
+  --metering-config <file>  JSON metering config ({meter?, source?, tenantSubscriptions, countStatuses?,
+                       flushIntervalMs?}) — meters each billable request into billing usage keyed by the
+                       tenant's subscription, flushed to Postgres periodically (needs --store pg)
+  --stripe-usage-sync-config <file>  JSON usage-sync config ({intervalMs?, tenants, subscriptionItems}) —
+                       periodically reports persisted usage records to Stripe + marks them synced
+                       (needs --store pg + --stripe-api-key)
+  --help, -h           Show this help
+  --version, -v        Print version
+
+Auth: OPERATE_API_KEY_SPECS (or --api-key) for opaque tokens; --jwks-* + --jwt-*
+to verify Bearer JWTs (EdDSA) against an IdP's public keys — the verified claims
+(sub/scope/tenant_id) become the principal. Both api-key sources are read and
+concatenated; a spec on argv is reported at boot because `ps` discloses it.
+Postgres (--store pg): standard PG* env vars.
