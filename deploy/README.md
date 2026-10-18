@@ -317,12 +317,24 @@ has to come from outside the web. **Every user after the first is a console step
 mounted ten identity routes and the one act that makes them usable had no route at all, so
 onboarding broke at step 3 of 4 and a `docker compose exec` was mandatory per person.
 
-**A session's role is frozen until it expires.** The role is read from the membership at
-login and stamped into the token, and nothing re-reads the directory per request. So
-revoking or downgrading a membership takes effect at the next login, within
-`--session-token-ttl` (one hour by default; lower it if that window matters to you). The
-same is true of suspending a user. If you need a session cut off now, rotate
-`OPERATE_TOKEN_SIGNING_KEY` — that invalidates every session at once.
+**A session's roles are frozen until it expires.** The membership's primary role *and its
+secondary roles* are read at login and stamped into the token, and nothing re-reads the
+directory per request. So granting, revoking or downgrading a membership takes effect at the
+next login, within `--session-token-ttl` (one hour by default; lower it if that window
+matters to you). The same is true of suspending a user. If you need a session cut off now,
+rotate `OPERATE_TOKEN_SIGNING_KEY` — that invalidates every session at once.
+
+Secondary roles are additive and were inert before ADR-0369: the membership form accepted
+them, stored them and showed them in the Members panel, and the session carried the primary
+alone. A principal now holds the union of its roles, so the usual answer to "this person
+administers tenants *and* works in the ERP" is one membership with
+`primaryRole: platform_admin` and `secondaryRoles: ["erp_admin"]` — measured on `erp-core`,
+that reaches 250 of 255 (entity, operation) pairs where `platform_admin` alone reaches 0.
+Two consequences worth knowing. A role name may not contain a space (the token's scope claim
+is space-delimited, so the grant is refused with that reason). And an **api-key** carries
+exactly one role whatever the membership says — `--api-key key:role:tenant` has one role
+field and names no person, so there is no membership to read a list from; if a key needs two
+roles, declare a manifest role that inherits both.
 
 A wrong password locks the account after `--login-lockout-attempts` tries (10 by default)
 for `--login-lockout-seconds` (15 minutes). That bounds guessing against one account and
@@ -340,7 +352,7 @@ and what is not:
 | Where | What you can do |
 | --- | --- |
 | **Platform → Tenants** | List, filter by status, create. Open one to see its record and to suspend / archive / reactivate it — each needs a typed **reason**, which lands in the tenant's permanent lifecycle trail. |
-| **Platform → Tenants → one tenant** | Grant a membership (user id, primary role, and a status you must choose), activate or revoke one, and see every member of that tenant. |
+| **Platform → Tenants → one tenant** | Grant a membership (user id, primary role, optional secondary roles, and a status you must choose), activate or revoke one, and see every member of that tenant. The secondary roles are additive and take effect at that person's next login — they were accepted and inert before ADR-0369. |
 | **Platform → Users** | List every `meta.users` row with a per-status census, filter by status or by exact email address, provision a new one, and open one to suspend / reactivate / retire it. |
 | **Platform → Users → one user** | **Set their password.** This is the route that did not exist before ADR-0364 and the reason onboarding needed a shell. It cannot be aimed at yourself. |
 | **Platform → Design Reviews** | Approve or reject a manifest the Architect designed, with a field-level diff. This page used to 404: the routes behind it mount on `--design-review`, which the compose did not pass. It does now, via `--require-design-review`. The diff covers five of the manifest's sixteen sections and has **no `jobs` and no `views` layer**, so read it as "what entities, roles, permissions and classifications changed", not as the whole change. |
@@ -361,7 +373,9 @@ Four things it deliberately does **not** do, so you know where the edges are:
   checked against it, and a role the manifest does not declare comes back on the response named
   beside the ones it does, in the panel and in the audit trail. It is still accepted and stored,
   and it still grants nothing at serve time: a per-tenant manifest may declare roles the boot
-  pack does not, so this warns rather than refusing.
+  pack does not, so this warns rather than refusing. The warning now offers the declared names
+  for a **secondary** role too, which it withheld before ADR-0369 because re-granting one with a
+  declared name bought nothing.
 - **No database browser and no SQL.** A tenant's records are served by that tenant's own
   compiled gateway, under that tenant's field grants, classification and redaction. A
   platform-level reader would be a second path to the same rows with none of that applied.

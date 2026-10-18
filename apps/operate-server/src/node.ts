@@ -224,6 +224,7 @@ import { JwksRefreshPoller, RemoteJwksProvider } from "./jwks.js";
 import {
   buildJwksProvider,
   buildPrincipalWiring,
+  formatScopeRoleReading,
   parseApiKeySpec,
   parseJwksKeySpec,
   type JwksKeySpec,
@@ -1158,6 +1159,19 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   );
   if (credentialAuth !== null) {
     console.info(`[auth] ${formatCredentialAuth(credentialAuth)}`);
+  }
+  // ADR-0369. Said after the credential line because that one is about *whether* a token can be
+  // minted and this one about *what* one carries, which only matters once it can.
+  // `externalJwks` is any of the three static/remote JWKS flags: `--credential-login` refuses
+  // `--jwks-url` at parse, so the reachable combination is its own key beside a foreign
+  // `--jwks-key`/`--jwks-file` entry, and a pure external IdP has no credential line at all.
+  const scopeRoleReading = formatScopeRoleReading({
+    credentialLogin: credentialAuth?.ok === true,
+    externalJwks:
+      options.jwksKeys.length > 0 || options.jwksFile !== null || options.jwksUrl !== null,
+  });
+  if (scopeRoleReading !== null) {
+    console.info(`[auth] ${scopeRoleReading}`);
   }
   const schemaOpt = options.schema !== null ? { schema: options.schema } : {};
   // ADR-0350. The boot manifest's own typed entity tables, which the shared-table erasure now
@@ -4449,10 +4463,17 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           request,
           store: credentialStore,
           pepper: material.pepper,
+          // The whole row's role list since ADR-0369, where this returned `primaryRole` alone and
+          // was the producer half of the two truncations that made `secondary_roles` reach no
+          // authorization decision. `MembershipRecord.secondaryRoles` has carried the column since
+          // ADR-0335 and `rowToMembership` has mapped it; nothing read it here.
           roleFor: async (tenantId, userId) => {
             const membership = await userStore.membershipFor(tenantId, userId);
             if (membership === null || membership.status !== "active") return null;
-            return membership.primaryRole;
+            return {
+              primaryRole: membership.primaryRole,
+              secondaryRoles: membership.secondaryRoles,
+            };
           },
           lockout,
           now: new Date(),
@@ -4472,7 +4493,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           audience: options.jwtAudience ?? "",
           userId: outcome.userId,
           tenantId: outcome.tenantId,
-          role: outcome.role,
+          roles: outcome.roles,
           now: new Date(),
           lifetimeSeconds: ttl,
           kid: material.kid,

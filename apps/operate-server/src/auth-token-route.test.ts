@@ -17,6 +17,7 @@ import {
   type LoginOutcome,
 } from "./auth-token-route.js";
 import type { CredentialRecord, PostgresCredentialStore, TenantRef } from "./credential-store.js";
+import type { SessionRoles } from "./token-mint.js";
 
 const PEPPER = "a-deployment-pepper-with-plenty-of-distinct-bytes-0123456789";
 const PASSWORD = "correct horse battery staple";
@@ -28,7 +29,7 @@ const NOW = new Date("2026-10-11T12:00:00.000Z");
 interface StubState {
   readonly tenant?: TenantRef | null;
   readonly record?: CredentialRecord | null;
-  readonly role?: string | null;
+  readonly roles?: SessionRoles | null;
 }
 
 function stubStore(state: StubState): PostgresCredentialStore {
@@ -57,7 +58,8 @@ function run(state: StubState, password = PASSWORD): Promise<LoginOutcome> {
     request: { tenant: "acme", email: "a@example.test", password },
     store: stubStore(state),
     pepper: PEPPER,
-    roleFor: async () => (state.role === undefined ? "erp_admin" : state.role),
+    roleFor: async () =>
+      state.roles === undefined ? { primaryRole: "erp_admin", secondaryRoles: [] } : state.roles,
     lockout: DEFAULT_LOGIN_LOCKOUT,
     now: NOW,
     scryptParams: CHEAP,
@@ -149,9 +151,66 @@ describe("parseLoginLockout", () => {
 });
 
 describe("verifyLogin", () => {
-  it("admits a correct password and reports the membership's role", async () => {
+  it("admits a correct password and reports the membership's roles", async () => {
     const outcome = await run({ record: await activeRecord() });
-    expect(outcome).toMatchObject({ ok: true, userId: USER, tenantId: TENANT, role: "erp_admin" });
+    expect(outcome).toMatchObject({
+      ok: true,
+      userId: USER,
+      tenantId: TENANT,
+      roles: { primaryRole: "erp_admin", secondaryRoles: [] },
+    });
+  });
+
+  it("carries the membership's secondary roles through to the outcome", async () => {
+    // ADR-0369's producer half. This returned `membership.primaryRole` alone, so a secondary role
+    // an operator had granted was dropped here and could reach no authorization decision however
+    // many readers downstream were ready to spread it.
+    const outcome = await run({
+      record: await activeRecord(),
+      roles: { primaryRole: "ap_clerk", secondaryRoles: ["hr_manager", "controller"] },
+    });
+    expect(outcome).toMatchObject({
+      ok: true,
+      roles: { primaryRole: "ap_clerk", secondaryRoles: ["hr_manager", "controller"] },
+    });
+  });
+
+  it("refuses a role the scope claim cannot carry, rather than letting the mint throw", async () => {
+    // The backstop was worse than the fault: `sessionScope`'s throw escaped `ctx.mint(outcome)`
+    // uncaught and the login answered a 500 carrying the exception's message — on the one route
+    // whose design is that every refusal looks identical, with a status clients retry for a
+    // condition no retry fixes. Found by the live run, because every other test supplies a
+    // well-formed list.
+    for (const roles of [
+      { primaryRole: "hr manager", secondaryRoles: [] },
+      { primaryRole: "erp_admin", secondaryRoles: ["hr manager"] },
+      { primaryRole: "erp_admin", secondaryRoles: ["ok", "\tbad"] },
+    ]) {
+      const outcome = await run({ record: await activeRecord(), roles });
+      expect(outcome, JSON.stringify(roles)).toMatchObject({
+        ok: false,
+        refusal: "membership_role_unusable",
+      });
+      // The detail names the role for the operator and nothing about the credential.
+      if (!outcome.ok) expect(outcome.detail).toMatch(/scope claim cannot carry/);
+    }
+  });
+
+  it("does not count an unusable membership role against the lockout", () => {
+    // The password was correct, so counting it would lock a user out of an account whose
+    // credential they hold for a defect they cannot fix.
+    expect(REFUSAL_COUNTS_AGAINST_LOCKOUT["membership_role_unusable"]).toBe(false);
+  });
+
+  it("refuses a membership whose primary role is empty, secondary roles notwithstanding", async () => {
+    // The primary is what makes a membership a session: with none, the mint has nothing to put
+    // first and `principalRoles` would read the first secondary as the primary — promoting a role
+    // nobody granted as such.
+    const outcome = await run({
+      record: await activeRecord(),
+      roles: { primaryRole: "", secondaryRoles: ["hr_manager"] },
+    });
+    expect(outcome).toMatchObject({ ok: false, refusal: "no_active_membership" });
   });
 
   it("refuses a wrong password", async () => {
@@ -189,7 +248,7 @@ describe("verifyLogin", () => {
   });
 
   it("refuses a correct password with no active membership", async () => {
-    const outcome = await run({ record: await activeRecord(), role: null });
+    const outcome = await run({ record: await activeRecord(), roles: null });
     expect(outcome).toMatchObject({ ok: false, refusal: "no_active_membership" });
   });
 
@@ -213,7 +272,7 @@ describe("verifyLogin", () => {
     // Ordering is the whole point: the other way round, a caller holding no password could learn
     // whether a user is a member of a named tenant, which is a directory oracle on an
     // unauthenticated route.
-    const roleFor = vi.fn(async () => "erp_admin");
+    const roleFor = vi.fn(async () => ({ primaryRole: "erp_admin", secondaryRoles: [] }));
     await verifyLogin({
       request: { tenant: "acme", email: "a@example.test", password: "wrong" },
       store: stubStore({ record: await activeRecord() }),
@@ -281,7 +340,13 @@ describe("buildAuthTokenInterceptor", () => {
 
   function interceptor(over: Partial<Parameters<typeof buildAuthTokenInterceptor>[0]> = {}) {
     return buildAuthTokenInterceptor({
-      verify: async () => ({ ok: true, userId: USER, tenantId: TENANT, role: "erp_admin", rehashTo: null }),
+      verify: async () => ({
+        ok: true,
+        userId: USER,
+        tenantId: TENANT,
+        roles: { primaryRole: "erp_admin", secondaryRoles: [] },
+        rehashTo: null,
+      }),
       mint: () => minted,
       onSuccess: async () => undefined,
       onFailure: async () => undefined,
@@ -318,7 +383,23 @@ describe("buildAuthTokenInterceptor", () => {
       expiresAt: minted.expiresAt,
       tenantId: TENANT,
       role: "erp_admin",
+      secondaryRoles: [],
     });
+  });
+
+  it("names the session's secondary roles beside the primary, so the body does not understate it", async () => {
+    // `role` keeps its name and its meaning. Since ADR-0369 a session carries more than one role,
+    // so a body naming only the primary would understate what it had just minted.
+    const res = await interceptor({
+      verify: async () => ({
+        ok: true,
+        userId: USER,
+        tenantId: TENANT,
+        roles: { primaryRole: "ap_clerk", secondaryRoles: ["hr_manager"] },
+        rehashTo: null,
+      }),
+    })(req, body({ tenant: "acme", email: "a@b.test", password: "x" }));
+    expect(parse(res!)).toMatchObject({ role: "ap_clerk", secondaryRoles: ["hr_manager"] });
   });
 
   it("answers ONE body for every refusal", async () => {

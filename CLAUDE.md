@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 363 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 364 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -1215,8 +1215,9 @@ type errors.
   it. **The console's first renderer reinstated in the UI the exact promise the server withholds** —
   it unioned `declaredRoles` from every `not_declared` warning and printed "This tenant's manifest
   declares: …" under a *secondary*-only warning, which is ADR-0334's remedy-that-cannot-work one
-  layer out, since a declared secondary role reaches no authorization decision for **two**
-  independent reasons. **A brief of mine was wrong in the direction that hid a defect**: I wrote that
+  layer out, since a declared secondary role reached no authorization decision for **two**
+  independent reasons — both closed one increment later by ADR-0369, which is what makes that
+  renderer correct now and is why the gate it was replaced by is gone. **A brief of mine was wrong in the direction that hid a defect**: I wrote that
   a stale cursor would now 400, and it does not (`encodeCursor` is `base64url("o:<offset>")` with no
   filter binding, so it decodes perfectly and is honoured against the new filter's rows) — and that
   framing "directed attention at a refusal rather than at a wrong answer", which is why an in-flight
@@ -1422,6 +1423,64 @@ type errors.
   `comparable` flag**. Both of us concluded "workflows are not in the diff" from a fixture using
   `initial` and string states where the schema wants `initialState` and state objects, and read the
   empty view as the answer.
+
+  ADR-0369 is the sixth user-directed increment and the class is **a reader that truncated the list
+  it was given** — ADR-0361's class one domain across, on a *scope list* rather than a field list.
+  A membership's `secondary_roles` is `TEXT[] NOT NULL`, accepted, bound into the `INSERT`, read
+  back by `rowToMembership`, echoed in two API bodies, rendered as a console column and warned
+  about by ADR-0365's fence, and it reached **no authorization decision whatsoever** — while the
+  consumption side was already complete, since **26** non-test call sites spread
+  `...(secondaryRoles ?? [])`. One `[0]` in
+  `principalRoles: (p) => ({primaryRole: p?.grantedScopes[0] ?? "anonymous"})` made every one of
+  them take the empty arm. There were **two** truncations, either sufficient alone (the mint
+  stamped one `scope`, and the reader dropped the tail), which is why nothing failed and no test
+  was wrong — and why `token-mint.ts` stated the consequence in its own doc comment and
+  `membership-role-fence.ts` derived a whole documented position from the pair.
+  The headline is measured against the real `rbacCheck` over resolved `erp-core` (255 pairs):
+  `platform_admin` reaches **0 of 255** and `erp_admin` 250, so an operator signing in as the role
+  the shipped compose grants reached nothing inside the ERP — and the remedy their own grant form
+  offered, a secondary `erp_admin`, was **inert**. It is 250 now. `ap_clerk` 31 + `hr_manager` 26
+  compose to exactly **55**, the union.
+  Four measurements decided the design. **Every route in the workspace declares
+  `requiredScopes: []`** (18 + 5), so the gateway's `grantedScopes.includes()` check is vacuous
+  workspace-wide and widening the *reader* grants no scope-gated route; an undeclared role
+  contributes nothing in all three readers; **130 role declarations across the seven resolved
+  packs, 0 with whitespace, 0 declaring `inherits`**; and `--credential-login` and `--jwks-url` are
+  mutually exclusive, refused twice. So `scope` carries the list, primary first, de-duplicated —
+  **the vehicle was never missing** — and `scp`, the array claim the gateway reads *after* it, is
+  refused because emitting both leaves the array dead and emitting `scp` alone yields a token this
+  gateway reads and nothing else does. **No flag**: nothing retroactively activates, because a live
+  session's token carries one scope and activation is a login event per user (ADR-0339's split — an
+  explicitly declared grant is enforced always). A `role:` prefix tagging which scopes are roles
+  was refused on ADR-0342's own grounds, and the one behaviour change that *is* real — a foreign
+  token's scopes past the first — is **reported at boot and never refused**, since a refusal would
+  refuse a deployment that works.
+  Three things were sharper than the defect. **A role name may contain whitespace** and the claim
+  is space-delimited, so `"hr manager"` arrives as two roles — a hazard that was already live for
+  the *primary* and which this increment extends to the list; refused at the grant (where the
+  operator can act, ADR-0348's split) and at the mint (the backstop for a stored row), and
+  deliberately **not** in the kernel, because `--api-key key:role:tenant` sets
+  `grantedScopes: [spec.role]` with no split so such a name is legitimately holdable by an api-key.
+  **Four places argued at length that a secondary role is unread and all four stop being true at
+  once** — the mint's doc comment, the fence's `SECONDARY_UNREAD` and its whole "two positions"
+  section, the console's `primaryUndeclared` gate, and this file. **The backstop was worse than the
+  fault it guarded and only the live run said so**: `sessionScope`'s throw escapes
+  `ctx.mint(outcome)` uncaught, so the login answered a **500 carrying the exception's message** —
+  on the one route whose entire design is that every refusal looks identical, and as a status
+  clients retry for a condition no retry fixes. ADR-0359's `writeTxn` finding reproduced inside the
+  increment citing it, past every test, because every test supplies a well-formed role list. It is
+  a twelfth `LoginRefusal` now (`membership_role_unusable`, not counting against the lockout, since
+  the password was correct), verified byte-identical to a wrong-password refusal with the role named
+  in the log — and the throw stays as a backstop this path can no longer reach, `dischargeAbac`'s
+  shape. The predicate was also spelled **twice**, which is this increment's own class, and is one
+  function in `token-mint.ts` beside the delimiter now. And **the "total denial" clause
+  had to be weakened, by this increment**: `resolveEffectiveRoles` visits the primary and then
+  loops the secondaries, so a *declared* secondary beside an undeclared primary carries that
+  secondary's grants — `ghost_role` + `["hr_manager"]` is **26 of 255**, exactly `hr_manager`
+  alone, where the same primary with no secondary is 0. ADR-0365 measured its 0 of 255 on a grant
+  carrying **no** secondary roles and before this it generalised for the same reason everything
+  else about this column did: the list was unread. Found by a slice reading the function rather
+  than the brief, which asserted the old rule in both halves.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -4383,6 +4442,24 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   rather than casting, since `CredentialRecord.status` is a bare `string` constrained only by the
   column's CHECK, so a row from a later binary takes the fail-closed arm instead of indexing the map
   with a key it does not have.
+  **A session carries every role its membership grants** (ADR-0369), over three functions that are
+  one round trip: `roleFor` returns the row's `SessionRoles {primaryRole, secondaryRoles}`,
+  `sessionScope` composes the `scope` claim (primary first, de-duplicated, secondary order
+  preserved) and `principalRolesFromScopes` reads it back — exported and tested **across** each
+  other, since a change to one that the other does not follow is the defect restated. `secondaryRoles`
+  is **required** on the pair (`[]` is the claim, which the `NOT NULL` column really carries) and the
+  pair is named rather than positional, because which role is primary is consequential: it is the one
+  `UiViewer.primaryRole` shows and the only one an api-key spec can express. `sessionScope`
+  **throws** on a role name carrying whitespace, which is the one fence the vehicle needs — the claim
+  is space-delimited, so `"hr manager"` would arrive as two roles, neither declared — and
+  `SCOPE_DELIMITER` is a constant because the refusal and the join must be about the same character.
+  The reader is deliberately **total and uninterpreting**: no de-duplication, no filtering of
+  undeclared names, no case folding, because every consumer already fails closed on a name it does
+  not know and a reader that dropped one would make the fence reporting it unreachable.
+  `formatScopeRoleReading` is the boot line, beside the reader rather than with the other surveys
+  (ADR-0361's rule), `null` for an api-key-only deployment, and its second clause is the increment's
+  one behaviour change: a token this deployment did not mint has its scopes past the first read as
+  secondary roles.
   **A membership grant says whether the role it names is one the tenant's manifest declares**
   (ADR-0365, `membership-role-fence.ts`). `MembershipRoleDirectory` answers
   `(tenantId) => Promise<ReadonlySet<string> | null>` and the `null` is the whole of it: an **empty
@@ -4406,13 +4483,18 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   84 tests green. The warnings ride **two** places: the 201 body (always present, `[]` and never
   omitted, since an absent field reads as *none* and is indistinguishable from *not checked*) and the
   audit `detail`, set on the event **before** `record` so the row carries what the operator was told
-  (ADR-0313's ordering). The **two positions are not one defect**: an undeclared primary is a total
-  denial, while an undeclared secondary costs nothing extra because a declared one would not be read
-  either — `roleFor` returns `membership.primaryRole` alone and the mint stamps `scope: input.role`,
-  one string, *and* `principalRoles` returns **no `secondaryRoles` key at all**, so every
-  `...(secondaryRoles ?? [])` reader takes the empty arm whatever a token carries. So the secondary
-  warning names the mechanism and deliberately does **not** offer the declared names, which is the
-  promise the console's first renderer reinstated and the review removed.
+  (ADR-0313's ordering). The **two positions are not one defect**, and **ADR-0369 changed what
+  separates them**: at the time, an undeclared secondary cost nothing extra because a declared one
+  would not be read either — `roleFor` returned `membership.primaryRole` alone and the mint stamped
+  `scope: input.role`, one string, *and* `principalRoles` returned **no `secondaryRoles` key at
+  all** — so the secondary warning named the mechanism and deliberately withheld the declared
+  names, which is the promise the console's first renderer reinstated and the review removed. Both
+  halves are closed, both positions offer the names, and what survives is the **consequence**, held
+  in two total maps over the position (`NOT_DECLARED_COST`, `UNRESOLVED_COST`). That difference is
+  also weaker than it was: a *declared* secondary beside an undeclared primary now carries grants,
+  so the primary's sentence is qualified **unless a declared secondary role carries one**, and only
+  the empty-catalog branch is unconditional — if the manifest declares no role, no secondary can be
+  declared either.
   `node.ts` builds the directory from the boot manifest's `manifestRoleNames` and answers `null` two
   ways under `--per-tenant-manifests`: an unparseable stored manifest (one the gateway cache refuses
   to build anyway) and one declaring `meta.extends`, whose parents contribute roles `roles` does not
@@ -7483,7 +7565,10 @@ three make the rest honest, cheap or verifiable.
     `/platform/users` + `/platform/users/[id]` + a Members panel provision people, move their
     status, grant and revoke memberships and set a first password, and `/account` is the
     self-service change. Nothing else here moved: no workflow view, no report builder, no incident
-    surface, no deletion-request surface, no preferences page. **The viewer's identity is still
+    surface, no deletion-request surface, no preferences page. ADR-0369 made `/account`'s
+    **Other roles** field populate for the first time at a cost of **zero** web changes — it reads
+    `UiViewer.roles`, which `ui-schema.ts` has always built from the full list, so it had rendered
+    `—` for every viewer in every deployment. **The viewer's identity is still
     the sharpest remaining piece and is now the blocker for the obvious next one**: `UiViewer`
     carries `primaryRole` and `roles` and no user id, display name or email, so `/account` can
     name the role you signed in with and not the person holding it, the shell's avatar initial is
@@ -7834,7 +7919,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 363 records; 284 Accepted, 79 Proposed (the
+title or status change cannot drift. 364 records; 285 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

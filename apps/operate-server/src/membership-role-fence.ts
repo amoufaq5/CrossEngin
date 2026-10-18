@@ -15,19 +15,33 @@
  *
  * ## The two positions are not the same defect, and the difference is not declaredness
  *
- * A secondary role is granted, stored (`secondary_roles TEXT[] NOT NULL`), read back by
- * `rowToMembership` and echoed in the API body — and then never reaches an authorization decision,
- * for **two** independent reasons, either of which alone would be sufficient. `mintSessionToken`
- * stamps `scope: input.role`, one string, from `roleFor`, which returns `membership.primaryRole`
- * alone; and `principalRoles` is `(p) => ({primaryRole: p?.grantedScopes[0] ?? "anonymous"})`,
- * which returns no `secondaryRoles` key at all, so every `...(secondaryRoles ?? [])` reader in the
- * app takes the empty arm unconditionally however many scopes a token carries. `token-mint.ts`
- * already states it: *"`secondaryRoles` is populated by nothing anywhere"*.
+ * This section used to argue that a secondary warning must offer no remedy at all, because a
+ * secondary role is granted, stored (`secondary_roles TEXT[] NOT NULL`), read back by
+ * `rowToMembership`, echoed in the API body — and then reached no authorization decision, for
+ * **two** independent reasons either of which alone was sufficient. `mintSessionToken` stamped
+ * `scope: input.role`, one string, from `roleFor`, which returned `membership.primaryRole` alone;
+ * and `principalRoles` was `(p) => ({primaryRole: p?.grantedScopes[0] ?? "anonymous"})`, which
+ * returned no `secondaryRoles` key at all, so every `...(secondaryRoles ?? [])` reader took the
+ * empty arm however many scopes a token carried. **ADR-0369 closed both.** Declaring a secondary
+ * role now does something, so withholding the catalog from that warning would be ADR-0334's
+ * remedy-that-cannot-work rule applied to a remedy that works. Both positions offer the names.
  *
- * So declaring a secondary role would not make it work. Its warning says the position is unread
- * rather than offering the declared names as a remedy, because pointing an operator at the role
- * catalog here would promise that a declared secondary role grants something — which is the one
- * thing measurement says it does not (ADR-0334: a remedy that cannot work is worse than none).
+ * What survives is a difference in the **consequence**, which is why the two details are still two
+ * sentences and why `NOT_DECLARED_COST` is a map rather than one string. An undeclared **primary**
+ * denies: it resolves to no grant, and with nothing else in the membership to supply one the
+ * session authorizes nothing — ADR-0365's 0 of 255 (entity, operation) pairs. An undeclared
+ * **secondary** can only ever fail to *add*: `resolveEffectiveRoles` visits it with `"skip"` beside
+ * a primary that still resolves, so the membership authorizes whatever it would have without the
+ * name. Total against no-op, and neither warning may read as the other.
+ *
+ * The qualifier on that first half is ADR-0369's own doing and is worth stating rather than
+ * rounding off, because this module's measurement predates it: ADR-0365 measured the 0 of 255 on a
+ * grant carrying **no** secondary roles, and before ADR-0369 that generalised, since an undeclared
+ * primary denied whatever the list held — the list was unread. Now a *declared* secondary beside an
+ * undeclared primary genuinely carries grants, so the primary detail says `unless a declared
+ * secondary role carries one`. The position is still the consequential one for two reasons no
+ * measurement here touches: it is the role `UiViewer.primaryRole` shows, and the only role an
+ * `--api-key key:role:tenant` spec can express.
  *
  * ## Why this warns and never refuses
  *
@@ -152,18 +166,41 @@ function nameSome(declared: readonly string[]): string {
   return `${shown} (+${String(declared.length - NAMED_DECLARED_ROLE_LIMIT)} more)`;
 }
 
-/** The sentence a secondary warning ends on, whichever verdict it carries. */
-const SECONDARY_UNREAD =
-  "no secondary role reaches an authorization decision whether declared or not, since the mint" +
-  " stamps the primary role alone and principalRoles reads one scope";
+/**
+ * What an undeclared role costs, per position: total denial against no-op, and nothing else.
+ *
+ * A total map, so a third position is a compile error here rather than a sentence that silently
+ * describes the wrong one — and declared once, because after ADR-0369 this pair *is* the whole
+ * difference between the two warnings. The remedy clause and the "not declared by this tenant's
+ * manifest" opening are now shared, so a difference that lived in two sentence builders would be
+ * two chances to state it inconsistently.
+ *
+ * The primary's conditional clause is load-bearing and not hedging: ADR-0369 made a declared
+ * secondary role resolve, so a grant pairing an undeclared primary with a declared secondary does
+ * authorize something, where before that increment it could not.
+ */
+const NOT_DECLARED_COST: Readonly<Record<MembershipRolePosition, string>> = {
+  primary:
+    "so it resolves to no grant and, unless a declared secondary role carries one, this membership" +
+    " authorizes nothing",
+  secondary:
+    "so it resolves to no grant and adds nothing to what the rest of this membership authorizes",
+};
+
+/** The same difference where nothing was read: what is *unknown* is per position too. */
+const UNRESOLVED_COST: Readonly<Record<MembershipRolePosition, string>> = {
+  primary: "so whether this membership authorizes anything is unknown",
+  secondary: "so whether it adds anything to this membership is unknown",
+};
 
 function unresolvedDetail(position: MembershipRolePosition, role: string): string {
   // No remedy in either position, because none is known: nothing was read, so the grant may well be
-  // correct. Naming the role catalog here would be naming a catalog this call could not see.
-  return position === "secondary"
-    ? `secondary role '${role}' was not checked, and ${SECONDARY_UNREAD}`
-    : `primary role '${role}' was not checked: this deployment cannot say which roles the tenant's` +
-        ` manifest declares, so whether this membership authorizes anything is unknown`;
+  // correct. Naming the role catalog here would be naming a catalog this call could not see. That
+  // is the one argument ADR-0369 leaves standing for withholding the names from a secondary.
+  return (
+    `${position} role '${role}' was not checked: this deployment cannot say which roles the` +
+    ` tenant's manifest declares, ${UNRESOLVED_COST[position]}`
+  );
 }
 
 /** `declared` is non-nullable: a `not_declared` verdict is only reachable from a read catalog. */
@@ -172,23 +209,19 @@ function notDeclaredDetail(
   role: string,
   declared: readonly string[],
 ): string {
-  if (position === "secondary") {
-    return `secondary role '${role}' is not declared by this tenant's manifest — and ${SECONDARY_UNREAD}`;
-  }
-  const consequence =
-    "so the session's one scope claim matches no grant and this membership authorizes nothing";
-  // The empty catalog gets no remedy for the same reason the `unresolved` case does not: there is
-  // no declared name to re-grant with, and making the manifest declare one is not an act available
-  // at a grant. A sentence offering "one of the declared roles" would name an empty list.
+  // The empty catalog gets no remedy in **either** position, for the reason the `unresolved` case
+  // does not: there is no declared name to re-grant with, and making the manifest declare one is
+  // not an act available at a grant. A sentence offering "one of the declared roles" would name an
+  // empty list.
   if (declared.length === 0) {
     return (
-      `primary role '${role}' is not declared by this tenant's manifest, which declares no role at` +
-      ` all, ${consequence}`
+      `${position} role '${role}' is not declared by this tenant's manifest, which declares no` +
+      ` role at all, ${NOT_DECLARED_COST[position]}`
     );
   }
   return (
-    `primary role '${role}' is not declared by this tenant's manifest, ${consequence};` +
-    ` the roles a session can carry are ${nameSome(declared)}`
+    `${position} role '${role}' is not declared by this tenant's manifest,` +
+    ` ${NOT_DECLARED_COST[position]}; the roles a session can carry are ${nameSome(declared)}`
   );
 }
 

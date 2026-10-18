@@ -93,6 +93,22 @@ describe("checkMembershipRoles — an undeclared primary role", () => {
   });
 
   /**
+   * ADR-0365 measured the 0 of 255 on a grant carrying **no** secondary roles, and before ADR-0369
+   * that generalised, because an undeclared primary denied whatever the list held — the list was
+   * unread. ADR-0369 makes a declared secondary resolve, so the unconditional sentence became false
+   * for a grant pairing an undeclared primary with a declared secondary. The qualifier is asserted
+   * rather than left to the prose, since without it `toContain("authorizes nothing")` above passes
+   * on a claim this increment weakened.
+   */
+  it("qualifies the total denial with what ADR-0369 made possible beside it", async () => {
+    const ws = await checkMembershipRoles(
+      grant({ primaryRole: "platform_admin" }),
+      directoryOf("erp_admin"),
+    );
+    expect(ws[0]?.detail).toContain("unless a declared secondary role carries one");
+  });
+
+  /**
    * The measured case this module exists for, read off the real pack rather than a fixture: a
    * `platform_admin` grant in an `erp-core` tenant. Verified independently against `rbacCheck` —
    * 0 of 255 (entity, operation) pairs and 0 of 51 entities allowed, where `erp_admin` reaches
@@ -141,21 +157,38 @@ describe("checkMembershipRoles — an undeclared secondary role", () => {
   });
 
   /**
-   * The measured fact the detail must carry: a secondary role is stored, read back and echoed, and
-   * then reaches no authorization decision for two independent reasons — `mintSessionToken` stamps
-   * one `scope` from `primaryRole`, and `principalRoles` returns no `secondaryRoles` key at all. So
-   * the warning must not read as *declare it and it will work*, and in particular must not offer
-   * the role catalog as a remedy the way the primary warning does.
+   * ADR-0365 withheld the role catalog from this position, on the measured fact that a secondary
+   * role reached no authorization decision for two independent reasons — `mintSessionToken` stamped
+   * one `scope` from `primaryRole`, and `principalRoles` returned no `secondaryRoles` key at all —
+   * so offering the names would have promised a remedy that could not work (ADR-0334).
+   *
+   * ADR-0369 closed both reasons, so declaring the role is now the remedy and withholding it is the
+   * rule applied against itself. This is the inversion of the assertion that stood here.
    */
-  it("says the position is unread rather than offering the declared names", async () => {
+  it("offers the declared names, which ADR-0369 made a remedy that works", async () => {
     const ws = await checkMembershipRoles(
       grant({ primaryRole: "erp_admin", secondaryRoles: ["ghost"] }),
       directoryOf("erp_admin", "erp_viewer"),
     );
-    expect(ws[0]?.detail).toContain("whether declared or not");
-    expect(ws[0]?.detail).toContain("principalRoles reads one scope");
-    expect(ws[0]?.detail).not.toContain("the roles a session can carry");
-    expect(ws[0]?.detail).not.toContain("erp_viewer");
+    expect(ws[0]?.detail).toContain("the roles a session can carry");
+    expect(ws[0]?.detail).toContain("erp_viewer");
+  });
+
+  /**
+   * The half of ADR-0365's distinction that survives ADR-0369, and the reason the two details are
+   * still two sentences: an undeclared secondary can only fail to *add*, because
+   * `resolveEffectiveRoles` visits it with `"skip"` beside a primary that still resolves. Asserted
+   * as both halves — it says what it costs, and it does not borrow the primary's denial — since a
+   * shared remedy clause is exactly the edit that would let one sentence serve both positions.
+   */
+  it("states a no-op cost and never the primary's total denial", async () => {
+    const ws = await checkMembershipRoles(
+      grant({ primaryRole: "erp_admin", secondaryRoles: ["ghost"] }),
+      directoryOf("erp_admin", "erp_viewer"),
+    );
+    expect(ws[0]?.detail).toContain("adds nothing to what the rest of this membership authorizes");
+    expect(ws[0]?.detail).not.toContain("authorizes nothing");
+    expect(ws[0]?.detail).not.toContain("unless a declared secondary role carries one");
   });
 
   it("still reports the declared list on the warning for an operator to read", async () => {
@@ -352,13 +385,14 @@ describe("formatMembershipRoleWarnings", () => {
     for (const w of ws) expect(out).toContain(w.detail);
   });
 
-  it("never offers the declared names for a secondary-only report", async () => {
+  it("carries the declared names through for a secondary-only report", async () => {
     const ws = await checkMembershipRoles(
       grant({ secondaryRoles: ["ghost"] }),
       directoryOf("erp_admin", "erp_viewer"),
     );
     const out = formatMembershipRoleWarnings(ws);
-    expect(out).not.toContain("the roles a session can carry");
+    expect(out).toContain("the roles a session can carry");
+    expect(out).toContain("erp_viewer");
   });
 });
 
@@ -413,6 +447,71 @@ describe("the verdict and its declared list travel together", () => {
       directoryOf(),
     );
     for (const w of ws) expect(w.detail).not.toContain("the roles a session can carry");
+  });
+
+  /**
+   * The empty catalog is the one branch where both positions withhold the names, so it is also the
+   * branch where a reader could lose track of which cost sentence it is in. Pinned per position:
+   * sharing the remedy clause must not end up sharing the consequence, which is the whole of what
+   * ADR-0369 left different.
+   */
+  it("keeps each position's own cost sentence when the catalog is empty", async () => {
+    const [primary, secondary] = await checkMembershipRoles(
+      grant({ primaryRole: "ghost", secondaryRoles: ["also_ghost"] }),
+      directoryOf(),
+    );
+    expect(primary?.detail).toContain("authorizes nothing");
+    expect(secondary?.detail).toContain(
+      "adds nothing to what the rest of this membership authorizes",
+    );
+    expect(secondary?.detail).not.toContain("authorizes nothing");
+  });
+});
+
+describe("the retired unread-position limitation is not reinstated", () => {
+  /**
+   * ADR-0365's secondary detail ended on a fixed sentence asserting that no secondary role reaches
+   * an authorization decision "whether declared or not", because the mint stamped the primary alone
+   * and `principalRoles` read one scope. ADR-0369 closed both mechanisms, so every clause of that
+   * sentence is now false — and a sentence that is false about what the deployment does is worse
+   * here than one that is merely unhelpful, since an operator reading it would not declare the role.
+   *
+   * Asserted as a string absence over every detail the module can produce rather than against one
+   * call, because the sentence was appended to both verdicts at the secondary position and the way
+   * it would come back is a revert of one builder.
+   */
+  it("renders no detail containing any clause of it, in any position or verdict", async () => {
+    const retired: readonly string[] = [
+      "whether declared or not",
+      "reaches an authorization decision",
+      "stamps the primary role alone",
+      "principalRoles reads one scope",
+      "was not checked, and",
+      "the session's one scope claim",
+    ];
+    const directories: readonly MembershipRoleDirectory[] = [
+      directoryOf(),
+      directoryOf("erp_admin", "erp_viewer"),
+      UNRESOLVED,
+      () => {
+        throw new Error("42501: permission denied");
+      },
+    ];
+    const details: string[] = [];
+    for (const directory of directories) {
+      const ws = await checkMembershipRoles(
+        grant({ primaryRole: "ghost_primary", secondaryRoles: ["ghost_secondary"] }),
+        directory,
+      );
+      for (const w of ws) details.push(w.detail);
+      details.push(formatMembershipRoleWarnings(ws));
+    }
+    // Both positions warn under all four directories, so the absence is asserted over a populated
+    // set: a builder that returned the empty string would otherwise satisfy every clause below.
+    expect(details.filter((d) => d.length > 0)).toHaveLength(12);
+    for (const detail of details) {
+      for (const phrase of retired) expect(detail).not.toContain(phrase);
+    }
   });
 });
 

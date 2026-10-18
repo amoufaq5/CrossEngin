@@ -12,6 +12,7 @@ import { z } from "zod";
 
 import type { CredentialRecord, PostgresCredentialStore } from "./credential-store.js";
 import type { RawHttpRequest, RawHttpResponse } from "./http.js";
+import { roleNameIsScopeSafe, type SessionRoles } from "./token-mint.js";
 
 /**
  * `POST /v1/auth/token` -- the one surface that turns a password into a session token.
@@ -75,6 +76,22 @@ export const LOGIN_REFUSALS = [
   "password_mismatch",
   "account_locked",
   "no_active_membership",
+  /**
+   * The membership exists, is active, and names a role the `scope` claim cannot carry.
+   *
+   * `no_active_membership`'s sibling and ADR-0369's only new refusal. It exists because the
+   * backstop it replaces was **worse than the fault it guarded**: `sessionScope` throws, the
+   * throw escaped `ctx.mint(outcome)` uncaught, and the login answered a **500 carrying the
+   * exception's message** -- on the one route whose entire design is that every refusal looks
+   * identical, and as a status clients retry for a condition no retry can fix. Found by the live
+   * run and not by a test, because every test supplies a well-formed role list.
+   *
+   * So the check moves into `verifyLogin`, where it takes the uniform 401 body like every other
+   * refusal and the detail reaches the operator through `onFailure`. The mint's throw stays as a
+   * pure backstop that this path can no longer reach -- `dischargeAbac`'s shape, where the refusal
+   * sits before the call so a caller that forgets cannot get it wrong.
+   */
+  "membership_role_unusable",
 ] as const;
 export type LoginRefusal = (typeof LOGIN_REFUSALS)[number];
 
@@ -103,6 +120,10 @@ export const REFUSAL_COUNTS_AGAINST_LOCKOUT: Readonly<Record<LoginRefusal, boole
     password_mismatch: true,
     account_locked: false,
     no_active_membership: false,
+    // The password was correct. This is a malformed membership, so counting it would lock a user
+    // out of an account whose credential they hold for a defect they cannot fix —
+    // `credential_unreadable`'s reasoning on the other side of the verification.
+    membership_role_unusable: false,
   });
 
 export type LoginOutcome =
@@ -110,7 +131,7 @@ export type LoginOutcome =
       readonly ok: true;
       readonly userId: string;
       readonly tenantId: string;
-      readonly role: string;
+      readonly roles: SessionRoles;
       /**
        * A hash re-derived under the deployment's current parameters, when the stored one was
        * produced under weaker ones -- `null` when there is nothing to upgrade. The caller stores
@@ -166,11 +187,18 @@ export function parseLoginLockout(attempts: number, seconds: number): LoginLocko
 
 /* ------------------------------------------------------------------ the check */
 
-/** Resolves the one role a session carries. Returns null when no active membership exists. */
+/**
+ * Resolves the roles a session carries. Returns null when no active membership exists.
+ *
+ * It answered one `string` until ADR-0369, which is where the membership's `secondary_roles` was
+ * dropped on the way to the token -- the first of the two truncations that made that column reach
+ * no authorization decision. The resolver returns the pair the row holds; the mint turns it into
+ * one `scope` claim and `principalRoles` reads it back.
+ */
 export type MembershipRoleResolver = (
   tenantId: string,
   userId: string,
-) => Promise<string | null>;
+) => Promise<SessionRoles | null>;
 
 export interface VerifyLoginInput {
   readonly request: AuthTokenRequest;
@@ -273,8 +301,11 @@ export async function verifyLogin(input: VerifyLoginInput): Promise<LoginOutcome
     };
   }
 
-  const role = await input.roleFor(tenant.tenantId, record.userId);
-  if (role === null || role === "") {
+  const roles = await input.roleFor(tenant.tenantId, record.userId);
+  // The **primary** is what makes a membership a session: a row carrying secondary roles and an
+  // empty primary names no role the mint can put first, and `principalRoles` would read the first
+  // secondary as the primary -- promoting a role nobody granted as such.
+  if (roles === null || roles.primaryRole === "") {
     return {
       ok: false,
       refusal: "no_active_membership",
@@ -282,11 +313,26 @@ export async function verifyLogin(input: VerifyLoginInput): Promise<LoginOutcome
       detail: `user ${record.userId} has no active membership in tenant ${tenant.tenantId}`,
     };
   }
+  // Asked here rather than left to `sessionScope`'s throw: that throw escapes the interceptor as a
+  // 500 carrying its own message, which on this route is both a disclosure and a retryable status
+  // for a permanent fault. `roleNameIsScopeSafe` is imported rather than restated, so the grant's
+  // 400 and this 401 cannot come to disagree about which names are usable.
+  const unusable = [roles.primaryRole, ...roles.secondaryRoles].find((r) => !roleNameIsScopeSafe(r));
+  if (unusable !== undefined) {
+    return {
+      ok: false,
+      refusal: "membership_role_unusable",
+      userId: record.userId,
+      detail:
+        `user ${record.userId} has a membership in tenant ${tenant.tenantId} naming role` +
+        ` ${JSON.stringify(unusable)}, which the session scope claim cannot carry`,
+    };
+  }
   return {
     ok: true,
     userId: record.userId,
     tenantId: tenant.tenantId,
-    role,
+    roles,
     // The one moment the plaintext is in hand, which is the only moment a re-derivation is
     // possible. It closes a timing oracle rather than merely strengthening an old hash:
     // `spendPasswordWork` has to derive under *some* parameters and the only honest choice is the
@@ -453,7 +499,13 @@ export function buildAuthTokenInterceptor(
       token: minted.token,
       expiresAt: minted.expiresAt,
       tenantId: outcome.tenantId,
-      role: outcome.role,
+      role: outcome.roles.primaryRole,
+      // `role` keeps its name and its meaning -- the primary -- and the list rides beside it
+      // rather than replacing it. Since ADR-0369 a session carries more than one role, so a body
+      // naming only the primary would *understate* what it had just minted: this is an existing
+      // field completed, not a speculative one added (the client does not need it -- `/account`
+      // reads the same list off `UiViewer.roles`, which is derived from the token).
+      secondaryRoles: outcome.roles.secondaryRoles,
     });
   };
 }

@@ -70,6 +70,75 @@ export interface PrincipalWiring {
   readonly principalRoles: (principal: ResolvedPrincipal | null) => PrincipalRoles;
 }
 
+/** What `principalRoles` answers for a credential that carries no scope at all. */
+export const ANONYMOUS_ROLE = "anonymous";
+
+/**
+ * The credential's granted scopes read as the roles it holds: the first is the primary, the rest
+ * are secondary.
+ *
+ * **This function is the whole of ADR-0369's reader half.** It was
+ * `(p) => ({ primaryRole: p?.grantedScopes[0] ?? "anonymous" })` -- inline, with no
+ * `secondaryRoles` key at all -- so the tail of a list the type declares as
+ * `readonly string[]` was dropped, and all 26 non-test readers that spread
+ * `...(secondaryRoles ?? [])` took the empty arm unconditionally however many scopes a token
+ * carried. ADR-0361's class, on a scope list rather than a field list: a reader whose aperture is
+ * narrower than the writer's.
+ *
+ * It is extracted and exported so there is **one** spelling of the reading and a test can hold it
+ * against the mint, which is the other half: `sessionScope` composes the claim and this decomposes
+ * it, and a round trip through both is the property that matters.
+ *
+ * Deliberately total and uninterpreting -- no de-duplication, no filtering of names the manifest
+ * does not declare, no case folding. It reports what the credential carries; deciding what a role
+ * *means* belongs to `resolveEffectiveRoles` and to the gates, each of which already fails closed
+ * on a name it does not know (an unknown role maps to the unprivileged sentinel in the redaction
+ * path, is skipped by the role-graph walk, and answers false to every `.has`). A reader that
+ * silently dropped an undeclared scope would make the fence that reports it unreachable.
+ */
+export function principalRolesFromScopes(scopes: readonly string[]): PrincipalRoles {
+  return { primaryRole: scopes[0] ?? ANONYMOUS_ROLE, secondaryRoles: scopes.slice(1) };
+}
+
+/**
+ * The boot line for how this deployment reads a token's scopes, or `null` when no JWT path is
+ * configured at all.
+ *
+ * It lives beside the reader whose behaviour it describes rather than with the other boot surveys,
+ * which is ADR-0361's rule: the fact lands where the next reader is.
+ *
+ * The second clause is the increment's one behaviour change on a configuration that worked before
+ * it. A deployment trusting an externally-issued token -- `--jwks-url`, or a static `--jwks-key`
+ * holding a foreign key -- had its token's first scope read as the role and the rest ignored; now
+ * the rest are secondary roles. **Reported and never refused**, on two measurements: a refusal
+ * would refuse a deployment that works, and an undeclared scope grants nothing anywhere (the
+ * redaction path maps an unknown name to its unprivileged sentinel, `resolveEffectiveRoles` skips
+ * it, and every platform gate is a `.has`), so the only reachable change is an IdP emitting a
+ * second scope that *is* a declared role name -- which is what a role list means.
+ *
+ * There is deliberately no survey beside it and no affirmative line for an api-key-only
+ * deployment. A survey of which memberships grant a secondary role is the unscoped census
+ * ADR-0365 refused by measurement: `meta.user_tenant_membership` carries one `ALL`-scope isolation
+ * policy and no platform read arm, so a non-owner session with no tenant context reads zero rows
+ * and would report a clean deployment because it could see nothing.
+ */
+export function formatScopeRoleReading(opts: {
+  readonly credentialLogin: boolean;
+  readonly externalJwks: boolean;
+}): string | null {
+  const clauses: string[] = [];
+  if (opts.credentialLogin) {
+    clauses.push("a session carries every role its membership grants, primary role first");
+  }
+  if (opts.externalJwks) {
+    clauses.push(
+      "a token this deployment did not mint has its scopes past the first read as secondary roles",
+    );
+  }
+  if (clauses.length === 0) return null;
+  return `session roles: ${clauses.join("; ")}`;
+}
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
@@ -156,7 +225,7 @@ export function buildPrincipalWiring(
   return {
     principalResolver,
     opaqueTokenLookup,
-    principalRoles: (p) => ({ primaryRole: p?.grantedScopes[0] ?? "anonymous" }),
+    principalRoles: (p) => principalRolesFromScopes(p?.grantedScopes ?? []),
   };
 }
 

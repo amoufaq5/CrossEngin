@@ -35,10 +35,16 @@ export interface SessionTokenClaims {
    * Space-delimited, read by the authenticate stage into `ctx.authScopes` and then taken as the
    * principal's `grantedScopes`.
    *
-   * `principalRoles` reads `grantedScopes[0]` and `secondaryRoles` is populated by nothing
-   * anywhere, so a session holds exactly **one** manifest role however many scopes travel here.
-   * The minter therefore stamps one, read from the membership, rather than a list that would read
-   * as more than it is.
+   * **The membership's whole role list, primary first** (ADR-0369). It used to be one role, on the
+   * true observation that `principalRoles` read `grantedScopes[0]` and dropped the rest -- so the
+   * minter stamped one rather than a list that would read as more than it was. Both halves of that
+   * are closed now: the reader returns the tail as `secondaryRoles` and this claim carries it.
+   *
+   * `scp`, the array claim the gateway reads *after* this one, was the alternative and is refused:
+   * `scope` wins where both are present, so emitting both leaves the array dead, and emitting
+   * `scp` alone yields a token this gateway reads correctly and nothing else does. The delimiter
+   * hazard is shared with every externally-issued token and so needs `sessionScope`'s refusal
+   * either way.
    */
   readonly scope: string;
   readonly iat: number;
@@ -46,12 +52,36 @@ export interface SessionTokenClaims {
   readonly exp: number;
 }
 
+/**
+ * The roles one session carries, as the membership row holds them.
+ *
+ * `secondaryRoles` is **required** and `[]` is the claim this membership grants none -- a fact the
+ * row really carries, since `secondary_roles` is `TEXT[] NOT NULL`. Optional would let a caller
+ * forget the list with the type still valid, which is the shape the increment that introduced this
+ * type exists to close (ADR-0330's rule, ADR-0369's defect).
+ *
+ * Deliberately a named pair and not `readonly string[]` with the primary first: which role is
+ * primary is consequential and not merely ordinal. It is the one `UiViewer.primaryRole` shows and
+ * the only one an `--api-key key:role:tenant` spec can express.
+ *
+ * It is **not** the position that decides whether a grant is total, and this increment is what
+ * made that false: `resolveEffectiveRoles` visits the primary and then loops the secondaries, so a
+ * declared secondary beside an undeclared primary carries that secondary's grants. Measured on
+ * resolved `erp-core`: an undeclared primary with `["hr_manager"]` reaches 26 of 255 (entity,
+ * operation) pairs, exactly `hr_manager` alone, where the same primary with no secondary reaches
+ * 0. `membership-role-fence.ts` carries the qualifier that follows from it.
+ */
+export interface SessionRoles {
+  readonly primaryRole: string;
+  readonly secondaryRoles: readonly string[];
+}
+
 export interface MintSessionTokenInput {
   readonly issuer: string;
   readonly audience: string;
   readonly userId: string;
   readonly tenantId: string;
-  readonly role: string;
+  readonly roles: SessionRoles;
   readonly now: Date;
   readonly lifetimeSeconds: number;
   readonly kid: string;
@@ -88,6 +118,73 @@ const B64URL = (bytes: Buffer): string =>
 const B64URL_JSON = (value: unknown): string => B64URL(Buffer.from(JSON.stringify(value), "utf8"));
 
 /**
+ * The `scope` claim's one delimiter, the same single space the gateway splits on
+ * (`runtime.ts`: `scope.split(" ").filter((s) => s.length > 0)`).
+ *
+ * A constant rather than a literal in the join, because the refusal below and the join must be
+ * about the same character: a fence against a delimiter spelled separately from the delimiter is a
+ * fence against a different one.
+ */
+export const SCOPE_DELIMITER = " ";
+
+const ROLE_NAME_WHITESPACE_RE = /\s/;
+
+/**
+ * Whether a role name survives a round trip through the `scope` claim.
+ *
+ * It lives here, beside the delimiter it is about, and `platform-users.ts` imports it for its
+ * grant-time refusal — **one predicate, two messages**. The messages differ because the readers
+ * do: a 400 names the consequence for the operator typing the grant, and `sessionScope`'s throw
+ * names the stored role for the operator reading a log. The *rule* may not differ, and before this
+ * convergence it was spelled twice, which is the shape that eventually disagrees.
+ */
+export function roleNameIsScopeSafe(role: string): boolean {
+  return role.length > 0 && !ROLE_NAME_WHITESPACE_RE.test(role);
+}
+
+/**
+ * The membership's roles as one `scope` claim: primary first, de-duplicated, secondary order
+ * preserved.
+ *
+ * De-duplicated because a membership may legitimately name its primary in `secondary_roles` and
+ * every downstream reader already treats the list as a set (`resolveEffectiveRoles` visits a `Set`,
+ * `UiViewer.roles` de-dupes, the platform gates are `.some`). The duplicate would change no
+ * answer; it would only make the token say the same thing twice.
+ *
+ * **Throws on a role name carrying whitespace, and that is the fence rather than a validation
+ * nicety.** `RoleNameSchema` is `z.string().min(1)` and `ManifestSchema.roles` is keyed by
+ * `z.string()`, so `"hr manager"` is a legal role name -- and the claim is space-delimited, so it
+ * would arrive as `["hr", "manager"]`: two roles, neither declared, in place of the one that was
+ * granted. Silently dropping or mangling it is exactly the class ADR-0369 closes, one layer down,
+ * so the only honest answers are to refuse or to change the vehicle, and the vehicle is the claim
+ * the verifier reads.
+ *
+ * It throws where `platform-users.ts` answers 400, and the split is ADR-0348's: the grant is a
+ * property of the request and is refused where the operator can act on it, while this is the
+ * backstop for a row stored before that fence existed. A throw here surfaces as a failed login for
+ * that one user with the role named in the log, which is narrower than refusing the row on read --
+ * that would make the membership unreadable and take every surface keyed on it down with it.
+ *
+ * `--api-key key:role:tenant` is unaffected and deliberately so: it sets `grantedScopes:
+ * [spec.role]` with no split, so a role name with a space is legitimately holdable by an api-key
+ * and a refusal in the kernel would refuse a configuration that works.
+ */
+export function sessionScope(roles: SessionRoles): string {
+  const ordered: string[] = [];
+  for (const role of [roles.primaryRole, ...roles.secondaryRoles]) {
+    if (!roleNameIsScopeSafe(role)) {
+      throw new Error(
+        `role name ${JSON.stringify(role)} cannot be carried by a session: the token's scope` +
+          " claim is space-delimited, so a name that is empty or contains whitespace is read as a" +
+          " different set of roles than was granted",
+      );
+    }
+    if (!ordered.includes(role)) ordered.push(role);
+  }
+  return ordered.join(SCOPE_DELIMITER);
+}
+
+/**
  * The compact JWS. `EdDSA` with a `kid`, which is the only algorithm the verifier accepts and the
  * only one `@crossengin/crypto` signs with.
  *
@@ -118,7 +215,7 @@ export function mintSessionToken(input: MintSessionTokenInput): MintedSessionTok
     aud: input.audience,
     sub: input.userId,
     tenant_id: input.tenantId,
-    scope: input.role,
+    scope: sessionScope(input.roles),
     iat,
     nbf: iat - TOKEN_NOT_BEFORE_SKEW_SECONDS,
     exp: iat + input.lifetimeSeconds,

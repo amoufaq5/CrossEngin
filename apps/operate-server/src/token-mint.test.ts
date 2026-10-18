@@ -1,12 +1,15 @@
 import { ed25519PublicKeyFromSeed, generateEd25519Keypair, verifyEd25519 } from "@crossengin/crypto";
 import { describe, expect, it } from "vitest";
 
+import { principalRolesFromScopes } from "./principals.js";
 import {
   DEFAULT_SESSION_TOKEN_SECONDS,
   MAX_SESSION_TOKEN_SECONDS,
   MIN_SESSION_TOKEN_SECONDS,
+  SCOPE_DELIMITER,
   TOKEN_NOT_BEFORE_SKEW_SECONDS,
   mintSessionToken,
+  sessionScope,
 } from "./token-mint.js";
 
 const KP = generateEd25519Keypair();
@@ -20,7 +23,7 @@ function mint(over: Partial<Parameters<typeof mintSessionToken>[0]> = {}) {
     audience: "crossengin-operate",
     userId: USER,
     tenantId: TENANT,
-    role: "erp_admin",
+    roles: { primaryRole: "erp_admin", secondaryRoles: [] },
     now: NOW,
     lifetimeSeconds: DEFAULT_SESSION_TOKEN_SECONDS,
     kid: "login-v1",
@@ -99,9 +102,24 @@ describe("mintSessionToken", () => {
     expect(claims["sub"]).toBe(USER);
   });
 
-  it("carries exactly one scope, because only the first is read", () => {
-    const claims = decodeSegment(mint({ role: "ap_clerk" }).token.split(".")[1]!);
-    expect(claims["scope"]).toBe("ap_clerk");
+  it("carries the membership's whole role list, primary first", () => {
+    // This test used to assert the opposite — "carries exactly one scope, because only the first
+    // is read" — which was a true statement about `principalRoles` and the producer half of
+    // ADR-0369's defect. Both halves moved together: the reader returns the tail as
+    // `secondaryRoles` and the claim carries it.
+    const claims = decodeSegment(
+      mint({ roles: { primaryRole: "ap_clerk", secondaryRoles: ["hr_manager", "controller"] } })
+        .token.split(".")[1]!,
+    );
+    expect(claims["scope"]).toBe("ap_clerk hr_manager controller");
+    // Primary first is the property every reader depends on, so it is asserted as a position and
+    // not only as membership.
+    expect(String(claims["scope"]).split(" ")[0]).toBe("ap_clerk");
+  });
+
+  it("still carries one scope for a membership that grants no secondary role", () => {
+    const claims = decodeSegment(mint().token.split(".")[1]!);
+    expect(claims["scope"]).toBe("erp_admin");
     expect(String(claims["scope"]).split(" ")).toHaveLength(1);
   });
 
@@ -142,5 +160,92 @@ describe("mintSessionToken", () => {
     );
     expect(verifyEd25519(KP.publicKeyBase64, sigStd, `${h!}.${p!}`)).toBe(true);
     expect(verifyEd25519(other.publicKeyBase64, sigStd, `${h!}.${p!}`)).toBe(false);
+  });
+});
+
+describe("sessionScope", () => {
+  it("joins primary first and preserves secondary order", () => {
+    expect(
+      sessionScope({ primaryRole: "ap_clerk", secondaryRoles: ["hr_manager", "controller"] }),
+    ).toBe("ap_clerk hr_manager controller");
+  });
+
+  it("de-duplicates, because a membership may name its primary in secondary_roles", () => {
+    // Every downstream reader already treats the list as a set — `resolveEffectiveRoles` visits a
+    // `Set`, `UiViewer.roles` de-dupes, the platform gates are `.some` — so the duplicate would
+    // change no answer. It would only make the token say the same thing twice.
+    expect(
+      sessionScope({ primaryRole: "erp_admin", secondaryRoles: ["erp_admin", "hr_manager"] }),
+    ).toBe("erp_admin hr_manager");
+    expect(sessionScope({ primaryRole: "a", secondaryRoles: ["b", "b", "c", "b"] })).toBe("a b c");
+  });
+
+  it("joins on the one character the gateway splits on", () => {
+    // The fence below and the join must be about the same character: a refusal against a delimiter
+    // spelled separately from the delimiter is a refusal against a different one.
+    expect(SCOPE_DELIMITER).toBe(" ");
+    expect(sessionScope({ primaryRole: "a", secondaryRoles: ["b"] }).split(SCOPE_DELIMITER)).toEqual(
+      ["a", "b"],
+    );
+  });
+
+  it("REFUSES a role name carrying whitespace, in either position", () => {
+    // `RoleNameSchema` is `z.string().min(1)` and `ManifestSchema.roles` is keyed by `z.string()`,
+    // so "hr manager" is a legal role name — and the claim is space-delimited, so it would arrive
+    // as ["hr", "manager"]: two roles, neither declared, in place of the one that was granted.
+    for (const roles of [
+      { primaryRole: "hr manager", secondaryRoles: [] },
+      { primaryRole: "ap_clerk", secondaryRoles: ["hr manager"] },
+      { primaryRole: "ap_clerk", secondaryRoles: ["ok", "with\ttab"] },
+      { primaryRole: " leading", secondaryRoles: [] },
+      { primaryRole: "trailing ", secondaryRoles: [] },
+      { primaryRole: "\n", secondaryRoles: [] },
+    ]) {
+      expect(() => sessionScope(roles), JSON.stringify(roles)).toThrow(/space-delimited/);
+    }
+  });
+
+  it("REFUSES an empty role name, which would vanish from the claim rather than be read wrongly", () => {
+    // `split(" ").filter(s => s.length > 0)` drops it, so an empty primary would silently promote
+    // the first secondary — a role nobody granted as the primary.
+    expect(() => sessionScope({ primaryRole: "", secondaryRoles: ["hr_manager"] })).toThrow(
+      /cannot be carried by a session/,
+    );
+    expect(() => sessionScope({ primaryRole: "ap_clerk", secondaryRoles: [""] })).toThrow(
+      /cannot be carried by a session/,
+    );
+  });
+
+  it("names the offending role in the refusal and nothing else", () => {
+    expect(() => sessionScope({ primaryRole: "hr manager", secondaryRoles: [] })).toThrow(
+      /"hr manager"/,
+    );
+  });
+
+  it("round-trips through the reader: what the mint composes is what principalRoles decomposes", () => {
+    // The property the two halves of ADR-0369 share, asserted across them rather than within
+    // either. `sessionScope` composes the claim and `principalRolesFromScopes` reads it back; a
+    // change to one that the other does not follow fails here.
+    for (const roles of [
+      { primaryRole: "erp_admin", secondaryRoles: [] },
+      { primaryRole: "ap_clerk", secondaryRoles: ["hr_manager"] },
+      { primaryRole: "ap_clerk", secondaryRoles: ["hr_manager", "controller", "erp_viewer"] },
+    ]) {
+      const scopes = sessionScope(roles).split(SCOPE_DELIMITER);
+      expect(principalRolesFromScopes(scopes), JSON.stringify(roles)).toEqual(roles);
+    }
+  });
+
+  it("round-trips a de-duplicated list to the de-duplicated reading, not to the input", () => {
+    // The one case where the round trip is deliberately not the identity: the claim is the set,
+    // so reading it back answers the set and not the list that was handed in.
+    const scopes = sessionScope({
+      primaryRole: "erp_admin",
+      secondaryRoles: ["erp_admin", "hr_manager"],
+    }).split(SCOPE_DELIMITER);
+    expect(principalRolesFromScopes(scopes)).toEqual({
+      primaryRole: "erp_admin",
+      secondaryRoles: ["hr_manager"],
+    });
   });
 });

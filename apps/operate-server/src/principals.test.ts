@@ -1,7 +1,13 @@
 import type { IncomingRequest } from "@crossengin/api-gateway";
 import { describe, expect, it } from "vitest";
 
-import { buildPrincipalWiring, parseApiKeySpec } from "./principals.js";
+import {
+  ANONYMOUS_ROLE,
+  buildPrincipalWiring,
+  formatScopeRoleReading,
+  parseApiKeySpec,
+  principalRolesFromScopes,
+} from "./principals.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const fakeReq = {} as IncomingRequest;
@@ -61,9 +67,29 @@ describe("buildPrincipalWiring", () => {
     expect(principal).toMatchObject({ tenantId: TENANT, grantedScopes: ["cashier"], authScheme: "api_key_header" });
   });
 
-  it("bridges scopes to the primary role", () => {
-    expect(wiring.principalRoles({ grantedScopes: ["cashier"] } as never)).toEqual({ primaryRole: "cashier" });
-    expect(wiring.principalRoles(null)).toEqual({ primaryRole: "anonymous" });
+  it("bridges scopes to the primary role AND the secondary list", () => {
+    // This asserted `{primaryRole: "cashier"}` alone until ADR-0369 — the reader half of the
+    // defect, with no `secondaryRoles` key at all, so the 26 non-test readers that spread
+    // `...(secondaryRoles ?? [])` took the empty arm however many scopes a token carried.
+    expect(wiring.principalRoles({ grantedScopes: ["cashier"] } as never)).toEqual({
+      primaryRole: "cashier",
+      secondaryRoles: [],
+    });
+    expect(wiring.principalRoles({ grantedScopes: ["cashier", "auditor"] } as never)).toEqual({
+      primaryRole: "cashier",
+      secondaryRoles: ["auditor"],
+    });
+    expect(wiring.principalRoles(null)).toEqual({ primaryRole: "anonymous", secondaryRoles: [] });
+  });
+
+  it("gives an api-key the one role its spec names, which is the family's limit", () => {
+    // `key:role:tenant[:principalId]` carries one role and the resolver registers
+    // `grantedScopes: [spec.role]`, so a key holds exactly one however the reader is written. A
+    // key names no person, so there is no membership to read a list from; a deployment wanting two
+    // roles on one key declares an inheriting role in the manifest, which is a remedy that works.
+    expect(wiring.principalRoles({ grantedScopes: ["cashier"] } as never).secondaryRoles).toEqual(
+      [],
+    );
   });
 
   it("resolves an unnamed key as a service account, not as a user", async () => {
@@ -86,5 +112,57 @@ describe("buildPrincipalWiring", () => {
       principalKind: "user",
       principalId: "00000000-0000-4000-8000-0000000000bb",
     });
+  });
+});
+
+describe("principalRolesFromScopes", () => {
+  it("is total and uninterpreting: it reports what the credential carries", () => {
+    // No de-duplication, no filtering of names the manifest does not declare, no case folding.
+    // Deciding what a role *means* belongs to `resolveEffectiveRoles` and to the gates, each of
+    // which already fails closed on a name it does not know. A reader that silently dropped an
+    // undeclared scope would make the fence that reports it unreachable.
+    expect(principalRolesFromScopes(["a", "a", "GHOST", "b"])).toEqual({
+      primaryRole: "a",
+      secondaryRoles: ["a", "GHOST", "b"],
+    });
+  });
+
+  it("answers the anonymous sentinel for no scopes, with an empty tail", () => {
+    expect(principalRolesFromScopes([])).toEqual({
+      primaryRole: ANONYMOUS_ROLE,
+      secondaryRoles: [],
+    });
+  });
+});
+
+describe("formatScopeRoleReading", () => {
+  it("says nothing when no JWT path is configured", () => {
+    // An api-key-only deployment reads one scope and always did, so there is no change to report
+    // and no survey to run. Deliberately not an affirmative line: a census of which memberships
+    // grant a secondary role is the unscoped read ADR-0365 refused by measurement.
+    expect(formatScopeRoleReading({ credentialLogin: false, externalJwks: false })).toBeNull();
+  });
+
+  it("names the membership's list for a deployment that mints its own tokens", () => {
+    const line = formatScopeRoleReading({ credentialLogin: true, externalJwks: false });
+    expect(line).toContain("every role its membership grants");
+    expect(line).toContain("primary role first");
+  });
+
+  it("names the one behaviour change for a deployment trusting a foreign token", () => {
+    // The increment's only change on a configuration that worked before it: such a token had its
+    // first scope read as the role and the rest ignored. Reported, never refused — a refusal would
+    // refuse a deployment that works, and an undeclared scope grants nothing anywhere.
+    const line = formatScopeRoleReading({ credentialLogin: false, externalJwks: true });
+    expect(line).toContain("did not mint");
+    expect(line).toContain("scopes past the first");
+  });
+
+  it("says both when both are configured, because both are true", () => {
+    // Reachable: `--credential-login` refuses `--jwks-url` at parse, so the combination is this
+    // deployment's own key beside a foreign `--jwks-key`/`--jwks-file` entry.
+    const line = formatScopeRoleReading({ credentialLogin: true, externalJwks: true });
+    expect(line).toContain("every role its membership grants");
+    expect(line).toContain("did not mint");
   });
 });

@@ -15,8 +15,9 @@ import type { RoleWarning, RoleWarnings as RoleWarningsValue } from "@/lib/users
  * The three states are three sentences and never two:
  *
  * - `not_declared` — the manifest was read and this name is not in it, so the grant resolves to
- *   nothing at serve time. A **fact about the role**, and the one verdict with a remedy — but only
- *   in the `primary` position; see the gate below, which is not cosmetic.
+ *   nothing at serve time. A **fact about the role**, and the one verdict with a remedy, in both
+ *   positions since ADR-0369. The two positions differ in what the undeclared name *costs* and no
+ *   longer in whether re-granting helps; see the block below.
  * - `unresolved` — nothing could be read, so this says nothing whatever about the role. A fact
  *   about the **deployment**, and weaker in both colour and wording for that reason.
  * - `null` — the response carried no readable answer at all (a binary from before the fence, or a
@@ -54,6 +55,7 @@ function Verdicts({ warnings }: { warnings: ReadonlyArray<RoleWarning> }): React
   const undeclared = warnings.filter((w) => w.verdict === "not_declared");
   const unresolved = warnings.filter((w) => w.verdict === "unresolved");
   const primaryUndeclared = undeclared.some((w) => w.position === "primary");
+  const secondaryUndeclared = undeclared.some((w) => w.position === "secondary");
   // One directory read of one tenant produces every warning in a response, so these lists are one
   // list; the union is deduplicated rather than taking the first so that nothing is dropped if that
   // ever stops being true. The `?? []` is reachable by the *type* and not by a parsed value, since
@@ -84,44 +86,65 @@ function Verdicts({ warnings }: { warnings: ReadonlyArray<RoleWarning> }): React
             ))}
           </ul>
           {/*
-            Gated on the position, and that gate is the whole of this block rather than a nicety.
-            The consequence genuinely differs — an undeclared *primary* role leaves the person able
-            to sign in and nothing else, where an undeclared secondary fails to add anything to a
-            primary that still works — and a secondary role reaches no authorization decision
-            whatever it is set to, since the mint stamps the primary alone and `principalRoles`
-            returns one scope. So offering the catalog beside a secondary-only warning promises that
-            re-granting with a declared name buys something, which is the one thing measurement says
-            it does not (ADR-0334: a remedy that cannot work is worse than none). The server's own
-            `detail` withholds the names from a secondary warning for exactly that reason, while
-            `declaredRoles` arrives on both — so rendering it ungated would reinstate here precisely
-            what that sentence refuses to say.
+            This block used to be gated on `primaryUndeclared`, which withheld the role catalog
+            from a warning whose only undeclared name sat in the *secondary* position. The reason
+            given was sound and is now false: a secondary role reached no authorization decision
+            whatever it was set to, since the mint stamped the primary alone and `principalRoles`
+            returned one scope, so offering the catalog promised that re-granting bought something
+            it did not (ADR-0334: a remedy that cannot work is worse than none). ADR-0369 closed
+            both halves, so the remedy now works in both positions and the gate is gone.
+
+            What survives is the *consequence*, which still differs and is the only thing that
+            does. It is also weaker than the gate's comment claimed, and this increment is what
+            weakened it: `resolveEffectiveRoles` visits the primary and then loops the secondaries,
+            so a declared secondary beside an undeclared primary carries that secondary's grants —
+            measured at 26 of 255 (entity, operation) pairs on resolved erp-core, exactly the
+            secondary alone, against 0 for the same primary with no secondary. So the primary
+            sentence is qualified, matching the server's own `detail`.
           */}
-          {primaryUndeclared &&
-            (declared.length > 0 ? (
-              <div className="mt-2">
-                <p className="text-xs font-medium">
-                  A primary role the manifest does not declare grants nothing: this person can sign
-                  in and every request is then refused. Change the membership&rsquo;s primary role
-                  to one of the names below.
-                </p>
-                <div className="mt-1.5 flex flex-wrap gap-1.5">
-                  {declared.map((role) => (
-                    <span key={role} className="chip font-mono">
-                      {role}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              // No names to offer, so none are promised: the sentence above would point at an empty
-              // list. And the thing the empty catalog denies is authorization and not acceptance —
-              // the grant lands and is stored either way.
-              <p className="mt-2 text-xs font-medium">
-                A primary role the manifest does not declare grants nothing: this person can sign in
-                and every request is then refused. This tenant&rsquo;s manifest declares no roles at
-                all, so no name would have made this membership authorize anything.
+          {declared.length > 0 ? (
+            <div className="mt-2">
+              <p className="text-xs font-medium">
+                {primaryUndeclared ? (
+                  <>
+                    A primary role the manifest does not declare resolves to no grant, so unless a
+                    declared secondary role carries one this person can sign in and every request is
+                    then refused.
+                  </>
+                ) : (
+                  <>
+                    A secondary role the manifest does not declare adds nothing to a primary that
+                    still works, so this membership is narrower than it reads.
+                  </>
+                )}{" "}
+                {primaryUndeclared && secondaryUndeclared
+                  ? "Re-grant both with names below."
+                  : "Re-grant with one of the names below."}
               </p>
-            ))}
+              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                {declared.map((role) => (
+                  <span key={role} className="chip font-mono">
+                    {role}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ) : (
+            // No names to offer, so none are promised: the sentence above would point at an empty
+            // list. And the thing the empty catalog denies is authorization and not acceptance —
+            // the grant lands and is stored either way.
+            //
+            // The primary sentence needs no qualifier here and is given none: if the manifest
+            // declares no role at all then no secondary can be declared either, so on an empty
+            // catalog the denial really is unconditional.
+            <p className="mt-2 text-xs font-medium">
+              {primaryUndeclared
+                ? "A primary role the manifest does not declare grants nothing: this person can sign in and every request is then refused."
+                : "A secondary role the manifest does not declare adds nothing to a primary that still works."}{" "}
+              This tenant&rsquo;s manifest declares no roles at all, so no name would have made this
+              membership authorize anything.
+            </p>
+          )}
         </div>
       )}
 

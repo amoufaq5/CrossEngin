@@ -9,6 +9,7 @@ import {
   DuplicateUserError,
   GrantMembershipInputSchema,
   MEMBERSHIP_STATUSES,
+  ROLE_NAME_SCOPE_SAFE_MESSAGE,
   MEMBERSHIP_STATUS_TRANSITIONS,
   MembershipRecordSchema,
   PostgresUserStore,
@@ -24,6 +25,7 @@ import {
   decodeUserListCursor,
   isUserListCursor,
   normalizeEmail,
+  roleNameIsScopeSafe,
   type UserRegistryAuditEvent,
 } from "./platform-users.js";
 
@@ -180,6 +182,81 @@ describe("contracts", () => {
     const body = { userId: USER, tenantId: TENANT, primaryRole: "erp_admin" };
     expect(GrantMembershipInputSchema.safeParse(body).success).toBe(false);
     expect(GrantMembershipInputSchema.safeParse({ ...body, status: "invited" }).success).toBe(true);
+  });
+
+  it("answers whether a role name survives the space-delimited scope claim", () => {
+    expect(roleNameIsScopeSafe("erp_admin")).toBe(true);
+    expect(roleNameIsScopeSafe("hr manager")).toBe(false);
+    expect(roleNameIsScopeSafe("hr\tmanager")).toBe(false);
+    expect(roleNameIsScopeSafe("hr\nmanager")).toBe(false);
+    expect(roleNameIsScopeSafe(" erp_admin")).toBe(false);
+    expect(roleNameIsScopeSafe("erp_admin ")).toBe(false);
+    expect(roleNameIsScopeSafe(" ")).toBe(false);
+    // The predicate answers for emptiness too, so the mint has one question to ask rather than two,
+    // even though `.min(1)` is what reports it on a schema field.
+    expect(roleNameIsScopeSafe("")).toBe(false);
+  });
+
+  it("refuses a whitespace-bearing role in either grant position, naming the consequence", () => {
+    const body = { userId: USER, tenantId: TENANT, status: "active" as const };
+    const refused = (over: Record<string, unknown>): z.ZodIssue[] => {
+      const parsed = GrantMembershipInputSchema.safeParse({ ...body, ...over });
+      if (parsed.success) throw new Error(`expected a refusal for ${JSON.stringify(over)}`);
+      return parsed.error.issues;
+    };
+    // Every shape the claim cannot carry, in both positions. A leading or trailing space is the one
+    // a form supplies by accident and the one `min(1)` cannot see.
+    for (const name of ["hr manager", "hr\tmanager", " erp_admin", "erp_admin ", " "]) {
+      expect(refused({ primaryRole: name })[0]?.message).toBe(ROLE_NAME_SCOPE_SAFE_MESSAGE);
+      const secondary = refused({ primaryRole: "erp_admin", secondaryRoles: [name] });
+      expect(secondary[0]?.message).toBe(ROLE_NAME_SCOPE_SAFE_MESSAGE);
+      // The element and not merely the field: the refusal has to say which of a list it refused.
+      expect(secondary[0]?.path).toEqual(["secondaryRoles", 0]);
+    }
+    // `min(1)` settles emptiness first, so the reader gets zod's accurate sentence rather than one
+    // about whitespace a `""` does not contain.
+    expect(refused({ primaryRole: "" })[0]?.code).toBe("too_small");
+    // The control, including the `[]` default, so the fence is not refusing the ordinary case.
+    const ok = GrantMembershipInputSchema.safeParse({ ...body, primaryRole: "erp_admin" });
+    expect(ok.success).toBe(true);
+    expect(ok.success && ok.data.secondaryRoles).toEqual([]);
+    expect(
+      GrantMembershipInputSchema.safeParse({
+        ...body,
+        primaryRole: "erp_admin",
+        secondaryRoles: ["auditor", "hr_manager"],
+      }).success,
+    ).toBe(true);
+  });
+
+  it("still reads a stored membership whose role the scope claim cannot carry", () => {
+    // The load-bearing asymmetry (see `MembershipRecordSchema`): refusing on read would make a row
+    // written before the fence unreadable, which takes `membershipFor` — and with it the login — down
+    // for that user with no remedy, where the mint's throw names the role and leaves every read
+    // working. A row in that shape has to survive the parse and fail later.
+    const stored = {
+      id: "33333333-3333-4333-8333-333333333333",
+      userId: USER,
+      tenantId: TENANT,
+      primaryRole: "hr manager",
+      secondaryRoles: ["cost centre lead"],
+      status: "active" as const,
+      abacAttributes: {},
+      createdAt: AT,
+      updatedAt: AT,
+    };
+    expect(MembershipRecordSchema.safeParse(stored).success).toBe(true);
+    // And the write schema refuses the same pair, which is what makes the two schemas a split rather
+    // than one of them being stale.
+    expect(
+      GrantMembershipInputSchema.safeParse({
+        userId: USER,
+        tenantId: TENANT,
+        primaryRole: stored.primaryRole,
+        secondaryRoles: stored.secondaryRoles,
+        status: "active",
+      }).success,
+    ).toBe(false);
   });
 
   it("refuses an unknown key on either record schema", () => {
@@ -537,6 +614,32 @@ function warningsOf(carrier: unknown): z.infer<typeof RoleWarningsShape> {
   const parsed = z.object({ roleWarnings: RoleWarningsShape }).safeParse(carrier);
   if (!parsed.success) throw new Error(`no roleWarnings: ${parsed.error.message}`);
   return parsed.data.roleWarnings;
+}
+
+/**
+ * The zod issues a 400 body carries, **parsed** rather than cast.
+ *
+ * `path` is asserted on as well as `message`, because a refusal that names the field but not the
+ * element would be indistinguishable from one that refused the whole list.
+ */
+const IssuesShape = z.array(
+  z.object({
+    code: z.string(),
+    path: z.array(z.union([z.string(), z.number()])),
+    message: z.string(),
+  }),
+);
+
+function issuesOf(body: unknown): z.infer<typeof IssuesShape> {
+  const parsed = z
+    .object({ error: z.literal("invalid_request"), detail: IssuesShape })
+    .safeParse(body);
+  if (!parsed.success) throw new Error(`not an invalid_request body: ${parsed.error.message}`);
+  return parsed.data.detail;
+}
+
+function messagesOf(body: unknown): readonly string[] {
+  return issuesOf(body).map((i) => i.message);
 }
 
 function principal(): { readonly principalId: string } {
@@ -1034,6 +1137,131 @@ describe("the membership role fence on both write paths", () => {
     });
     expect(out.status).toBe(400);
     expect(directoryCalls()).toBe(0);
+  });
+});
+
+/* ----------------------------------------------- the scope-safe role name on both write paths */
+
+/**
+ * Both write bodies derive from `GrantMembershipInputSchema` by `.omit()` —
+ * `ProvisionBodySchema.membership` is `GrantMembershipInputSchema.omit({ userId: true })` and
+ * `GrantBodySchema` is `GrantMembershipInputSchema.omit({ tenantId: true }).strict()` — so the
+ * per-field refusal is inherited rather than restated. These tests are what make that inheritance a
+ * fact about the routes instead of a claim about zod: both schemas are module-private, so the only
+ * way to ask them is through the handler.
+ */
+describe("the scope-safe role name on both write paths", () => {
+  it("refuses a whitespace-bearing role on the grant path, before the fence and before the record", async () => {
+    const db = fakeDb([[membershipRow()]]);
+    const { ctx, recorded, directoryCalls } = ctxFor(new PostgresUserStore(db.conn));
+    const grant = handlerFor(buildPlatformUserRoutes(ctx), "platform.tenants.members.grant");
+    const out = await grant({
+      principal: principal(),
+      params: { tenantId: TENANT },
+      request: {},
+      parsedBody: { userId: USER, primaryRole: "hr manager", status: "active" },
+    });
+    expect(out.status).toBe(400);
+    expect(messagesOf(out.body)).toContain(ROLE_NAME_SCOPE_SAFE_MESSAGE);
+    // Nothing was written and nothing was even asked: a name the claim cannot carry is refused by the
+    // body parse, so neither the directory read nor the audit row is spent on it.
+    expect(directoryCalls()).toBe(0);
+    expect(recorded.events).toEqual([]);
+    expect(db.captured).toEqual([]);
+  });
+
+  it("refuses one in the grant path's secondary list, naming the element", async () => {
+    const db = fakeDb([[membershipRow()]]);
+    const { ctx } = ctxFor(new PostgresUserStore(db.conn));
+    const grant = handlerFor(buildPlatformUserRoutes(ctx), "platform.tenants.members.grant");
+    const out = await grant({
+      principal: principal(),
+      params: { tenantId: TENANT },
+      request: {},
+      parsedBody: {
+        userId: USER,
+        primaryRole: "erp_admin",
+        secondaryRoles: ["auditor", "cost centre lead"],
+        status: "active",
+      },
+    });
+    expect(out.status).toBe(400);
+    expect(issuesOf(out.body)[0]?.path).toEqual(["secondaryRoles", 1]);
+    expect(issuesOf(out.body)[0]?.message).toBe(ROLE_NAME_SCOPE_SAFE_MESSAGE);
+  });
+
+  it("refuses one in the provision body's nested membership, which omits `userId`", async () => {
+    const db = fakeDb([[userRow()], [membershipRow()]]);
+    const { ctx, recorded, directoryCalls } = ctxFor(new PostgresUserStore(db.conn));
+    const provision = handlerFor(buildPlatformUserRoutes(ctx), "platform.users.provision");
+    const out = await provision({
+      principal: principal(),
+      params: {},
+      request: {},
+      parsedBody: {
+        user: { id: USER, email: "ada@example.com" },
+        membership: { tenantId: TENANT, primaryRole: " erp_admin", status: "active" },
+      },
+    });
+    expect(out.status).toBe(400);
+    // The path proves it is the nested schema that refused, which is the inheritance this describe
+    // exists to pin: `.omit({ userId: true })` keeps a field-level refinement where a top-level
+    // `superRefine` could not have been omitted from at all.
+    expect(issuesOf(out.body)[0]?.path).toEqual(["membership", "primaryRole"]);
+    expect(issuesOf(out.body)[0]?.message).toBe(ROLE_NAME_SCOPE_SAFE_MESSAGE);
+    expect(directoryCalls()).toBe(0);
+    expect(recorded.events).toEqual([]);
+  });
+
+  it("refuses an all-whitespace role, which `min(1)` admits", async () => {
+    const db = fakeDb([[membershipRow()]]);
+    const { ctx } = ctxFor(new PostgresUserStore(db.conn));
+    const grant = handlerFor(buildPlatformUserRoutes(ctx), "platform.tenants.members.grant");
+    const out = await grant({
+      principal: principal(),
+      params: { tenantId: TENANT },
+      request: {},
+      parsedBody: { userId: USER, primaryRole: " ", status: "active" },
+    });
+    expect(out.status).toBe(400);
+    expect(messagesOf(out.body)).toContain(ROLE_NAME_SCOPE_SAFE_MESSAGE);
+  });
+
+  it("still grants a scope-safe pair on both paths", async () => {
+    const grantDb = fakeDb([[membershipRow()]]);
+    const { ctx: grantCtx } = ctxFor(new PostgresUserStore(grantDb.conn));
+    const grant = handlerFor(buildPlatformUserRoutes(grantCtx), "platform.tenants.members.grant");
+    const granted = await grant({
+      principal: principal(),
+      params: { tenantId: TENANT },
+      request: {},
+      parsedBody: {
+        userId: USER,
+        primaryRole: "erp_admin",
+        secondaryRoles: ["auditor"],
+        status: "active",
+      },
+    });
+    expect(granted.status).toBe(201);
+
+    const provisionDb = fakeDb([[userRow()], [membershipRow()]]);
+    const { ctx: provisionCtx } = ctxFor(new PostgresUserStore(provisionDb.conn));
+    const provision = handlerFor(buildPlatformUserRoutes(provisionCtx), "platform.users.provision");
+    const provisioned = await provision({
+      principal: principal(),
+      params: {},
+      request: {},
+      parsedBody: {
+        user: { id: USER, email: "ada@example.com" },
+        membership: {
+          tenantId: TENANT,
+          primaryRole: "erp_admin",
+          secondaryRoles: ["auditor"],
+          status: "active",
+        },
+      },
+    });
+    expect(provisioned.status).toBe(201);
   });
 });
 

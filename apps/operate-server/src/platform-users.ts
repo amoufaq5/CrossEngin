@@ -10,6 +10,7 @@ import {
   type MembershipRoleDirectory,
   type MembershipRoleWarning,
 } from "./membership-role-fence.js";
+import { roleNameIsScopeSafe } from "./token-mint.js";
 
 /**
  * The writer `meta.users` and `meta.user_tenant_membership` never had.
@@ -130,6 +131,59 @@ export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
+/**
+ * Named in the refusal so the operator reads the consequence rather than the rule.
+ *
+ * It names **whitespace only** and not emptiness, which `roleNameIsScopeSafe` also refuses: a `""`
+ * never reaches the refinement, because `.min(1)` settles it first with zod's own accurate
+ * `too_small`. A message describing a case it cannot fire for is ADR-0361's class in a string.
+ *
+ * Exported because the test asserts this exact text: a paraphrase in the schema and a paraphrase in
+ * the test agree with each other and with nothing.
+ */
+export const ROLE_NAME_SCOPE_SAFE_MESSAGE =
+  "a role name may not contain whitespace: the JWT scope claim is space-delimited, so this name" +
+  " would be granted once and read back as two roles, neither of which the manifest declares";
+
+/**
+ * Re-exported from `token-mint.js`, which owns it because it owns the delimiter it is about. It is
+ * re-exported here, rather than merely imported, because this is the module a reader comes to when
+ * they meet the 400 — and the reasoning below is about the grant, not about the claim.
+ *
+ * **Whether a role name survives a round trip through the JWT `scope` claim.**
+ *
+ * `mintSessionToken` joins a session's roles with a single space and the gateway's JWT stage splits
+ * them back on one (`scope.split(" ").filter((s) => s.length > 0)`), so the claim cannot carry a
+ * name containing whitespace: `"hr manager"` is granted once and arrives as `["hr", "manager"]`,
+ * and an empty name arrives as nothing at all. Either way the session holds something other than
+ * what was granted, silently — an undeclared role contributes nothing (`redaction.ts` maps an
+ * unknown name to `UNPRIVILEGED_ROLE` and `resolveEffectiveRoles` visits it with `"skip"`), so the
+ * symptom is a role that was granted and does not work.
+ *
+ * Emptiness is in the predicate and **not** in the schema's message, because
+ * `z.string().min(1)` settles that case first and zod's own `too_small` is the accurate sentence
+ * for it; the predicate still answers for both so a caller that is not a zod field — the mint — has
+ * one question to ask rather than two.
+ *
+ * Deliberately not enforced in the kernel, which is where a rule about role names would otherwise
+ * belong: `--api-key key:role:tenant` sets `grantedScopes: [spec.role]` with no split at all, so a
+ * role name containing a space is legitimately holdable by an api-key principal and a kernel
+ * refusal would refuse a configuration that works. The fence belongs where the name is typed in.
+ */
+export { roleNameIsScopeSafe };
+
+/**
+ * The write-path role name. Per **field** rather than a `superRefine` on the object, which is
+ * load-bearing: a top-level refinement makes `GrantMembershipInputSchema` a `ZodEffects`, which has
+ * no `.omit()` — and both of its consumers derive from it that way
+ * (`ProvisionBodySchema.membership`, `GrantBodySchema`). A field-level refusal is inherited through
+ * `.omit()` by construction, and its error path names the offending element.
+ */
+const ScopeSafeRoleNameSchema = z
+  .string()
+  .min(1)
+  .refine(roleNameIsScopeSafe, { message: ROLE_NAME_SCOPE_SAFE_MESSAGE });
+
 export const UserRecordSchema = z
   .object({
     id: z.string().uuid(),
@@ -144,6 +198,22 @@ export const UserRecordSchema = z
   .strict();
 export type UserRecord = z.infer<typeof UserRecordSchema>;
 
+/**
+ * `primaryRole` and `secondaryRoles` are **not** `ScopeSafeRoleNameSchema` here, and the asymmetry
+ * against `GrantMembershipInputSchema` is the decision rather than an oversight.
+ *
+ * This is the **read** schema: `rowToMembership` parses every row through it, so refusing a
+ * whitespace-bearing name here would make an already-stored membership *unreadable* — which takes
+ * `membershipFor` down, and with it the login, the ABAC attribute directory and the member list, for
+ * a user whose row was written before the fence existed. There is no remedy from that state either:
+ * the row cannot be read, so no surface can show it and the operator cannot see which name to
+ * correct. `mintSessionToken`'s throw is the strictly narrower failure — it names the role, leaves
+ * every read working, and the grant route is where the name can actually be fixed.
+ *
+ * So a row written before this fence stays readable and fails at the mint. ADR-0289's rule applies
+ * to a row edited into a shape the *contract* forbids; this is a shape the contract still admits and
+ * only one consumer cannot carry.
+ */
 export const MembershipRecordSchema = z
   .object({
     id: z.string().uuid(),
@@ -182,8 +252,8 @@ export const GrantMembershipInputSchema = z
   .object({
     userId: z.string().uuid(),
     tenantId: z.string().uuid(),
-    primaryRole: z.string().min(1),
-    secondaryRoles: z.array(z.string().min(1)).default([]),
+    primaryRole: ScopeSafeRoleNameSchema,
+    secondaryRoles: z.array(ScopeSafeRoleNameSchema).default([]),
     abacAttributes: z.record(z.unknown()).default({}),
     /**
      * `invited` is expressible and is **not** the default. A default is applied to silence
