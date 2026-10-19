@@ -14,7 +14,12 @@ import {
 } from "@crossengin/forensics-pg";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 
-import type { ChainFullReason, ChainVerificationReport } from "./chain-verify.js";
+import {
+  CHAIN_FULL_REASONS,
+  CHAIN_FULL_REASON_BLOCKS_ANCHORING,
+  type ChainFullReason,
+  type ChainVerificationReport,
+} from "./chain-verify.js";
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
 import {
   buildCheckpointLifecycle,
@@ -23,6 +28,7 @@ import {
   parseCheckpointConfig,
   tenantSourceScopes,
   CheckpointScheduler,
+  CHECKPOINT_PASS_OUTCOMES,
 } from "./checkpoint-scheduler.js";
 
 const TENANT_A = "11111111-1111-1111-1111-111111111111";
@@ -160,6 +166,34 @@ interface ChainFixture {
   readonly signer: ChainSigner;
   readonly registry: PostgresKeyRegistry;
   readonly checkpointStore: PostgresChainCheckpointStore;
+}
+
+/**
+ * A checkpoint store that counts the `record` calls reaching it, because that is the assertion the
+ * burying refusal needs and `latest()` cannot give.
+ *
+ * `latest() === null` is the fence every other refusal test here uses, and it is sound for those:
+ * nothing is on disk, so a write is the only thing that could make it non-null. It is **unsound for
+ * the burying refusal**, because that write is a row the store accepts and the contract reads back
+ * perfectly — so in the live shape, where a refused row is already on disk, `latest()` would answer
+ * with the *new* row and `expect(...).toBeNull()` would be asserting the defect rather than its
+ * absence. The question there is whether the write was attempted at all.
+ *
+ * A subclass rather than a stand-in object, because `CheckpointSchedulerOptions.checkpointStore` is
+ * the concrete class: this keeps the real `record` (and its `ChainCheckpointSchema.parse`) on the
+ * path, so a test asserting "nothing was recorded" cannot pass because the fake accepted something
+ * the real store would refuse.
+ */
+class RecordCountingCheckpointStore extends PostgresChainCheckpointStore {
+  readonly recorded: Array<{
+    readonly scope: string | null;
+    readonly checkpoint: ChainCheckpoint;
+  }> = [];
+
+  override async record(tenantId: string | null, checkpoint: ChainCheckpoint): Promise<void> {
+    this.recorded.push({ scope: tenantId, checkpoint });
+    await super.record(tenantId, checkpoint);
+  }
 }
 
 /**
@@ -395,6 +429,23 @@ describe("allTenants config + tenantSourceScopes", () => {
   });
 });
 
+describe("CHECKPOINT_PASS_OUTCOMES", () => {
+  it("is exactly these five members", () => {
+    // An exact set rather than a count, on this repo's rule for a vocabulary an argued distinction
+    // hangs off: a count moves for a rename too, and these member names ARE the two refusals'
+    // arguments — `refused_unverified` says the chain did not verify, `refused_anchor_would_bury`
+    // says it did and the stored anchor is the finding. A sixth outcome fails here rather than
+    // landing unnoticed, which is the whole reason the union is derived from an array.
+    expect([...CHECKPOINT_PASS_OUTCOMES]).toEqual([
+      "recorded",
+      "skipped_empty",
+      "refused_unverified",
+      "refused_anchor_would_bury",
+      "error",
+    ]);
+  });
+});
+
 describe("CheckpointScheduler.runOnce", () => {
   it("records a checkpoint at the tail of a non-empty chain", async () => {
     const { conn, signer, registry, checkpointStore } = await newChainFixture();
@@ -593,6 +644,8 @@ describe("CheckpointScheduler verification", () => {
     opts: {
       readonly verify: (scope: string | null) => Promise<ChainVerificationReport>;
       readonly scopes: readonly (string | null)[];
+      /** Overrides the fixture's store, for the tests that assert on `record` being called at all. */
+      readonly checkpointStore?: PostgresChainCheckpointStore;
       readonly onCheckpoint?: (scope: string | null, checkpoint: ChainCheckpoint) => void;
       readonly onRefused: (scope: string | null, verification: ChainVerificationReport) => void;
       readonly onError?: (err: unknown) => void;
@@ -600,7 +653,7 @@ describe("CheckpointScheduler verification", () => {
   ): CheckpointScheduler {
     return new CheckpointScheduler({
       logStore: new PostgresChainLogStore(fixture.conn, fixture.signer, {}),
-      checkpointStore: fixture.checkpointStore,
+      checkpointStore: opts.checkpointStore ?? fixture.checkpointStore,
       verify: opts.verify,
       scopes: () => opts.scopes,
       intervalMs: 1000,
@@ -837,6 +890,146 @@ describe("CheckpointScheduler verification", () => {
     expect(refused).toEqual([]);
     expect(errors).toHaveLength(1);
     expect(await fx.checkpointStore.latest(TENANT_A)).toBeNull();
+  });
+
+  /**
+   * The two sides of `CHAIN_FULL_REASON_BLOCKS_ANCHORING`, derived from the map rather than
+   * hand-listed, so a reason whose answer is flipped moves between the tables below instead of
+   * leaving one of them asserting the behaviour it used to have. The map's exact membership is
+   * `chain-verify.test.ts`'s claim to make; what these need is that every reason sits in exactly one
+   * table and that both tables have a member.
+   */
+  const BURYING_REASONS = CHAIN_FULL_REASONS.filter((r) => CHAIN_FULL_REASON_BLOCKS_ANCHORING[r]);
+  const SUPERSEDING_REASONS = CHAIN_FULL_REASONS.filter(
+    (r) => !CHAIN_FULL_REASON_BLOCKS_ANCHORING[r],
+  );
+
+  describe("an anchor on disk that a fresh checkpoint would bury", () => {
+    it("partitions every full-fold reason into exactly one of the two tables", () => {
+      // The vacuity floor for both `it.each`s below: `it.each([])` passes having run nothing, which
+      // is the shape of coverage that is not coverage. `toContain` and not `toEqual` on the burying
+      // side, because the map's exact membership is asserted where the map lives and restating it
+      // here would be two spellings of one claim — what this file needs is that the member its
+      // headline fence is about is in the table that exercises it.
+      expect(BURYING_REASONS).toContain("anchor_unreadable");
+      expect(SUPERSEDING_REASONS.length).toBeGreaterThan(0);
+      expect([...BURYING_REASONS, ...SUPERSEDING_REASONS].sort()).toEqual(
+        [...CHAIN_FULL_REASONS].sort(),
+      );
+    });
+
+    it.each(BURYING_REASONS)(
+      "refuses to anchor over %s and writes nothing, on a chain that verified",
+      async (reason) => {
+        const fx = await newChainFixture();
+        await seed(fx.conn, fx.signer, TENANT_A, 2);
+        const store = new RecordCountingCheckpointStore(fx.conn, {});
+        const refused: ChainVerificationReport[] = [];
+
+        const results = await stubVerify(fx, {
+          verify: async (scope) => report(scope, "full", true, reason),
+          scopes: [TENANT_A],
+          checkpointStore: store,
+          onRefused: (_scope, verification) => refused.push(verification),
+        }).runOnce();
+
+        expect(results[0]?.outcome).toBe("refused_anchor_would_bury");
+        // `ok` is true, and that is the whole of why this is not `refused_unverified`: the chain
+        // verified and the finding is the stored anchor, so a reader of the result can tell the two
+        // apart rather than being told a sound chain failed to verify.
+        expect(results[0]?.verification?.ok).toBe(true);
+        expect(results[0]?.verification?.fullBecause).toBe(reason);
+        expect(results[0]?.checkpoint).toBeUndefined();
+        expect(refused).toHaveLength(1);
+        expect(refused[0]?.fullBecause).toBe(reason);
+        // The assertion `latest()` cannot give — see `RecordCountingCheckpointStore`. A row at the
+        // tail is one the store accepts and reads back, so on a deployment `latest()` would answer
+        // with it and asserting `null` would be asserting the defect.
+        expect(store.recorded).toEqual([]);
+      },
+    );
+
+    it.each(SUPERSEDING_REASONS)("still anchors over %s", async (reason) => {
+      // The negative controls, and the last two matter most. `anchor_unverified` and
+      // `anchor_provenance_absent` are the self-healing path ADR-0371 built: a row stating that
+      // nothing vouched for its prefix, or one written before the column existed, is *superseded*
+      // by a vouched anchor rather than hidden by it — so a fence that refused these would stop a
+      // legacy or hand-placed anchor ever being replaced and make the full fold permanent for
+      // exactly the deployments the healing exists for. `requested` and `no_checkpoint` have
+      // nothing on disk to bury at all.
+      const fx = await newChainFixture();
+      await seed(fx.conn, fx.signer, TENANT_A, 2);
+      const store = new RecordCountingCheckpointStore(fx.conn, {});
+      const refused: Array<string | null> = [];
+
+      const results = await stubVerify(fx, {
+        verify: async (scope) => report(scope, "full", true, reason),
+        scopes: [TENANT_A],
+        checkpointStore: store,
+        onRefused: (scope) => refused.push(scope),
+      }).runOnce();
+
+      expect(results[0]?.outcome).toBe("recorded");
+      expect(refused).toEqual([]);
+      expect(store.recorded).toHaveLength(1);
+      // The superseding anchor carries the provenance the fold it rests on earned, which is what
+      // makes replacing the old row a heal rather than a second unvouched claim at a new sequence.
+      expect(store.recorded[0]?.checkpoint.provenance).toBe("verified_full");
+      expect((await fx.checkpointStore.latest(TENANT_A))?.sequenceNumber).toBe(1);
+    });
+
+    it("reports a failed verification as the failure even when its reason would bury", async () => {
+      // Order: `!ok` wins. "This chain did not verify" is the stronger and more urgent statement,
+      // and the anchor refusal is implied by it, since nothing is written on either path.
+      const fx = await newChainFixture();
+      await seed(fx.conn, fx.signer, TENANT_A, 2);
+      const store = new RecordCountingCheckpointStore(fx.conn, {});
+
+      const results = await stubVerify(fx, {
+        verify: async (scope) => report(scope, "full", false, "anchor_unreadable"),
+        scopes: [TENANT_A],
+        checkpointStore: store,
+        onRefused: () => undefined,
+      }).runOnce();
+
+      expect(results[0]?.outcome).toBe("refused_unverified");
+      expect(store.recorded).toEqual([]);
+    });
+
+    it("anchors a bounded pass, which carries no reason and so buries nothing", async () => {
+      const fx = await newChainFixture();
+      await seed(fx.conn, fx.signer, TENANT_A, 2);
+      const store = new RecordCountingCheckpointStore(fx.conn, {});
+
+      const results = await stubVerify(fx, {
+        verify: async (scope) => report(scope, "from_checkpoint", true),
+        scopes: [TENANT_A],
+        checkpointStore: store,
+        onRefused: () => undefined,
+      }).runOnce();
+
+      expect(results[0]?.verification?.fullBecause).toBeNull();
+      expect(results[0]?.outcome).toBe("recorded");
+      expect(store.recorded).toHaveLength(1);
+    });
+
+    it("lets the pass continue past a burying refusal, so other scopes still anchor", async () => {
+      const fx = await newChainFixture();
+      await seed(fx.conn, fx.signer, TENANT_A, 1);
+      await seed(fx.conn, fx.signer, TENANT_B, 1);
+      const store = new RecordCountingCheckpointStore(fx.conn, {});
+
+      const results = await stubVerify(fx, {
+        verify: async (scope) =>
+          report(scope, "full", true, scope === TENANT_A ? "anchor_unreadable" : "no_checkpoint"),
+        scopes: [TENANT_A, TENANT_B],
+        checkpointStore: store,
+        onRefused: () => undefined,
+      }).runOnce();
+
+      expect(results.map((r) => r.outcome)).toEqual(["refused_anchor_would_bury", "recorded"]);
+      expect(store.recorded.map((r) => r.scope)).toEqual([TENANT_B]);
+    });
   });
 });
 

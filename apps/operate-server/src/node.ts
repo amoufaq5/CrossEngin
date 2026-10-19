@@ -3412,11 +3412,15 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           console.info(
             `[checkpoint] scope=${scope ?? "platform"} seq=${cp.sequenceNumber.toString()} root=${cp.rootHash.slice(0, 12)} provenance=${cp.provenance ?? "unstated"}`,
           ),
-        // A scope whose chain did not verify is NOT anchored, and that is a standing condition an
-        // operator has to see: an un-anchored scope is re-folded from genesis on every later pass,
-        // and the reason it refused is the finding. Error level, and distinct from `onError` on
-        // ADR-0322's split — this one says the chain failed to verify and names what failed, where
-        // `onError` says the verification could not be performed and asserts nothing about it.
+        // A scope that is NOT anchored, for either of two reasons, and in both cases that is a
+        // standing condition an operator has to see: an un-anchored scope is re-folded from genesis
+        // on every later pass, and the reason it refused is the finding. The two differ in what
+        // went wrong and the first line of the report names which (ADR-0374) — the chain did not
+        // verify, or it verified and its stored **anchor** is a row this binary cannot read, which
+        // is withheld because anchoring would mask that row from `latest()`. Error level, and
+        // distinct from `onError` on ADR-0322's split — this one says a verification happened and
+        // names what it found, where `onError` says the verification could not be performed and
+        // asserts nothing about it.
         onRefused: (scope, verification) =>
           console.error(
             `[checkpoint] REFUSED scope=${scope ?? "platform"} — not anchored\n${formatChainVerification(verification)}`,

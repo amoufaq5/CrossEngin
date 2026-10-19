@@ -11,7 +11,11 @@ import {
 } from "@crossengin/forensics-pg";
 import type { PgConnection } from "@crossengin/kernel-pg";
 
-import { verifyChainFromCheckpoint, type ChainVerificationReport } from "./chain-verify.js";
+import {
+  anchoringWouldBury,
+  verifyChainFromCheckpoint,
+  type ChainVerificationReport,
+} from "./chain-verify.js";
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
@@ -93,6 +97,23 @@ const DEFAULT_SCHEDULER: IntervalScheduler = {
   },
 };
 
+/**
+ * What one scope can resolve to on a pass.
+ *
+ * An `as const` array with the type derived from it rather than an inline union, for the reason
+ * every closed vocabulary in this repo is one: a bare union cannot be enumerated at runtime, so
+ * nothing can assert what its members are and a sixth can land unnoticed. The derived type is
+ * structurally the union it replaces, so no consumer changes.
+ */
+export const CHECKPOINT_PASS_OUTCOMES = [
+  "recorded",
+  "skipped_empty",
+  "refused_unverified",
+  "refused_anchor_would_bury",
+  "error",
+] as const;
+export type CheckpointPassOutcome = (typeof CHECKPOINT_PASS_OUTCOMES)[number];
+
 /** What one scope resolved to on a pass (for metrics / logging / tests). */
 export interface CheckpointPassResult {
   /** The tenant id, or `null` for the platform chain. */
@@ -102,8 +123,17 @@ export interface CheckpointPassResult {
    * did not verify, so `verification` names what failed. An `error` is a verification that could
    * not be performed at all, which says nothing about the chain. Both withhold the anchor — the
    * difference is what an operator is told, and only one of the two is a finding.
+   *
+   * `refused_anchor_would_bury` is the fifth and is deliberately **not** that one, because its
+   * premise is the opposite of it: the chain **verified**, and the finding is the *stored anchor*,
+   * which `anchoringWouldBury` adjudicates over the report's `fullBecause`. Reporting a sound chain
+   * as `refused_unverified` would tell an operator "this chain did not verify" about a chain that
+   * did — the same conflation the refusal/error split above exists to prevent, one case across, and
+   * it would send them to look for a tamper in the entries rather than at the checkpoint row that
+   * is the whole finding. It carries `verification` for `refused_unverified`'s reason: the refusal
+   * leaves no row behind, so the report is the only thing that can say why.
    */
-  readonly outcome: "recorded" | "skipped_empty" | "refused_unverified" | "error";
+  readonly outcome: CheckpointPassOutcome;
   readonly checkpoint?: ChainCheckpoint;
   /** Present iff a verification ran: absent for `skipped_empty`, and for a throw. */
   readonly verification?: ChainVerificationReport;
@@ -151,13 +181,20 @@ export interface CheckpointSchedulerOptions {
   readonly runOnStart?: boolean;
   readonly onCheckpoint?: (scope: string | null, checkpoint: ChainCheckpoint) => void;
   /**
-   * A scope whose chain did not verify: no anchor was written and the pass carried on.
+   * A scope that was not anchored: either its chain did not verify, or its chain verified and the
+   * stored anchor is one a fresh checkpoint would bury (`refused_anchor_would_bury`). Either way no
+   * anchor was written and the pass carried on, and `verification` is what says which.
    *
    * **Required**, unlike the other two callbacks, because a refusal is the only outcome here that
    * leaves nothing in the database. An anchor that is written is its own record and a throw is a
    * condition the next pass meets again, while a refused verification writes no row at all — see
    * `CHAIN_FULL_REASONS`' note on why writing one would be worse — so an optional handler would let
    * a deployment discover that its chain stopped verifying by never being told.
+   *
+   * That argument is **stronger** for the second cause and not weaker: the burying refusal recurs on
+   * every pass for as long as the row stands, and this is the only surface that says so — the
+   * integrity proof's own `anchorRowsRefused` names the row, but nothing there knows that the
+   * scheduler has stopped anchoring the scope.
    */
   readonly onRefused: (scope: string | null, verification: ChainVerificationReport) => void;
   readonly onError?: (err: unknown) => void;
@@ -182,10 +219,12 @@ export interface CheckpointSchedulerOptions {
  * unsound on every deployment not running it.
  *
  * A scope with an empty chain is skipped — nothing to verify, nothing to anchor — and never surfaced
- * as an error. A scope that fails verification is refused and routed to `onRefused`; a throw is
- * routed to `onError`. Both let the pass continue, so one scope never blocks the rest. Mirrors
- * `JobScheduler` / `JwksRefreshPoller`: the timer is `unref`'d so it never holds the process open,
- * and `start()` fires an immediate pass before the interval.
+ * as an error. A scope is refused and routed to `onRefused` for either of **two** reasons: its chain
+ * failed verification (`refused_unverified`), or its chain verified and the anchor already on disk
+ * is one that writing a fresh checkpoint would bury (`refused_anchor_would_bury`, adjudicated by
+ * `anchoringWouldBury`). A throw is routed to `onError`. All three let the pass continue, so one
+ * scope never blocks the rest. Mirrors `JobScheduler` / `JwksRefreshPoller`: the timer is `unref`'d
+ * so it never holds the process open, and `start()` fires an immediate pass before the interval.
  */
 export class CheckpointScheduler {
   private handle: IntervalHandle | null = null;
@@ -260,6 +299,39 @@ export class CheckpointScheduler {
         if (!verification.ok) {
           this.opts.onRefused(scope, verification);
           results.push({ scope, outcome: "refused_unverified", verification });
+          continue;
+        }
+        // Ordered AFTER `!verification.ok` and before any anchor is built. A verification that both
+        // failed and carries a burying reason is reported as the failure, because "this chain did
+        // not verify" is the stronger and more urgent statement and the anchor refusal is implied
+        // by it — nothing is written on either path.
+        //
+        // The chain verified here, and the finding is the anchor already on disk. Anchoring would
+        // write a **readable** checkpoint at the tail, which `latest()` then returns because it
+        // orders by `sequence_number DESC` — so the refused row sits below it and
+        // `IntegrityProofReport.anchorRowsRefused` goes back to empty. Measured live before and
+        // after one pass: `compromised` with `[onPass, onFinding, escalate]`, then `verified` with
+        // `[onPass, escalate]`, the refused row still on disk (ADR-0374). The scheduler would be
+        // erasing the alarm, and no callback would fire at all. The bound is exact rather than a
+        // narrow race: the finding survives only while the tail is at or below the refused anchor's
+        // sequence, where `ON CONFLICT … DO NOTHING` fires, and is buried the moment the chain gains
+        // one entry — which on a serving deployment is every audited request (ADR-0286).
+        //
+        // The cost is stated because it is the deliberate price: this scope folds from genesis on
+        // every pass until the row is corrected, at a measured ~152 microseconds of Ed25519 verify
+        // per entry (ADR-0371), so 15.2 s of signature CPU per pass at 100k entries. It is the right
+        // price because the alternative silences the one detector there is for that row, and it is
+        // self-healing in the correct direction: once an operator corrects or removes the row,
+        // `latest()` reads again, the next pass anchors normally, and the cost disappears.
+        //
+        // It also makes `node.ts`'s start order **irrelevant** rather than merely safe. Today the
+        // checkpoint lifecycle starts before the integrity proof, both `runOnStart` and both hourly
+        // by default, so the burial happened milliseconds before the proof looked — but ADR-0371
+        // refused to let soundness depend on a start order in a third file, and a scheduler that
+        // cannot bury the finding cannot bury it in any order.
+        if (anchoringWouldBury(verification.fullBecause)) {
+          this.opts.onRefused(scope, verification);
+          results.push({ scope, outcome: "refused_anchor_would_bury", verification });
           continue;
         }
         const checkpoint = checkpointFromTail(tail, {

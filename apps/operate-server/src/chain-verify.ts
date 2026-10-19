@@ -139,6 +139,20 @@ export const CHAIN_FULL_REASON_PHRASES: Record<ChainFullReason, string> = {
  * NOTHING` blocks replacement **at that sequence**; the scheduler anchors at the **tail**, which is
  * a different sequence. The row stays and the finding does not.
  *
+ * **Nothing about that write is wrong, and getting this right decides where the end state lives.**
+ * On `anchor_unreadable` the verification is `foldFromGenesis`, which loads the whole chain and runs
+ * both folds, so the `verified_full` provenance the scheduler would stamp is genuinely earned over
+ * the entire prefix and the bounded proof's induction stays intact. What is narrow is the
+ * **detector**: `latest()` reads one row, so a sound new anchor shadows the refused one. That makes
+ * this ADR-0361's class — *a reader whose aperture is narrower than the writer's* — rather than a
+ * bad write, and it is why the honest long-term fix is to widen the read (see
+ * `PostgresChainCheckpointStore.listRecent`, whose own doc comment predicts exactly this consumer)
+ * rather than to keep withholding the anchor. Withholding is what ships first on ADR-0340's
+ * ordering rule: a refusal is correct whether or not the detector is later widened, while anchoring
+ * is correct **only after** it is, so shipped in the other order it restores the defect. Relaxing it
+ * afterwards is one line — this member flips to `false` — and the scheduler's tests re-aim
+ * themselves, because they derive their cases from this map rather than listing them.
+ *
  * Only `anchor_unreadable` answers true, and the map is named for what it decides rather than for
  * ADR-0371's finding-versus-gap split, which it deliberately does not re-litigate: `requested` and
  * `no_checkpoint` have nothing to bury, and for `anchor_unverified` and `anchor_provenance_absent`
