@@ -5058,7 +5058,14 @@ function buildReplayRunners(
         // listed first because a cross-row finding computed beside an unreadable campaign is an
         // inference rather than an observation.
         return {
-          complete: replay.unreadableCampaigns.length === 0,
+          // Both lists, because a refused **campaign** row and a refused **item** or **decision**
+          // row are the same fact at two depths: `CampaignReplay.complete` is what the replayer
+          // sets `false` when it could not read the whole of one campaign's graph, and reading only
+          // `unreadableCampaigns` here reported a tenant covered while a decision inside it had
+          // gone unexamined. That field had no production reader until this line — which is the
+          // shape this increment exists to close, in the increment's own wiring.
+          complete:
+            replay.unreadableCampaigns.length === 0 && replay.replays.every((r) => r.complete),
           scanned: replay.replays.length + replay.unreadableCampaigns.length,
           refusal: null,
           findings: [

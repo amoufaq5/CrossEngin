@@ -18,7 +18,7 @@ stopped the sweep that exists to find defective rows. It gave those three a requ
 reporter and established the rule: **report and carry on.** Its own Q2 asked how many other members
 that class has.
 
-It has **51**, and the rule as stated is only half of it. The missing half is what this increment is
+It has **82**, and the rule as stated is only half of it. The missing half is what this increment is
 about:
 
 > **Where a sweep's purpose is to find defective rows, an unreadable row *is* the finding — so it
@@ -32,8 +32,24 @@ defect).
 
 A single-row read that throws is correct — the caller asked about that row, and ADR-0289's rule is
 that a parse failure means a row edited into a state the contract forbids and a CHECK permits, which
-the caller must not be served past. The census separated the two: **63 single-row reads excluded, 51
-multi-row sites**, of which **13** are a sweep or an audit.
+the caller must not be served past. So the class is counted on the **array** anchor: a conversion
+applied to a row *page*, which is what `pg-unreadable-rows.ts` fences. Measured by running that
+module over the committed tree before and after, which is the only figure here worth carrying
+because it is the one the rule itself produces:
+
+| | sites | needing a declaration |
+|---|---|---|
+| before (`HEAD~1`) | 112 | **82** — 66 throwing, 11 asserting, 3 dropping, 2 self-guarding |
+| after | 110 | **67** — 51 throwing, 11 asserting, 2 dropping, 3 self-guarding |
+
+So **15** sites are closed and 67 are declared, 44 of them an explicit backlog naming what a refused
+row costs today.
+
+An earlier draft of this paragraph said *"63 single-row reads excluded, 51 multi-row sites, of which
+13 are a sweep or an audit"*, and that triple is **the refused anchor's**, not the class's: anchoring
+on *every invocation* of a row mapper gives 114 sites of which 63 are single-row reads doing the
+right thing, which is precisely why `REFUSED_ROW_PAGE_ANCHORS` refuses it. It is kept here as what
+it is — the measurement that justified the anchor — rather than as a count of the class.
 
 ### The three reachable ways to defeat the Article 17 / forensics audit, graded
 
@@ -55,8 +71,12 @@ shorter map"*), on a premise it did not have — that the alternative was a *sil
 
 ### A scoping refusal, measured
 
-From the built catalog: **505 TEXT columns and 159 JSONB columns carry no CHECK**, 36+ of them
-`NOT NULL DEFAULT '[]'::jsonb` with no array constraint. So "every contract refinement gets a CHECK"
+From the built catalog, as it stood **before** this increment: **505 TEXT columns and 159 JSONB
+columns carried no CHECK**, **57** of the latter `NOT NULL DEFAULT '[]'::jsonb` with no array
+constraint. After the three added here, 503 and 158, with 56 of that shape. (An earlier draft stated
+the before-figures in the present tense and put the last one at "36+", which understated it by 20 —
+the count is of JSONB columns that are `NOT NULL` with an empty-array default and no CHECK, and the
+predicate reads `default`, not `defaultExpression`.) So "every contract refinement gets a CHECK"
 is a separate increment — and probably a twelfth workspace rule, since ADR-0362 established that
 none of the ten compares a *contract field* to a *catalog column*, and this is that question's other
 half. This increment's fix is at the **read**, where the consequence lives, with CHECKs only on the
@@ -171,7 +191,8 @@ payload — the exact trap ADR-0371 reverted a field out of.
 
 - **Option D:** make every contract refinement a CHECK, so no stored row can be unreadable.
   - **Pros:** closes the class at the source rather than at the read.
-  - **Cons:** measured, it is **505 TEXT and 159 JSONB columns** with no CHECK.
+  - **Cons:** measured before this increment, **505 TEXT and 159 JSONB columns** with no CHECK (503
+    and 158 after the three added here).
   - **Why not:** a separate increment, and probably a twelfth workspace rule — ADR-0362 established
     that none of the ten compares a *contract field* to a *catalog column*, and this is that
     question's other half. It also would not retire this increment: a CHECK added to a populated
@@ -229,9 +250,12 @@ payload — the exact trap ADR-0371 reverted a field out of.
   increment the same change was silent. The remedy belongs to the contract change, not to this read:
   a new actor field must be `.optional()`, or arrive with a migration, which is ADR-0351's
   versioning rule one table over.
-- **Neutral:** `listForTenant` still answers a bare array and still drops the refusal, because its
-  consumer is a reader and not a verifier. That asymmetry is deliberate and a test is the only place
-  it is written down. `audit-read-store.ts`'s own `rowToEntry` keeps **throwing**, with its reasoning
+- **Neutral:** `listForTenant` still answers a bare array and still drops the refusal. The reason
+  first written here — *"because its consumer is a reader and not a verifier"* — names a consumer
+  that **does not exist**: it has zero non-test callers, which is the stale-claim class this
+  repository's own register has an item about. The decision stands on the honest ground instead:
+  it is the reader-shaped sibling of a verifier-shaped method on the same store, and when it gains
+  a caller that caller's kind decides, not this note. `audit-read-store.ts`'s own `rowToEntry` keeps **throwing**, with its reasoning
   already in place — *"the caller turns it into a refused page, not a shorter one"* — which is the
   increment's thesis confirmed in-repo: two opposite choices for one mapper in one app, decided by
   whether the consumer is serving a page or computing a verdict.
@@ -276,9 +300,14 @@ same reason.
 not use it — a function parameter is contravariant, so an `interface Row` with no index signature
 reaches neither that parameter nor `Record<string, unknown>` itself. Two slices wrote a local copy
 of the loop rather than widen their mappers, each with a comment saying a generic primitive would
-retire it. Both are retired: `access-reviews-runtime-pg`'s `readTypedRows` is deleted and
+retire it. Two are retired: `access-reviews-runtime-pg`'s `readTypedRows` is deleted and
 `workflow-runtime-pg`'s `readEventRows` is a four-line wrapper keeping only the identity expression,
-which is the one part that has to know the row's own shape.
+which is the one part that has to know the row's own shape. A **third** copy — ADR-0372's own
+`readRequestRows` — was missed by the first pass and is retired too; it had `requestIdOf(row)` inside
+the catch but **not** in its own `try`, so a throw from the identity would have cost every row behind
+it, which is the property `readRows` keeps and the reason one spelling is worth the churn. Its
+`requestIdOf` was byte-identical to `textIdentity(row, "request_id")`, a fourth spelling of that
+predicate.
 
 **A refused row makes a cross-row finding an inference rather than an observation**, and three
 places say so now. `verifyIncident` passed `historyIsComplete: true` on the ground that
@@ -313,7 +342,10 @@ What must not diverge is the detail, and that now has one definition.
 | `DrReadinessReport` has no field for *this axis's evidence was partly unreadable* — `unevidencedAxes` cannot say it (naming `failovers` is a compile error by design, and naming `drills` renders a false sentence into a SOC 2 pack), so a page of one readable drill beside one refused one still reads `ready: true` with `totalIssues: 0`. Pinned as a named limitation test; closing it is a `packages/dr-runtime` contract change. | platform | 2026-12-31 |
 | `TombstoneAuditPage.unreadable` reaches no escalator: `DeletionEvidenceEscalator.onAuditFinding` takes findings only, so a sweep that cannot read a stored Article 17 proof still has no alarm behind it — the same gap `onRefused` was made required for in ADR-0371. It is reported on the sweep's log line and nowhere durable. | platform | 2026-12-31 |
 | `tombstone-store.ts`' `listForTenant` and `findForRequest` still throw. The second is the sharper one: it is `DeletionReconciler`'s *evidence* lookup, where "a tombstone naming the request exists ⟺ that request's deletion committed", so a refused row there is not a missing proof but an unanswerable question. Dropping it would be **worse** than the throw — `found.length === 1` would answer `completed_by_evidence` over a broken premise — and neither existing verdict fits (`ambiguous_evidence` says two tombstones name this; `evidence_unverified` says a record failed `verifyStoredEvidence`), so the honest shape is the pair plus a **sixth** verdict. A verdict decision, not a read one. | platform | 2026-12-31 |
-| The remaining non-sweep members of the 51 are declared rather than fixed. Whether a route or a scheduler should forward a reporter is a per-surface decision, and the twelfth rule is what keeps the list from going stale. | platform | 2027-01-31 |
+| `UnreadableRowReporter` is now two incompatible exported types under one name — `kernel-pg`'s over `UnreadableRow` and `tenant-lifecycle-pg`'s over `UnreadableRequestRow` — both re-exported with `export *`, with `node.ts` importing from both. The *field* name divergence is argued above; the type name was not noticed, and it is the shape CLAUDE.md records as a finding for `packages/deploy`. | platform | 2026-12-31 |
+| `auditRowLimit` bounds the anchor check at the newest 500 rows (`ORDER BY occurred_at DESC`), so a refused audit row outside that window reaches no axis at all. Pre-existing, and worth stating now that `anchors.unreadable` is framed as *the* detector for an edited audit row. | platform | 2027-01-31 |
+| Nothing fences a consumer that reads `.records` and drops its sibling `.unreadable` — one level up from a conversion, so outside the twelfth rule by construction. The direction is established and a count is not: one pass over production sources gets 50 reads of `.unreadable` against 45 of `.records`, another 57 against 50, depending on a filter neither states. | platform | 2027-01-31 |
+| The remaining non-sweep members are declared rather than fixed. Whether a route or a scheduler should forward a reporter is a per-surface decision, and the twelfth rule is what keeps the list from going stale. | platform | 2027-01-31 |
 | `patchedReadConn` is duplicated across two forensics-pg test files; it belongs in that package's `test-fakes.ts` for the reason `scopeFilter` was hoisted. | platform | 2026-11-30 |
 | There are two spellings of *forward the reporter*: positional (`listRecent(scope, onUnreadable, limit)`) and an options field (`loadEngineDefinitions({onUnreadable})`). Both are the primitive's sanctioned shapes and each matches its own call site's existing signature, so neither is wrong — but one spelling is this repo's rule, and nothing decides which. | platform | 2026-12-31 |
 | `event-log.ts`' `sequence_number` is still `tx.query<Row>`-asserted, so a string there lands in `WorkflowEvent.sequenceNumber` unchecked. Pre-existing and now declared in a test comment; fixing it is Option G, which rule 9 refuses in its accessor form. | platform | 2027-01-31 |

@@ -1698,9 +1698,14 @@ type errors.
   on*; the missing half is that **where a sweep's purpose is to find defective rows, an unreadable row
   *is* the finding — so it must be routed into the finding set, not out of the answer.** Dropping it is
   the same silence one layer in; throwing takes every other row's finding with it, and both land on the
-  reassuring side. The class has **51** members (63 single-row reads excluded, since there the caller
-  asked about that row and ADR-0289 says it must not be served past), **13** of them a sweep or an
-  audit, and the two live ones show the two routes to that silence: one makes the **row** unreadable
+  reassuring side. Counted on the rule's own anchor — a conversion applied to a row *page*, since a
+  single-row read that throws is correct and ADR-0289 says its caller must not be served past — the
+  class had **82** members needing a declaration and has **67**, so 15 are closed and 44 of the rest
+  are an explicit backlog. (An earlier version of this entry said **51**, with "63 single-row reads
+  excluded"; that triple is the *refused* anchor's — every invocation of a row mapper, 114 sites of
+  which 63 are single-row — and `REFUSED_ROW_PAGE_ANCHORS` refuses it for exactly that reason. Both
+  figures move with every slice that migrates a store, so re-derive them by calling the module.)
+  The two live members show the two routes to that silence: one makes the **row** unreadable
   (the sweep stops), the other makes the **evidence** unreadable in a way the contract tolerates (the
   detector answers *cannot say*, which is not a defect).
 
@@ -5676,10 +5681,13 @@ with a row its contract refuses** — a question every one of the eleven is blin
 them compare an artifact against the catalog, a value set, a declaration or a producer, and a
 `rows.map(rowToX)` that throws is well-formed SQL naming existing columns with a complete `INSERT`
 and a mapper that applies its contract correctly. What is wrong is what happens to the **page** when
-one row fails. **110 conversions over 906 source files** (`array_map` 74, `row_loop` 24, `primitive`
-12), six verdicts over two total maps, **68 needing a declaration, 68 declared, 0 findings in either
-direction** — 45 of them `unmigrated`, which is explicitly the backlog, each naming what a refused
-row costs today. **Throw-capability decides the fence and the record type only classifies a *silent*
+one row fails. **110 conversions over 942 source files** (`array_map` 73, `row_loop` 24, `primitive`
+13), six verdicts over two total maps, **67 needing a declaration, 67 declared, 0 findings in either
+direction** — 44 of them `unmigrated`, which is explicitly the backlog, each naming what a refused
+row costs today. Every one of those figures moves with the next slice that migrates a store, and
+each was already wrong within its own increment by the one site migrated after the prose was
+written; the rule's test asserts one-sided floors for that reason, and these are re-derivable by
+calling the module. **Throw-capability decides the fence and the record type only classifies a *silent*
 conversion**, which is the module's load-bearing line and was reversed in its own first draft:
 evidence that a refusal is possible **is** proof a contract is applied, so it needs no annotation to
 confirm it. Each reason costs something checkable — `page_refusal_declared` names a `refusalCode`
@@ -6115,26 +6123,30 @@ opened them.
 **Load-bearing**
 
 - **A sweep survives the row it exists to find, and what is left of it** (ADR-0373 closed ADR-0372's
-  Q2). The class has **51** members — 63 single-row reads excluded, since there the caller asked
-  about that row — of which **13** are a sweep or an audit, and those are closed: the chain reader,
-  the audit-anchor read, the tombstone sweep, the DR drill/failover/readiness reads, the SLO
-  enforcement reads, the access-review campaign/item/decision reads, the workflow event log and the
-  engine's definition load. `kernel-pg`'s `read-rows.ts` is the one spelling, generic in the row
+  Q2). Measured by calling the rule over the committed tree before and after, which is the only
+  figure worth carrying because it is the one the rule produces: **82 sites needing a declaration
+  became 67**, so **15** are closed — the chain reader, the audit-anchor read, the tombstone sweep,
+  the DR drill/failover/readiness reads, the SLO enforcement reads, the access-review
+  campaign/item/decision reads, the workflow event log and the engine's definition load. `kernel-pg`'s `read-rows.ts` is the one spelling, generic in the row
   type, with two shapes the store's contract picks between (**forward** a reporter, or return the
   refused rows **beside** the records when the consumer is a verifier), and
   `packages/testing/src/strategy/pg-unreadable-rows.ts` is the twelfth rule over the whole class.
-  What remains, in order: **(1)** **45 of the 68 declared sites are `unmigrated`** — the backlog,
+  What remains, in order: **(1)** **44 of the 67 declared sites are `unmigrated`** — the backlog,
   each naming what a refused row costs today, and the sharpest are `column-store::listPageOn` (every
   tenant list request), `crypto-pg::listKeys`, `forensics-pg::checkpoint-store::listRecent` and
   `access-reviews-runtime-pg::evidence-store::listByTenant`; nine are latent on declared-callerless
   stores and say so. **(2)** **nothing fences a consumer that reads `.records` and drops
-  `.unreadable`** — measured at **50** reads of `.unreadable` against **45** of `.records`, and
-  `audit-log-store::listForTenant` is the live instance (deliberate, because its consumer is a
-  reader), which is one level up from a conversion and so outside the twelfth rule by construction.
-  **(3)** `unreadableDetail`'s no-value property is **enforced** for a `ZodError` and **assumed** for
-  a mapper's own guard, whose message passes through — a convention of exactly the kind ADR-0367
-  found failing in four of six refusal strings, one of them an id; the only honest fence is a text
-  test over the construction sites with a vacuity floor. **(4)** a new required field on a
+  `.unreadable`** — the direction is right and the figures are not reproducible with a plain grep
+  (one pass gets 50 against 45, another 57 against 50, depending on an unstated filter), so what is
+  established is the shape and not a count. `audit-log-store::listForTenant` is the live instance,
+  and its own stated reason is wrong: it has **zero non-test callers**, so "its consumer is a
+  reader" names a consumer that does not exist and the kind is decided by whoever gives it one.
+  Dropping a reporter's findings is one level up from a conversion and so outside the twelfth rule
+  by construction. **(3)** `unreadableDetail`'s no-value property is **enforced** for a `ZodError`
+  and **assumed** for a mapper's own guard, whose message passes through. That assumption has
+  exactly **one** live counterexample — `access-reviews-runtime-pg/src/records.ts`' numeric guard,
+  which interpolated the value and is fixed — and the honest fence is still a text test over the
+  construction sites with a vacuity floor, because the next one is a comment away. **(4)** a new required field on a
   `.strict()` stored shape now turns every pre-existing row into a paging `sev1`, where the same
   change used to be silent — the remedy is a contract-evolution rule (`.optional()`, or a version
   tag) rather than anything in the read. **(5)** `DrReadinessReport` has no field for *this axis's
@@ -6148,7 +6160,14 @@ opened them.
   not a missing proof but an unanswerable question. **(8)** `deletion-request-store`'s
   `UnreadableRequestRow` keeps its own field name (`requestId`, deliberately — it is what its three
   audiences act on) while sharing the primitive's `detail` rule, so the vocabulary is one and the
-  shape is two.
+  shape is two — but its **type** name is not: `UnreadableRowReporter` is now two incompatible
+  exported types under one name (`kernel-pg`'s over `UnreadableRow`, `tenant-lifecycle-pg`'s over
+  `UnreadableRequestRow`), both re-exported with `export *`, and `node.ts` imports from both. The
+  ADR argued the field name and did not notice the type name; this file records exactly that shape
+  as a finding for `packages/deploy`'s six colliding flag names. **(9)** `auditRowLimit` bounds the
+  anchor check at the newest 500 rows (`ORDER BY occurred_at DESC`), so a refused audit row outside
+  that window reaches no axis. Pre-existing, and worth saying now that `anchors.unreadable` is
+  framed as *the* detector for an edited audit row.
 
 - **Every money figure is read over the whole set, and what is left of it** (ADR-0367,
   user-directed). Thirteen capped reads drain their cursor to a declared ceiling now, and the

@@ -21,12 +21,17 @@
  * of a mapper would have produced 114 sites of which 63 are single-row reads doing the right thing;
  * see `REFUSED_ROW_PAGE_ANCHORS`.
  *
- * Measured on the committed tree as this landed: **109 conversions over 906 source files** — 74
- * written as `rows.map(…)`, 24 as a `for…of`, 11 through the primitive — of which **30 build no
- * contract record at all** and are excluded from the fence by measurement rather than by assumption,
- * and **68 need a declaration**: 52 that throw, 11 that assert a record they never parse, 3 that
- * guard themselves and 2 that drop the row in silence. Those figures move with every slice that
- * migrates a store, which is why the test asserts one-sided floors and not one of them.
+ * Measured on the committed tree by calling this module over it: **110 conversions over 942 source
+ * files** (927 of them production sources) — 73 written as `rows.map(…)`, 24 as a `for…of`, 13
+ * through the primitive — of which **30 build no contract record at all** and are excluded from the
+ * fence by measurement rather than by assumption, and **67 need a declaration**: 51 that throw, 11
+ * that assert a record they never parse, 3 that guard themselves and 2 that drop the row in
+ * silence.
+ *
+ * Every one of those figures moves with every slice that migrates a store, which is why the test
+ * asserts one-sided floors and not one of them — and why this paragraph was wrong within its own
+ * increment, by exactly the one `rows.map` site that was migrated after it was written. Re-derive
+ * them by calling the module; do not carry them.
  *
  * **Why the declarations live here.** `pg-storeless-tables.ts` argues this once and it holds
  * unchanged: a list in `packages/testing` is only ADR-0288's `needsAuditEmitter` shape if nothing
