@@ -631,13 +631,12 @@ export class IntegrityProofScheduler {
  * fire, without re-reading the other two conjuncts against `integrityVerdictFor` — where
  * `truncation.truncated` is asked **first** and is read by none of the three. So the *weaker*
  * evidence (an anchor that cannot be read) was kept and the *stronger* — a proven total truncation,
- * the thing
- * ADR-0287 built the check for) was still thrown away. Measured live on a scope with no chain
- * entries, a readable checkpoint at 3 and no audit rows: `verdict=compromised truncated=true`,
- * `outcome=skipped_empty`, `callbacks=[]`, and the formatter's "TRUNCATED: checkpoint at 3 but the
- * chain ends at null" printed by nobody. Only the *maximal* truncation was lost — with one
- * surviving entry the tail is non-null and the first conjunct already fails — which is why a
- * partial cut was visible and a total one was not.
+ * the thing ADR-0287 built the check for — was still thrown away. Measured live on a scope with no
+ * chain entries, a readable checkpoint at 3 and no audit rows: `verdict=compromised`,
+ * `truncated=true`, `outcome=skipped_empty`, `callbacks=[]`, and the formatter's "TRUNCATED:
+ * checkpoint at 3 but the chain ends at null" printed by nobody. Only the *maximal* truncation was
+ * lost — with one surviving entry the tail is non-null and the first conjunct already fails —
+ * which is why a partial cut was visible and a total one was not.
  *
  * So the question is asked of the **verdict**, which is total over every condition, rather than of
  * a conjunct list that has to be revisited whenever a condition is added. `verified` is the one
@@ -676,12 +675,13 @@ function isEmptyScope(report: IntegrityProofReport): boolean {
  * verdict stays `verified` and asserts the pass is *not* skipped — and deleting this call is
  * measured to fail exactly those two, so here the assertion is this function's answer and nothing
  * else's. More generally it keeps the two kinds of evidence apart: the verdict is a **claim** and
- * the refusal lists are the **content**, which is ADR-0331's distinction inside one predicate. The
- * second reason is the shape ADR-0340's `dischargeAbac` keeps: a guard a
- * path can no longer reach is kept when the redundancy is **one-directional**, and this one is —
- * it can only ever refuse a skip, never grant one, so an axis that never fires costs nothing and an
- * axis omitted on the strength of what a read one layer down happens to do today is this defect
- * again the day that read starts parsing.
+ * the refusal lists are the **content**, which is ADR-0331's distinction inside one predicate.
+ *
+ * The second reason is the shape ADR-0340's `dischargeAbac` keeps: a guard a path can no longer
+ * reach is kept when the redundancy is **one-directional**, and this one is — it can only ever
+ * refuse a skip, never grant one. So an axis that never fires costs nothing, where an axis omitted
+ * on the strength of what a read one layer down happens to do today is this defect again the day
+ * that read starts parsing.
  *
  * That last clause is why the chain half's own `signatures.unreadable` is asked even though it
  * cannot be reached with a differing answer: `tail()` selects `sequence_number, entry_hash` raw and
