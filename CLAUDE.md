@@ -1765,9 +1765,12 @@ type errors.
   ADR-0374 is the increment ADR-0373 made necessary, and the class is **the increment's own alarm,
   cancelled by a write it does not fence**. That increment routed a blanked `actor_reference` on a
   chain entry into the verdict as `compromised` with a paging `sev1` — and one `UPDATE` on a column
-  of a **different table** cancels it, because `proveScopeIntegrity` awaits `checkpoints.latest(scope)`
-  **twice** per pass with no `try`: once inside `verifyChainFromCheckpoint` and once directly, for the
-  truncation check. ADR-0373 gave that store a parse on read, which is the premise the whole increment
+  of a **different table** cancels it, because `proveScopeIntegrity` reaches
+  `checkpoints.latest(scope)` with no `try` at either of two call sites: one inside
+  `verifyChainFromCheckpoint` and one directly, for the
+  truncation check. The count is per **mode** rather than per pass — two on `fromCheckpoint: true`
+  and one on `false`, the first being gated on the mode — which is precisely why catching it in the
+  chain half alone closes nothing, since the site a full fold reaches is the one that half skips. ADR-0373 gave that store a parse on read, which is the premise the whole increment
   rests on, so a refused checkpoint row now reaches both `await`s as a thrown `ZodError` and the
   hourly scheduler files `outcome: "error"` — no verdict row, no `onFinding`, no `escalate`, no page.
   It is ADR-0373's own graded way (3) — *the tamper disabled the detector* — on a read it migrated and
@@ -1787,8 +1790,13 @@ type errors.
   that table's isolation policy is `ALL`-scope with a NULL `WITH CHECK`, so its `USING` doubles as the
   write check and a tenant-context session `UPDATE`s its own checkpoint (`UPDATE 1`, live as the
   non-owner `serving` role) — and the census generalises past the finding: **78 `meta` tables are in
-  that state, 0 of them carry a `DELETE`-scoped policy, and a tenant-context non-owner deleted its own
-  checkpoint, its own 12 chain entries and its own 3 audit rows.** So **CLAUDE.md's own "`DELETE` is
+  that state, 0 of them carry a `DELETE`-scoped policy, and on **6 of 6** scopes measured a
+  tenant-context non-owner's `DELETE` count **equalled the owner's row count** on every one of
+  `forensic_chain_checkpoints`, `forensic_chain_entries` and `audit_log` — so a tenant destroys its
+  entire tamper-evident trail in its own scope.** (The figure first recorded here was a single
+  stitched triple, `DELETE 1 / 12 / 3`, which **no scope answers**: the first two come from one
+  tenant and the third from another. Comparing against the owner's count per scope is both the
+  honest form and the control the triple lacked.) So **CLAUDE.md's own "`DELETE` is
   reachable by no policy on any of the 32" is true of the *named arms* and false of the behaviour**,
   which is corrected in the RLS bullet below; the empty-scope control is what makes that measurement
   trustworthy, since the same statement for a scope holding nothing answers `DELETE 0` — ADR-0333's
@@ -1852,8 +1860,10 @@ increment. See **What's actually left** at the bottom for the current open ends.
   with a NULL `WITH CHECK` has its `USING` serve as the `WITH CHECK`, so it admits a tenant-scoped
   `UPDATE` **and `DELETE`** of that tenant's own rows. Measured live as the non-owner `serving` role:
   **78** `meta` tables carry such an arm, **0** of them carry a `DELETE` policy, and a tenant-context
-  session deleted its own checkpoint (`DELETE 1`), its own 12 chain entries (`DELETE 12`) and its own
-  3 audit rows (`DELETE 3`) — rolled back. The empty-scope control is what makes that trustworthy: the
+  session's `DELETE` count equalled the **owner's** row count, per table, on 6 of 6 scopes measured
+  — all rolled back. Per scope rather than as one triple, because the triple first recorded here
+  (`1 / 12 / 3`) is answered by no scope: it stitched two tenants together. The empty-scope control
+  is the other half of what makes it trustworthy: the
   same statement for a scope holding nothing answers `DELETE 0`, byte-identical to a refusal
   (ADR-0333's silent zero, in the measurement that would otherwise have read as protection). So what
   the platform split buys is that a *platform-scope* row cannot be deleted, or (on the 17) updated; a
@@ -3815,7 +3825,9 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   alone has `results.every(ok)` true, so a surface rendering `results` without reading `unreadable`
   reports a failure and names no cause — `formatChainVerification` names them for that reason.
 
-  **And a refused *anchor* is too** (ADR-0374). `PostgresChainCheckpointStore`'s three read paths go
+  **And a refused *anchor* is too** (ADR-0374). `PostgresChainCheckpointStore`'s two **single-row**
+  read paths — `latest` and `getBySequence`, not all three, which an earlier version of this sentence
+  said and the next clause of the same sentence already contradicted — go
   through one private `readOne`, which parses and throws `CheckpointRowUnreadable` carrying the
   refused row rather than answering `null` — `null` is *no checkpoint for this scope*, which heals on
   the next scheduler pass, where a refused row **cannot** heal because `record` is
@@ -5075,7 +5087,7 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   serving a page or computing a verdict, which is the increment's thesis confirmed in-repo. The refused
   rows are named by `formatIntegrityProof` and nowhere else: the durable record carries the fact
   through `verdict`, and a count in the stored report would have to move `integrityVerdictPayload`,
-  `StoredIntegrityReportSchema`, `canonicalStoredReport` and `storedReportFrom` together or break the
+  `StoredIntegrityReportSchema`, `canonicalStoredReport` and `storedIntegrityReportFor` together or break the
   parity ADR-0371 reverted a field out of.
 - **`apps/operate-web`** — **long-running process** (Next.js app router + Tailwind, `next
   dev`/`next start` on :3000). The generic manifest-driven UI: a catch-all `/api/[...path]`
@@ -6267,13 +6279,49 @@ opened them.
   which ADR-0373 made necessary). A refused *checkpoint* row threw out of **both** of
   `proveScopeIntegrity`'s unguarded `checkpoints.latest(scope)` calls, so the hourly pass filed
   `outcome: "error"` and one `UPDATE` on a column of a different table — reachable by the tenant,
-  `UPDATE 1` live as a non-owner — cancelled the `compromised` verdict ADR-0373 had just produced
-  about a genuine chain tamper. Closed by `anchor_unreadable` (fold from genesis, catching only
+  `UPDATE 1` live as a non-owner — erased the pass that would have reported a genuine chain tamper
+  on the same scope. Closed by `anchor_unreadable` (fold from genesis, catching only
   `CheckpointRowUnreadable`), a third refusal axis `integrityVerdictFor` answers `compromised` for,
   and two CHECKs; verified 15/15 live.
+  **And then the increment reproduced its own class inside its own fix, which an adversarial pass
+  over the commit found and is the most useful thing in it.** Making
+  `verifyChainFromCheckpoint` answer `ok: true` instead of throwing is right as a *verification* —
+  and `CheckpointScheduler` consumes that same function as its `verify` seam and anchors on
+  `verification.ok`, so a refused anchor stopped being an `outcome: "error"` and became a
+  **recorded** readable checkpoint at the current tail, which `latest()` then returns because it
+  orders by `sequence_number DESC`. The refused row stays and the finding does not. Measured live,
+  additive writes only: `compromised` + `[onPass, onFinding, escalate]` before one scheduler pass,
+  `verified` + `[onPass, escalate]` after it. **The commit turned a loud error into a silent success
+  that erased its own new alarm**, and `node.ts` starts the checkpoint lifecycle *before* the
+  integrity proof with both `runOnStart` and both hourly, so on the paired configuration the burial
+  happened milliseconds before the proof looked. It also refuted this increment's own Option D
+  reasoning: `DO NOTHING` blocks replacement **at that sequence** and the scheduler anchors at the
+  **tail**, so "the refused row stays where it is" was true of the row and false of the finding.
+  Closed by `CHAIN_FULL_REASON_BLOCKS_ANCHORING`, a total map over the five reasons — only
+  `anchor_unreadable` is true, because for `anchor_unverified` and `anchor_provenance_absent`
+  anchoring **is** the heal and the other two have nothing to bury — with the scheduler refusing to
+  anchor and routing to its **required** `onRefused`. The price is that such a scope folds from
+  genesis every pass until the row is corrected, which is the right price and is self-healing in
+  the correct direction. The same map fixes the **CLI**, where `verify-chain --from-checkpoint`
+  exited **0** printing "OK" for a scope whose anchor this binary cannot read — ADR-0374's own
+  Option B rejection, left standing in the by-hand auditor command; measured 0 → 1 against a
+  pre-fix worktree, with the full fold correctly still 0 (it never consults the anchor) and
+  `no_checkpoint` on a sound chain still 0.
+  Two more live members came out of the same pass. **A `compromised` verdict driven by
+  `truncation.truncated` was discarded as `skipped_empty`** — `isEmptyScope` never had `truncated`
+  as a conjunct, and this increment added a fourth axis to `readEveryRowFound` and wrote a long
+  comment about which axes fire there without re-examining the other two conjuncts against the
+  verdict function. The asymmetry is the sharp part: the **weaker** evidence (an anchor that cannot
+  be read) was kept and the **stronger** (a proven total truncation, the thing ADR-0287 built the
+  check for) was thrown away, with zero callbacks. And **`checkpointed_at` is a third column
+  carrying the same attack**: it is TIMESTAMPTZ with no CHECK, `'infinity'` is admitted as a
+  non-owner, node-postgres hands it back as the **number** `Infinity`, and the mapper refuses it —
+  so this increment's claim that "the two CHECKs make the write itself fail" was false, and the
+  whole-table invariant it added was false under its own predicate.
   What remains, in order: **(1)** **78 `meta` tables carry an `ALL`-scope `*_tenant_isolation` policy
   with a NULL `WITH CHECK`, 0 of them carry a `DELETE` policy, and a tenant-context non-owner deleted
-  its own checkpoint, its own 12 chain entries and its own 3 audit rows** — so a tenant can destroy
+  every row the **owner** can see in its scope, on 6 of 6 scopes measured, across all three
+  forensic tables** — so a tenant can destroy
   its own tamper-evident trail, and every argument in this file that reads "`DELETE` is reachable by
   no policy" is about the *named arms*. Narrowing 78 arms from `ALL` to the three commands is one
   decision over the whole catalog and would change what every tenant write path may do; the fix for

@@ -114,6 +114,53 @@ export const CHAIN_FULL_REASON_PHRASES: Record<ChainFullReason, string> = {
   anchor_unreadable: "anchor is stored in a shape the contract refuses",
 };
 
+/**
+ * Whether anchoring over this reason would destroy the evidence that produced it.
+ *
+ * **This exists because ADR-0374's first commit reproduced its own class inside its own fix.**
+ * Before it, a refused anchor threw out of `verifyChainFromCheckpoint`, so `CheckpointScheduler`
+ * filed `outcome: "error"` and wrote nothing. After it the function answers `ok: true`, the
+ * scheduler's `if (!verification.ok)` falls through, and it records a **readable** checkpoint at the
+ * current tail — which `latest()` then returns, because it orders by `sequence_number DESC`, so the
+ * refused row sits below it and `IntegrityProofReport.anchorRowsRefused` goes back to empty. The
+ * commit turned a loud scheduler error into a silent success that erases its own new finding.
+ *
+ * Measured live as a non-owner, additive writes only: `compromised` + `[onPass, onFinding,
+ * escalate]` before one scheduler pass, and `verified` + `[onPass, escalate]` after it, with the
+ * refused row still on disk. The bound is exact and is why this is not a narrow race — the finding
+ * survives only while the tail is at or below the refused anchor's sequence (where `DO NOTHING`
+ * fires) and is buried the moment the chain gains one entry, which on a serving deployment is every
+ * audited request (ADR-0286). `node.ts` also starts the checkpoint lifecycle *before* the integrity
+ * proof, both `runOnStart` and both hourly by default, so on the paired configuration the burial
+ * happened milliseconds before the proof looked.
+ *
+ * It also refutes ADR-0374's own Option D reasoning, which argued that a refused row cannot heal
+ * "because `record` is `ON CONFLICT … DO NOTHING` so the refused row stays where it is". `DO
+ * NOTHING` blocks replacement **at that sequence**; the scheduler anchors at the **tail**, which is
+ * a different sequence. The row stays and the finding does not.
+ *
+ * Only `anchor_unreadable` answers true, and the map is named for what it decides rather than for
+ * ADR-0371's finding-versus-gap split, which it deliberately does not re-litigate: `requested` and
+ * `no_checkpoint` have nothing to bury, and for `anchor_unverified` and `anchor_provenance_absent`
+ * anchoring **is** the heal — a row stating that nothing vouched for its prefix, or one written
+ * before the column existed, is superseded by a vouched anchor rather than hidden by it. A row this
+ * binary cannot read is the only one whose masking costs a detector.
+ */
+export const CHAIN_FULL_REASON_BLOCKS_ANCHORING: Record<ChainFullReason, boolean> = {
+  requested: false,
+  no_checkpoint: false,
+  anchor_unverified: false,
+  anchor_provenance_absent: false,
+  anchor_unreadable: true,
+};
+
+/**
+ * The one reader of that map. `null` is a bounded pass, which carries no reason and buries nothing.
+ */
+export function anchoringWouldBury(fullBecause: ChainFullReason | null): boolean {
+  return fullBecause === null ? false : CHAIN_FULL_REASON_BLOCKS_ANCHORING[fullBecause];
+}
+
 export interface ChainVerificationReport {
   readonly tenantId: string | null;
   readonly ok: boolean;
@@ -209,9 +256,15 @@ export async function verifyChainFromCheckpoint(
   // `latest` throws `CheckpointRowUnreadable` for a stored row the contract refuses, and that throw
   // escaped `proveScopeIntegrity` — so the hourly pass filed `outcome: "error"`, which means no
   // verdict row, no `onFinding`, no `escalate` and no page, on a scope whose chain may hold the very
-  // tamper the pass exists to find. Measured live as the non-owner `serving` role: a tenant-context
-  // `UPDATE … SET checkpointed_by = ''` on its own checkpoint is `UPDATE 1`, and it cancelled an
-  // already-`compromised` verdict driven by a blanked `actor_reference` on a chain entry.
+  // tamper the pass exists to find.
+  //
+  // Measured live as the non-owner `serving` role, on one scope holding **both** tampers — a blanked
+  // `actor_reference` at sequence 1 and its own anchor refused — because an earlier version of this
+  // comment asserted that pairing and no scope on the cluster had it. `UPDATE 1` for each. What the
+  // measurement shows is sharper than the "cancelled an already-`compromised` verdict" it replaces:
+  // the chain-row finding is a *field of a verdict*, so a pass that throws does not cancel it, it
+  // never computes it. Post-fix the two coexist — `chainRefused=1 anchorRefused=1`, both named on
+  // the unattended line — and the pass that reports them is the pass this `catch` lets happen.
   //
   // Caught here rather than inside the store, because the store's throw is correct (ADR-0373: a
   // single-row read must not serve its caller past the row it was asked about) and it is *this*
@@ -223,6 +276,14 @@ export async function verifyChainFromCheckpoint(
     checkpoint = await checkpoints.latest(tenantId);
   } catch (err) {
     if (!(err instanceof CheckpointRowUnreadable)) throw err;
+    // The caught `err.row` is deliberately discarded: `ChainVerificationReport` has no refusal axis
+    // to put it on, and adding one would be a **second** derivation of the same fact, because
+    // `proveScopeIntegrity` catches its own `latest` and reports `anchorRowsRefused`. The cost is
+    // that the two reads can disagree if the row changes between them, so `fullBecause:
+    // "anchor_unreadable"` can coexist with an empty `anchorRowsRefused` — which is why the verdict
+    // reads the **axis** and never this reason, and why `anchoringWouldBury` is a *scheduler* and
+    // *CLI* predicate rather than a verdict one. Narrow, and in the safe direction: the surface that
+    // pages reads the axis, and this reason only ever adds a sentence to a line a human reads.
     return foldFromGenesis(reader, registry, tenantId, "anchor_unreadable");
   }
   if (checkpoint === null) {

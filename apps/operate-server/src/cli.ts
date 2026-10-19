@@ -2265,12 +2265,17 @@ Usage:
 Reads the scope's meta.forensic_chain_entries with a signer-free reader, folds the
 hash chain from genesis, and verifies each entry's Ed25519 signature against the
 public key resolved from the crypto-pg key registry (meta.crypto_keys). Read-only;
-exits 0 when valid, 1 when integrity or a signature fails. Uses standard PG* env vars.
+exits 0 when valid, 1 when integrity or a signature fails, and 1 when the scope's
+stored anchor is in a shape the contract refuses — that last one folds the chain
+from genesis and so reports a sound chain as OK, which is a true statement about
+the entries and not the whole verdict (ADR-0374). Uses standard PG* env vars.
 
 With --from-checkpoint, verifies only the suffix after the scope's latest persisted
 checkpoint (bounded cost for long chains) — integrity anchored at the checkpoint's
-root hash, signatures over just the suffix; falls back to a full verify when no
-checkpoint exists yet.
+root hash, signatures over just the suffix. It falls back to a full verify in four
+cases, not one: no checkpoint for this scope yet, an anchor recording no verified
+prefix, an anchor predating the provenance column, and an anchor this binary cannot
+read. The header names which; only the last exits non-zero.
 
 Options:
   --tenant <uuid>      Tenant chain to verify (one of this or --platform)

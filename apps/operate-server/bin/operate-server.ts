@@ -16,7 +16,7 @@ import {
   setCredentialCliHelpText,
 } from "../src/cli.js";
 import { formatMultiTenantReport } from "../src/link-sweep.js";
-import { formatChainVerification } from "../src/chain-verify.js";
+import { anchoringWouldBury, formatChainVerification } from "../src/chain-verify.js";
 import { runPruneLinks, runRekey, runReplay, runVerifyChain, serve } from "../src/node.js";
 import { formatReplayReport } from "../src/replay.js";
 import { formatRekeyResult, formatRekeySurvey } from "../src/rekey.js";
@@ -65,7 +65,20 @@ async function runVerify(argv: readonly string[]): Promise<number> {
       ? `${JSON.stringify(report, null, 2)}\n`
       : `${formatChainVerification(report)}\n`,
   );
-  return report.ok ? 0 : 1;
+  // `report.ok` is not the whole verdict, and ADR-0374's own Option B rejection says why: a full
+  // fold over a sound chain answers `ok: true`, so a bounded pass that *refused its anchor* and
+  // folded instead reads as a healthy full verification. That increment closed it for the hourly
+  // `proveScopeIntegrity` through `IntegrityProofReport.anchorRowsRefused` and left it standing
+  // here, in the by-hand auditor command, whose help text frames the exit code as the verdict —
+  // so `verify-chain --from-checkpoint` exited 0 printing "OK" for a scope whose stored anchor
+  // this binary cannot read, where before that increment the store's throw escaped and it exited 1.
+  //
+  // `anchoringWouldBury` is the predicate rather than `fullBecause !== null`, because three of the
+  // five reasons are not findings: a caller asking for a full fold, a scope with no checkpoint yet,
+  // and a legacy anchor predating the provenance column must all keep exiting 0. It is the same
+  // total map `CheckpointScheduler` refuses to anchor on, so the command and the scheduler cannot
+  // come to disagree about which anchors are a finding.
+  return report.ok && !anchoringWouldBury(report.fullBecause) ? 0 : 1;
 }
 
 async function runReplayCommand(argv: readonly string[]): Promise<number> {

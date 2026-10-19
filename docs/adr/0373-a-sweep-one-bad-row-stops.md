@@ -161,7 +161,7 @@ behind it. Both break the lap, in opposite directions, and neither is visible fr
 and `formatChainVerification` print the ids; the durable record carries the fact through `verdict`,
 which is both signed and projected. Adding a count to the stored report would have to move
 `integrityVerdictPayload`, `StoredIntegrityReportSchema`, `canonicalStoredReport` and
-`storedReportFrom` together or the stored report stops being byte-identical to the committed
+`storedIntegrityReportFor` together or the stored report stops being byte-identical to the committed
 payload — the exact trap ADR-0371 reverted a field out of.
 
 ## Alternatives considered
@@ -442,7 +442,7 @@ It carries `chain: {ok, integrityValid, brokenAt, signaturesValid}` and
 
 The payload is the free-form audit `after` and **not** the verdict's signed bytes:
 `integrityVerdictPayload`, `StoredIntegrityReportSchema`, `canonicalStoredReport` and
-`storedReportFrom` must move together or the stored report stops being byte-identical to its
+`storedIntegrityReportFor` must move together or the stored report stops being byte-identical to its
 committed payload, which is the trap ADR-0371 reverted a field out of. None is touched.
 
 ### The detail that quoted the row

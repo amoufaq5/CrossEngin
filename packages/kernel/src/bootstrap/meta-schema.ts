@@ -11375,11 +11375,24 @@ export const META_FORENSIC_CHAIN_CHECKPOINTS: TableDefinition = {
      *
      * Reachable by the tenant and not only by an owner: this table's isolation policy is `ALL`-scope,
      * so its `USING` doubles as its `WITH CHECK` and a tenant-context session may `UPDATE` its own
-     * checkpoint. Verified live as the non-owner `serving` role — `UPDATE 1`, and the hourly pass
-     * went from `compromised` + escalation to a single log line, so the blanking **cancelled the
-     * alarm about a genuine chain tamper one table over**. The CHECK is the fence, because the RLS
-     * arm cannot be narrowed here without a decision spanning the 23 tables in the same state (see
-     * ADR-0374's reported finding).
+     * checkpoint. Verified live as the non-owner `serving` role — `UPDATE 1`. The CHECK is the
+     * fence, because the RLS arm cannot be narrowed here without a decision spanning the **78**
+     * `meta` tables in the same state (see ADR-0374's reported finding; an earlier version of this
+     * comment said 23, which is no census of anything and contradicted the figure in the ADR it
+     * points the reader at).
+     *
+     * **What the blanking costs is stated from a measurement now, and that measurement corrected an
+     * earlier version of this comment twice.** It claimed the hourly pass "went from `compromised` +
+     * escalation to a single log line, so the blanking cancelled the alarm about a genuine chain
+     * tamper one table over" — and no scope on the cluster held both tampers, so the claim was
+     * asserted rather than taken. Performed on one scope holding both (a blanked `actor_reference` at
+     * sequence 1 *and* its own anchor refused): pre-fix the refused anchor threw out of the pass, so
+     * there was **no verdict at all** — which buries the chain-row finding for a sharper reason than
+     * cancellation, since that finding is a field of a verdict that was never computed. Post-fix the
+     * two coexist and both are named: `verdict=compromised chainRefused=1 anchorRefused=1`, with the
+     * unattended line carrying `unreadable chain entry 1 (actorReference: too_small)` *and*
+     * `unreadable checkpoint 3 (checkpointedAt: invalid_string)`. The second tamper does not cancel
+     * the first on this code; it used to erase the pass that would have reported it.
      *
      * `char_length(...) >= 1` is this catalog's spelling for the predicate, with the upper bound left
      * off, because the contract declares no maximum and a CHECK refusing what the contract permits is
