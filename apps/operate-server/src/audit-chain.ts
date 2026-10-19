@@ -2,7 +2,14 @@ import { readFile } from "node:fs/promises";
 
 import { z } from "zod";
 import { STAGE_OUTCOMES, type PipelineExecution } from "@crossengin/api-gateway";
-import { ed25519PublicKeyFingerprint, sha256, signEd25519 } from "@crossengin/crypto";
+import {
+  ed25519PublicKeyFingerprint,
+  ed25519PublicKeyFromSeed,
+  isEd25519PrivateSeedBase64,
+  isEd25519PublicKeyBase64,
+  sha256,
+  signEd25519,
+} from "@crossengin/crypto";
 import {
   PostgresChainLogStore,
   type ChainAppendInput,
@@ -26,8 +33,27 @@ export const AuditChainConfigSchema = z
   .object({
     schema: z.string().regex(SCHEMA_RE).default("meta"),
     actorReference: z.string().min(1).default("operate-server"),
-    privateKeyBase64: z.string().min(1),
-    publicKeyBase64: z.string().min(1),
+    /**
+     * Both halves are checked **here** rather than only where they are used, on ADR-0348's split:
+     * whether a string is a 32-byte Ed25519 key is a property of the config alone, so it is
+     * decidable at parse time — where `loadAuditChainConfig` already names the file and zod names
+     * the field, which is the house refusal shape by construction instead of by a hand-written
+     * string. The predicates are `@crossengin/crypto`'s own, imported rather than restated.
+     *
+     * The alternative — catch the decode where the signer derives — closes only one arm and reads
+     * worse: `publicKeyBase64: "x"` passed `.min(1)` and then threw a bare
+     * `public key must decode to 32 bytes, got 0` at boot, naming neither the flag nor the field
+     * (ADR-0364's addendum class). `ed25519ChainSigner` keeps its try as a backstop for a direct
+     * caller that never parsed, which is `dischargeAbac`'s shape.
+     */
+    privateKeyBase64: z
+      .string()
+      .min(1)
+      .refine(isEd25519PrivateSeedBase64, "must be a 32-byte Ed25519 private seed, base64"),
+    publicKeyBase64: z
+      .string()
+      .min(1)
+      .refine(isEd25519PublicKeyBase64, "must be a 32-byte Ed25519 public key, base64"),
     outcomes: z.array(z.enum(STAGE_OUTCOMES)).optional(),
     operations: z.array(z.string().min(1)).optional(),
     sampleRate: z.number().min(0).max(1).default(1),
@@ -138,13 +164,62 @@ export async function loadAuditChainConfig(path: string): Promise<AuditChainConf
   return parseAuditChainConfig(parsed);
 }
 
-/** A `ChainSigner` backed directly by an Ed25519 keypair (no key store needed for the serving edge). */
+/**
+ * A `ChainSigner` backed directly by an Ed25519 keypair (no key store needed for the serving edge).
+ *
+ * The pair is checked against itself first, because node will not do it: an OKP private key is
+ * built from `d` and an inconsistent `x` is **silently discarded**, so `signEd25519(seedA, pubB, …)`
+ * returns a signature valid under A while this signer announces B's fingerprint on every entry it
+ * writes. Nothing downstream recovers from that — the entries resolve to a registered public key
+ * that cannot verify them, so each reads `bad_signature` for ever and the full-chain proof reports
+ * `compromised` at a 100% false-positive rate, which pages. Observed live on three entries left by
+ * an ordinary boot that announced nothing.
+ *
+ * Refused rather than warned: a deployment in this state cannot verify a single entry it writes,
+ * and no later configuration repairs the ones already signed.
+ */
 export function ed25519ChainSigner(keypair: {
   readonly privateKeyBase64: string;
   readonly publicKeyBase64: string;
 }): ChainSigner {
+  // Compared as fingerprints rather than as the two base64 strings: each is the sha256 of the
+  // decoded 32 bytes, so an unpadded-but-correct public key is not reported as a mismatch. The
+  // fingerprint is also what every entry records, so the refusal names the identifier an operator
+  // can find in the chain — and it is a digest of public material, never key material.
+  //
+  // Both decodes are wrapped as a BACKSTOP: `AuditChainConfigSchema` refuses a malformed half at
+  // parse time, so a config that reached here through `parseAuditChainConfig` cannot take these
+  // arms. They exist for a direct caller that built the pair by hand, and they say what the
+  // underlying refusal does not — the flag and the field an operator would edit, rather than
+  // another package's sentence about a "private seed" (ADR-0364's addendum class).
+  let fingerprint: string;
+  try {
+    fingerprint = ed25519PublicKeyFingerprint(keypair.publicKeyBase64);
+  } catch (err) {
+    throw new Error(
+      "--audit-chain-config: publicKeyBase64 is not a usable Ed25519 public key" +
+        ` (expected a 32-byte Ed25519 public key, base64): ${errMessage(err)}`,
+    );
+  }
+  let derivedPublicKey: string;
+  try {
+    derivedPublicKey = ed25519PublicKeyFromSeed(keypair.privateKeyBase64);
+  } catch (err) {
+    throw new Error(
+      "--audit-chain-config: privateKeyBase64 is not a usable Ed25519 private key" +
+        ` (expected a 32-byte Ed25519 seed, base64): ${errMessage(err)}`,
+    );
+  }
+  const derived = ed25519PublicKeyFingerprint(derivedPublicKey);
+  if (derived !== fingerprint) {
+    throw new Error(
+      "--audit-chain-config: publicKeyBase64 is not the public half of privateKeyBase64" +
+        ` (configured fingerprint ${fingerprint}, derived ${derived}) — entries would be signed` +
+        " under the derived key and announced under the configured one, so none could verify",
+    );
+  }
   return {
-    fingerprint: ed25519PublicKeyFingerprint(keypair.publicKeyBase64),
+    fingerprint,
     sign: async (bytes) =>
       signEd25519(keypair.privateKeyBase64, keypair.publicKeyBase64, bytes),
   };

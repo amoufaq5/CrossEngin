@@ -461,6 +461,7 @@ import {
   type TenantAuditPolicyLifecycle,
 } from "./audit-sampling-policy-source.js";
 import {
+  formatChainVerification,
   verifyChainFromCheckpoint,
   verifyChainFull,
   type ChainVerificationReport,
@@ -3276,10 +3277,25 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         : {};
       checkpoints = buildCheckpointLifecycle(conn, checkpointConfig, {
         signer: ed25519ChainSigner(auditConfig),
+        // The verification's key resolver, not a composed `verify` seam: `buildCheckpointLifecycle`
+        // owns both chain stores, so it composes the verifier over the same pair it anchors
+        // (ADR-0371). Same line and same reason as the integrity proof's two blocks down.
+        registry: new PostgresKeyRegistry(conn),
         ...liveScopes,
+        // `provenance` is the anchor's own statement of what verified its prefix, so the line that
+        // says a checkpoint was written says which of the two folds earned it.
         onCheckpoint: (scope, cp) =>
           console.info(
-            `[checkpoint] scope=${scope ?? "platform"} seq=${cp.sequenceNumber.toString()} root=${cp.rootHash.slice(0, 12)}`,
+            `[checkpoint] scope=${scope ?? "platform"} seq=${cp.sequenceNumber.toString()} root=${cp.rootHash.slice(0, 12)} provenance=${cp.provenance ?? "unstated"}`,
+          ),
+        // A scope whose chain did not verify is NOT anchored, and that is a standing condition an
+        // operator has to see: an un-anchored scope is re-folded from genesis on every later pass,
+        // and the reason it refused is the finding. Error level, and distinct from `onError` on
+        // ADR-0322's split — this one says the chain failed to verify and names what failed, where
+        // `onError` says the verification could not be performed and asserts nothing about it.
+        onRefused: (scope, verification) =>
+          console.error(
+            `[checkpoint] REFUSED scope=${scope ?? "platform"} — not anchored\n${formatChainVerification(verification)}`,
           ),
         onError: (err) => console.error("[checkpoint] pass error", err),
       });
@@ -3349,9 +3365,17 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         signer: ed25519ChainSigner(auditConfig),
         registry: new PostgresKeyRegistry(conn),
         ...liveScopes,
+        // The mode and its reason ride on the hourly line, not only on `onFinding`'s COMPROMISED
+        // one: a deployment whose anchors cannot be trusted folds from genesis on every pass and
+        // still answers `verdict=verified`, so without the reason the one standing condition an
+        // operator has to act on — and the unbounded cost it carries — is reported nowhere
+        // (ADR-0371). The stored verdict commits to the mode and deliberately not to the reason.
         onPass: (report) =>
           console.info(
-            `[integrity-proof] scope=${report.scope ?? "platform"} verdict=${report.verdict}`,
+            `[integrity-proof] scope=${report.scope ?? "platform"} verdict=${report.verdict}` +
+              ` chain=${report.chain.mode}` +
+              (report.chain.fullBecause === null ? "" : `:${report.chain.fullBecause}`) +
+              ` sigs=${report.chain.signatures.checked.toString()}`,
           ),
         // A provable tamper is the one outcome worth shouting about; `unproven` is not a finding.
         onFinding: (report) => console.error(`[integrity-proof] COMPROMISED\n${formatIntegrityProof(report)}`),

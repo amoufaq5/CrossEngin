@@ -4,7 +4,12 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 import type { PipelineExecution } from "@crossengin/api-gateway";
-import { generateEd25519Keypair, ed25519PublicKeyFingerprint } from "@crossengin/crypto";
+import {
+  generateEd25519Keypair,
+  ed25519PublicKeyFingerprint,
+  signEd25519,
+  verifyEd25519,
+} from "@crossengin/crypto";
 import {
   GENESIS_HASH,
   verifyChainEntrySignature,
@@ -52,6 +57,8 @@ function fakeChainPg(): PgConnection {
 import {
   AuditChainObserver,
   auditAppendInputFrom,
+  AuditChainConfigSchema,
+  auditChainStore,
   buildAuditChain,
   ed25519ChainSigner,
   loadAuditChainConfig,
@@ -106,8 +113,37 @@ describe("parseAuditChainConfig", () => {
   });
 
   it("requires both key halves and rejects a bad schema", () => {
-    expect(() => parseAuditChainConfig({ publicKeyBase64: "x" })).toThrow();
+    expect(() => parseAuditChainConfig({ publicKeyBase64: keypair.publicKeyBase64 })).toThrow();
+    expect(() => parseAuditChainConfig({ privateKeyBase64: keypair.privateKeyBase64 })).toThrow();
     expect(() => config({ schema: "Bad-Schema" })).toThrow();
+  });
+
+  it("refuses a key half that is not a 32-byte Ed25519 key, naming the field", () => {
+    // Both halves, at parse time, where the field name comes from zod and the file name from
+    // `loadAuditChainConfig` — rather than from a hand-written string at the one use site, which
+    // is what left `publicKeyBase64: "x"` passing `.min(1)` and throwing a bare
+    // `public key must decode to 32 bytes, got 0` at boot (ADR-0371).
+    for (const [field, value] of [
+      ["publicKeyBase64", "x"],
+      ["publicKeyBase64", Buffer.alloc(31).toString("base64")],
+      ["publicKeyBase64", "not!base64!"],
+      ["privateKeyBase64", "x"],
+      ["privateKeyBase64", Buffer.alloc(16).toString("base64")],
+      ["privateKeyBase64", "not!base64!"],
+    ] as const) {
+      const issues = AuditChainConfigSchema.safeParse({
+        privateKeyBase64: keypair.privateKeyBase64,
+        publicKeyBase64: keypair.publicKeyBase64,
+        [field]: value,
+      });
+      expect(issues.success).toBe(false);
+      if (issues.success) continue;
+      // The path is the property, not the message: a reworded message must not break this, and the
+      // path is what tells an operator which line of the JSON to edit.
+      expect(issues.error.issues.map((i) => i.path.join("."))).toContain(field);
+      // And the refusal must not echo the configured value back, since the private half is a secret.
+      expect(JSON.stringify(issues.error.issues)).not.toContain(value);
+    }
   });
 });
 
@@ -143,6 +179,95 @@ describe("ed25519ChainSigner + auditAppendInputFrom", () => {
   it("falls back to the configured actor for an anonymous request", () => {
     const input = auditAppendInputFrom(execution({ principalId: null }), { actorReference: "operate-server" });
     expect(input.actorReference).toBe("operate-server");
+  });
+});
+
+describe("ed25519ChainSigner key-pair agreement", () => {
+  const other = generateEd25519Keypair();
+  const crossed = { privateKeyBase64: keypair.privateKeyBase64, publicKeyBase64: other.publicKeyBase64 };
+
+  /** The refusal message, or a failure if the call did not refuse. */
+  function refusalOf(fn: () => unknown): string {
+    try {
+      fn();
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
+    throw new Error("expected a refusal, got a signer");
+  }
+
+  it("node signs under the private half and silently ignores a mismatched public half", () => {
+    // The measurement the refusal exists for: this does NOT throw, so without a check the signer
+    // writes signatures under `other` is unable to verify, announced under its fingerprint.
+    const signature = signEd25519(crossed.privateKeyBase64, crossed.publicKeyBase64, "entry");
+    expect(verifyEd25519(keypair.publicKeyBase64, signature, "entry")).toBe(true);
+    expect(verifyEd25519(other.publicKeyBase64, signature, "entry")).toBe(false);
+  });
+
+  it("refuses a pair whose halves are not each other's", () => {
+    expect(() => ed25519ChainSigner(crossed)).toThrow(
+      /publicKeyBase64 is not the public half of privateKeyBase64/,
+    );
+  });
+
+  it("names both fingerprints and neither key's bytes", () => {
+    const message = refusalOf(() => ed25519ChainSigner(crossed));
+    // A fingerprint is a digest of public material and is the column every entry records, so it is
+    // the identifier an operator greps for. The key bytes are neither needed nor safe to print.
+    expect(message).toContain(ed25519PublicKeyFingerprint(other.publicKeyBase64));
+    expect(message).toContain(ed25519PublicKeyFingerprint(keypair.publicKeyBase64));
+    expect(message).not.toContain(keypair.privateKeyBase64);
+    expect(message).not.toContain(keypair.publicKeyBase64);
+    expect(message).not.toContain(other.publicKeyBase64);
+  });
+
+  it("accepts an unpadded but correct public key, because the comparison is over bytes", () => {
+    // base64 of 32 bytes is 43 characters plus one '='; both spellings decode identically, so a
+    // comparison of the two strings would refuse a deployment whose key is perfectly good.
+    const unpadded = keypair.publicKeyBase64.replace(/=+$/, "");
+    expect(unpadded).not.toBe(keypair.publicKeyBase64);
+    expect(
+      ed25519ChainSigner({ privateKeyBase64: keypair.privateKeyBase64, publicKeyBase64: unpadded })
+        .fingerprint,
+    ).toBe(ed25519PublicKeyFingerprint(keypair.publicKeyBase64));
+  });
+
+  // The property pinned is the house shape, not the wording: the flag an operator passed and the
+  // field they would edit. `/private seed/` was @crossengin/crypto's own sentence, which names
+  // neither — and this refusal lands long before `server.listen`, so it is the whole boot failure.
+  it("refuses a private key that is not base64, naming the flag and the field", () => {
+    const message = refusalOf(() =>
+      ed25519ChainSigner({ privateKeyBase64: "not base64!", publicKeyBase64: keypair.publicKeyBase64 }),
+    );
+    expect(message).toContain("--audit-chain-config:");
+    expect(message).toContain("privateKeyBase64");
+    expect(message).toMatch(/not valid base64/);
+  });
+
+  it("refuses a private key of the wrong decoded length, naming the flag and the field", () => {
+    const short = Buffer.alloc(16).toString("base64");
+    const message = refusalOf(() =>
+      ed25519ChainSigner({ privateKeyBase64: short, publicKeyBase64: keypair.publicKeyBase64 }),
+    );
+    expect(message).toContain("--audit-chain-config:");
+    expect(message).toContain("privateKeyBase64");
+    // The underlying cause rides along, so the wrapper adds attribution without hiding the defect.
+    expect(message).toMatch(/32 bytes/);
+    // Named, never echoed: the field's configured value is private material.
+    expect(message).not.toContain(short);
+  });
+
+  it("covers the wiring paths, not only a direct construction", () => {
+    const c = config({ publicKeyBase64: other.publicKeyBase64 });
+    expect(() => auditChainStore(fakeChainPg(), c)).toThrow(/not the public half/);
+    expect(() => buildAuditChain(fakeChainPg(), c)).toThrow(/not the public half/);
+  });
+
+  it("a consistent pair still builds a signer whose signatures verify under the announced key", async () => {
+    const signer = ed25519ChainSigner(keypair);
+    expect(signer.fingerprint).toBe(ed25519PublicKeyFingerprint(keypair.publicKeyBase64));
+    const bytes = Buffer.from("canonical entry bytes", "utf8");
+    expect(verifyEd25519(keypair.publicKeyBase64, await signer.sign(bytes), bytes)).toBe(true);
   });
 });
 

@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { GENESIS_HASH, type ChainedLogEntry } from "@crossengin/forensics";
+import {
+  CHECKPOINT_PROVENANCES,
+  GENESIS_HASH,
+  checkpointAnchorsBoundedProof,
+  type ChainedLogEntry,
+  type CheckpointProvenance,
+} from "@crossengin/forensics";
 
-import { checkpointFromChain, verifyChainSuffix } from "./checkpoint.js";
+import { checkpointFromTail, tailOfChain, verifyChainSuffix } from "./checkpoint.js";
 
 const AT = "2026-06-01T00:00:00.000Z";
 
@@ -85,10 +91,28 @@ describe("verifyChainSuffix", () => {
   });
 });
 
-describe("checkpointFromChain", () => {
-  it("anchors at the chain tail with the tail entry hash as the root", () => {
+describe("tailOfChain", () => {
+  it("is the last entry's sequence and hash", () => {
     const entries = suffix(0, 4, GENESIS_HASH);
-    const cp = checkpointFromChain(entries, { checkpointedBy: "auditor", checkpointedAt: AT });
+    expect(tailOfChain(entries)).toEqual({ sequenceNumber: 3, entryHash: entries[3]!.entryHash });
+  });
+
+  it("is null for an empty chain, which is how an empty chain stops being anchorable", () => {
+    // `checkpointFromTail` used to be `checkpointFromChain` and threw on an empty chain. The
+    // emptiness is unrepresentable in a `ChainTail` instead, so the refusal moved to the one caller
+    // that can meet it (`createCheckpoint`) and the builder has no failure mode left to forget.
+    expect(tailOfChain([])).toBeNull();
+  });
+});
+
+describe("checkpointFromTail", () => {
+  it("anchors at the given tail, taking its hash as the root", () => {
+    const entries = suffix(0, 4, GENESIS_HASH);
+    const cp = checkpointFromTail(tailOfChain(entries)!, {
+      checkpointedBy: "auditor",
+      checkpointedAt: AT,
+      provenance: "verified_full",
+    });
     expect(cp.sequenceNumber).toBe(3);
     expect(cp.rootHash).toBe(entries[3]!.entryHash);
     expect(cp.checkpointedBy).toBe("auditor");
@@ -96,11 +120,27 @@ describe("checkpointFromChain", () => {
     expect(cp.externalAnchorReference).toBeUndefined();
   });
 
-  it("carries an external anchor reference and algorithm when supplied", () => {
-    const entries = suffix(0, 1, GENESIS_HASH);
-    const cp = checkpointFromChain(entries, {
+  it("anchors at the tail it was given and not at the chain's", () => {
+    // The whole of ADR-0371's critical fix: a caller that verified a chain holds the tail its
+    // verification covered, and the anchor must claim that sequence even though the chain has since
+    // grown. Handing an earlier tail must produce an earlier anchor rather than being re-derived.
+    const entries = suffix(0, 6, GENESIS_HASH);
+    const verifiedThrough = { sequenceNumber: 2, entryHash: entries[2]!.entryHash };
+    const cp = checkpointFromTail(verifiedThrough, {
       checkpointedBy: "auditor",
       checkpointedAt: AT,
+      provenance: "verified_full",
+    });
+    expect(cp.sequenceNumber).toBe(2);
+    expect(cp.rootHash).toBe(entries[2]!.entryHash);
+    expect(cp.rootHash).not.toBe(entries[5]!.entryHash);
+  });
+
+  it("carries an external anchor reference and algorithm when supplied", () => {
+    const cp = checkpointFromTail(tailOfChain(suffix(0, 1, GENESIS_HASH))!, {
+      checkpointedBy: "auditor",
+      checkpointedAt: AT,
+      provenance: "verified_full",
       externalAnchorReference: "btc:txid:abc",
       algorithm: "sha512",
     });
@@ -108,9 +148,43 @@ describe("checkpointFromChain", () => {
     expect(cp.algorithm).toBe("sha512");
   });
 
-  it("throws on an empty chain", () => {
-    expect(() => checkpointFromChain([], { checkpointedBy: "auditor", checkpointedAt: AT })).toThrow(
-      /empty chain/,
+  // Over the constant rather than the three names, so a fourth provenance is covered here by
+  // landing rather than by somebody remembering to add a case.
+  it.each(CHECKPOINT_PROVENANCES)("carries the provenance %s through", (provenance) => {
+    const tail = tailOfChain(suffix(0, 2, GENESIS_HASH))!;
+    const cp = checkpointFromTail(tail, { checkpointedBy: "auditor", checkpointedAt: AT, provenance });
+    expect(cp.provenance).toBe(provenance);
+    expect(checkpointAnchorsBoundedProof(cp.provenance)).toBe(
+      checkpointAnchorsBoundedProof(provenance),
     );
+  });
+
+  it("defaults the algorithm and never the provenance", () => {
+    const tail = tailOfChain(suffix(0, 2, GENESIS_HASH))!;
+    // The asymmetry is the point: `algorithm` defaults because one hash function is the house's,
+    // while all three provenances are *claims* about a prefix — so there is no safe default and the
+    // field is required here. An absent one survives only on the contract, where it means a row an
+    // older binary wrote, and `unverified` is what a writer with nothing verified has to say.
+    const cp = checkpointFromTail(tail, {
+      checkpointedBy: "auditor",
+      checkpointedAt: AT,
+      provenance: "unverified",
+    });
+    expect(cp.algorithm).toBe("sha256");
+    // And the whole consequence of ADR-0371: an anchor that vouches for no prefix anchors nothing.
+    expect(checkpointAnchorsBoundedProof(cp.provenance)).toBe(false);
+  });
+
+  it("refuses a provenance outside the enum", () => {
+    const tail = tailOfChain(suffix(0, 2, GENESIS_HASH))!;
+    expect(() =>
+      checkpointFromTail(tail, {
+        checkpointedBy: "auditor",
+        checkpointedAt: AT,
+        // The cast is the test: the runtime refusal exists because the type is defeatable at every
+        // boundary this value really crosses — a stored row, a JSON body, a later binary's enum.
+        provenance: "verified_sort_of" as CheckpointProvenance,
+      }),
+    ).toThrow();
   });
 });

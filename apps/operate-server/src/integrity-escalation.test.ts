@@ -21,7 +21,10 @@ import {
   dispositionFromCloseOut,
   formatIntegrityEscalation,
 } from "./integrity-escalation.js";
-import type { ChainTruncationCheck, IntegrityProofReport } from "./integrity-proof.js";
+import {
+  type ChainTruncationCheck,
+  type IntegrityProofReport,
+} from "./integrity-proof.js";
 
 const TENANT_A = "11111111-1111-1111-1111-111111111111";
 const TENANT_B = "22222222-2222-2222-2222-222222222222";
@@ -45,14 +48,17 @@ const tamperedResult: AuditAnchorResult = {
 };
 
 function report(over: Partial<IntegrityProofReport> = {}): IntegrityProofReport {
+  // No cast: the fixture is complete, so the compiler keeps checking this construction site when
+  // `ChainVerificationReport` gains a field. It gained `fullBecause`, and the cast hid it.
   const chain: ChainVerificationReport = {
     tenantId: TENANT_A,
     ok: true,
     mode: "full",
+    fullBecause: "requested",
     checkpointSequence: null,
     integrity: { valid: true, brokenAt: null },
     signatures: { valid: true, checked: 3, results: [], unresolvedFingerprints: [] },
-  } as ChainVerificationReport;
+  };
   const anchors: AuditAnchorReport = {
     tenantId: TENANT_A,
     ok: false,

@@ -174,9 +174,19 @@ export interface IntegrityProofReportLike {
   readonly chain: {
     readonly ok: boolean;
     readonly mode: string;
+    // Deliberately no `fullBecause` beside `mode` (ADR-0371). This is the shape
+    // `storedIntegrityReportFor` projects *from*, the stored bytes commit to the mode and not to
+    // the reason, and nothing else here reads it — so declaring it would be a field written by a
+    // test fixture and read nowhere, which is the class this increment exists to close. It lands
+    // when the versioned decision to commit the reason does, and not as a fence for it.
     readonly checkpointSequence: number | null;
     readonly integrity: { readonly valid: boolean; readonly brokenAt: number | null };
-    readonly signatures: { readonly valid: boolean };
+    /**
+     * A **diagnostic and not evidence**: the count is rendered where diagnostics are read and is
+     * committed to no durable record, so there is no absent-versus-zero question to answer here.
+     * Required because the caller always holds a `ChainSignatureVerdict`, which carries it.
+     */
+    readonly signatures: { readonly valid: boolean; readonly checked: number };
   };
   readonly anchors: {
     readonly checked: number;
@@ -261,6 +271,11 @@ const SELECT_COLUMNS =
  * The bytes a verdict's id is derived from. Key order is fixed by construction here, so the same
  * verdict always hashes to the same id and re-recording a pass is idempotent against the
  * `verdict_id` unique constraint rather than duplicating the row.
+ *
+ * These bytes commit to the chain's `mode` and deliberately not to `fullBecause`, so the reason a
+ * pass folded from genesis is a diagnostic on the log line and in `verify-chain` rather than
+ * evidence: adding it would change the bytes every stored verdict is already checked against, and
+ * so would need a second domain tag beside `audit_integrity_proof`.
  */
 export function canonicalStoredReport(report: StoredIntegrityReport): string {
   return JSON.stringify({

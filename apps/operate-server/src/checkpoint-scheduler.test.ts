@@ -4,6 +4,8 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 import { InMemoryKeyStore } from "@crossengin/crypto";
+import { PostgresKeyRegistry } from "@crossengin/crypto-pg";
+import type { ChainCheckpoint } from "@crossengin/forensics";
 import {
   PostgresChainCheckpointStore,
   PostgresChainLogStore,
@@ -12,6 +14,7 @@ import {
 } from "@crossengin/forensics-pg";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 
+import type { ChainFullReason, ChainVerificationReport } from "./chain-verify.js";
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
 import {
   buildCheckpointLifecycle,
@@ -28,6 +31,7 @@ const TENANT_POISON = "33333333-3333-3333-3333-333333333333";
 const AT = "2026-06-01T00:00:00.000Z";
 
 const CHECKPOINTS = "forensic_chain_checkpoints";
+const CRYPTO_KEYS = "crypto_keys";
 
 function paramIndex(sql: string, re: RegExp): number {
   const m = re.exec(sql);
@@ -35,11 +39,17 @@ function paramIndex(sql: string, re: RegExp): number {
 }
 
 /**
- * Inline fake of both `meta.forensic_chain_entries` and `meta.forensic_chain_checkpoints` with RLS-like
- * per-transaction tenant scoping (mirrors forensics-pg's private test fake, which isn't exported).
+ * Inline fake of `meta.forensic_chain_entries`, `meta.forensic_chain_checkpoints` and the one
+ * `meta.crypto_keys` lookup a signature check makes, with RLS-like per-transaction tenant scoping
+ * (mirrors forensics-pg's private test fake, which isn't exported).
+ *
  * `failTenant` makes every read for that scope throw, to exercise per-scope error isolation.
+ * `keyRow` is the registry row `getByFingerprint` resolves to — omit it and the chain's signing
+ * fingerprint is unresolvable, which is how an unregistered key is reproduced.
  */
-function fakeChainPg(opts: { readonly failTenant?: string } = {}): PgConnection {
+function fakeChainPg(
+  opts: { readonly failTenant?: string; readonly keyRow?: Record<string, unknown> } = {},
+): PgConnection {
   const entryRows: Record<string, unknown>[] = [];
   const checkpointRows: Record<string, unknown>[] = [];
 
@@ -71,6 +81,7 @@ function fakeChainPg(opts: { readonly failTenant?: string } = {}): PgConnection 
               checkpointed_by: p[4],
               external_anchor_reference: p[5] ?? null,
               algorithm: p[6],
+              provenance: p[7] ?? null,
             });
           }
           return { rows: [], rowCount: exists ? 0 : 1 };
@@ -93,6 +104,14 @@ function fakeChainPg(opts: { readonly failTenant?: string } = {}): PgConnection 
       if (sql.includes("SELECT")) {
         if (opts.failTenant !== undefined && currentTenant === opts.failTenant) {
           throw new Error(`read failure for scope ${currentTenant}`);
+        }
+        if (sql.includes(CRYPTO_KEYS)) {
+          // `getByFingerprint(fingerprint, scope)`: matched on `$1` alone, because the chain's
+          // signing key is platform-scoped and both arms of the registry's inclusive scope filter
+          // admit it.
+          const row = opts.keyRow;
+          const hit = row !== undefined && row["fingerprint_sha256"] === p[0];
+          return { rows: hit && row !== undefined ? [row] : [], rowCount: hit ? 1 : 0 };
         }
         const table = sql.includes(CHECKPOINTS) ? checkpointRows : entryRows;
         let visible = table.filter((r) => (r["tenant_id"] ?? null) === currentTenant);
@@ -136,14 +155,80 @@ function fakeChainPg(opts: { readonly failTenant?: string } = {}): PgConnection 
   return makeClient();
 }
 
-async function newSigner(): Promise<ChainSigner> {
+interface ChainFixture {
+  readonly conn: PgConnection;
+  readonly signer: ChainSigner;
+  readonly registry: PostgresKeyRegistry;
+  readonly checkpointStore: PostgresChainCheckpointStore;
+}
+
+/**
+ * A fake chain connection, the signer that writes into it, and a real `PostgresKeyRegistry` that
+ * resolves that signer's fingerprint — so the verification `buildCheckpointLifecycle` composes is
+ * the real `verifyChainFromCheckpoint` over real entries rather than a stub.
+ *
+ * `unregisteredKey` withholds the registry row, which is the shape of a live deployment whose chain
+ * signing key was never registered: every signature is unresolvable and the pass must refuse.
+ */
+async function newChainFixture(
+  opts: { readonly failTenant?: string; readonly unregisteredKey?: boolean } = {},
+): Promise<ChainFixture> {
   const keyStore = new InMemoryKeyStore();
   const record = await keyStore.createKey({
     tenantId: null,
     algorithm: "ed25519",
     purpose: "evidence_sealing",
   });
-  return keyStoreChainSigner(keyStore, record, null);
+  if (record.publicKeyBase64 === null) {
+    throw new Error("an ed25519 key must carry public material");
+  }
+  const signer = keyStoreChainSigner(keyStore, record, null);
+  const keyRow: Record<string, unknown> = {
+    key_id: record.handle.id,
+    tenant_id: null,
+    algorithm: record.handle.algorithm,
+    purpose: record.handle.purpose,
+    public_key_base64: record.publicKeyBase64,
+    fingerprint_sha256: signer.fingerprint,
+    key_version: record.handle.version,
+    status: "active",
+    created_at: AT,
+  };
+  const conn = fakeChainPg({
+    ...(opts.failTenant !== undefined ? { failTenant: opts.failTenant } : {}),
+    ...(opts.unregisteredKey === true ? {} : { keyRow }),
+  });
+  return {
+    conn,
+    signer,
+    registry: new PostgresKeyRegistry(conn, {}),
+    checkpointStore: new PostgresChainCheckpointStore(conn, {}),
+  };
+}
+
+/**
+ * A stub verification report, for the tests that are about what the scheduler does with one.
+ *
+ * `fullBecause` is a parameter rather than always `requested`, because the two reasons a *bounded*
+ * verification falls back to a full fold — `anchor_unverified` and `anchor_provenance_absent` — are
+ * the ones the scheduler actually meets on a deployment, and a helper that could only express
+ * `requested` left both unreachable in every test.
+ */
+function report(
+  tenantId: string | null,
+  mode: ChainVerificationReport["mode"],
+  ok: boolean,
+  fullBecause: ChainFullReason = "requested",
+): ChainVerificationReport {
+  return {
+    tenantId,
+    ok,
+    mode,
+    fullBecause: mode === "full" ? fullBecause : null,
+    checkpointSequence: mode === "from_checkpoint" ? 0 : null,
+    integrity: { valid: ok, brokenAt: ok ? null : 3 },
+    signatures: { valid: ok, checked: 1, results: [], unresolvedFingerprints: [] },
+  };
 }
 
 async function seed(
@@ -292,14 +377,14 @@ describe("allTenants config + tenantSourceScopes", () => {
   });
 
   it("drives checkpointing over every live tenant", async () => {
-    const conn = fakeChainPg();
-    const signer = await newSigner();
+    const { conn, signer, registry, checkpointStore } = await newChainFixture();
     await seed(conn, signer, TENANT_A, 2);
     await seed(conn, signer, TENANT_B, 4);
-    const checkpointStore = new PostgresChainCheckpointStore(conn, {});
 
     const { runOnce } = buildCheckpointLifecycle(conn, { ...BASE_CONFIG, allTenants: true }, {
       signer,
+      registry,
+      onRefused: () => undefined,
       tenants: tenantSourceScopes({ activeTenantIds: () => [TENANT_A, TENANT_B] }),
     });
     const results = await runOnce();
@@ -312,13 +397,13 @@ describe("allTenants config + tenantSourceScopes", () => {
 
 describe("CheckpointScheduler.runOnce", () => {
   it("records a checkpoint at the tail of a non-empty chain", async () => {
-    const conn = fakeChainPg();
-    const signer = await newSigner();
+    const { conn, signer, registry, checkpointStore } = await newChainFixture();
     const tailHash = await seed(conn, signer, TENANT_A, 3);
-    const checkpointStore = new PostgresChainCheckpointStore(conn, {});
 
     const { runOnce } = buildCheckpointLifecycle(conn, { ...BASE_CONFIG, tenants: [TENANT_A] }, {
       signer,
+      registry,
+      onRefused: () => undefined,
       now: () => new Date(AT),
     });
     const results = await runOnce();
@@ -334,13 +419,13 @@ describe("CheckpointScheduler.runOnce", () => {
   });
 
   it("skips a scope with an empty chain without firing onError", async () => {
-    const conn = fakeChainPg();
-    const signer = await newSigner();
-    const checkpointStore = new PostgresChainCheckpointStore(conn, {});
+    const { conn, signer, registry, checkpointStore } = await newChainFixture();
     const errors: unknown[] = [];
 
     const { runOnce } = buildCheckpointLifecycle(conn, { ...BASE_CONFIG, tenants: [TENANT_A] }, {
       signer,
+      registry,
+      onRefused: () => undefined,
       onError: (err) => errors.push(err),
     });
     const results = await runOnce();
@@ -351,14 +436,14 @@ describe("CheckpointScheduler.runOnce", () => {
   });
 
   it("checkpoints multiple scopes independently at their own tails", async () => {
-    const conn = fakeChainPg();
-    const signer = await newSigner();
+    const { conn, signer, registry, checkpointStore } = await newChainFixture();
     await seed(conn, signer, TENANT_A, 2);
     await seed(conn, signer, TENANT_B, 5);
-    const checkpointStore = new PostgresChainCheckpointStore(conn, {});
 
     const { runOnce } = buildCheckpointLifecycle(conn, { ...BASE_CONFIG, tenants: [TENANT_A, TENANT_B] }, {
       signer,
+      registry,
+      onRefused: () => undefined,
     });
     const results = await runOnce();
 
@@ -368,13 +453,13 @@ describe("CheckpointScheduler.runOnce", () => {
   });
 
   it("checkpoints the platform chain when includePlatform is set", async () => {
-    const conn = fakeChainPg();
-    const signer = await newSigner();
+    const { conn, signer, registry, checkpointStore } = await newChainFixture();
     await seed(conn, signer, null, 2);
-    const checkpointStore = new PostgresChainCheckpointStore(conn, {});
 
     const { runOnce } = buildCheckpointLifecycle(conn, { ...BASE_CONFIG, includePlatform: true }, {
       signer,
+      registry,
+      onRefused: () => undefined,
     });
     const results = await runOnce();
 
@@ -384,16 +469,16 @@ describe("CheckpointScheduler.runOnce", () => {
   });
 
   it("isolates a per-scope failure and still checkpoints the others", async () => {
-    const conn = fakeChainPg({ failTenant: TENANT_POISON });
-    const signer = await newSigner();
+    const { conn, signer, registry, checkpointStore } = await newChainFixture({
+      failTenant: TENANT_POISON,
+    });
     await seed(conn, signer, TENANT_A, 1);
-    const checkpointStore = new PostgresChainCheckpointStore(conn, {});
     const errors: unknown[] = [];
 
     const { runOnce } = buildCheckpointLifecycle(
       conn,
       { ...BASE_CONFIG, tenants: [TENANT_POISON, TENANT_A] },
-      { signer, onError: (err) => errors.push(err) },
+      { signer, registry, onRefused: () => undefined, onError: (err) => errors.push(err) },
     );
     const results = await runOnce();
 
@@ -403,13 +488,14 @@ describe("CheckpointScheduler.runOnce", () => {
   });
 
   it("fires onCheckpoint with the scope + recorded checkpoint", async () => {
-    const conn = fakeChainPg();
-    const signer = await newSigner();
+    const { conn, signer, registry } = await newChainFixture();
     await seed(conn, signer, TENANT_A, 1);
     const seen: Array<{ scope: string | null; seq: number }> = [];
 
     const { runOnce } = buildCheckpointLifecycle(conn, { ...BASE_CONFIG, tenants: [TENANT_A] }, {
       signer,
+      registry,
+      onRefused: () => undefined,
       onCheckpoint: (scope, checkpoint) => seen.push({ scope, seq: checkpoint.sequenceNumber }),
     });
     await runOnce();
@@ -418,13 +504,13 @@ describe("CheckpointScheduler.runOnce", () => {
   });
 
   it("resolves scopes from an injected tenant source, overriding the config list", async () => {
-    const conn = fakeChainPg();
-    const signer = await newSigner();
+    const { conn, signer, registry, checkpointStore } = await newChainFixture();
     await seed(conn, signer, TENANT_B, 1);
-    const checkpointStore = new PostgresChainCheckpointStore(conn, {});
 
     const { runOnce } = buildCheckpointLifecycle(conn, { ...BASE_CONFIG, tenants: [TENANT_A] }, {
       signer,
+      registry,
+      onRefused: () => undefined,
       tenants: () => [TENANT_B],
     });
     const results = await runOnce();
@@ -435,12 +521,13 @@ describe("CheckpointScheduler.runOnce", () => {
   });
 
   it("routes a scope-source failure to onError without throwing", async () => {
-    const conn = fakeChainPg();
-    const signer = await newSigner();
+    const { conn, signer, registry } = await newChainFixture();
     const errors: unknown[] = [];
 
     const { runOnce } = buildCheckpointLifecycle(conn, BASE_CONFIG, {
       signer,
+      registry,
+      onRefused: () => undefined,
       tenants: () => {
         throw new Error("no tenant source");
       },
@@ -451,14 +538,312 @@ describe("CheckpointScheduler.runOnce", () => {
     expect(results).toEqual([]);
     expect(errors).toHaveLength(1);
   });
+
+  it("folds from genesis on a first pass and persists verified_full", async () => {
+    const { conn, signer, registry, checkpointStore } = await newChainFixture();
+    await seed(conn, signer, TENANT_A, 3);
+
+    const { runOnce } = buildCheckpointLifecycle(conn, { ...BASE_CONFIG, tenants: [TENANT_A] }, {
+      signer,
+      registry,
+      onRefused: () => undefined,
+    });
+    const results = await runOnce();
+
+    // No checkpoint exists yet, so the composed `verifyChainFromCheckpoint` has nothing to anchor a
+    // bounded fold to and goes all the way to genesis — which is why a brand-new chain's first
+    // anchor is always the one that earns `verified_full`, and every pass after it can be bounded.
+    expect(results[0]?.outcome).toBe("recorded");
+    expect(results[0]?.verification?.mode).toBe("full");
+    expect(results[0]?.verification?.signatures.checked).toBe(3);
+    expect((await checkpointStore.latest(TENANT_A))?.provenance).toBe("verified_full");
+  });
+
+  it("refuses the anchor when the chain's signing key is unregistered", async () => {
+    const { conn, signer, registry, checkpointStore } = await newChainFixture({
+      unregisteredKey: true,
+    });
+    await seed(conn, signer, TENANT_A, 2);
+    const errors: unknown[] = [];
+    const refused: Array<string | null> = [];
+
+    const { runOnce } = buildCheckpointLifecycle(conn, { ...BASE_CONFIG, tenants: [TENANT_A] }, {
+      signer,
+      registry,
+      onRefused: (scope) => refused.push(scope),
+      onError: (err) => errors.push(err),
+    });
+    const results = await runOnce();
+
+    expect(results[0]?.outcome).toBe("refused_unverified");
+    expect(results[0]?.verification?.signatures.unresolvedFingerprints).toHaveLength(1);
+    expect(refused).toEqual([TENANT_A]);
+    expect(errors).toEqual([]);
+    expect(await checkpointStore.latest(TENANT_A)).toBeNull();
+  });
+});
+
+/**
+ * The verification itself is `chain-verify.ts`'s; these are about what the scheduler does with its
+ * answer, so the stores are real and only `verify` is stubbed.
+ */
+describe("CheckpointScheduler verification", () => {
+  function stubVerify(
+    fixture: ChainFixture,
+    opts: {
+      readonly verify: (scope: string | null) => Promise<ChainVerificationReport>;
+      readonly scopes: readonly (string | null)[];
+      readonly onCheckpoint?: (scope: string | null, checkpoint: ChainCheckpoint) => void;
+      readonly onRefused: (scope: string | null, verification: ChainVerificationReport) => void;
+      readonly onError?: (err: unknown) => void;
+    },
+  ): CheckpointScheduler {
+    return new CheckpointScheduler({
+      logStore: new PostgresChainLogStore(fixture.conn, fixture.signer, {}),
+      checkpointStore: fixture.checkpointStore,
+      verify: opts.verify,
+      scopes: () => opts.scopes,
+      intervalMs: 1000,
+      checkpointedBy: "operate-server",
+      now: () => new Date(AT),
+      ...(opts.onCheckpoint !== undefined ? { onCheckpoint: opts.onCheckpoint } : {}),
+      onRefused: opts.onRefused,
+      ...(opts.onError !== undefined ? { onError: opts.onError } : {}),
+    });
+  }
+
+  it("derives verified_full from a fold from genesis", async () => {
+    const fx = await newChainFixture();
+    await seed(fx.conn, fx.signer, TENANT_A, 2);
+    const seen: ChainCheckpoint[] = [];
+
+    const results = await stubVerify(fx, {
+      verify: async (scope) => report(scope, "full", true),
+      scopes: [TENANT_A],
+      onRefused: () => undefined,
+      onCheckpoint: (_scope, checkpoint) => seen.push(checkpoint),
+    }).runOnce();
+
+    expect(results[0]?.outcome).toBe("recorded");
+    expect(results[0]?.checkpoint?.provenance).toBe("verified_full");
+    expect(seen[0]?.provenance).toBe("verified_full");
+  });
+
+  it("anchors at the tail the verification covered, not at one re-read afterwards", async () => {
+    // ADR-0371's critical finding, and this increment's own class surviving its own fix. The pass
+    // read the tail, verified, and then let `createCheckpoint` re-read the chain to choose the
+    // sequence — so every entry committed in between was anchored as `verified_full` by a fold that
+    // never saw it, and every bounded pass after it starts at `checkpoint.sequenceNumber + 1` and
+    // skips the band forever. Appending inside the `verify` stub reproduces the window exactly:
+    // writers into it are continuous on a serving deployment, since every audited request anchors
+    // a row (ADR-0286), and on a first post-upgrade pass the window is the whole full fold.
+    const fx = await newChainFixture();
+    await seed(fx.conn, fx.signer, TENANT_A, 3); // sequences 0..2
+    let during: string | null = null;
+
+    const results = await stubVerify(fx, {
+      verify: async (scope) => {
+        during = await seed(fx.conn, fx.signer, TENANT_A, 1); // sequence 3, mid-verification
+        return report(scope, "full", true);
+      },
+      scopes: [TENANT_A],
+      onRefused: () => undefined,
+    }).runOnce();
+
+    expect(results[0]?.outcome).toBe("recorded");
+    // 2 and not 3: the entry appended during the verification is simply not covered yet, and the
+    // next pass covers it. Claiming 3 would be the defect.
+    expect(results[0]?.checkpoint?.sequenceNumber).toBe(2);
+    expect(results[0]?.checkpoint?.rootHash).not.toBe(during);
+    const stored = await fx.checkpointStore.latest(TENANT_A);
+    expect(stored?.sequenceNumber).toBe(2);
+  });
+
+  it("carries a refused bounded fold's reason into the report onRefused is handed", async () => {
+    // `anchor_unverified` and `anchor_provenance_absent` are the reasons a *bounded* verification
+    // falls back, so they are the ones a deployment meets — and `onRefused` is the only place a
+    // refusal is reported, because no row is written for one.
+    const fx = await newChainFixture();
+    await seed(fx.conn, fx.signer, TENANT_A, 2);
+    const seen: ChainVerificationReport[] = [];
+
+    const results = await stubVerify(fx, {
+      verify: async (scope) => report(scope, "full", false, "anchor_provenance_absent"),
+      scopes: [TENANT_A],
+      onRefused: (_scope, verification) => seen.push(verification),
+    }).runOnce();
+
+    expect(results[0]?.outcome).toBe("refused_unverified");
+    expect(seen[0]?.fullBecause).toBe("anchor_provenance_absent");
+    expect(await fx.checkpointStore.latest(TENANT_A)).toBeNull();
+  });
+
+  it("makes a second concurrent pass a no-op rather than stacking folds", async () => {
+    // A full fold is unbounded in the chain's length (~152 microseconds of signature CPU per entry
+    // measured), so a scope that must fold from genesis can outlast an hourly interval and the
+    // timer would stack passes on exactly the deployment least able to afford them.
+    const fx = await newChainFixture();
+    await seed(fx.conn, fx.signer, TENANT_A, 2);
+    // A callable default rather than `null`: assignment inside a Promise executor is invisible to
+    // control-flow analysis, so a `(() => void) | null` narrows to `null` at the call below and
+    // `null?.()` is `never`. A non-null assertion would hide that rather than answer it (ADR-0362).
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = (): void => {
+        resolve();
+      };
+    });
+    let verifications = 0;
+
+    const scheduler = stubVerify(fx, {
+      verify: async (scope) => {
+        verifications += 1;
+        await held;
+        return report(scope, "full", true);
+      },
+      scopes: [TENANT_A],
+      onRefused: () => undefined,
+    });
+
+    const first = scheduler.runOnce();
+    const second = await scheduler.runOnce();
+    expect(second).toEqual([]); // honest: this call performed no pass
+    release();
+    expect((await first)[0]?.outcome).toBe("recorded");
+    expect(verifications).toBe(1);
+  });
+
+  it("derives verified_suffix from a checkpoint-bounded fold", async () => {
+    const fx = await newChainFixture();
+    await seed(fx.conn, fx.signer, TENANT_A, 2);
+
+    const results = await stubVerify(fx, {
+      verify: async (scope) => report(scope, "from_checkpoint", true),
+      scopes: [TENANT_A],
+      onRefused: () => undefined,
+    }).runOnce();
+
+    expect(results[0]?.checkpoint?.provenance).toBe("verified_suffix");
+  });
+
+  it("refuses an unverified chain and writes no anchor at all", async () => {
+    const fx = await newChainFixture();
+    await seed(fx.conn, fx.signer, TENANT_A, 2);
+
+    const results = await stubVerify(fx, {
+      verify: async (scope) => report(scope, "full", false),
+      scopes: [TENANT_A],
+      onRefused: () => undefined,
+    }).runOnce();
+
+    expect(results[0]?.outcome).toBe("refused_unverified");
+    expect(results[0]?.checkpoint).toBeUndefined();
+    // The anchor a bounded proof would later trust is the thing withheld, so this is the assertion
+    // the whole seam exists for: a chain that does not verify gains no fresh prefix to be believed on.
+    expect(await fx.checkpointStore.latest(TENANT_A)).toBeNull();
+  });
+
+  it("routes a refusal to onRefused with its report, and never to onError", async () => {
+    const fx = await newChainFixture();
+    await seed(fx.conn, fx.signer, TENANT_A, 2);
+    const refused: Array<{ scope: string | null; brokenAt: number | null }> = [];
+    const errors: unknown[] = [];
+
+    await stubVerify(fx, {
+      verify: async (scope) => report(scope, "full", false),
+      scopes: [TENANT_A],
+      onRefused: (scope, verification) =>
+        refused.push({ scope, brokenAt: verification.integrity.brokenAt }),
+      onError: (err) => errors.push(err),
+    }).runOnce();
+
+    expect(refused).toEqual([{ scope: TENANT_A, brokenAt: 3 }]);
+    expect(errors).toEqual([]);
+  });
+
+  it("lets the pass continue past a refusal, so other scopes still anchor", async () => {
+    const fx = await newChainFixture();
+    await seed(fx.conn, fx.signer, TENANT_A, 1);
+    await seed(fx.conn, fx.signer, TENANT_B, 1);
+
+    const results = await stubVerify(fx, {
+      verify: async (scope) => report(scope, "full", scope !== TENANT_A),
+      scopes: [TENANT_A, TENANT_B],
+      onRefused: () => undefined,
+    }).runOnce();
+
+    expect(results.map((r) => r.outcome)).toEqual(["refused_unverified", "recorded"]);
+    expect(await fx.checkpointStore.latest(TENANT_A)).toBeNull();
+    expect(await fx.checkpointStore.latest(TENANT_B)).not.toBeNull();
+  });
+
+  it("verifies before anchoring, never after", async () => {
+    const fx = await newChainFixture();
+    await seed(fx.conn, fx.signer, TENANT_A, 2);
+    const atVerifyTime: Array<ChainCheckpoint | null> = [];
+
+    await stubVerify(fx, {
+      verify: async (scope) => {
+        atVerifyTime.push(await fx.checkpointStore.latest(scope));
+        return report(scope, "full", true);
+      },
+      scopes: [TENANT_A],
+      onRefused: () => undefined,
+    }).runOnce();
+
+    // Asked while nothing was anchored, and anchored afterwards: an anchor placed first would be one
+    // the verification it is supposed to rest on had not yet been asked about.
+    expect(atVerifyTime).toEqual([null]);
+    expect(await fx.checkpointStore.latest(TENANT_A)).not.toBeNull();
+  });
+
+  it("does not verify a scope whose chain is empty", async () => {
+    const fx = await newChainFixture();
+    const asked: Array<string | null> = [];
+
+    const results = await stubVerify(fx, {
+      verify: async (scope) => {
+        asked.push(scope);
+        return report(scope, "full", true);
+      },
+      scopes: [TENANT_A],
+      onRefused: () => undefined,
+    }).runOnce();
+
+    expect(results[0]?.outcome).toBe("skipped_empty");
+    expect(results[0]?.verification).toBeUndefined();
+    expect(asked).toEqual([]);
+  });
+
+  it("treats a verifier that throws as an error and not as a refusal", async () => {
+    const fx = await newChainFixture();
+    await seed(fx.conn, fx.signer, TENANT_A, 1);
+    const refused: Array<string | null> = [];
+    const errors: unknown[] = [];
+
+    const results = await stubVerify(fx, {
+      verify: async () => {
+        throw new Error("key registry down");
+      },
+      scopes: [TENANT_A],
+      onRefused: (scope) => refused.push(scope),
+      onError: (err) => errors.push(err),
+    }).runOnce();
+
+    expect(results[0]?.outcome).toBe("error");
+    // No verdict was reached, so none is reported: a verification that could not run says nothing
+    // about the chain, where a refusal says the chain did not verify.
+    expect(results[0]?.verification).toBeUndefined();
+    expect(refused).toEqual([]);
+    expect(errors).toHaveLength(1);
+    expect(await fx.checkpointStore.latest(TENANT_A)).toBeNull();
+  });
 });
 
 describe("CheckpointScheduler lifecycle", () => {
   it("runs a pass on start via the injected scheduler, and stop() clears the timer", async () => {
-    const conn = fakeChainPg();
-    const signer = await newSigner();
+    const { conn, signer, registry, checkpointStore } = await newChainFixture();
     await seed(conn, signer, TENANT_A, 1);
-    const checkpointStore = new PostgresChainCheckpointStore(conn, {});
     const manual = manualScheduler();
 
     let resolveDone: () => void = () => undefined;
@@ -468,6 +853,8 @@ describe("CheckpointScheduler lifecycle", () => {
 
     const { scheduler } = buildCheckpointLifecycle(conn, { ...BASE_CONFIG, tenants: [TENANT_A] }, {
       signer,
+      registry,
+      onRefused: () => undefined,
       scheduler: manual.scheduler,
       onCheckpoint: () => resolveDone(),
     });
@@ -485,18 +872,18 @@ describe("CheckpointScheduler lifecycle", () => {
   });
 
   it("does not run an immediate pass when runOnStart is false", async () => {
-    const conn = fakeChainPg();
-    const signer = await newSigner();
+    const { conn, signer, checkpointStore } = await newChainFixture();
     await seed(conn, signer, TENANT_A, 1);
-    const checkpointStore = new PostgresChainCheckpointStore(conn, {});
     const manual = manualScheduler();
 
     const scheduler = new CheckpointScheduler({
       logStore: new PostgresChainLogStore(conn, signer, {}),
       checkpointStore,
+      verify: async (scope) => report(scope, "full", true),
       scopes: () => [TENANT_A],
       intervalMs: 1000,
       checkpointedBy: "operate-server",
+      onRefused: () => undefined,
       scheduler: manual.scheduler,
       runOnStart: false,
     });

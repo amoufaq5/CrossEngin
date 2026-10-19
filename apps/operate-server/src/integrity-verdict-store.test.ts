@@ -63,7 +63,7 @@ function reportFor(overrides: Partial<IntegrityProofReportLike> = {}): Integrity
       mode: "from_checkpoint",
       checkpointSequence: 7,
       integrity: { valid: true, brokenAt: null },
-      signatures: { valid: true },
+      signatures: { valid: true, checked: 6 },
     },
     anchors: { checked: 4, verified: 4, unanchored: 0, tampered: [] },
     truncation: { checkpointSequence: 7, tailSequence: 9, truncated: false },
@@ -85,11 +85,15 @@ function fullReportFor(report: IntegrityProofReportLike): IntegrityProofReport {
       tenantId: report.scope,
       ok: report.chain.ok,
       mode: report.chain.mode === "full" ? "full" : "from_checkpoint",
+      // Null and never synthesized: the stored verdict does not commit to the reason, so it cannot
+      // be recovered from a row, and `requested` would claim a fold a caller asked for when it may
+      // have been a refused anchor.
+      fullBecause: null,
       checkpointSequence: report.chain.checkpointSequence,
       integrity: report.chain.integrity,
       signatures: {
         valid: report.chain.signatures.valid,
-        checked: 0,
+        checked: report.chain.signatures.checked,
         results: [],
         unresolvedFingerprints: [],
       },
@@ -650,6 +654,28 @@ describe("integrity-verdict-store — record", () => {
       false,
       true,
     ]);
+  });
+
+  it("stores the committed bytes themselves, so `report` and `payload_sha256` are one content", async () => {
+    // `toVerdictView` tells a reader that `report` plus `payloadSha256` let them confirm the row's
+    // content *is* the committed content. That holds only while the stored JSONB is byte-identical
+    // to what the digest is taken over — so a field added to the projection and left out of
+    // `canonicalStoredReport` (or the reverse) falsifies that sentence for every row written after
+    // it, with no digest anywhere disagreeing.
+    const db = fakeVerdictDb();
+    const store = new PostgresIntegrityVerdictStore(db.conn);
+    const report = storedIntegrityReportFor(reportFor());
+    await store.record(integrityVerdictInputFor(reportFor(), anchorAt("c".repeat(64), 5)));
+    const insert = db.captured.find((c) => c.sql.startsWith("INSERT INTO"));
+    // Positions read off the statement's own column list, never written as literals: ADR-0370's
+    // fake modelled one numbering and silently stopped modelling anything once it changed.
+    const columns = (/\(([^)]*)\) VALUES/.exec(insert?.sql ?? "")?.[1] ?? "")
+      .split(",")
+      .map((c) => c.trim());
+    expect(columns).toEqual(expect.arrayContaining(["report", "payload_sha256"]));
+    const storedJson = insert?.params[columns.indexOf("report")];
+    expect(storedJson).toBe(canonicalStoredReport(report));
+    expect(insert?.params[columns.indexOf("payload_sha256")]).toBe(sha256(String(storedJson)));
   });
 
   it("is idempotent on the content-addressed id: a replayed pass inserts nothing", async () => {

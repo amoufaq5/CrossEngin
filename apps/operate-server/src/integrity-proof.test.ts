@@ -8,7 +8,7 @@ import type { ChainedLogEntry } from "@crossengin/forensics";
 import { describe, expect, it } from "vitest";
 
 import type { AuditAnchorReport, AuditAnchorResult } from "./audit-anchor.js";
-import type { ChainVerificationReport } from "./chain-verify.js";
+import { CHAIN_FULL_REASONS, type ChainVerificationReport } from "./chain-verify.js";
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
 import {
   INTEGRITY_VERDICTS,
@@ -28,16 +28,21 @@ const TENANT_A = "11111111-1111-1111-1111-111111111111";
 const TENANT_B = "22222222-2222-2222-2222-222222222222";
 const AT = "2026-09-29T00:00:00.000Z";
 
+// No `as ChainVerificationReport`: the cast omitted `fullBecause` after it became required, so
+// every `formatIntegrityProof` call in this file rendered `chain [from_checkpoint: undefined]` and
+// not one of the formatter assertions read the chain segment, so the suite stayed green over wrong
+// output (ADR-0371, ADR-0362's cast-standing-in-for-a-check).
 function chainOk(over: Partial<ChainVerificationReport> = {}): ChainVerificationReport {
   return {
     tenantId: TENANT_A,
     ok: true,
     mode: "from_checkpoint",
+    fullBecause: null,
     checkpointSequence: 3,
     integrity: { valid: true, brokenAt: null },
     signatures: { valid: true, checked: 4, results: [], unresolvedFingerprints: [] },
     ...over,
-  } as ChainVerificationReport;
+  };
 }
 
 function anchors(over: Partial<AuditAnchorReport> = {}): AuditAnchorReport {
@@ -438,6 +443,29 @@ describe("integrityVerdictPayload", () => {
 });
 
 describe("formatIntegrityProof", () => {
+  // ADR-0371: `mode: "full"` alone cannot separate a caller who asked for a fold from genesis from
+  // a bounded pass that *refused* its anchor, and the second is the one an operator must act on.
+  // The key and not the prose `formatChainVerification` prints: the key indexes
+  // `CHAIN_FULL_REASON_PHRASES`, so the two cannot diverge, and this line is the one a deployment
+  // greps.
+  it("names why a pass folded from genesis, beside the count it examined", () => {
+    const text = formatIntegrityProof(
+      report({
+        chain: chainOk({ mode: "full", fullBecause: "anchor_unverified", checkpointSequence: null }),
+      }),
+    );
+    expect(text).toContain("chain [full: anchor_unverified]");
+    expect(text).toContain("4 checked");
+  });
+
+  it("prints no reason clause for a bounded pass, which has none", () => {
+    const text = formatIntegrityProof(report({ chain: chainOk() }));
+    expect(text).toContain("chain [from_checkpoint]:");
+    // Over the enum rather than one hand-picked reason, so a fifth member cannot leak into this
+    // line unnoticed.
+    for (const reason of CHAIN_FULL_REASONS) expect(text).not.toContain(reason);
+  });
+
   it("leads with the verdict and summarizes both halves", () => {
     const text = formatIntegrityProof(report());
     expect(text).toContain("VERIFIED");

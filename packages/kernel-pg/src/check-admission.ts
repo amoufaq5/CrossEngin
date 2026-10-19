@@ -38,8 +38,8 @@ import {
  * deployment and diverge on exactly the one that has drifted. Measured over the catalog:
  *
  * ```
- *   777  column-level CHECKs the catalog emits
- *   287  of them are value sets (`col IN (…)`), over 123 tables, 242 distinct value lists
+ *   781  column-level CHECKs the catalog emits
+ *   288  of them are value sets (`col IN (…)`), over 123 tables, 244 distinct value lists
  *   263  are a bounded range (`col >= N`, `col BETWEEN A AND B`, ± an `IS NULL OR` prefix)
  *   213  are a pattern match, whose admitted set is not enumerable
  * ```
@@ -84,12 +84,12 @@ import {
  *
  * And it says nothing about whether the catalog's own value list is the one the *contract* declares.
  * That is the upstream half of "does the live catalog admit what this binary emits" and it is
- * deliberately out of scope here, on a measurement: of the 287 value sets, 258 match a workspace
+ * deliberately out of scope here, on a measurement: of the 288 value sets, 258 match a workspace
  * `as const` array exactly, 17 of those match more than one array, and the 5 that have only a strict
  * superset include two deliberate narrowings (`gateway_idempotency_records.method` is mutating
  * methods only; a digest row cannot carry `immediate` or `never`) that are indistinguishable from a
  * stale one without a per-column declaration. A derived static rule would therefore report
- * deliberate narrowings as defects, and a declared one is 287 hand-written links — ADR-0288's shape.
+ * deliberate narrowings as defects, and a declared one is 288 hand-written links — ADR-0288's shape.
  * See the ADR's open questions, which carry the two real findings that census turned up.
  */
 

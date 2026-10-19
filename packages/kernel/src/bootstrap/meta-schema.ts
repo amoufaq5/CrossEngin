@@ -11305,6 +11305,20 @@ export const META_FORENSIC_CHAIN_CHECKPOINTS: TableDefinition = {
       default: "'sha256'",
       check: "algorithm IN ('sha256', 'sha512', 'blake3')",
     },
+    // How this anchor came to be trusted (ADR-0371). A checkpoint-bounded verification folds only
+    // the entries after the anchor and takes the prefix on trust — `verifyChainFromCheckpoint`
+    // says so — and the one writer in the workspace used to read the tail and anchor it, verifying
+    // nothing, so that premise was false for every checkpoint any deployment held.
+    //
+    // Nullable with no default, for `tenant_tombstones.record_storage`'s reason (ADR-0351): every
+    // row written before this column predates the question, and all three values are claims, so
+    // defaulting one would assert something about rows whose writer asserted nothing. NULL and
+    // `unverified` both refuse to anchor a bounded proof; they differ in what an operator is told.
+    {
+      name: "provenance",
+      type: "TEXT",
+      check: "provenance IN ('verified_full', 'verified_suffix', 'unverified')",
+    },
     { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
   ],
   primaryKey: ["id"],

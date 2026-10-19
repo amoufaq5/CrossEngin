@@ -6,6 +6,9 @@ import {
   LOG_KINDS,
   HASH_ALGORITHMS,
   ChainCheckpointSchema,
+  CHECKPOINT_PROVENANCES,
+  CHECKPOINT_PROVENANCE_ANCHORS_A_BOUNDED_PROOF,
+  checkpointAnchorsBoundedProof,
   lastEntryHash,
   nextSequenceNumber,
   verifyChainIntegrity,
@@ -140,6 +143,73 @@ describe("ChainCheckpointSchema", () => {
         algorithm: "sha256",
       }),
     ).not.toThrow();
+  });
+
+  it("accepts a checkpoint with no provenance, and leaves it absent rather than defaulting one", () => {
+    const parsed = ChainCheckpointSchema.parse({
+      sequenceNumber: 100,
+      rootHash: HASH_A,
+      checkpointedAt: "2026-05-14T10:00:00Z",
+      checkpointedBy: "u-1",
+    });
+    // No default: all three provenances are claims, so defaulting one would assert something about
+    // every row written before the field existed (ADR-0351's reason for `record_storage`).
+    expect(parsed.provenance).toBeUndefined();
+    expect("provenance" in parsed).toBe(false);
+  });
+
+  it("round-trips each provenance and rejects one outside the enum", () => {
+    for (const p of CHECKPOINT_PROVENANCES) {
+      expect(
+        ChainCheckpointSchema.parse({
+          sequenceNumber: 1,
+          rootHash: HASH_A,
+          checkpointedAt: "2026-05-14T10:00:00Z",
+          checkpointedBy: "u-1",
+          provenance: p,
+        }).provenance,
+      ).toBe(p);
+    }
+    expect(() =>
+      ChainCheckpointSchema.parse({
+        sequenceNumber: 1,
+        rootHash: HASH_A,
+        checkpointedAt: "2026-05-14T10:00:00Z",
+        checkpointedBy: "u-1",
+        provenance: "verified",
+      }),
+    ).toThrow();
+  });
+});
+
+describe("checkpoint provenance", () => {
+  it("has three members", () => {
+    expect(CHECKPOINT_PROVENANCES).toEqual(["verified_full", "verified_suffix", "unverified"]);
+  });
+
+  it("answers for every member, so a fourth cannot inherit a branch", () => {
+    // Derived from the enum rather than restated: a member added to the union and not to the map is
+    // a compile error, and a member added to both without a decision fails here.
+    for (const p of CHECKPOINT_PROVENANCES) {
+      expect(typeof CHECKPOINT_PROVENANCE_ANCHORS_A_BOUNDED_PROOF[p]).toBe("boolean");
+    }
+    expect(Object.keys(CHECKPOINT_PROVENANCE_ANCHORS_A_BOUNDED_PROOF).sort()).toEqual(
+      [...CHECKPOINT_PROVENANCES].sort(),
+    );
+  });
+
+  it("admits exactly the two verified provenances as anchors", () => {
+    const anchoring = CHECKPOINT_PROVENANCES.filter((p) => checkpointAnchorsBoundedProof(p));
+    expect(anchoring).toEqual(["verified_full", "verified_suffix"]);
+  });
+
+  it("refuses an absent provenance, which is a gap and not the `unverified` claim", () => {
+    // Both answer false — a prefix nothing can vouch for is not a prefix to trust — and they are
+    // different facts: `unverified` is a row stating nothing checked it, absent is a row that does
+    // not cover the question. A caller that must tell them apart reads `provenance` itself, which
+    // is why this function does not collapse them into one input value (ADR-0331).
+    expect(checkpointAnchorsBoundedProof(undefined)).toBe(false);
+    expect(checkpointAnchorsBoundedProof("unverified")).toBe(false);
   });
 });
 

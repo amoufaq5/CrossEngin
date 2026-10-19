@@ -20,9 +20,10 @@ import {
   type ChainAppendInput,
 } from "./records.js";
 import {
-  checkpointFromChain,
+  checkpointFromTail,
   verifyChainSuffix,
   type ChainSuffixVerdict,
+  type ChainTail,
   type CheckpointMeta,
 } from "./checkpoint.js";
 import type { ChainSigner } from "./signer.js";
@@ -32,11 +33,6 @@ const TABLE = "forensic_chain_entries";
 
 const READ_COLUMNS = `sequence_number, kind, recorded_at, actor_reference, payload_sha256,
   payload_size_bytes, prior_entry_hash, entry_hash, signing_key_fingerprint, signature`;
-
-export interface ChainTail {
-  readonly sequenceNumber: number;
-  readonly entryHash: string;
-}
 
 export interface PostgresChainLogStoreOptions {
   readonly schema?: string;
@@ -120,19 +116,36 @@ export class PostgresChainLogReader {
   }
 
   /**
-   * Builds a `ChainCheckpoint` at the current chain tail. It does NOT persist — hand the result to a
-   * `PostgresChainCheckpointStore.record` to durably anchor it. Throws on an empty chain (nothing to anchor).
+   * Builds a `ChainCheckpoint` at the current chain tail, for a caller that holds no tail of its own.
+   * It does NOT persist — hand the result to a `PostgresChainCheckpointStore.record` to durably
+   * anchor it. Throws on an empty chain (nothing to anchor).
+   *
+   * It reads the **tail** (one row) and not the chain. That is not only cheaper: a caller that has
+   * just verified a chain must anchor at the tail its verification covered, so it should build from
+   * that tail through `checkpointFromTail` rather than call this and have a second read choose the
+   * sequence — which is what stamped entries appended during a verification as verified (ADR-0371).
+   * This method is for the caller with nothing verified and nothing in hand, and `provenance` is
+   * required precisely so that caller has to say so.
+   *
+   * `provenance` is carried from the caller and deliberately **not** derived here: this class holds
+   * no keys — by design, so that an auditor can read a chain it cannot write — and the hash links
+   * alone cannot earn one, since `verifyChainIntegrity` compares a stored `priorEntryHash` against a
+   * stored `entryHash` and recomputes neither. Only the signature binds an entry to its content.
    */
   async createCheckpoint(
     tenantId: string | null,
-    meta: { checkpointedBy: string } & Partial<CheckpointMeta>,
+    meta: Pick<CheckpointMeta, "checkpointedBy" | "provenance"> & Partial<CheckpointMeta>,
   ): Promise<ChainCheckpoint> {
-    const entries = await this.loadChain(tenantId);
-    return checkpointFromChain(entries, {
+    const tail = await this.tail(tenantId);
+    if (tail === null) {
+      throw new Error("cannot checkpoint an empty chain");
+    }
+    return checkpointFromTail(tail, {
       checkpointedBy: meta.checkpointedBy,
       checkpointedAt: meta.checkpointedAt ?? new Date().toISOString(),
       externalAnchorReference: meta.externalAnchorReference,
       algorithm: meta.algorithm,
+      provenance: meta.provenance,
     });
   }
 

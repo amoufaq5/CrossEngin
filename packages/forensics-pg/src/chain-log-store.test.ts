@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { InMemoryKeyStore } from "@crossengin/crypto";
 import type { PgConnection } from "@crossengin/kernel-pg";
 import {
@@ -8,6 +8,7 @@ import {
 } from "@crossengin/forensics";
 
 import { PostgresChainLogReader, PostgresChainLogStore, advisoryKeyFor } from "./chain-log-store.js";
+import { PostgresChainCheckpointStore } from "./checkpoint-store.js";
 import { keyStoreChainSigner } from "./signer.js";
 import { fakeChainPg } from "./test-fakes.js";
 import { SET_PLATFORM_AUDIT_WRITE_SQL, SET_TENANT_CONTEXT_SQL } from "./tenant-context.js";
@@ -136,7 +137,14 @@ describe("PostgresChainLogStore checkpoint anchoring", () => {
     await append(store, TENANT_A, 1);
     const e2 = await append(store, TENANT_A, 2);
 
-    const cp = await store.createCheckpoint(TENANT_A, { checkpointedBy: "auditor", checkpointedAt: AT });
+    const cp = await store.createCheckpoint(TENANT_A, {
+      checkpointedBy: "auditor",
+      checkpointedAt: AT,
+      // A hand-placed anchor has no verification behind it, and `provenance` is required so it has
+      // to say so rather than leaving the field absent — which on a stored row means an older
+      // binary wrote it (ADR-0331). This is `unverified`'s producer.
+      provenance: "unverified",
+    });
     expect(cp.sequenceNumber).toBe(2);
     expect(cp.rootHash).toBe(e2.entryHash);
 
@@ -155,9 +163,65 @@ describe("PostgresChainLogStore checkpoint anchoring", () => {
 
   it("createCheckpoint throws on an empty chain", async () => {
     const { store } = await newStore();
-    await expect(store.createCheckpoint(TENANT_A, { checkpointedBy: "auditor" })).rejects.toThrow(
-      /empty chain/,
-    );
+    await expect(
+      store.createCheckpoint(TENANT_A, { checkpointedBy: "auditor", provenance: "unverified" }),
+    ).rejects.toThrow(/empty chain/);
+  });
+
+  it("createCheckpoint reads the tail and not the whole chain", async () => {
+    // ADR-0371: it used to `loadChain`, so a checkpoint pass cost a third full read of the chain
+    // beside the verification's two — and worse, that read is what chose the anchored sequence,
+    // which is why the scheduler builds from `checkpointFromTail` over a tail it holds itself.
+    // Pinned on which read it makes, because the answer is identical either way:
+    // `lastEntryHash(entries)` on a non-empty chain IS the tail row's `entry_hash`, so no assertion
+    // on the resulting checkpoint can tell the two apart.
+    const { store } = await newStore();
+    for (let i = 0; i < 4; i++) await append(store, TENANT_A, i);
+    const loadChain = vi.spyOn(store, "loadChain");
+    const tail = vi.spyOn(store, "tail");
+
+    const cp = await store.createCheckpoint(TENANT_A, {
+      checkpointedBy: "auditor",
+      provenance: "unverified",
+    });
+
+    expect(tail).toHaveBeenCalledTimes(1);
+    expect(tail).toHaveBeenCalledWith(TENANT_A);
+    expect(loadChain).not.toHaveBeenCalled();
+    expect(cp.sequenceNumber).toBe(3);
+  });
+
+  it("carries a provenance from createCheckpoint all the way to what latest() answers", async () => {
+    // The one-line thread `createCheckpoint` -> `checkpointFromTail` -> `record` -> `latest` is
+    // what a bounded verification's whole soundness rests on (ADR-0371), and before this it was
+    // covered by nothing: each half had its own test and no test crossed the seam. It is also what
+    // makes `fakeChainPg`'s modelling of the column load-bearing — the fake used to read seven
+    // parameters of this statement and the eighth was dropped on the floor, which `assertBindArity`
+    // cannot see because the statement and the array agree on eight.
+    const keyStore = new InMemoryKeyStore();
+    const record = await keyStore.createKey({
+      tenantId: null,
+      algorithm: "ed25519",
+      purpose: "evidence_sealing",
+    });
+    const conn = fakeChainPg();
+    const store = new PostgresChainLogStore(conn, keyStoreChainSigner(keyStore, record, null));
+    const checkpoints = new PostgresChainCheckpointStore(conn);
+
+    await append(store, TENANT_A, 0);
+    const tail = await append(store, TENANT_A, 1);
+
+    const cp = await store.createCheckpoint(TENANT_A, {
+      checkpointedBy: "auditor",
+      checkpointedAt: AT,
+      provenance: "verified_full",
+    });
+    expect(cp.provenance).toBe("verified_full");
+    await checkpoints.record(TENANT_A, cp);
+
+    const stored = await checkpoints.latest(TENANT_A);
+    expect(stored?.provenance).toBe("verified_full");
+    expect(stored?.rootHash).toBe(tail.entryHash);
   });
 
   it("verifyFromCheckpoint reports a break when an after-checkpoint entry is tampered", async () => {
@@ -172,7 +236,14 @@ describe("PostgresChainLogStore checkpoint anchoring", () => {
 
     await append(store, TENANT_A, 0);
     await append(store, TENANT_A, 1);
-    const cp = await store.createCheckpoint(TENANT_A, { checkpointedBy: "auditor", checkpointedAt: AT });
+    const cp = await store.createCheckpoint(TENANT_A, {
+      checkpointedBy: "auditor",
+      checkpointedAt: AT,
+      // A hand-placed anchor has no verification behind it, and `provenance` is required so it has
+      // to say so rather than leaving the field absent — which on a stored row means an older
+      // binary wrote it (ADR-0331). This is `unverified`'s producer.
+      provenance: "unverified",
+    });
     await append(store, TENANT_A, 2);
     await append(store, TENANT_A, 3);
 
@@ -213,7 +284,11 @@ describe("PostgresChainLogReader (signer-free)", () => {
     await append(store, TENANT_A, 0);
     await append(store, TENANT_A, 1);
     const reader: PostgresChainLogReader = store;
-    const cp = await reader.createCheckpoint(TENANT_A, { checkpointedBy: "auditor", checkpointedAt: AT });
+    const cp = await reader.createCheckpoint(TENANT_A, {
+      checkpointedBy: "auditor",
+      checkpointedAt: AT,
+      provenance: "unverified",
+    });
     expect(cp.sequenceNumber).toBe(1);
     expect(await reader.verifyFromCheckpoint(TENANT_A, cp)).toEqual({ valid: true, brokenAt: null });
   });

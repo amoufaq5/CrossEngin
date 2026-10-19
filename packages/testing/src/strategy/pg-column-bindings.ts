@@ -1,11 +1,11 @@
 /**
  * Which workspace symbol does a store actually write into a catalogued column?
  *
- * ADR-0353 declared, for each of the 287 catalogued value-set CHECKs, the contract domain that
+ * ADR-0353 declared, for each of the 288 catalogued value-set CHECKs, the contract domain that
  * governs it, and `mirrors` asserts the two enumerate the same members. That is the right assertion
  * and it cannot see the question this module asks. A declaration says *which* domain governs a
  * column, and a member comparison is blind to which: two constants spelling one domain are
- * interchangeable to it, so a declaration adjudicated by reading — which is how all 287 were
+ * interchangeable to it, so a declaration adjudicated by reading — which is how all 288 were
  * written, and 19 of them required reading which record each table stores — can name the wrong
  * symbol and pass. That was ADR-0353's own first open end.
  *
@@ -16,7 +16,7 @@
  *
  * It is a static scan, like its siblings, and reads the real workspace from disk. The honest limit
  * is `UNRESOLVED_BINDING_GAPS` plus the floor on how many columns are checked: a column with no
- * reachable writer cannot be checked at all, and 164 of the 287 sit on tables
+ * reachable writer cannot be checked at all, and 164 of the 288 sit on tables
  * `pg-storeless-tables.ts` already declares writerless.
  */
 import { z } from "zod";

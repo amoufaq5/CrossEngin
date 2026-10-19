@@ -411,8 +411,15 @@ function isEmptyScope(report: IntegrityProofReport): boolean {
 export function formatIntegrityProof(report: IntegrityProofReport): string {
   const scope = report.scope ?? "platform";
   const lines = [`audit integrity for ${scope}: ${report.verdict.toUpperCase()}`];
+  // The mode alone cannot say whether a full fold was asked for or was a bounded pass refusing its
+  // anchor, and the second is the finding. This is the only consumer that runs unattended, so the
+  // reason is named here or nowhere; a bounded pass carries none and reads exactly as before.
+  const anchorage =
+    report.chain.fullBecause === null
+      ? report.chain.mode
+      : `${report.chain.mode}: ${report.chain.fullBecause}`;
   lines.push(
-    `  chain [${report.chain.mode}]: integrity ${report.chain.integrity.valid ? "valid" : `BROKEN at ${String(report.chain.integrity.brokenAt)}`}` +
+    `  chain [${anchorage}]: integrity ${report.chain.integrity.valid ? "valid" : `BROKEN at ${String(report.chain.integrity.brokenAt)}`}` +
       `, signatures ${report.chain.signatures.valid ? "valid" : "INVALID"}` +
       ` (${report.chain.signatures.checked.toString()} checked)`,
   );

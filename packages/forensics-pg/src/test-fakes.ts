@@ -2,10 +2,33 @@ import { assertBindArity } from "@crossengin/testing";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 
 const CHECKPOINTS = "forensic_chain_checkpoints";
+const ENTRIES = "forensic_chain_entries";
 
 function paramIndex(sql: string, re: RegExp): number | null {
   const m = re.exec(sql);
   return m === null ? Number.NaN : Number(m[1]) - 1;
+}
+
+/**
+ * Refuses an `INSERT` binding more parameters than this fake's row model reads, which is the one
+ * thing `assertBindArity` structurally cannot see: that fence compares the statement's `$n` set
+ * against the supplied array, so a column added to both agrees on arity and is then **dropped on the
+ * floor here** (ADR-0371). That is ADR-0333's `fakeCertificationPg` hazard — a fake that silently
+ * ignores a column is worse than no fake, because a round-trip test is answered from this side
+ * table and passes while the real database stores nothing. Per branch, because the two statements
+ * bind different counts, and a bare total would pass whichever branch happened to match.
+ */
+function assertModelsEveryParam(
+  params: readonly unknown[],
+  modelled: number,
+  table: string,
+): void {
+  if (params.length !== modelled) {
+    throw new Error(
+      `fakeChainPg models ${modelled.toString()} columns of ${table} and the statement bound ` +
+        `${params.length.toString()}: model the new column here, or this fake drops it silently`,
+    );
+  }
 }
 
 /**
@@ -66,6 +89,7 @@ export function fakeChainPg(): PgConnection {
         const refusal = writeRefusal((p[0] as string | null) ?? null);
         if (refusal !== null) throw new Error(refusal);
         if (sql.includes(CHECKPOINTS)) {
+          assertModelsEveryParam(p, 8, CHECKPOINTS);
           const tenant = (p[0] as string | null) ?? null;
           const seq = Number(p[1]);
           const exists = checkpointRows.some(
@@ -80,10 +104,12 @@ export function fakeChainPg(): PgConnection {
               checkpointed_by: p[4],
               external_anchor_reference: p[5] ?? null,
               algorithm: p[6],
+              provenance: p[7] ?? null,
             });
           }
           return { rows: [], rowCount: exists ? 0 : 1 };
         }
+        assertModelsEveryParam(p, 11, ENTRIES);
         entryRows.push({
           tenant_id: p[0] ?? null,
           sequence_number: p[1],

@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 365 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 366 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 19,506 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 19,576 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -661,7 +661,7 @@ type errors.
   domains sit in packages kernel can import without a cycle — and is refused for a third: **it cannot
   be total**, since the other 20 are in four packages that depend on kernel and twelve of them in an *app*,
   so the fence is needed for the remainder anyway and a partial elimination plus a fence is more
-  machinery than a fence. So `pg-value-set-domains.ts` is the sixth strategy rule and all 287
+  machinery than a fence. So `pg-value-set-domains.ts` is the sixth strategy rule and all 288
   catalogued value-set CHECKs declare their domain, `mirrors` asserting **equality** in both
   directions, with the exception surface a measured six — 1 `narrows` carrying the symbol that
   enforces it, 5 `catalog_only`, every one a table already declared writerless for an independent
@@ -1538,6 +1538,114 @@ type errors.
   `created_by=…a001 | approved_by=…a002` — two distinct principals, which is the attribution the
   surface exists for and had never once recorded.
 
+  ADR-0371 is the second increment that measuring register P0.3 produced, and the class is **a
+  bounded check that trusts an anchor whose one writer verifies nothing**. `verifyChainFromCheckpoint`
+  states its own soundness condition in its own doc comment — *"Trust in the anchor comes from the
+  earlier verification that produced it (ADR-0252/0255); this does not re-fold the prefix"* — and
+  that premise was false for every checkpoint any deployment has ever held: `CheckpointScheduler`
+  reads the chain tail and anchors it, and `createCheckpoint` and `checkpointStore.record` have
+  **exactly one non-test caller each**, both in that file, so there was no verified path the
+  scheduler was an unsound alternative to.
+  Three facts compose with it. `fromCheckpoint` **defaults to true**; `verifyChainSuffix([])` and
+  `verifyChainSignatures([])` are both vacuously valid, so `ok = integrity.valid &&
+  signatures.valid` is true over zero entries; and **the signature is the only check in the stack
+  that binds an entry's stored columns to its content** — both folds compare `priorEntryHash`
+  against the previous row's `entryHash`, stored column against stored column, and
+  `hashChainStep`/`canonicalEntryBytes` occur in exactly two places in the workspace, the write path
+  and `verifyChainEntrySignature`. The anchor half binds the *row* to `payload_sha256` rather than
+  `payload_sha256` to the signed bytes, which `audit-anchor.ts` says itself: *"a chain whose entries
+  were forged wholesale would satisfy this check alone, because the forged entry would commit to the
+  forged row."*
+  Live and unprompted on a real 344-entry chain, through the shipped subcommand: `[full]` answers
+  **FAILED, 344 checked, seq 323–325 `bad_signature`** and `[from checkpoint 337]` answers **OK, 6
+  checked** — the same chain at the same moment, and the mode the proof uses by default is the one
+  that answers OK. One pass of the real scheduler at the tail of a clean chain then takes the proof
+  to `sigs.CHECKED=0, chain.ok=true, verdict=verified`. And the forgery settles it: an Article 17
+  row at sequence 4, below the checkpoint at 7, rewritten from `platform.tenant_delete_refused` to
+  `platform.tenant_deleted` with the entry's `payload_sha256` made consistent and the hashes
+  untouched, reads **`compromised` in full mode and `verified` in the default one** — with
+  `anchors{verified=7 tampered=0}` in **both**, so the anchor half is not a mitigation but the check
+  the attack is shaped to satisfy. The `UPDATE` is `UPDATE 1` as the non-owner `serving` role with
+  tenant context, that table's isolation policy being `ALL`-scope. And the steady state is worse
+  than one missed window: the checkpoint scheduler starts immediately before the proof and both
+  default to the same hour, so an hour's entries are **anchored before anything examines them** and
+  the suffix the proof sees is whatever was written between the two passes.
+  The fix is that **the thing that writes the anchor is the thing that verifies it**, and the
+  injected verifier is `verifyChainFromCheckpoint` itself, which makes the induction self-healing: a
+  new chain folds in full and anchors `verified_full`, every pass after folds only the new suffix and
+  anchors `verified_suffix`, and a deployment whose legacy anchor carries no provenance pays one full
+  fold and is bounded from then on — **provided its chain gains an entry**, because `record` is
+  `ON CONFLICT … DO NOTHING` so a legacy row sitting *at* the tail is never replaced, which makes an
+  idle *tenant* chain re-fold every pass until something appends. Simply
+  defaulting `fromCheckpoint` to `false` was refused on measurement — Ed25519 verify is **152 µs**
+  here, so a full fold is 15.2 s of signature CPU per pass per scope at 100k entries and 152 s at 1M,
+  with the whole chain in memory. That figure was also *understated* when it was taken, because
+  `foldFromGenesis` loaded the chain **twice** (once through `reader.verify`, once through
+  `verifyStoredChainSignatures`); it loads once now and runs both pure checks over that array, so the
+  whole pass went from three full chain loads per scope to one.
+  **And the first draft of that fix reproduced the defect it closes, which an adversarial pass
+  caught.** The pass read the tail, verified, and then called `createCheckpoint`, which issued its
+  own `loadChain` and anchored at the **then**-current tail — so every entry committed during the
+  verification was stamped `verified_full` by a fold that never saw it, and skipped forever by every
+  bounded pass after it, since those start at `checkpoint.sequenceNumber + 1`. The same class,
+  narrowed from *the whole prefix* to *one band per pass* and reopened on every pass, in a window
+  that is continuously written on a serving deployment (every audited request anchors a row,
+  ADR-0286) and is the whole full fold on the first post-upgrade pass. So `checkpointFromChain` is
+  **`checkpointFromTail`** and the scheduler anchors at the tail it read *before* verifying, which is
+  conservative in the only safe direction — a row appended in the window is simply not covered yet.
+  The replacement is exact and that is why it needed a test about *which read is made*:
+  `lastEntryHash(entries)` on a non-empty chain **is** the tail row's `entry_hash`, so no assertion
+  on the resulting checkpoint can tell the two apart. Three full chain loads per scope per pass
+  became one, and the class doc comment had said *"records a `ChainCheckpoint` at that tail"* all
+  along — accurate prose beside code that did something else.
+  **And the live verification found a defect nobody had read**, which is the increment's second real
+  finding: `UNIQUE (tenant_id, sequence_number)` **does not constrain the platform scope**, because
+  `tenant_id` is nullable with NULL meaning platform (ADR-0331) and SQL treats NULLs as distinct — so
+  `(NULL, 3)` twice is legal, `ON CONFLICT … DO NOTHING` never fires for a platform checkpoint, and
+  the append-one-row-per-sequence design does not hold there. Measured: two real rows at platform
+  sequence 3, 546 ms apart, `count(distinct id) = 2`. `latest()` ordered by `sequence_number DESC
+  LIMIT 1` with **no tiebreaker** and returned the **older** of them 10 runs out of 10 — the
+  fail-open direction, since a stale `verified_full` masking a later `unverified` licenses exactly
+  the skip the provenance exists to refuse. Both ordered reads carry `checkpointed_at DESC, id DESC`
+  now (untiebroken `verified_full` 10/10 → tiebroken `verified_suffix` 10/10 on the same two rows),
+  and it also **inverts the healing condition for that one scope**: the idle *tenant* chain re-folds
+  because its anchor is never replaced, while the idle *platform* chain heals and grows without
+  bound. Two opposite failures from one `DO NOTHING`. The constraint itself is the top open question
+  — `UNIQUE NULLS NOT DISTINCT` is PG15 against a floor of 14, and a partial unique index cannot be
+  created while the duplicates every such deployment already holds are there.
+  Three things were sharper than the defect. **Swapping two `start()` lines in `node.ts` would have
+  made it accidentally sound** — run the proof first and the hour's entries are verified before they
+  are anchored — and it is refused on three measurements: the two `intervalMs` are **independent
+  configs**, `--checkpoint-config` **mounts with no proof at all**, and soundness would become a
+  property of a start order in a third file, invisible at both sites and to `verify-chain
+  --from-checkpoint` run by hand. **The live false `compromised` was ADR-0358's hazard with a live
+  instance**: fingerprint `04ae9a8e5b42e0` signed exactly 323–325 in a 39 ms burst, its registered
+  public key is *self-consistent* (its own fingerprint matches the stored column, verified), and the
+  Ed25519 verification still fails — a well-formed but mismatched `--audit-chain-config` pair, signing
+  with one half and announcing the other, from an ordinary boot that said nothing, which on the full
+  path is a paging `sev1` at a 100% false-positive rate. So **the two findings compose: one
+  manufactured a false positive and the other buried it**, and `ed25519PublicKeyFromSeed` had existed
+  since ADR-0358 for exactly this with no caller on that path. **And a figure this increment added
+  to the durable record was reverted out of it, because the argument for it expired inside the same
+  increment.** `StoredIntegrityReportSchema.chain` gained a `signaturesChecked` on the stated ground
+  that a bounded pass over an unchanged tail reports `signaturesValid: true` having examined nothing
+  — true before the fix and *eliminated by it*, since `mode: "from_checkpoint"` is now reachable only
+  when the anchor is admitted, so `checked: 0` beside it is the healthy steady state and the schema
+  comment calling zero "the alarming value" would have shipped as advice to treat the normal case as
+  a finding. It was also in the wrong place: `record()` stores the report whole while `payload_sha256`
+  is derived from `canonicalStoredReport`, which excluded the field — so the stored report stopped
+  being byte-identical to the committed payload and `toVerdictView`'s instruction that the two *"let
+  a reader confirm the row's content **is** the committed content"* was false for every row the binary
+  would write. Reverting restored that parity and retired three further findings with it. What is a
+  finding is the **reason**, and it reached nothing that runs unattended: `fullBecause` is rendered on
+  the hourly `onPass` line and by `formatIntegrityProof` now, with the count beside it, and **none of
+  the three is in the durable record** — one rule, that a diagnostic belongs where diagnostics are
+  read while the record carries only what the digest covers. And the `recordVerdict` comment
+  arguing that a verdict belongs in the chain because *"editing it or removing an earlier one breaks
+  a link"* is **false in its mechanism**: editing an entry breaks no link, only the signature notices
+  — this file's own recurring documentation class, in the comment justifying where the record of
+  verification is kept.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -1789,7 +1897,7 @@ packages exist at only one layer, noted below where that is true.
   existing row violates the declaration. A name the plan would have to *predict*,
   `ChooseConstraintName`'s numeric suffix inside a shared family, is never written and reads
   `column_check_name_unavailable` **however the proof came back**, since that reason is about the
-  identifier and not the rows. Costs one probe per declared column check (**777** as of ADR-0352,
+  identifier and not the rows. Costs one probe per declared column check (**781** as of ADR-0371,
   ~850 ms, flat in row count) plus, since ADR-0363, one catalog read and one violation count per
   *declared-CHECK difference* — a converged database has none and pays nothing.
   **The plan asks Postgres whether the declaration widens, and the rows only for the diagnosis**
@@ -3415,6 +3523,16 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   sealed/retention/destruction lifecycle, chain of custody with sha256-verified transfers,
   legal holds with separation of duties, e-discovery requests, court-admissible
   attestations.
+  **`ChainCheckpoint.provenance` is the fact a bounded verification rests on** (ADR-0371), and the
+  one place that decides what it buys is `CHECKPOINT_PROVENANCE_ANCHORS_A_BOUNDED_PROOF`, a total
+  map so a fourth provenance is a compile error rather than a value inheriting whichever answer an
+  `if`-chain ended on. `checkpointAnchorsBoundedProof(provenance | undefined)` is the only reader a
+  caller wants: it answers `false` for **absent** as well as for `unverified`, because a prefix
+  nothing can vouch for is not a prefix to trust — and the two stay distinct in the data for
+  ADR-0331's reason, since `unverified` is a row *stating* that nothing checked it while absent is a
+  row that does not cover the question, and the remedies differ. A caller that must tell them apart
+  reads `provenance` itself, which is why the function takes the optional value rather than
+  collapsing both into one input.
 - **`forensics-pg`** — the append-only chain in Postgres: an advisory-lock-serialized chain
   log writer, Ed25519 entry signer, chain-suffix verification and periodic checkpoints.
   `appendWithin(tx, …)` appends into a caller's transaction, so a record and its anchor
@@ -3433,6 +3551,45 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   **`scopeFilter` is the idiom the rest of the repo copies** — ADR-0333 swept it into fourteen
   store classes across seven packages, with a strict and an inclusive spelling chosen per table.
   Six copies exist for want of a shared home; it belongs in `kernel-pg`'s `connection.ts`.
+  **A checkpoint carries the provenance of what verified its prefix, and the store will not promote
+  one** (ADR-0371). `PostgresChainCheckpointStore.record` binds the column and `READ_COLUMNS` — one
+  constant feeding `latest`, `getBySequence` and `listRecent` — carries it back, so all three read
+  paths answer with it. `ON CONFLICT (tenant_id, sequence_number) DO NOTHING` stays, and after this
+  it is a **security property** rather than append-only hygiene: a `DO UPDATE SET provenance =
+  EXCLUDED.provenance` arm would let an `unverified` anchor become `verified_full` with nothing
+  having verified the prefix, which is ADR-0371's own defect by another route and reachable by
+  anyone who can write a checkpoint at all — a better-verified anchor is a **new** checkpoint at the
+  new tail. `rowToCheckpoint` hands a stored value this binary does not recognise to
+  `ChainCheckpointSchema` to **refuse** rather than coercing it to `undefined`, because coercing
+  would read a *newer* claim as the gap that means "predates the column" (ADR-0331 failing in the
+  direction that launders an unknown claim into a known one). And `createCheckpoint` **threads** the
+  provenance and deliberately does not derive it, with the reason at the method: the class holds the
+  whole chain in hand, so deriving `verified_full` there is tempting and would be ADR-0337's
+  falsely-true control, since `verifyChainIntegrity` compares a stored `priorEntryHash` against a
+  stored `entryHash` and recomputes neither — and this class holds no keys by design, so that an
+  auditor can read a chain it cannot write.
+  **And `checkpointFromTail(tail, meta)` replaces `checkpointFromChain(entries, meta)`** (ADR-0371),
+  which is the critical half of that increment: a caller that verified a chain holds the tail its
+  verification covered and must anchor *there*, where one that re-reads the chain to find a tail
+  anchors past it and stamps the entries appended in between as verified. `ChainTail` moved here from
+  `chain-log-store.ts` for that reason — it is the *input to a checkpoint*, so the two must agree
+  about what an anchor is made of — and the move was free, since it had zero external importers and
+  `index.ts` re-exports both modules with `export *`. The emptiness refusal moved with it to
+  `createCheckpoint`, the one caller that can meet it, because a `ChainTail` **cannot represent an
+  empty chain** (`tailOfChain([])` is `null`) and the builder is left with no failure mode to forget.
+  `createCheckpoint` survives for the caller holding no tail and reads **one row** rather than the
+  chain; `CheckpointMeta.provenance` is required there, so that caller — the only producer of
+  `unverified` — has to say it has nothing to vouch with.
+  **Both ordered reads break a same-sequence tie newest-first** (`NEWEST_AT_ONE_SEQUENCE`,
+  ADR-0371), because `UNIQUE (tenant_id, sequence_number)` does **not** constrain the platform
+  scope: `tenant_id` is nullable, NULL means platform, and SQL treats NULLs as distinct, so
+  `(NULL, 3)` twice is legal and `ON CONFLICT … DO NOTHING` never fires there. Found live — two real
+  rows at one platform sequence, and the untiebroken `ORDER BY sequence_number DESC LIMIT 1` returned
+  the **older** one 10 times out of 10. That is the fail-open order for the one column a bounded
+  proof trusts its prefix on, so newest-first is a correctness fix: a later verdict about a sequence
+  supersedes an earlier one and a mistake falls toward re-folding. Asserted on the recorded SQL,
+  because the fake de-duplicates on `(tenant, sequence)` in its INSERT branch and so cannot hold the
+  two rows the rule is about — slice 1's recorded-SQL-versus-round-trip argument in a second place.
 - **`access-reviews`** — periodic attestation campaigns (SOC 2 / ISO 27001 / HIPAA / PCI /
   GDPR / 21 CFR Part 11): campaigns, scoped items, decisions with attestation kinds and
   four-eyes, exceptions with per-reason duration caps, templates, sealed evidence with
@@ -3808,6 +3965,63 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   get no record — and `recordVerdict` defaults to **true**, so this is a default-on behaviour change
   rather than an opt-in. Verified live end to end: three ticks, three rows, anchored at consecutive
   chain sequences, served by the read route with `anchored: true`.
+  **And `CheckpointScheduler` verifies before it anchors, which it did not** (ADR-0371):
+  `verifyChainFromCheckpoint`'s own doc comment said *"trust in the anchor comes from the earlier
+  verification that produced it"*, and this scheduler — the **only** checkpoint writer in the
+  workspace — read the tail and anchored it, verifying nothing. So the bounded proof's soundness
+  condition was stated in one file and satisfied by none, and because `verifyChainSuffix([])` and
+  `verifyChainSignatures([])` are both vacuously valid, an hourly proof could report `verified` with
+  **zero signatures examined** over a forged prefix. `CheckpointSchedulerOptions.verify` is a
+  **required** seam — an optional verifier defaulting to *do not verify* is the defect restated as a
+  default (ADR-0364) — and it is what forced the `node.ts` wiring to be written rather than
+  remembered, since the compile error named the one call site. The provenance written is **derived
+  from the report's own `mode`** through a module-private total map (`full` → `verified_full`,
+  `from_checkpoint` → `verified_suffix`), never passed in, because a caller who could choose it
+  could assert a verification that never ran; the scheduler deliberately does **not** read the
+  latest checkpoint's provenance itself, which would be a second spelling of the bounded-verify
+  decision in the one place that must hold no opinion about *how* the verification was performed.
+  The tail is resolved **before** the verification, and that ordering is now a **correctness
+  requirement** rather than the error-avoidance convenience its first comment called it: the anchor
+  claims that sequence, and everything at or below it is provably inside what the verification then
+  loaded, so the pass builds the checkpoint with `checkpointFromTail(tail, …)` and makes **no second
+  read**. Letting `createCheckpoint` find a tail afterwards anchors at a *later* sequence, stamping
+  every entry appended during the verification as verified by a fold that never saw it — and since
+  the next bounded pass starts at `checkpoint.sequenceNumber + 1`, that band is skipped forever. The
+  increment's own class, narrowed to one band per pass and reopened on every pass, in a window a
+  serving deployment writes continuously (ADR-0286 anchors a row per audited request). Anchoring at
+  the pre-verify tail is conservative in the only safe direction: a row in the window is not covered
+  *yet*. The old reason survives as the empty-chain skip, for this increment's own vacuity one step
+  round — a full fold over zero entries is vacuously `ok`, so verifying first would report a failure
+  where there is nothing to anchor. `onCheckpoint` fires **outside** the `try`, because a throw from
+  a caller's own callback would otherwise file a recorded anchor as an `error`, which says the
+  opposite of what happened to the database; `checkpointedAt` is resolved **per scope**, so a long
+  pass does not stamp its last scope with the time its first was read; and a pass already in flight
+  makes `runOnce` a no-op returning `[]`, because a full fold is unbounded in the chain's length
+  (152 µs of signature CPU per entry) so a scope that must fold from genesis can outlast an hourly
+  interval and the timer would stack passes on exactly the deployment least able to afford them —
+  cost and not correctness, since a re-`record` at one sequence is a no-op.
+  `refused_unverified` is a fourth outcome carrying the report while a verifier that
+  **throws** stays an `error` — ADR-0322's split, since both withhold the anchor and the difference
+  is what an operator is told: a refusal says the chain did not verify and names what failed, an
+  error says the verification could not be performed and asserts nothing about the chain, and
+  conflating them would report *"this chain is broken"* when the truth is *"the key registry was
+  down"*. `CheckpointLifecycleOptions` takes the `registry` **ingredient** and composes `verify`
+  itself, `buildIntegrityProofLifecycle`'s idiom, because the builder owns both chain stores — so a
+  verification cannot be pointed at a different store than the one being anchored, where a caller
+  supplying its own seam would have to build a second pair at the same schema.
+  **`onRefused` is required where `onCheckpoint` and `onError` are not**, and the asymmetry is the
+  decision: a refusal is the only outcome here that leaves **nothing in the database** — an anchor
+  that is written is its own record, a throw is a condition the next pass meets again, and a refused
+  verification writes no row at all (see the provenance entry for why writing one would be worse). So
+  an optional handler would let a deployment discover that its chain had stopped verifying by never
+  being told. That gap is not closed, only made unmissable: the durable form is the increment's top
+  open question. `fullBecause` reaches the hourly `[integrity-proof]` line and
+  `formatIntegrityProof` too, because a deployment whose anchors cannot be trusted folds from genesis
+  on every pass and still answers `verdict=verified` — so the one standing condition an operator has
+  to act on, and the unbounded cost it carries, was reported nowhere. It is committed to **no** stored
+  record: a diagnostic belongs where diagnostics are read, and the verdict's bytes carry only what
+  the digest covers (committing the reason would need a second domain tag beside
+  `audit_integrity_proof`).
   The escalator declares through the same
   `IncidentDeclarer` the SLO loop uses (ADR-0297), with `CountingIncidentDeclarer` as both the offline
   default and the fallback that keeps the page going out when the record cannot be stored.
@@ -4801,11 +5015,50 @@ proves, so the `replace_column_check` is planned on a populated table too. `proo
 by ADR-0352's general survey and the boot fence over it is what survives; see the `operate-server`
 entry.
 
+**`meta.forensic_chain_checkpoints.provenance` records how the anchor came to be trusted, which is
+the fact a bounded verification rests on and that no checkpoint carried** (ADR-0371). Nullable TEXT
+with a three-value CHECK and **no default**, `record_storage`'s treatment for its reason: every
+checkpoint on disk predates the column and all three values are *claims*, so defaulting one would
+assert that something verified a prefix whose writer asserted nothing — and absent is exactly the
+state `checkpointAnchorsBoundedProof` answers `false` for. **Nothing in a deployment writes
+`unverified`, and the write path obliges a hand-placed anchor to**: `CheckpointMeta.provenance` is
+**required** where the contract field is optional, which is the asymmetry rather than an
+inconsistency — on a stored row absent means *an older binary wrote this*, so a current writer
+permitted to omit it would make a new row indistinguishable from one of those and absent would stop
+meaning what the refusal reads it as meaning (ADR-0331). A caller holding no verification therefore
+refuses **by name** rather than by silence. The scheduler is not that caller: it writes **no row at
+all** for a scope whose verification did not pass, on two costs that compose. `latest()` returns the
+newest row, so an unverified anchor would **mask an older verified one** and convert a bounded
+deployment into a full-folding one on a single bad pass; and `record` is
+`ON CONFLICT … DO NOTHING` on a table ADR-0332 made immutable-by-RLS, so for a **tenant** scope the
+masking would *persist* after the chain was repaired — the later good anchor at that sequence no-ops.
+A transient fault would become a permanent cost whose only remedy is understanding `DO NOTHING` and
+waiting for the chain to grow (ADR-0334's rule). The persistence half does not hold for the platform
+scope, where the conflict arm never fires at all (see below) and a later anchor at one sequence wins
+on the newest-first tiebreaker — so the masking is self-healing there and the refusal rests on the
+first cost alone. So `CHAIN_FULL_REASONS`' `anchor_unverified` is reachable from a hand-placed
+anchor and from no deployment, which is said rather than claimed otherwise, and the gap it leaves —
+a scope that stopped verifying leaves nothing in the database saying so — is why
+`CheckpointSchedulerOptions.onRefused` is **required** while the other two callbacks are not.
+The migration is free for ADR-0358's reason: a CHECK on a
+column the plan is *adding* has no existing rows to validate against, so ADR-0330's
+widening-versus-narrowing problem cannot reach it — measured on the pre-migration cluster as
+**1 planned step, 0 unreconciled, 1 executed, re-plan clean**.
+**And this table's `UNIQUE (tenant_id, sequence_number)` does not constrain the platform scope**
+(ADR-0371): `tenant_id` is nullable with NULL meaning platform (ADR-0331), SQL treats NULLs as
+distinct, so `(NULL, 3)` twice is legal and `ON CONFLICT … DO NOTHING` never fires for a platform
+checkpoint — so an hourly pass writes a fresh row every tick on a table ADR-0332 made append-only,
+and `includePlatform` defaults to true. The reads were given a newest-first tiebreaker because the
+untiebroken order was measured returning the *stale* anchor; the constraint is unfixed, and the
+migration rather than the DDL is the hard part (`UNIQUE NULLS NOT DISTINCT` is PG15 against a floor
+of 14, and a partial unique index on `(sequence_number) WHERE tenant_id IS NULL` cannot be created
+while the duplicates every such deployment already holds are there).
+
 **Every column-level value-set CHECK declares which contract domain governs it** (ADR-0353), in
 `packages/testing/src/strategy/pg-value-set-domains.ts` rather than in the catalog — a ref is a
 string either way, since the kernel cannot import *all* of the packages it would name, so the
 declaration buys nothing by living here and would cost a `ColumnDefinition` field the emitter reads
-nothing from. 287 of them, compared both ways every run. `META_DEPLOYMENTS` is why: its `app_kind`,
+nothing from. 288 of them, compared both ways every run. `META_DEPLOYMENTS` is why: its `app_kind`,
 `environment`, `target` and `strategy` CHECKs were written independently of `DeploymentRecordSchema`
 and **refused four of its seven enum fields**, `target` with no overlap at all, so a store for that
 table could never have inserted a row. They now spell what `@crossengin/deploy` declares — not the
@@ -4976,8 +5229,8 @@ dependency graph cyclic, and reading `kernel/dist` would make the answer depend 
 The sixth is `pg-value-set-domains.ts` (ADR-0353), and it is the **upstream** half of ADR-0352's
 question: whether the catalog's CHECK admits every value the *contract* can emit, which is a property
 of the artifact and so belongs in a test where the other half belongs at boot. `VALUE_SET_DOMAINS`
-declares, for each of the **287** catalogued value-set CHECKs, which workspace domain governs it —
-**281** `mirrors`, **5** `catalog_only`, **1** `narrows` — and `mirrors` asserts **equality**, which
+declares, for each of the **288** catalogued value-set CHECKs, which workspace domain governs it —
+**282** `mirrors`, **5** `catalog_only`, **1** `narrows` — and `mirrors` asserts **equality**, which
 is the whole point: `META_DEPLOYMENTS`' four drifted columns were neither subsets nor supersets of
 `DeploymentRecordSchema` (`target` was *entirely disjoint*), so every nesting test was blind to them.
 The link is declared and not derived because both derivations were measured and refused — an
@@ -5950,7 +6203,7 @@ opened them.
   environment (`deploy`, `feature-flags`, `finops`, the last with five). ADR-0340 found seven
   spellings of the ABAC concept and left them; this is the same shape, now measured, with four
   catalogued columns pointing at one of the five by declaration. **(3)** a table-level `constraints`
-  CHECK is not read — all 287 are column-level today, so a value set written as a table constraint
+  CHECK is not read — all 288 are column-level today, so a value set written as a table constraint
   would be undeclared *and invisible* rather than undeclared and reported. **(4)**
   `auditColumnDefaults` reads a literal default only; `now()` and a cast are out of scope because
   evaluating them means evaluating SQL, which is `check-admission.ts`'s job, and no value-set column
@@ -7394,7 +7647,7 @@ opened them.
   removes the two table-level workarounds it needed. The naming ambiguity that made it look like a
   parser problem is answered by `pg_constraint.conkey` on the probe's own row — Postgres's own parser,
   asked rather than imitated. What it leaves: **one probe per declared column check on every
-  `apply` and drift check** (777 as of ADR-0352)
+  `apply` and drift check** (781 as of ADR-0371)
   (~850 ms, flat in row count, not cacheable across runs); `conkey` cannot express a whole-row `Var`,
   so `CHECK (t IS NOT NULL)` reads as an empty column set and gets the right spelling for the wrong
   reason (nothing in the catalog has one); an unrenderable declared expression marks the pass
@@ -7500,6 +7753,17 @@ by it**.
    deployment default on" cannot be answered without first asking, per flag, whether it serves what
    it mounts. That is the honest shape of the remaining work here — a flag-by-flag measurement with
    a live boot behind each verdict, not a list to paste into `command:`.
+   **And it found ADR-0371, which is the stronger form of the same lesson**: asking whether
+   `--integrity-proof-config` and `--checkpoint-config` should default on found that the second
+   manufactured the anchor the first trusted and verified nothing, so an hourly proof could record
+   `verified` with **zero signatures examined** over a forged prefix. A flag cannot be defaulted on
+   while the thing it records can be vacuously true — so the per-flag question is not only *does it
+   serve what it mounts* but *is what it records a claim*. Both are now defaultable as far as that
+   finding goes, with **one cost to weigh first that the increment measured rather than closed**: a
+   legacy anchor sitting at an *idle* chain's tail is never replaced (`DO NOTHING`), so such a scope
+   re-folds from genesis every pass, and `includePlatform` defaults to true over a chain that holds
+   only escalation rows. At 152 µs of signature CPU per entry that is cheap on a short chain and is
+   15.2 s per pass at 100k. The remaining eleven have not been asked either question.
 4. **An Article 17 request naming one data subject erases the whole tenant.** `subjectIdentifier`
    is required on the submit body and the stored record, `DeletionRunnerOptions.run` has no field
    that could carry it, and `node.ts` calls `deleteTenantAtomically` with
@@ -7626,7 +7890,7 @@ three make the rest honest, cheap or verifiable.
    P2 item 14's third clause, from the other end.)
 3. **No CI, no git hook, no smoke, e2e, load or migration test** — while `strategy/ci.ts` models
    triggers, budgets and a topological sort with no reader. No `.github/workflows`, no
-   `core.hooksPath`, so the eleven rules and 19,506 tests run only when a human types `pnpm -r test`,
+   `core.hooksPath`, so the eleven rules and 19,576 tests run only when a human types `pnpm -r test`,
    and this file's instruction never to use `--no-verify` describes a guardrail that does not
    exist. `operate-web` has **zero tests** against 15 pages and 34 unfenced `fetch` sites — the
    serialized-body boundary that shipped a broken console button for an hour (ADR-0335).
@@ -8041,7 +8305,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 365 records; 286 Accepted, 79 Proposed (the
+title or status change cannot drift. 366 records; 287 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 
