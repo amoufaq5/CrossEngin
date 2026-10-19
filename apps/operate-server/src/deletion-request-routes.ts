@@ -166,6 +166,22 @@ export interface TombstoneAuditLike {
 export interface TombstoneAuditPageLike {
   readonly examined: number;
   readonly findings: readonly TombstoneAuditLike[];
+  /**
+   * Rows the store read and could not represent (ADR-0373). **Required**, and not expressible as a
+   * `TombstoneAuditLike`: that shape carries a reference state and a `verifyStoredEvidence` verdict,
+   * neither of which can be computed for a row nobody could parse.
+   *
+   * Spelled inline the way `stranded`'s reporter row is, so this file still imports no store type —
+   * `kernel-pg`'s `UnreadableRow`, whose identity is the best-effort handle read off the refused row
+   * and is `null` when that column is itself what the contract refused.
+   *
+   * The member was missing from this mirror for one commit, and a missing member on a structural
+   * mirror does not fail to compile — it *discards* the field. So the route answered `clean: true`
+   * over a page that had just reported a proof it could not read, and recorded that claim in the
+   * forensic trail, where the same database state used to reach the `catch` below and 503. Where a
+   * sweep's purpose is to find defective rows, an unreadable row is the finding.
+   */
+  readonly unreadable: readonly { readonly identity: string | null; readonly detail: string }[];
   readonly nextAfterTombstoneId: string | null;
 }
 
@@ -884,6 +900,20 @@ function buildUnprovenHandler(ctx: DeletionRequestRoutesContext): Handler {
       });
     }
     let findings: readonly EvidenceAuditLike[];
+    // THE SAME GAP AS THE SWEEP'S, AND IT IS NOT CLOSED HERE — because it cannot be closed from this
+    // file. `auditCompleted` returns findings alone and sends a row the contract refused to the
+    // *constructor-level* `onUnreadableRequest` the deployment wired (`node.ts` → `console.error`),
+    // so the refusals never reach this handler and `clean` below can read true over a completed
+    // Article 17 request whose record has stopped being readable. ADR-0372-era, not new: the sweep's
+    // copy was a regression because the store started reporting instead of throwing, where this one
+    // has always had a reporter.
+    //
+    // Closing it is a signature change in `@crossengin/tenant-lifecycle-pg` — `auditCompleted`
+    // returning its refusals beside its findings, the way `auditTombstones` now returns a page —
+    // plus its callers. Adding a per-call reporter parameter to the mirror alone would be WORSE than
+    // leaving it: the store would ignore the extra argument, the refusals would still go only to the
+    // constructor's reporter, and this route would report `unreadable: []` — a falsely-true control
+    // where today there is an honest silence (ADR-0337's direction). So it is declared, not papered.
     try {
       findings = await reconciler.auditCompleted(100);
     } catch {
@@ -985,22 +1015,42 @@ function buildTombstoneSweepHandler(ctx: DeletionRequestRoutesContext): Handler 
       });
     }
     const at = (ctx.clock ?? ((): Date => new Date()))().toISOString();
+    // One predicate, two readers. The body's `clean` and the audit row's `status` answer the same
+    // question, and the regression ADR-0373 left here was that only one of them was ever going to be
+    // corrected if the two were spelled separately — so they are not: `clean` is computed once and
+    // the row's status is derived from the same two lengths. A refusal is reported under its own
+    // status rather than folded into `findings`, because the detail beside it reads "0 finding(s)"
+    // and a row claiming findings with none named is a different wrong answer; what matters is that
+    // neither state is `clean`.
+    const clean = page.findings.length === 0 && page.unreadable.length === 0;
     // Recorded even when clean, and recording the *examined* count is the point: "we verified 412
     // proofs and found nothing" is a claim an auditor can use, where the absence of a log line is
-    // not (ADR-0323).
+    // not (ADR-0323). The refusal count is appended rather than replacing the sentence, following
+    // `stranded`: the plain form stays the plain form on the page that really found nothing.
     await record(ctx, {
       tenantId: readerTenant,
       requestId: page.findings[0]?.relatedDeletionRequestId ?? "-",
       principalId: principal.principalId,
       operation: TOMBSTONE_SWEEP_AUDITED_OPERATION,
-      status: page.findings.length === 0 ? "clean" : "findings",
+      status: page.findings.length > 0 ? "findings" : clean ? "clean" : "unreadable",
       tombstoneId: page.findings[0]?.tombstoneId ?? null,
-      detail: `${page.examined.toString()} examined, ${page.findings.length.toString()} finding(s)`,
+      detail:
+        page.unreadable.length === 0
+          ? `${page.examined.toString()} examined, ${page.findings.length.toString()} finding(s)`
+          : `${page.examined.toString()} examined, ${page.findings.length.toString()} finding(s), ` +
+            `${page.unreadable.length.toString()} unreadable`,
       at,
     });
     // Escalated even though a human asked, exactly as `unproven` does: this sweep's whole purpose
     // is to find a falsified proof the forensic chain cannot see, so one found gets an incident and
     // a page regardless of who was looking (ADR-0324, ADR-0328).
+    //
+    // The refusals are deliberately not escalated with them, and the reason is the escalator's own
+    // shape rather than a judgement about severity: `escalateTombstone` takes a `TombstoneAuditLike`
+    // and keys its episode on the tombstone id, while a refused row's identity is a best-effort
+    // handle that may itself be the column the contract refused — so an episode keyed on it could
+    // name the wrong row or no row. They reach the response and the audit line instead, which is
+    // where this route's own caller acts on them.
     for (const finding of page.findings) {
       try {
         await ctx.escalateTombstone?.(finding);
@@ -1009,9 +1059,19 @@ function buildTombstoneSweepHandler(ctx: DeletionRequestRoutesContext): Handler 
       }
     }
     return json(200, {
+      // Rows **verified**, and never rows read — so the refusals sit beside it rather than inside
+      // it, which is the store's own split: `examined: 2` next to one refusal says what happened,
+      // where `3` would claim an examination that did not occur (ADR-0371). They are beside
+      // `findings` for the second reason in `TombstoneAuditPageLike`: a refused row cannot carry a
+      // reference state or a verify verdict, so it is not expressible in that list.
       examined: page.examined,
       findings: page.findings,
-      clean: page.findings.length === 0,
+      // Always present, and `[]` is the claim that every row on this page could be represented —
+      // never omitted, because an absent field reads as "none" and is indistinguishable from
+      // "nobody looked" (ADR-0331), as on `stranded`. The `detail` is safe to hand back: it is a
+      // field path and an issue code, never a value off the row (`unreadableDetail`, ADR-0373).
+      unreadable: page.unreadable,
+      clean,
       nextAfter: page.nextAfterTombstoneId,
     });
   };

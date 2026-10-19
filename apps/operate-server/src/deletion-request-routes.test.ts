@@ -127,6 +127,7 @@ interface Harness {
   readonly auditCalls: (number | undefined)[];
   readonly sweepCalls: Array<Record<string, unknown>>;
   readonly escalated: string[];
+  readonly escalatedTombstones: string[];
   readonly escalatedVerdicts: string[];
 }
 
@@ -155,6 +156,7 @@ function harness(
   const auditCalls: (number | undefined)[] = [];
   const sweepCalls: Array<Record<string, unknown>> = [];
   const escalated: string[] = [];
+  const escalatedTombstones: string[] = [];
   const escalatedVerdicts: string[] = [];
   const unreadableReports: Array<{ requestId: string | null; detail: string }> = [];
   const ctx: DeletionRequestRoutesContext = {
@@ -209,6 +211,11 @@ function harness(
     escalate: async (finding): Promise<void> => {
       escalated.push(finding.requestId);
     },
+    // Wired, where the harness used to leave it undefined — so the loop over `page.findings` was a
+    // no-op in every sweep test and nothing could tell an escalated finding from a dropped one.
+    escalateTombstone: async (finding): Promise<void> => {
+      escalatedTombstones.push(finding.tombstoneId);
+    },
     escalateVerdict: async (result): Promise<void> => {
       escalatedVerdicts.push(result.verdict);
     },
@@ -236,6 +243,7 @@ function harness(
     auditCalls,
     sweepCalls,
     escalated,
+    escalatedTombstones,
     escalatedVerdicts,
   };
 }
@@ -958,7 +966,17 @@ function tombstoneFindingOf(over: Partial<TombstoneAuditLike> = {}): TombstoneAu
 }
 
 function sweepPageOf(over: Partial<TombstoneAuditPageLike> = {}): TombstoneAuditPageLike {
-  return { examined: 412, findings: [], nextAfterTombstoneId: null, ...over };
+  return { examined: 412, findings: [], unreadable: [], nextAfterTombstoneId: null, ...over };
+}
+
+/**
+ * A row the store read and the contract refused (ADR-0373). The `detail` is a field path and an
+ * issue code, which is what `unreadableDetail` produces and what makes it safe in a response body.
+ */
+function refusedRowOf(
+  over: Partial<{ identity: string | null; detail: string }> = {},
+): { readonly identity: string | null; readonly detail: string } {
+  return { identity: TOMB, detail: "anchors: too_small, scope: invalid_type", ...over };
 }
 
 /** A request carrying only the query, which is all `cursorParam` reads. */
@@ -1042,16 +1060,97 @@ describe("the tombstone sweep (ADR-0327)", () => {
     expect(String(res.body["detail"])).toContain("absence of findings");
   });
 
-  it("returns the page, and says clean with the number it verified", async () => {
+  it("is clean only when both lists are empty, and says so with the number it verified", async () => {
     const h = harness();
     const res = await call(h.ctx, SWEEP);
     expect(res.status).toBe(200);
     expect(res.body["examined"]).toBe(412);
     expect(res.body["findings"]).toEqual([]);
-    // The combination is the point: "we verified 412 and found nothing" is a claim, where an empty
-    // findings list on its own is indistinguishable from not having looked.
+    // The all-clean contrast to the refusal cases below, and the combination is the point: "we
+    // verified 412 and found nothing we could not read" is a claim, where an empty findings list on
+    // its own is indistinguishable from not having looked — and, before ADR-0373's regression was
+    // fixed, from having looked and failed to read a proof.
+    expect(res.body["unreadable"]).toEqual([]);
     expect(res.body["clean"]).toBe(true);
     expect(res.body["nextAfter"]).toBeNull();
+  });
+
+  it("is not clean when a proof could not be read, even with no findings", async () => {
+    const h = harness({}, { sweep: sweepPageOf({ examined: 0, unreadable: [refusedRowOf()] }) });
+    const res = await call(h.ctx, SWEEP);
+    expect(res.status).toBe(200);
+    expect(res.body["findings"]).toEqual([]);
+    // The regression ADR-0373 left here: the mirror discarded `unreadable`, so this page answered
+    // `clean: true` where the same database state used to reach the catch and 503. Where a sweep's
+    // purpose is to find defective proofs, a proof it could not read IS the finding.
+    expect(res.body["clean"]).toBe(false);
+  });
+
+  it("records a refusal-only page as unreadable rather than clean", async () => {
+    const h = harness({}, { sweep: sweepPageOf({ examined: 0, unreadable: [refusedRowOf()] }) });
+    await call(h.ctx, SWEEP);
+    // The audit row is the half that matters most, because it is a claim written into the forensic
+    // trail rather than a body a caller may ignore: `clean` here asserted that nothing was wrong.
+    expect(h.events[0]?.status).toBe("unreadable");
+    expect(h.events[0]?.status).not.toBe("clean");
+    expect(h.events[0]?.detail).toBe("0 examined, 0 finding(s), 1 unreadable");
+  });
+
+  it("carries the refused rows in the response, beside the findings", async () => {
+    const h = harness({}, { sweep: sweepPageOf({ examined: 1, unreadable: [refusedRowOf()] }) });
+    const res = await call(h.ctx, SWEEP);
+    // Beside rather than inside: a refused row carries no reference state and no verify verdict, so
+    // it is not expressible as a finding — and the detail is a field path and an issue code, which
+    // is what makes it safe to hand back (`unreadableDetail`).
+    expect(res.body["unreadable"]).toEqual([
+      { identity: TOMB, detail: "anchors: too_small, scope: invalid_type" },
+    ]);
+  });
+
+  it("leaves examined meaning rows verified, not rows read", async () => {
+    const h = harness(
+      {},
+      { sweep: sweepPageOf({ examined: 2, unreadable: [refusedRowOf(), refusedRowOf()] }) },
+    );
+    const res = await call(h.ctx, SWEEP);
+    // Not 4. A row the contract refused was read and not verified, so folding it in would claim an
+    // examination that did not occur (ADR-0371) — which is why the refusals are a second list.
+    expect(res.body["examined"]).toBe(2);
+    expect(h.events[0]?.detail).toBe("2 examined, 0 finding(s), 2 unreadable");
+  });
+
+  it("stays on findings when a page has both, with the refusals in the detail", async () => {
+    const h = harness(
+      {},
+      {
+        sweep: sweepPageOf({
+          examined: 9,
+          findings: [tombstoneFindingOf()],
+          unreadable: [refusedRowOf({ identity: null })],
+        }),
+      },
+    );
+    const res = await call(h.ctx, SWEEP);
+    expect(res.body["clean"]).toBe(false);
+    // `findings` is the stronger statement and the one an auditor counts, so it wins the status; the
+    // refusal is not lost, because the detail carries it and the body lists it.
+    expect(h.events[0]?.status).toBe("findings");
+    expect(h.events[0]?.detail).toBe("9 examined, 1 finding(s), 1 unreadable");
+    expect((res.body["unreadable"] as unknown[])).toHaveLength(1);
+  });
+
+  it("does not escalate a refused row, having no finding shape to escalate it as", async () => {
+    const refusalOnly = harness({}, { sweep: sweepPageOf({ unreadable: [refusedRowOf()] }) });
+    await call(refusalOnly.ctx, SWEEP);
+    // `escalateTombstone` keys its episode on the tombstone id, and a refused row's identity is a
+    // best-effort handle that may itself be the refused column — so it reaches the response and the
+    // audit line, which is where this route's caller acts on it.
+    expect(refusalOnly.escalatedTombstones).toEqual([]);
+    // The contrast, so the assertion above is not satisfied by an escalator nothing calls: a real
+    // finding on the same route does escalate.
+    const withFinding = harness({}, { sweep: sweepPageOf({ findings: [tombstoneFindingOf()] }) });
+    await call(withFinding.ctx, SWEEP);
+    expect(withFinding.escalatedTombstones).toEqual([TOMB]);
   });
 
   it("reports a tombstone that no request names, which no other direction can see", async () => {
