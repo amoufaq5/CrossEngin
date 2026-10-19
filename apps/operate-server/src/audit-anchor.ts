@@ -2,6 +2,8 @@ import { canonicalAuditEntryPayload, type AuditLogEntry } from "@crossengin/auth
 import { sha256 } from "@crossengin/crypto";
 import type { ChainedLogEntry } from "@crossengin/forensics";
 
+import type { UnreadableRow } from "@crossengin/kernel-pg";
+
 import type { AnchoredAuditEntry } from "./audit-log-store.js";
 
 /**
@@ -51,6 +53,16 @@ export interface AuditAnchorReport {
   /** Rows whose integrity is disproven — the findings that matter. */
   readonly tampered: readonly AuditAnchorResult[];
   readonly results: readonly AuditAnchorResult[];
+  /**
+   * Rows the reader refused, which never became an `AnchoredAuditEntry` and so cannot appear in
+   * `results`. Its own axis rather than a sixth `AuditAnchorVerdict` for two reasons, and the first
+   * is structural: a refused row is not in `rows` at all, so it has to arrive as its own argument.
+   * The second is that `TAMPERED` is a `ReadonlySet` over the enum, so a sixth member added to it
+   * and to nothing else compiles and silently reads as neither disproven nor unproven — ADR-0351's
+   * defect, where a `'v4'` added to an enum and to neither membership list typechecked and
+   * regressed two refinements at once.
+   */
+  readonly unreadable: readonly UnreadableRow[];
 }
 
 /**
@@ -71,6 +83,7 @@ export function verifyAuditAnchors(
   tenantId: string | null,
   rows: readonly AnchoredAuditEntry[],
   chain: readonly ChainedLogEntry[],
+  unreadable: readonly UnreadableRow[],
 ): AuditAnchorReport {
   const bySequence = new Map<number, ChainedLogEntry>();
   for (const entry of chain) bySequence.set(entry.sequenceNumber, entry);
@@ -89,12 +102,15 @@ export function verifyAuditAnchors(
   const unanchored = results.filter((r) => r.verdict === "unanchored").length;
   return {
     tenantId,
-    ok: tampered.length === 0 && unanchored === 0,
+    ok: tampered.length === 0 && unanchored === 0 && unreadable.length === 0,
+    // `checked` is the rows this function examined, so a refused row is not in it — a count of 3
+    // beside one refused row would claim an examination that did not happen (ADR-0371).
     checked: results.length,
     verified,
     unanchored,
     tampered,
     results,
+    unreadable,
   };
 }
 
@@ -120,11 +136,19 @@ export function formatAuditAnchorReport(report: AuditAnchorReport): string {
     `  checked: ${report.checked.toString()}` +
       `  verified: ${report.verified.toString()}` +
       `  unanchored: ${report.unanchored.toString()}` +
-      `  tampered: ${report.tampered.length.toString()}`,
+      `  tampered: ${report.tampered.length.toString()}` +
+      `  unreadable: ${report.unreadable.length.toString()}`,
   ];
   for (const t of report.tampered) {
     const seq = t.sequenceNumber === null ? "-" : t.sequenceNumber.toString();
     lines.push(`  ${t.verdict}: audit ${t.auditId} (chain sequence ${seq})`);
+  }
+  // Named for the reason `formatChainVerification` names its own: a report failing on this axis
+  // alone has every other count consistent and no `tampered` entry to list, so without these two
+  // lines it prints `FAILED` and explains nothing — a verdict an operator cannot act on, which is
+  // the one shape worse than a verdict that is merely wrong.
+  for (const u of report.unreadable) {
+    lines.push(`  unreadable: audit ${u.identity ?? "<unidentified>"} (${u.detail})`);
   }
   return lines.join("\n");
 }

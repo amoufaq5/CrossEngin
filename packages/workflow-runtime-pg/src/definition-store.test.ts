@@ -1,4 +1,4 @@
-import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
+import type { PgConnection, PgQueryResult, UnreadableRow } from "@crossengin/kernel-pg";
 import {
   WorkflowDefinitionSchema,
   type WorkflowDefinition,
@@ -622,10 +622,20 @@ describe("PostgresWorkflowDefinitionStore reads", () => {
   });
 });
 
+/**
+ * A reporter for the tests that are not about reporting.
+ *
+ * Named rather than `() => {}` inline: the parameter is required precisely so a caller cannot
+ * forget it, and a test that quietly discards a report should say that is what it is doing.
+ */
+function unreadableSink(): (row: UnreadableRow) => void {
+  return () => undefined;
+}
+
 describe("PostgresWorkflowDefinitionStore.loadEngineDefinitions", () => {
   it("keys the map by definition.id, which is what the instance_started payload records", async () => {
     const conn = mockConnection(() => ({ rows: [row()], rowCount: 1 }));
-    const map = await new PostgresWorkflowDefinitionStore(conn).loadEngineDefinitions();
+    const map = await new PostgresWorkflowDefinitionStore(conn).loadEngineDefinitions({ onUnreadable: unreadableSink() });
     expect([...map.keys()]).toEqual(["wfd_abcdef01"]);
     expect(map.get("wfd_abcdef01")?.definitionKey).toBe("purchase.approval");
     expect(map.has("purchase.approval")).toBe(false);
@@ -642,7 +652,7 @@ describe("PostgresWorkflowDefinitionStore.loadEngineDefinitions", () => {
       rows: [row(), row(deprecated, { definition_id: deprecated.id })],
       rowCount: 2,
     }));
-    const map = await new PostgresWorkflowDefinitionStore(conn).loadEngineDefinitions();
+    const map = await new PostgresWorkflowDefinitionStore(conn).loadEngineDefinitions({ onUnreadable: unreadableSink() });
     expect(map.size).toBe(2);
     expect(map.get("wfd_abcdef02")?.status).toBe("deprecated");
   });
@@ -652,7 +662,7 @@ describe("PostgresWorkflowDefinitionStore.loadEngineDefinitions", () => {
     const rows = [row(), row(definition({ id: "wfd_abcdef02", version: "1.1.0" }))];
     const conn = mockConnection(() => ({ rows, rowCount: rows.length }), capture);
     await expect(
-      new PostgresWorkflowDefinitionStore(conn).loadEngineDefinitions({ limit: 1 }),
+      new PostgresWorkflowDefinitionStore(conn).loadEngineDefinitions({ limit: 1, onUnreadable: unreadableSink() }),
     ).rejects.toThrow(/truncated map/);
     expect(capture.at(-1)?.params).toEqual([2]);
   });
@@ -660,21 +670,26 @@ describe("PostgresWorkflowDefinitionStore.loadEngineDefinitions", () => {
   it("defaults the limit to DEFAULT_DEFINITION_LOAD_LIMIT", async () => {
     const capture: Recorded[] = [];
     const conn = mockConnection(() => EMPTY, capture);
-    await new PostgresWorkflowDefinitionStore(conn).loadEngineDefinitions();
+    await new PostgresWorkflowDefinitionStore(conn).loadEngineDefinitions({ onUnreadable: unreadableSink() });
     expect(capture.at(-1)?.params).toEqual([DEFAULT_DEFINITION_LOAD_LIMIT + 1]);
   });
 
   it("refuses a non-positive limit", async () => {
     const conn = mockConnection(() => EMPTY);
     await expect(
-      new PostgresWorkflowDefinitionStore(conn).loadEngineDefinitions({ limit: 0 }),
+      new PostgresWorkflowDefinitionStore(conn).loadEngineDefinitions({ limit: 0, onUnreadable: unreadableSink() }),
     ).rejects.toThrow(/limit must be positive/);
   });
 
   it("raises when two rows claim one definition id", async () => {
+    // Still a throw, and the contrast with the unreadable row below is the whole distinction: this
+    // is a fact about the **map** — the key the engine looks up by is ambiguous, so neither row can
+    // be trusted and no report can name which to keep.
     const conn = mockConnection(() => ({ rows: [row(), row()], rowCount: 2 }));
     await expect(
-      new PostgresWorkflowDefinitionStore(conn).loadEngineDefinitions(),
+      new PostgresWorkflowDefinitionStore(conn).loadEngineDefinitions({
+        onUnreadable: unreadableSink(),
+      }),
     ).rejects.toThrow(/two rows claim/);
   });
 
@@ -683,18 +698,69 @@ describe("PostgresWorkflowDefinitionStore.loadEngineDefinitions", () => {
     const resolver = new WorkflowDefinitionIdResolver(conn);
     await new PostgresWorkflowDefinitionStore(conn, {
       definitionResolver: resolver,
-    }).loadEngineDefinitions();
+    }).loadEngineDefinitions({ onUnreadable: unreadableSink() });
     expect(resolver.size()).toBe(1);
   });
 
-  it("raises on an unreadable row rather than serving a shorter map", async () => {
+  it("reports an unreadable row and serves the definitions it could read", async () => {
+    // **This inverts the assertion that stood here**, whose title — "raises ... rather than serving
+    // a shorter map" — argued that a map missing one definition silently strands that definition's
+    // instances, which is true and is the degradation `loadEngineDefinitions` refuses for a
+    // `published`-narrowed map.
+    //
+    // Two things it did not have. The reporter is **required**, so a shorter map is no longer
+    // silent — which was the only alternative on offer when that decision was taken. And the blast
+    // radius is not "a shorter map versus a raise": `node.ts` awaits this call with no `try`, so an
+    // unreadable row took **the whole API down at boot**, not the workflow engine. Reporting puts
+    // the choice where the trade-off is visible — the caller can still refuse the boot, and now it
+    // can name the row when it does.
+    const reports: UnreadableRow[] = [];
     const conn = mockConnection(() => ({
-      rows: [row(definition(), { initial_state: "ghost" })],
+      rows: [
+        row(definition(), { definition_id: "wfd_abcdef99", initial_state: "ghost" }),
+        row(),
+      ],
+      rowCount: 2,
+    }));
+    const map = await new PostgresWorkflowDefinitionStore(conn).loadEngineDefinitions({
+      onUnreadable: (r) => reports.push(r),
+    });
+    expect([...map.keys()]).toEqual(["wfd_abcdef01"]);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.identity).toBe("wfd_abcdef99");
+  });
+
+  it("names the refused definition by definition_id and nothing else of it", async () => {
+    const reports: UnreadableRow[] = [];
+    const conn = mockConnection(() => ({
+      rows: [
+        row(definition(), {
+          definition_id: "wfd_abcdef98",
+          label: "Purchase approval — EMEA",
+          initial_state: "ghost",
+        }),
+      ],
       rowCount: 1,
     }));
-    await expect(
-      new PostgresWorkflowDefinitionStore(conn).loadEngineDefinitions(),
-    ).rejects.toThrow();
+    await new PostgresWorkflowDefinitionStore(conn).loadEngineDefinitions({
+      onUnreadable: (r) => reports.push(r),
+    });
+    const rendered = JSON.stringify(reports);
+    expect(rendered).toContain("wfd_abcdef98");
+    expect(rendered).not.toContain("ghost");
+    expect(rendered).not.toContain("Purchase approval — EMEA");
+  });
+
+  it("admits it cannot name a definition whose own id column is what is wrong", async () => {
+    const reports: UnreadableRow[] = [];
+    const conn = mockConnection(() => ({
+      rows: [row(definition(), { definition_id: null, initial_state: "ghost" })],
+      rowCount: 1,
+    }));
+    await new PostgresWorkflowDefinitionStore(conn).loadEngineDefinitions({
+      onUnreadable: (r) => reports.push(r),
+    });
+    expect(reports[0]?.identity).toBeNull();
   });
 });
 
@@ -827,7 +893,7 @@ describe("read scoping", () => {
     // definitionId — inflating the count the worker supervisor's no_definitions refusal reads, and
     // letting the row limit crowd out the very definition an instance's timer resolves.
     const { conn, capture } = capturing();
-    await new PostgresWorkflowDefinitionStore(conn).loadEngineDefinitions({ tenantId: TENANT });
+    await new PostgresWorkflowDefinitionStore(conn).loadEngineDefinitions({ tenantId: TENANT, onUnreadable: unreadableSink() });
     const [read] = selects(capture);
     expect(read?.sql).toContain("WHERE (tenant_id = $1 OR tenant_id IS NULL)");
     expect(read?.params).toEqual([TENANT, DEFAULT_DEFINITION_LOAD_LIMIT + 1]);
@@ -835,13 +901,13 @@ describe("read scoping", () => {
 
   it("loadEngineDefinitions renumbers its LIMIT around the scope's parameter", async () => {
     const { conn, capture } = capturing();
-    await new PostgresWorkflowDefinitionStore(conn).loadEngineDefinitions({ tenantId: TENANT });
+    await new PostgresWorkflowDefinitionStore(conn).loadEngineDefinitions({ tenantId: TENANT, onUnreadable: unreadableSink() });
     expect(selects(capture)[0]?.sql).toContain("LIMIT $2");
   });
 
   it("loadEngineDefinitions for the platform scope binds the limit at $1", async () => {
     const { conn, capture } = capturing();
-    await new PostgresWorkflowDefinitionStore(conn).loadEngineDefinitions({ limit: 5 });
+    await new PostgresWorkflowDefinitionStore(conn).loadEngineDefinitions({ limit: 5, onUnreadable: unreadableSink() });
     const [read] = selects(capture);
     expect(read?.sql).toContain("WHERE tenant_id IS NULL");
     expect(read?.sql).toContain("LIMIT $1");
@@ -854,7 +920,7 @@ describe("read scoping", () => {
     await store.loadById("wfd_abcdef01", TENANT);
     await store.loadByKeyVersion("purchase.approval", "1.0.0", TENANT);
     await store.listByKey("purchase.approval", TENANT);
-    await store.loadEngineDefinitions({ tenantId: TENANT });
+    await store.loadEngineDefinitions({ tenantId: TENANT, onUnreadable: unreadableSink() });
     const reads = selects(capture);
     expect(reads.length).toBe(4);
     for (const read of reads) {

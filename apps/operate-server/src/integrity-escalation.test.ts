@@ -57,7 +57,7 @@ function report(over: Partial<IntegrityProofReport> = {}): IntegrityProofReport 
     fullBecause: "requested",
     checkpointSequence: null,
     integrity: { valid: true, brokenAt: null },
-    signatures: { valid: true, checked: 3, results: [], unresolvedFingerprints: [] },
+    signatures: { valid: true, checked: 3, results: [], unresolvedFingerprints: [], unreadable: [] },
   };
   const anchors: AuditAnchorReport = {
     tenantId: TENANT_A,
@@ -67,6 +67,7 @@ function report(over: Partial<IntegrityProofReport> = {}): IntegrityProofReport 
     unanchored: 0,
     tampered: [tamperedResult],
     results: [],
+    unreadable: [],
   };
   const truncation: ChainTruncationCheck = {
     checkpointSequence: 3,
@@ -79,6 +80,7 @@ function report(over: Partial<IntegrityProofReport> = {}): IntegrityProofReport 
     verifiedAt: AT,
     chain,
     anchors,
+    chainRowsRefused: [],
     truncation,
     ...over,
   };

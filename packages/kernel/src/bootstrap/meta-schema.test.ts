@@ -36,6 +36,7 @@ import {
   META_EVENTS,
   META_EXTENSION_PACKS,
   META_FAILOVER_RECORDS,
+  META_FORENSIC_CHAIN_ENTRIES,
   META_FORENSIC_EVIDENCE,
   META_FEATURE_FLAGS,
   META_FEATURE_FLAG_CHANGES,
@@ -1538,6 +1539,21 @@ describe("table column shapes", () => {
     // itself (ADR-0317).
     expect(col("attestations")?.type).toBe("JSONB");
     expect(col("attestations")?.notNull).toBe(true);
+    // ADR-0373. `JSONB NOT NULL DEFAULT '[]'` was the whole fence, so `'{}'`, `'null'` and `'"x"'`
+    // all stored and every reader coerced them to `[]` — which reads as "written with no evidence"
+    // rather than as a defect, so destroying the evidence disarmed `tombstoneMatchesAttestations`.
+    // `jsonb_typeof` and not `jsonb_array_length`: an empty array is this column's own default and
+    // its legitimate claim, so a length bound would have to be `>= 0` and would be testing
+    // something other than what it says — and `jsonb_array_length` *raises* 22023 on a non-array
+    // where this gives a plain 23514 (verified on PG 16.13).
+    expect(col("attestations")?.check).toBe("jsonb_typeof(attestations) = 'array'");
+    // The default has to satisfy the CHECK it now sits beside, or every INSERT omitting the column
+    // raises 23514. That is `auditColumnDefaults`' question, and **this column is outside it**:
+    // that rule reads `catalogValueSets`, which matches only `IN (…)` and `col = 'literal'`, so a
+    // `jsonb_typeof` predicate is not a value set and no workspace rule compares the pair. Pinned
+    // here because this is the only place it is compared at all — and verified live on PG 16.13,
+    // where an INSERT omitting the column returns `[]`.
+    expect(col("attestations")?.default).toBe("'[]'::jsonb");
     // ADR-0329. The version selects which domain tag the digest commits to, so it may not be NULL:
     // a row whose version is unknown has a digest nothing can be checked against. `DEFAULT 'v1'`
     // because every row written before this column existed was genuinely a v1 proof.
@@ -1691,6 +1707,37 @@ describe("table column shapes", () => {
     // Partial, because the column is NULL for every tombstone the synchronous route of ADR-0320
     // writes, and those rows can never match a lookup by request id.
     expect(idx?.where).toBe("related_deletion_request_id IS NOT NULL");
+  });
+
+  it("META_FORENSIC_CHAIN_ENTRIES leaves no column of a chain entry uncheckable", () => {
+    const col = (n: string) => META_FORENSIC_CHAIN_ENTRIES.columns.find((c) => c.name === n);
+    // ADR-0373. These two were the only columns on this table carrying no CHECK, which made them
+    // the exception rather than the rule in the one table whose purpose is to be checkable — so
+    // `''` stored, `ChainedLogEntrySchema`'s `z.string().min(1)` then refused the row, and because
+    // `actorReference` and `signature` are both inside `canonicalEntryBytes` that is a genuine
+    // signature-breaking tamper **whose own detector cannot run**: the reader refuses the row
+    // before the verification reaches it.
+    expect(col("actor_reference")?.check).toBe("char_length(actor_reference) >= 1");
+    expect(col("signature")?.check).toBe("char_length(signature) >= 1");
+    // No upper bound on either, because the contract declares none. A CHECK that refuses what the
+    // contract permits is this same defect pointing the other way, and a signature's width is a
+    // property of whichever algorithm `signing_key_fingerprint` resolves to rather than of the
+    // column — so a bound here would be a second place for the two to disagree.
+    expect(col("actor_reference")?.check).not.toContain("BETWEEN");
+    expect(col("signature")?.check).not.toContain("BETWEEN");
+    // The invariant the two above are instances of, asserted over the whole table rather than per
+    // column, so a twelfth column added without one fails here instead of being discovered live.
+    // The four exempt ones are exempt for one reason and it is not "they are generated": each is
+    // **fully constrained by its declared type**, so no value it can hold is a shape the contract
+    // refuses. `id` and `created_at` are UUID and TIMESTAMPTZ with defaults; `recorded_at` is the
+    // TIMESTAMPTZ that `Iso8601` parses to; and `tenant_id` is the scope rather than a field of
+    // `ChainedLogEntrySchema` at all — nullable, with NULL meaning platform (ADR-0331), so there is
+    // no narrower rule to state. Every remaining column's contract says something its type does
+    // not, which is exactly when a CHECK is owed.
+    const uncovered = META_FORENSIC_CHAIN_ENTRIES.columns
+      .filter((c) => c.check === undefined)
+      .map((c) => c.name);
+    expect(uncovered).toEqual(["id", "tenant_id", "recorded_at", "created_at"]);
   });
 
   it("META_GDPR_DELETION_REQUESTS outlives the verifier and names its proof", () => {

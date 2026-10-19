@@ -2,6 +2,7 @@ import { META_TENANT_TOMBSTONES } from "@crossengin/kernel/bootstrap";
 import type { PgConnection } from "@crossengin/kernel-pg";
 import {
   assembleTombstone,
+  tombstoneMatchesAttestations,
   verifyTombstoneHashes,
   type DeletionAttestation,
   type TombstoneRecord,
@@ -11,6 +12,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   PostgresTombstoneStore,
+  STORED_ATTESTATIONS_READS,
   TOMBSTONE_COLUMNS,
   TOMBSTONE_LOG_KIND,
   TOMBSTONE_SCAN_MAX_LIMIT,
@@ -124,10 +126,17 @@ function legacyRecordOf(): TombstoneRecord {
   return out.record;
 }
 
-/** A real record, assembled the way production does, so the hashes are genuine. */
-function recordOf(over: Partial<TombstoneRecord> = {}): TombstoneRecord {
+/**
+ * A real record under a chosen id, assembled the way production does so the hashes are genuine.
+ *
+ * Separate from `recordOf`'s post-assembly spread because `proofSha256` commits to the record's
+ * identity: swapping an id afterwards yields a record whose own proof does not verify, which is
+ * exactly the state the page-shape tests below must not be confused with. They need several rows
+ * with distinct ids, because `scanAll`'s cursor is the ordering on that column.
+ */
+function assembledAt(id: string): TombstoneRecord {
   const out = assembleTombstone({
-    id: "tomb_store0001abc",
+    id,
     kind: "tenant_deletion",
     tenantId: TENANT,
     deletedAt: AT,
@@ -140,7 +149,17 @@ function recordOf(over: Partial<TombstoneRecord> = {}): TombstoneRecord {
     attestations: [ATTESTATION, SHARED_ATTESTATION],
   });
   if (!out.ok) throw new Error(`fixture failed: ${JSON.stringify(out.refusals)}`);
-  return { ...out.record, ...over };
+  return out.record;
+}
+
+/** The same record, with fields written over it after assembly for the tamper tests. */
+function recordOf(over: Partial<TombstoneRecord> = {}): TombstoneRecord {
+  return { ...assembledAt("tomb_store0001abc"), ...over };
+}
+
+/** A row the contract refuses: edited into a four-eyes violation the column CHECK would stop. */
+function refusedRowOf(record: TombstoneRecord): Record<string, unknown> {
+  return rowOf(record, { approved_by: record.executedBy });
 }
 
 interface Fake {
@@ -454,12 +473,44 @@ describe("write", () => {
     ]);
   });
 
-  it("sets no tenant context, because the tenant's data is already gone", async () => {
-    const { conn, anchorer, sql } = fakePg();
+  it("sets the record's own tenant context before the append, or no non-owner can write at all", async () => {
+    const { conn, anchorer, calls, sql } = fakePg();
     await new PostgresTombstoneStore(conn, anchorer).write(recordOf());
-    // Writing the record of a deletion under the deleted tenant's context would be a dependency on
-    // the thing being deleted.
-    expect(sql().some((s) => s.includes("app.current_tenant_id"))).toBe(false);
+    const order = sql();
+    const context = order.findIndex((s) => s.includes("app.current_tenant_id"));
+    const append = order.indexOf("-- chain append");
+    const insert = order.findIndex((s) => s.startsWith("INSERT INTO"));
+    // Both tables carry their isolation policy as the only arm with a `WITH CHECK`, and both
+    // platform arms are `SELECT`-only — so without this the whole synchronous Article 17 write
+    // raises `42501` as any non-owner role, and succeeded only because the owner bypasses RLS.
+    // This test asserted the opposite until ADR-0373: it read the absence as the design.
+    expect(context).toBeGreaterThanOrEqual(0);
+    // Before the **append**, not merely before the insert: `appendWithin` reads the scope's tail
+    // first, and unscoped a non-owner sees none of it and would restart the chain at sequence 0.
+    expect(append).toBeGreaterThan(context);
+    expect(insert).toBeGreaterThan(context);
+    // The row's own tenant, bound rather than interpolated, and never anything a caller chose.
+    expect(calls[context]?.params).toEqual([TENANT]);
+  });
+
+  it("sets it transaction-locally, so a pooled connection's next caller does not inherit it", async () => {
+    const { conn, anchorer, calls, sql } = fakePg();
+    await new PostgresTombstoneStore(conn, anchorer).write(recordOf());
+    const context = sql().findIndex((s) => s.includes("app.current_tenant_id"));
+    // The `true` third argument. A bare `conn.query` would also be discarded with the implicit
+    // single-statement transaction it was set in, before the statement it was set for — which is
+    // why this is inside the store's own transaction and asserted against `BEGIN`.
+    expect(calls[context]?.sql).toContain("set_config('app.current_tenant_id', $1, true)");
+    expect(context).toBeGreaterThan(sql().indexOf("BEGIN"));
+  });
+
+  it("scopes writeWithin the same way, so the pipeline's own transaction is covered too", async () => {
+    // The synchronous deletion commits the `DROP SCHEMA` and the tombstone together through this
+    // entry point (ADR-0319), so a scope set only in `write` would leave the live path unscoped.
+    const { conn, anchorer, calls } = fakePg();
+    await new PostgresTombstoneStore(conn, anchorer).writeWithin(conn, recordOf());
+    const context = calls.find((c) => c.sql.includes("app.current_tenant_id"));
+    expect(context?.params).toEqual([TENANT]);
   });
 
   it("honours a schema override and refuses an invalid identifier", () => {
@@ -610,25 +661,91 @@ describe("scanAll", () => {
     expect(TOMBSTONE_SCAN_MAX_LIMIT).toBe(500);
   });
 
-  it("returns an empty page for an empty table", async () => {
-    const { conn, anchorer } = fakePg([]);
-    expect(await new PostgresTombstoneStore(conn, anchorer).scanAll({ limit: 10 })).toEqual([]);
-  });
-
-  it("re-parses every row, so a corrupted one is a finding rather than data", async () => {
-    const record = recordOf();
-    const { conn, anchorer } = fakePg([rowOf(record, { approved_by: record.executedBy })]);
-    await expect(new PostgresTombstoneStore(conn, anchorer).scanAll({ limit: 10 })).rejects.toThrow();
-  });
-
   it("hands back the full record, evidence and anchor for each row", async () => {
     const record = recordOf();
     const { conn, anchorer } = fakePg([rowOf(record)]);
     const page = await new PostgresTombstoneStore(conn, anchorer).scanAll({ limit: 10 });
-    expect(page).toHaveLength(1);
-    expect(page[0]?.record.id).toBe(record.id);
-    expect(page[0]?.attestations).toEqual([ATTESTATION]);
-    expect(page[0]?.chainEntryHash).toBe(ENTRY_HASH);
+    expect(page.rowsRead).toBe(1);
+    expect(page.records).toHaveLength(1);
+    expect(page.records[0]?.record.id).toBe(record.id);
+    expect(page.records[0]?.attestations).toEqual([ATTESTATION]);
+    expect(page.records[0]?.chainEntryHash).toBe(ENTRY_HASH);
+  });
+
+  it("re-parses every row, so a corrupted one is reported rather than returned as data", async () => {
+    // This asserted `rejects.toThrow()` until ADR-0373, and the title said the throw *was* the
+    // finding. It is a finding (ADR-0289) and throwing is how it reached nobody: one corrupted row
+    // ended the sweep, so every other stored proof went unverified behind it.
+    const record = recordOf();
+    const { conn, anchorer } = fakePg([refusedRowOf(record)]);
+    const page = await new PostgresTombstoneStore(conn, anchorer).scanAll({ limit: 10 });
+    expect(page.records).toEqual([]);
+    expect(page.unreadable).toHaveLength(1);
+    expect(page.unreadable[0]?.identity).toBe(record.id);
+  });
+
+  it("costs only itself: a refused middle row, and the sweep one bad row used to stop", async () => {
+    const first = assembledAt("tomb_scan0001aaaa");
+    const bad = assembledAt("tomb_scan0002bbbb");
+    const last = assembledAt("tomb_scan0003cccc");
+    const { conn, anchorer } = fakePg([rowOf(first), refusedRowOf(bad), rowOf(last)]);
+    const page = await new PostgresTombstoneStore(conn, anchorer).scanAll({ limit: 10 });
+    // In order, and the row after the refusal is reached: a `.map()` over the page stopped here.
+    expect(page.records.map((r) => r.record.id)).toEqual([first.id, last.id]);
+    expect(page.unreadable).toHaveLength(1);
+    expect(page.unreadable[0]?.identity).toBe(bad.id);
+    expect(page.rowsRead).toBe(3);
+  });
+
+  it("names the field path and the issue code, and no value from the refused row", async () => {
+    const record = assembledAt("tomb_scan0004dddd");
+    const FORGED = "v9-written-by-hand";
+    const { conn, anchorer } = fakePg([rowOf(record, { proof_version: FORGED })]);
+    const page = await new PostgresTombstoneStore(conn, anchorer).scanAll({ limit: 10 });
+    expect(page.unreadable[0]?.identity).toBe(record.id);
+    // The path sends a reader to the one column to look at; the code says what is wrong with it.
+    expect(page.unreadable[0]?.detail).toBe("proofVersion: invalid_enum_value");
+    // An `invalid_enum_value` issue carries `received`, so a detail built from the ZodError's own
+    // message would quote the stored value into a log line, an HTTP body or an incident note — and
+    // every other column of a refused row is of unestablished trustworthiness anyway.
+    expect(page.unreadable[0]?.detail).not.toContain(FORGED);
+  });
+
+  it("takes lastTombstoneId from the last ROW of the page, even when that row is refused", async () => {
+    const good = assembledAt("tomb_scan0005eeee");
+    const bad = assembledAt("tomb_scan0006ffff");
+    const { conn, anchorer } = fakePg([rowOf(good), refusedRowOf(bad)]);
+    const page = await new PostgresTombstoneStore(conn, anchorer).scanAll({ limit: 2 });
+    expect(page.records.map((r) => r.record.id)).toEqual([good.id]);
+    expect(page.lastTombstoneId).toBe(bad.id);
+    // The records' last id is *earlier* in the ordering, so a caller deriving the cursor from them
+    // would ask again from before the refused row and read it for ever. This is the whole reason
+    // the page carries the cursor rather than letting the caller take it from `records`.
+    expect(page.lastTombstoneId).not.toBe(good.id);
+    expect(page.rowsRead).toBe(2);
+  });
+
+  it("still answers a cursor and a row count when every row on the page was refused", async () => {
+    const ids = ["tomb_scan0007gggg", "tomb_scan0008hhhh", "tomb_scan0009iiii"];
+    const records = ids.map((id) => assembledAt(id));
+    const { conn, anchorer } = fakePg(records.map((r) => refusedRowOf(r)));
+    const page = await new PostgresTombstoneStore(conn, anchorer).scanAll({ limit: 3 });
+    expect(page.records).toEqual([]);
+    expect(page.unreadable).toHaveLength(page.rowsRead);
+    expect(page.rowsRead).toBe(3);
+    // A full page of refusals is still a full page, so the lap continues past it rather than
+    // reading the empty record list as the end of the table.
+    expect(page.lastTombstoneId).toBe(ids[2]);
+  });
+
+  it("returns an empty page for an empty table, which is not the same page as that one", async () => {
+    const { conn, anchorer } = fakePg([]);
+    expect(await new PostgresTombstoneStore(conn, anchorer).scanAll({ limit: 10 })).toEqual({
+      records: [],
+      unreadable: [],
+      lastTombstoneId: null,
+      rowsRead: 0,
+    });
   });
 
   it("selects every column the verification needs", async () => {
@@ -673,10 +790,10 @@ describe("rowToStoredTombstone", () => {
 
   it("reads an unanchored legacy row as unanchored rather than failing", () => {
     const stored = rowToStoredTombstone(
-      rowOf(recordOf(), { chain_entry_hash: null, chain_sequence_number: null, attestations: null }),
+      rowOf(recordOf(), { chain_entry_hash: null, chain_sequence_number: null }),
     );
     expect(stored.chainEntryHash).toBeNull();
-    expect(stored.attestations).toEqual([]);
+    expect(stored.chainSequenceNumber).toBeNull();
   });
 
   it("accepts a Date for deleted_at, as node-postgres returns", () => {
@@ -707,6 +824,115 @@ describe("rowToStoredTombstone", () => {
   });
 });
 
+/**
+ * How the `attestations` column is read, which before ADR-0373 was `Array.isArray` and a cast.
+ *
+ * The column is `JSONB NOT NULL DEFAULT '[]'` with **no CHECK that it is an array**, so every
+ * non-array below is genuinely storable — and each one used to come back as `[]`, which every
+ * reader gates on as "no evidence, cannot say". So a destroyed evidence column read as an honest
+ * proof written with none, and destroying the evidence turns off one of the only two detectors
+ * there are for a tampered scope.
+ */
+describe("reading the attestations column", () => {
+  it("declares two readings, because an empty array is a claim and not an absence", () => {
+    // `'[]'` is what `write(record)` and the column default both produce, so it is read evidence
+    // that says nothing — a third member for it would split the honest case in two.
+    expect(STORED_ATTESTATIONS_READS).toEqual(["parsed", "unreadable"]);
+  });
+
+  it("parses a real evidence array and still compares it", () => {
+    const record = recordOf();
+    const stored = rowToStoredTombstone(rowOf(record));
+    expect(stored.attestationsRead).toBe("parsed");
+    expect(stored.attestations).toEqual([ATTESTATION]);
+    expect(tombstoneMatchesAttestations(stored.record, stored.attestations)).toBe(true);
+  });
+
+  it("reads an empty array as parsed, which is the legitimate no-evidence claim", () => {
+    const stored = rowToStoredTombstone(rowOf(recordOf(), { attestations: "[]" }));
+    expect(stored.attestationsRead).toBe("parsed");
+    expect(stored.attestations).toEqual([]);
+  });
+
+  it.each([
+    ["an object", "{}"],
+    ["the JSON null scalar", "null"],
+    ["a string", '"x"'],
+    ["a number", "3"],
+  ])("reports %s as unreadable rather than as no evidence", (_label, column) => {
+    const stored = rowToStoredTombstone(rowOf(recordOf(), { attestations: column }));
+    expect(stored.attestationsRead).toBe("unreadable");
+    // `[]` and not a partial answer: a consumer reads the array as the evidence, and the fact that
+    // it could not be read travels in the reading, never in the array's length.
+    expect(stored.attestations).toEqual([]);
+  });
+
+  it("reports SQL NULL as unreadable, though the NOT NULL column cannot hold one", () => {
+    // Unreachable against a real database and read the conservative way regardless: a NULL there
+    // means the constraint is gone or the column is, and neither is distinguishable from `'{}'`.
+    const stored = rowToStoredTombstone(rowOf(recordOf(), { attestations: null }));
+    expect(stored.attestationsRead).toBe("unreadable");
+    expect(stored.attestations).toEqual([]);
+  });
+
+  it("reports an element the contract refuses rather than handing it back typed", () => {
+    // What the cast bought: the elements were never parsed, so `subsystem: "not_a_subsystem"` came
+    // back as a `DeletionAttestation` naming a subsystem that does not exist — measured live.
+    const row = rowOf(recordOf(), {
+      attestations: JSON.stringify([{ subsystem: "not_a_subsystem" }]),
+    });
+    const stored = rowToStoredTombstone(row);
+    expect(stored.attestationsRead).toBe("unreadable");
+    expect(stored.attestations).toEqual([]);
+  });
+
+  it("reports one bad element among good ones, rather than the good prefix", () => {
+    const row = rowOf(recordOf(), {
+      attestations: JSON.stringify([ATTESTATION, { subsystem: "tenant_schema", outcome: "nope" }]),
+    });
+    const stored = rowToStoredTombstone(row);
+    expect(stored.attestationsRead).toBe("unreadable");
+    // The prefix would recompose a scope that happens to match, which is the reading a tamper
+    // wants: drop the attestation that disagrees and keep the one that does not.
+    expect(stored.attestations).toEqual([]);
+  });
+
+  it("does not throw on an unreadable column, because the sweep must reach the next row", () => {
+    // The other half of this class, and the one a throw here would create: these mappers are read
+    // by a cross-tenant sweep whose purpose is to find defective rows, so a row that cannot be
+    // read is routed into the finding set rather than out of the answer.
+    expect(() => rowToStoredTombstone(rowOf(recordOf(), { attestations: "{}" }))).not.toThrow();
+  });
+
+  it("carries the reading through every read path, not only the mapper", async () => {
+    const record = recordOf();
+    const broken = rowOf(record, { attestations: '"x"' });
+    const store = (rows: Record<string, unknown>[]): PostgresTombstoneStore => {
+      const f = fakePg(rows);
+      return new PostgresTombstoneStore(f.conn, f.anchorer);
+    };
+    expect((await store([broken]).read(record.id))?.attestationsRead).toBe("unreadable");
+    expect((await store([broken]).listForTenant(TENANT))[0]?.attestationsRead).toBe("unreadable");
+    expect((await store([broken]).findForRequest("dreq_abcdefgh1234"))[0]?.attestationsRead).toBe(
+      "unreadable",
+    );
+    // `scanAll` is the one that matters most: it is the only reader that does not start from
+    // something already naming a tombstone (ADR-0327). The row is *readable* — an unreadable
+    // evidence column is a field on a record that parsed — so it is a record here and not a
+    // refusal, which is the line between this reading and `unreadable`.
+    const page = await store([broken]).scanAll({ limit: 10 });
+    expect(page.records[0]?.attestationsRead).toBe("unreadable");
+    expect(page.unreadable).toEqual([]);
+  });
+
+  it("reports the write path's own evidence as parsed, since it was never round-tripped", async () => {
+    const { conn, anchorer } = fakePg();
+    const stored = await new PostgresTombstoneStore(conn, anchorer).write(recordOf(), [ATTESTATION]);
+    expect(stored.attestationsRead).toBe("parsed");
+    expect(stored.attestations).toEqual([ATTESTATION]);
+  });
+});
+
 describe("verify", () => {
   it("reports found, both hashes, the anchor and the evidence match", async () => {
     const record = recordOf();
@@ -717,6 +943,7 @@ describe("verify", () => {
       proofOk: true,
       anchored: true,
       matchesAttestations: true,
+      attestationsRead: "parsed",
     });
   });
 
@@ -897,6 +1124,23 @@ describe("verify", () => {
       proofOk: false,
       anchored: false,
       matchesAttestations: null,
+      // Null and not `unreadable`: there is no row, so nothing failed to be read. Answering
+      // `unreadable` for an absent tombstone would report a tamper where there is no record.
+      attestationsRead: null,
     });
+  });
+
+  it("separates an honest empty claim from a destroyed one, which matchesAttestations cannot", async () => {
+    const record = recordOf();
+    const honest = fakePg([rowOf(record, { attestations: "[]" })]);
+    const destroyed = fakePg([rowOf(record, { attestations: "{}" })]);
+    const a = await new PostgresTombstoneStore(honest.conn, honest.anchorer).verify(record.id);
+    const b = await new PostgresTombstoneStore(destroyed.conn, destroyed.anchorer).verify(record.id);
+    // The pair that makes the field earn its place: both answer `null` for the comparison, because
+    // neither ran one, and only `attestationsRead` says which of them is a finding.
+    expect(a.matchesAttestations).toBeNull();
+    expect(b.matchesAttestations).toBeNull();
+    expect(a.attestationsRead).toBe("parsed");
+    expect(b.attestationsRead).toBe("unreadable");
   });
 });

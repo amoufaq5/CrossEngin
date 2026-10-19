@@ -103,4 +103,94 @@ describe("PostgresAccessReviewItemStore.upsert", () => {
     expect(select?.sql).toContain("c.tenant_id = $2");
     expect(select?.params).toEqual(["arc_00000001", UUIDS.tenant]);
   });
+
+  it("listByCampaignWithUnreadable issues the identical statement", async () => {
+    // The sibling exists to change what is done with a refused row, not what is asked of the
+    // database — so a scope predicate added to one and not the other is the defect this pins.
+    const plain = new FakeConn();
+    await new PostgresAccessReviewItemStore(plain).listByCampaign(UUIDS.tenant, "arc_00000001");
+    const paired = new FakeConn();
+    await new PostgresAccessReviewItemStore(paired).listByCampaignWithUnreadable(
+      UUIDS.tenant,
+      "arc_00000001",
+    );
+    expect(paired.calls.map((c) => c.sql)).toEqual(plain.calls.map((c) => c.sql));
+    expect(paired.calls.map((c) => c.params)).toEqual(plain.calls.map((c) => c.params));
+  });
+});
+
+describe("PostgresAccessReviewItemStore reports a row it cannot represent", () => {
+  const itemRow = {
+    item_id: "ari_00000001",
+    tenant_id: UUIDS.tenant,
+    campaign_natural_id: "arc_00000001",
+    principal_id: UUIDS.principal,
+    principal_type: "user",
+    principal_label: "alice@example.com",
+    grant_kind: "role",
+    grant_id: "grant-role-admin",
+    grant_label: "admin role",
+    grant_attributes: {},
+    granted_at: "2024-01-01T00:00:00.000Z",
+    granted_by: UUIDS.creator,
+    last_used_at: null,
+    risk_level: "high",
+    status: "pending",
+    current_reviewer_user_id: null,
+    current_reviewer_kind: null,
+    reviewer_assigned_at: null,
+    reminder_count: 0,
+    last_reminder_at: null,
+    escalation_level: 0,
+    created_at: "2026-01-01T00:00:00.000Z",
+    opened_for_review_at: null,
+    decided_at: null,
+    decision_id: null,
+    auto_revoked_at: null,
+    auto_revoke_reason: null,
+    due_at: "2026-01-10T00:00:00.000Z",
+    notes: null,
+  };
+
+  function connWith(rows: readonly unknown[]): FakeConn {
+    return new FakeConn((sql) =>
+      sql.includes("FROM meta.access_review_items i")
+        ? { rows: rows as Record<string, unknown>[], rowCount: rows.length }
+        : { rows: [], rowCount: 0 },
+    );
+  }
+
+  it("keeps the other rows and names the refused one by item_id", async () => {
+    const broken = { ...itemRow, item_id: "ari_0000bad1", due_at: null };
+    const read = await new PostgresAccessReviewItemStore(
+      connWith([broken, itemRow]),
+    ).listByCampaignWithUnreadable(UUIDS.tenant, "arc_00000001");
+    expect(read.records.map((i) => i.id)).toEqual(["ari_00000001"]);
+    expect(read.unreadable).toEqual([
+      { identity: "ari_0000bad1", detail: "row is missing required timestamp: due_at" },
+    ]);
+  });
+
+  it("discloses no value from the refused row beyond its business key", async () => {
+    const broken = {
+      ...itemRow,
+      item_id: "ari_0000bad2",
+      principal_label: "alice@example.com",
+      due_at: null,
+    };
+    const read = await new PostgresAccessReviewItemStore(
+      connWith([broken]),
+    ).listByCampaignWithUnreadable(UUIDS.tenant, "arc_00000001");
+    const rendered = JSON.stringify(read.unreadable);
+    expect(rendered).toContain("ari_0000bad2");
+    expect(rendered).not.toContain("alice@example.com");
+    expect(rendered).not.toContain(UUIDS.principal);
+  });
+
+  it("admits it cannot name the row when item_id is itself what is wrong", async () => {
+    const read = await new PostgresAccessReviewItemStore(
+      connWith([{ ...itemRow, item_id: null, due_at: null }]),
+    ).listByCampaignWithUnreadable(UUIDS.tenant, "arc_00000001");
+    expect(read.unreadable[0]?.identity).toBeNull();
+  });
 });

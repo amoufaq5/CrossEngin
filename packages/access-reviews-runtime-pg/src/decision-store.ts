@@ -1,8 +1,17 @@
 import type { AccessReviewDecision } from "@crossengin/access-reviews";
-import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  readRowsWithUnreadable,
+  type PgConnection,
+} from "@crossengin/kernel-pg";
 
 import { CampaignUuidResolver, ItemUuidResolver } from "./id-mapping.js";
-import { rowToDecision, type DecisionRow } from "./records.js";
+import {
+  recordsOrRefuse,
+  rowKey,
+  rowToDecision,
+  type DecisionRow,
+  type TypedRowRead,
+} from "./records.js";
 import { tenantScopePredicate, withTenantContext } from "./tenant-context.js";
 
 const SCHEMA = "meta";
@@ -96,13 +105,14 @@ export class PostgresAccessReviewDecisionStore {
     tenantId: string,
     itemId: string,
   ): Promise<readonly AccessReviewDecision[]> {
-    return withTenantContext(this.conn, tenantId, async (tx) => {
+    const read = await withTenantContext(this.conn, tenantId, async (tx) => {
       const result = await tx.query<DecisionRow>(
         `${SELECT_JOINED} WHERE i.item_id = $1 ORDER BY d.decided_at ASC, d.decision_id ASC`,
         [itemId],
       );
-      return result.rows.map(rowToDecision);
+      return readRowsWithUnreadable(result.rows, rowToDecision, (row) => rowKey(row.decision_id));
     });
+    return recordsOrRefuse(`decisions of item ${itemId}`, read);
   }
 
   /**
@@ -116,6 +126,25 @@ export class PostgresAccessReviewDecisionStore {
     tenantId: string,
     campaignId: string,
   ): Promise<readonly AccessReviewDecision[]> {
+    return recordsOrRefuse(
+      `decisions of campaign ${campaignId}`,
+      await this.listByCampaignWithUnreadable(tenantId, campaignId),
+    );
+  }
+
+  /**
+   * The same read, with the rows the contract refused beside the ones it accepted.
+   *
+   * This is the read ADR-0362 made throwable: it gave `rowToDecision` a `parse` where it had
+   * returned a bare literal *typed as* the contract, and measured that 9 of the schema's 13 clauses
+   * became reachable from a stored row. So the hardening one increment ago is what put the other
+   * campaign's decisions at risk here — which is the argument for the two landing together rather
+   * than against the parse.
+   */
+  async listByCampaignWithUnreadable(
+    tenantId: string,
+    campaignId: string,
+  ): Promise<TypedRowRead<AccessReviewDecision>> {
     return withTenantContext(this.conn, tenantId, async (tx) => {
       const result = await tx.query<DecisionRow>(
         `${SELECT_JOINED}
@@ -126,7 +155,7 @@ export class PostgresAccessReviewDecisionStore {
           ORDER BY d.decided_at ASC, d.decision_id ASC`,
         [campaignId, tenantId],
       );
-      return result.rows.map(rowToDecision);
+      return readRowsWithUnreadable(result.rows, rowToDecision, (row) => rowKey(row.decision_id));
     });
   }
 }

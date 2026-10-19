@@ -4,9 +4,12 @@ import {
   scopeFilter,
   scopeFilterWithPlatform,
   setPlatformWriteSql,
+  textIdentity,
+  unreadableDetail,
   type PgConnection,
   type ScopeFilter,
   type ScopedWriteRefusal,
+  type UnreadableRowReporter,
 } from "@crossengin/kernel-pg";
 import {
   DEFINITION_STATUSES,
@@ -344,6 +347,29 @@ export interface PostgresWorkflowDefinitionStoreOptions {
 export interface LoadEngineDefinitionsOptions {
   readonly tenantId?: string | null;
   readonly limit?: number;
+  /**
+   * What to do with a stored row `WorkflowDefinitionSchema` refuses.
+   *
+   * **Required**, and the options object loses its default for it: a reporter defaulting to "drop it
+   * silently" is the defect restated as a default, and required means the compiler names the call
+   * site rather than letting a new caller inherit an answer nobody chose.
+   *
+   * It is a reporter and not a returned pair because this read's consumer is neither a verifier nor
+   * a scheduler but a **boot**: `node.ts` builds the engine's map from it once and already decides
+   * between two volumes of boot line — a loud warning at `size === 0`, a count otherwise. An
+   * unreadable row is a third state it could not express, because before this it never received a
+   * map at all.
+   *
+   * The two throws beside it **stay**, and the distinction is what a report can name. Hitting the
+   * row limit means an unknown number of definitions are missing and nothing can say which; two
+   * rows claiming one `definition.id` means the key the engine looks up by is ambiguous, so neither
+   * row can be trusted. Both are facts about the **map**. One unreadable row names itself, and
+   * dropping it costs exactly the instances of that one definition — which go quiet rather than
+   * wrong, since a missing definition makes the engine skip a due timer and decline a signal — where
+   * throwing costs *every* instance in the deployment its engine. Narrowing the blast radius is only
+   * honest if the absence is said, which is what this reports.
+   */
+  readonly onUnreadable: UnreadableRowReporter;
 }
 
 /**
@@ -514,10 +540,11 @@ export class PostgresWorkflowDefinitionStore {
    * so; it does not belong to the loader, which cannot.
    *
    * Hitting `limit` **raises**. A truncated map is the same failure as a narrowed one, except
-   * nothing would report it.
+   * nothing would report it. A row the contract *refuses* is reported instead, and
+   * `LoadEngineDefinitionsOptions.onUnreadable` argues the difference.
    */
   async loadEngineDefinitions(
-    options: LoadEngineDefinitionsOptions = {},
+    options: LoadEngineDefinitionsOptions,
   ): Promise<ReadonlyMap<string, WorkflowDefinition>> {
     const limit = options.limit ?? DEFAULT_DEFINITION_LOAD_LIMIT;
     throwUnless(limit > 0, "limit must be positive");
@@ -538,7 +565,19 @@ export class PostgresWorkflowDefinitionStore {
       }
       const map = new Map<string, WorkflowDefinition>();
       for (const row of result.rows) {
-        const definition = rowToWorkflowDefinition(row);
+        let definition: WorkflowDefinition;
+        try {
+          definition = rowToWorkflowDefinition(row);
+        } catch (err) {
+          // Reported and skipped, never thrown: one unreadable row used to cost every instance in
+          // the deployment its engine. `definition_id` is the row's business key and the only
+          // column a report may name — see `UnreadableRow`.
+          options.onUnreadable({
+            identity: textIdentity(row, "definition_id"),
+            detail: unreadableDetail(err),
+          });
+          continue;
+        }
         const previous = map.get(definition.id);
         if (previous !== undefined) {
           throw new Error(

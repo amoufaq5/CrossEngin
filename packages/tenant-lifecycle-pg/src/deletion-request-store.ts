@@ -1,4 +1,4 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import { unreadableDetail, type PgConnection } from "@crossengin/kernel-pg";
 import {
   GdprDeletionRequestSchema,
   canTransitionDeletionRequest,
@@ -175,6 +175,15 @@ export class DeletionRequestCommittedUnreadable extends Error {
  *
  * `requestId` is `string | null` because the column itself may be what is wrong, and `null` says
  * *the row does not name one* rather than inventing a handle (ADR-0331).
+ *
+ * Structurally `kernel-pg`'s `UnreadableRow` with the identity named for what it is, and kept that
+ * way deliberately: a reporter here is handed a *request*, and `requestId` is what the three
+ * audiences — a scheduler, an HTTP route, an audit sweep — act on. What is **not** kept local is the
+ * `detail`. This module computed it as `err.message`, and for an `invalid_enum_value` issue that
+ * string *is* the stored value — so the rule argued three paragraphs above was broken by its own
+ * implementation. `unreadableDetail` is imported for that, and the three sites that build one go
+ * through it: this reporter, and the two `DeletionRequestCommittedUnreadable` throws, whose message
+ * reaches an HTTP body and the runner's log.
  */
 export interface UnreadableRequestRow {
   readonly requestId: string | null;
@@ -224,7 +233,7 @@ function readRequestRows(
     } catch (err) {
       onUnreadable({
         requestId: requestIdOf(row),
-        detail: err instanceof Error ? err.message : String(err),
+        detail: unreadableDetail(err),
       });
     }
   }
@@ -410,7 +419,7 @@ export class PostgresDeletionRequestStore {
     try {
       return rowToDeletionRequest(row);
     } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
+      const detail = unreadableDetail(err);
       // The whole of finding 3, and the split is the row count. Our `INSERT` landed, so a read-back
       // the contract cannot represent is a committed write this binary cannot read — never a
       // refusal, which would tell the caller to retry a row that exists.
@@ -657,7 +666,7 @@ export class PostgresDeletionRequestStore {
       throw new DeletionRequestCommittedUnreadable(
         requestId,
         to,
-        err instanceof Error ? err.message : String(err),
+        unreadableDetail(err),
       );
     }
   }

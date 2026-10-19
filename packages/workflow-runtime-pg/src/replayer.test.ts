@@ -6,7 +6,7 @@ import {
   WorkflowDefinitionIdResolver,
   WorkflowInstanceIdResolver,
 } from "./id-mapping.js";
-import { WorkflowReplayer, timerProjectionSignature } from "./replayer.js";
+import { RESYNC_REFUSALS, WorkflowReplayer, timerProjectionSignature } from "./replayer.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const INSTANCE_UUID = "00000000-0000-4000-8000-000000000111";
@@ -866,6 +866,99 @@ const CANCELLED_ROW_BASE = {
   compensation_started_at: null,
   compensation_completed_at: null,
 } as const;
+
+describe("WorkflowReplayer and a log row it cannot represent", () => {
+  /**
+   * An event whose `kind` no `EVENT_KINDS` member matches.
+   *
+   * The cast is the fixture's whole point: the contract forbids this value and
+   * `meta.workflow_events.kind`'s CHECK forbids it too, so only a hand-edit or a future binary
+   * produces one — and it is exactly the row that used to be cast through `rowToEvent` and folded
+   * away in silence, because `projectInstance` ignores a kind it does not recognise.
+   */
+  function unknownKindEvent(): WorkflowEvent {
+    return {
+      ...signalReceivedEvent(),
+      id: "wfe_bad00001",
+      sequenceNumber: 2,
+      kind: "instance_teleported" as WorkflowEvent["kind"],
+    };
+  }
+
+  it("verifyInstance reports the row instead of propagating, and counts it as drift", async () => {
+    // The whole increment: `listByInstance` throws on such a row, so `verifyInstance` used to die
+    // on the one instance whose log is damaged — and a sweep over the tenant died with it.
+    const state = emptyState([startedEvent(), unknownKindEvent()]);
+    state.instanceRow = storedRow();
+    const report = await buildReplayer(state).verifyInstance("wfi_inst0001");
+    expect(report.unreadableEvents).toEqual([
+      {
+        identity: "wfe_bad00001",
+        detail: "row column kind is not a declared workflow event kind",
+      },
+    ]);
+    expect(report.drifted).toBe(true);
+    expect(report.hasEvents).toBe(true);
+  });
+
+  it("discloses no value from the refused row beyond its business key", async () => {
+    const state = emptyState([
+      startedEvent(),
+      { ...unknownKindEvent(), correlationId: "po-88731" },
+    ]);
+    state.instanceRow = storedRow();
+    const report = await buildReplayer(state).verifyInstance("wfi_inst0001");
+    const rendered = JSON.stringify(report.unreadableEvents);
+    expect(rendered).toContain("wfe_bad00001");
+    expect(rendered).not.toContain("instance_teleported");
+    expect(rendered).not.toContain("po-88731");
+  });
+
+  it("a log whose every row is refused is not an orphaned instance", async () => {
+    // `hasEvents: false` with a non-empty `unreadableEvents` is a third state: the log has rows and
+    // none could be read, which is the opposite of `instanceOrphaned` — an instance row with no
+    // log at all — and would otherwise have been reported as it.
+    const state = emptyState([unknownKindEvent()]);
+    state.instanceRow = storedRow();
+    const report = await buildReplayer(state).verifyInstance("wfi_inst0001");
+    expect(report.hasEvents).toBe(false);
+    expect(report.instance.instanceOrphaned).toBe(false);
+    expect(report.unreadableEvents).toHaveLength(1);
+    expect(report.drifted).toBe(true);
+  });
+
+  it("an instance with a genuinely empty log is still reported orphaned", async () => {
+    const state = emptyState([]);
+    state.instanceRow = storedRow();
+    const report = await buildReplayer(state).verifyInstance("wfi_inst0001");
+    expect(report.instance.instanceOrphaned).toBe(true);
+    expect(report.unreadableEvents).toEqual([]);
+  });
+
+  it("resyncInstance refuses by name and writes nothing", async () => {
+    // A refusal and not a throw, which is `RESYNC_REFUSALS`' own reason for existing: a typed
+    // refusal is a fact `bulkResync` can carry past this instance.
+    const state = emptyState([startedEvent(), unknownKindEvent()]);
+    state.instanceRow = storedRow();
+    const report = await buildReplayer(state).resyncInstance("wfi_inst0001");
+    expect(report.refusal).toBe("log_has_unreadable_rows");
+    expect(report.hadEvents).toBe(true);
+    expect(report.upserts).toEqual({ instance: false, activities: 0, signals: 0, timers: 0 });
+    expect(state.updates).toEqual([]);
+  });
+
+  it("the resync refusal names the row and nothing the row held", async () => {
+    const state = emptyState([startedEvent(), unknownKindEvent()]);
+    state.instanceRow = storedRow();
+    const report = await buildReplayer(state).resyncInstance("wfi_inst0001");
+    expect(report.detail).toContain("wfe_bad00001");
+    expect(report.detail).not.toContain("instance_teleported");
+  });
+
+  it("log_has_unreadable_rows is in the declared refusal vocabulary", () => {
+    expect([...RESYNC_REFUSALS]).toContain("log_has_unreadable_rows");
+  });
+});
 
 describe("WorkflowReplayer.verifyInstance — the cancellation fence", () => {
   async function fieldsFor(

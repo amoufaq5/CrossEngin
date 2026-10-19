@@ -6,6 +6,8 @@ import {
   type GdprDeletionRequest,
 } from "@crossengin/tenant-lifecycle";
 
+import type { UnreadableRow } from "@crossengin/kernel-pg";
+
 import { isAnchoredByChain } from "./deletion-pipeline.js";
 import { DeletionRequestCommittedUnreadable } from "./deletion-request-store.js";
 import type {
@@ -103,6 +105,19 @@ export const EVIDENCE_DEFECTS = [
   "proof_mismatch",
   /** The scope disagrees with the attestations stored beside it. */
   "scope_disagrees_with_attestations",
+  /**
+   * The `attestations` column holds something that is not a list of attestations, so the check
+   * above could not be run at all.
+   *
+   * The companion to it and the easier tamper of the two. That column is `JSONB NOT NULL DEFAULT
+   * '[]'` with **no CHECK that it is an array**, so `'{}'`, `'null'` and `'"x"'` are all storable —
+   * and before this defect existed the mapper answered `[]` for each, every reader gated on
+   * `attestations.length === 0`, and the row came back `ok` with `matchesAttestations: null`. So
+   * *editing* the evidence into a lie was caught by name and *destroying* it was not, which is the
+   * wrong way round: `tombstoneMatchesAttestations` is one of only two detectors for a tampered
+   * scope, and this is how you turn it off.
+   */
+  "attestations_unreadable",
   /** No chain entry witnesses it, or the record does not commit to the one that does. */
   "unwitnessed",
 ] as const;
@@ -117,6 +132,12 @@ export interface EvidenceCheck {
    * record is internally intact and commits to its own scope, which is what completing a *request*
    * needs. A row with no evidence beside it predates `attestations` or was not written by the
    * pipeline, and that is worth seeing without stranding the request over it.
+   *
+   * It stays `null` for an **unreadable** column too, and that is honest rather than a gap: nothing
+   * could be compared, so there is no comparison to report. What separates the two cases is
+   * `attestations_unreadable` in `defects` — the fact carries the finding, and this field carries
+   * only the comparison. Reporting `false` here instead would claim a disagreement nobody
+   * established.
    */
   readonly matchesAttestations: boolean | null;
 }
@@ -137,6 +158,11 @@ export function verifyStoredEvidence(stored: StoredTombstone): EvidenceCheck {
   if (!hashes.contentManifestOk) defects.push("scope_tampered");
   if (!hashes.proofOk) defects.push("proof_mismatch");
   if (matchesAttestations === false) defects.push("scope_disagrees_with_attestations");
+  // Read from the mapper's own reading and never inferred from the array being empty: `[]` is a
+  // legitimate stored claim, so the length cannot tell an honest proof written with no evidence
+  // from one whose evidence was destroyed. This is the gap that made the second detector above
+  // switchable off — the check it would have run is skipped either way, and only this says so.
+  if (stored.attestationsRead === "unreadable") defects.push("attestations_unreadable");
   // A tombstone nothing witnessed is a row, not a proof: without the chain entry anybody with write
   // access to the table could have inserted it. `isAnchoredByChain` is the stronger question than
   // "is `chain_entry_hash` set" — it also requires the record's own anchors to name that entry, so a
@@ -668,7 +694,7 @@ export class DeletionReconciler {
       afterTombstoneId: input.afterTombstoneId ?? null,
     });
     const findings: TombstoneAudit[] = [];
-    for (const stored of page) {
+    for (const stored of page.records) {
       const named = stored.record.relatedDeletionRequestId ?? null;
       const reference = await this.referenceStateOf(named);
       const check = verifyStoredEvidence(stored);
@@ -689,16 +715,25 @@ export class DeletionReconciler {
         detail: standing.detail,
       });
     }
-    const last = page[page.length - 1];
     return {
-      // What this call actually verified, never what it hoped to: "we examined 4,000 and found
-      // nothing" is a claim an auditor can be given, and it cannot be made from the absence of a
-      // log line (ADR-0323).
-      examined: page.length,
+      // What this call actually **verified**, never what it hoped to nor what it read: "we examined
+      // 4,000 and found nothing" is a claim an auditor can be given, and it cannot be made from the
+      // absence of a log line (ADR-0323). A row the contract refused was read and not verified, so
+      // it is beside this figure rather than inside it — `checked: 2` next to one refusal says what
+      // happened where `3` would claim an examination that did not occur (ADR-0371).
+      examined: page.records.length,
       findings,
-      // A page shorter than the limit is the end of the table, not a boundary — a cursor here would
-      // make the caller ask again for nothing, forever.
-      nextAfterTombstoneId: page.length < limit || last === undefined ? null : last.record.id,
+      // A refused row is a finding of its own, and it cannot be a `TombstoneAudit`: that shape
+      // carries a `verifyStoredEvidence` result and a reference state, and neither can be computed
+      // for a row nobody could represent. Reporting `unverified` for it would claim an examination;
+      // reporting nothing would make a sweep whose only purpose is finding defective proofs go
+      // quiet on the one row it found something wrong with.
+      unreadable: page.unreadable,
+      // Over every row the page held, readable or not. A page shorter than the limit is the end of
+      // the table, not a boundary — and the cursor comes from the store, because the last row of a
+      // page may be the refused one and the records then do not reach it.
+      nextAfterTombstoneId:
+        page.rowsRead < limit ? null : page.lastTombstoneId,
     };
   }
 
@@ -822,6 +857,15 @@ export interface TombstoneAuditPage {
    */
   readonly examined: number;
   readonly findings: readonly TombstoneAudit[];
+  /**
+   * Rows the store could not represent — read, not verified, and not expressible as a
+   * `TombstoneAudit` because that shape needs a `verifyStoredEvidence` result this row cannot have.
+   *
+   * Its own axis for the reason `AuditAnchorReport.unreadable` is: a page that is clean on the
+   * findings and non-empty here is a page that found nothing **in what it could read**, which is a
+   * different claim from a clean sweep and the one an auditor has to be given.
+   */
+  readonly unreadable: readonly UnreadableRow[];
   /** The cursor for the next page, or `null` when the sweep reached the end of the table. */
   readonly nextAfterTombstoneId: string | null;
 }

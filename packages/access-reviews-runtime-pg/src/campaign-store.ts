@@ -1,8 +1,16 @@
 import type { AccessReviewCampaign } from "@crossengin/access-reviews";
-import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  readRowsWithUnreadable,
+  type PgConnection,
+} from "@crossengin/kernel-pg";
 
 import { CampaignUuidResolver } from "./id-mapping.js";
-import { rowToCampaign, type CampaignRow } from "./records.js";
+import {
+  rowKey,
+  rowToCampaign,
+  type CampaignRow,
+  type TypedRowRead,
+} from "./records.js";
 import { tenantScopePredicate, withTenantContext } from "./tenant-context.js";
 
 const SCHEMA = "meta";
@@ -126,8 +134,20 @@ export class PostgresAccessReviewCampaignStore {
     });
   }
 
-  /** The name said one tenant and the statement had no `WHERE` clause at all. */
-  async listByTenant(tenantId: string): Promise<readonly AccessReviewCampaign[]> {
+  /**
+   * The name said one tenant and the statement had no `WHERE` clause at all.
+   *
+   * It returns the pair rather than forwarding a reporter, because its one consumer is a
+   * **verifier**: `AccessReviewReplayer.replayTenant` is the entry point for a tenant's sweep, and a
+   * campaign row the contract refuses is the finding that sweep exists to produce. Before this, one
+   * such row threw out of the `.map` and took **every other campaign in the tenant** with it — the
+   * sweep reported nothing at all, which reads as a clean bill of health.
+   *
+   * `rowToCampaign` validates only its three required timestamps, so what throws here today is a
+   * NULL `scheduled_start_at`, `deadline_at` or `created_at`. See `AccessReviewReplayer` for why it
+   * deliberately does not also parse.
+   */
+  async listByTenant(tenantId: string): Promise<TypedRowRead<AccessReviewCampaign>> {
     return withTenantContext(this.conn, tenantId, async (tx) => {
       const result = await tx.query<CampaignRow>(
         `SELECT ${SELECT_COLUMNS} FROM ${SCHEMA}.${TABLE} c
@@ -135,7 +155,7 @@ export class PostgresAccessReviewCampaignStore {
           ORDER BY c.created_at ASC, c.campaign_id ASC`,
         [tenantId],
       );
-      return result.rows.map(rowToCampaign);
+      return readRowsWithUnreadable(result.rows, rowToCampaign, (row) => rowKey(row.campaign_id));
     });
   }
 }

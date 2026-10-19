@@ -36,6 +36,7 @@ import {
   TOMBSTONE_SCAN_MAX_LIMIT,
   type StoredTombstone,
   type TombstoneAnchorer,
+  type TombstoneScanPage,
 } from "./tombstone-store.js";
 
 const TENANT = "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8";
@@ -146,6 +147,10 @@ function tombstoneOf(id = TOMB): StoredTombstone {
       ],
     },
     attestations: [ATTESTATION, SHARED_ATTESTATION],
+    // What `rowToStoredTombstone` answers for the row this fixture describes: a real evidence array
+    // that parses. `unreadable` is what the mapper reports for a column holding anything that is
+    // not a list of attestations, and `destroyedEvidence` below is the fixture for it.
+    attestationsRead: "parsed",
     chainEntryHash: CHAIN_HASH,
     chainSequenceNumber: 7,
   };
@@ -153,6 +158,18 @@ function tombstoneOf(id = TOMB): StoredTombstone {
 
 /** The honest fixture's real proof digest, so an assertion cannot drift from the arithmetic. */
 const PROOF = tombstoneOf().record.proofSha256;
+
+/**
+ * The same record whose `attestations` column was **destroyed** rather than edited — what the
+ * mapper answers for `'{}'`, `'null'`, `'"x"'` or an element the contract refuses.
+ *
+ * `attestations: []` beside `attestationsRead: "unreadable"` is the shape that matters: the array is
+ * empty because nothing could be read from it, not because the proof was written with no evidence,
+ * and the old reading could not tell those apart.
+ */
+function destroyedEvidence(): StoredTombstone {
+  return { ...tombstoneOf(), attestations: [], attestationsRead: "unreadable" };
+}
 
 /**
  * The same fixture with a real statutory retention in its proof (ADR-0330, signed by ADR-0331).
@@ -212,6 +229,7 @@ function retainingTombstone(): StoredTombstone {
       ],
     },
     attestations,
+    attestationsRead: "parsed",
     chainEntryHash: CHAIN_HASH,
     chainSequenceNumber: 7,
   };
@@ -266,6 +284,7 @@ function unreferencedTombstone(id = "tomb_unref0001aaaa"): StoredTombstone {
       ],
     },
     attestations: [ATTESTATION, SHARED_ATTESTATION],
+    attestationsRead: "parsed",
     chainEntryHash: CHAIN_HASH,
     chainSequenceNumber: 9,
   };
@@ -276,6 +295,26 @@ function tamper(stored: StoredTombstone): StoredTombstone {
     ...stored,
     record: { ...stored.record, scope: { ...stored.record.scope, rowCount: 1 } },
   };
+}
+
+/**
+ * One row of the fake table: a tombstone the mapper could represent, or a row it refused.
+ *
+ * Both carry an id, because the store's cursor is the ordering on that column and a refused row
+ * occupies a position in it. Modelling the refusals as a list beside the records could not express
+ * a page whose **last** row is the refused one — which is the case the page shape exists for, and
+ * the one a cursor taken off `records` gets wrong.
+ */
+type ScanRow =
+  | { readonly kind: "record"; readonly id: string; readonly stored: StoredTombstone }
+  | { readonly kind: "refused"; readonly id: string; readonly detail: string };
+
+function readableRow(stored: StoredTombstone): ScanRow {
+  return { kind: "record", id: stored.record.id, stored };
+}
+
+function refusedRow(id: string, detail = "approvedBy: custom"): ScanRow {
+  return { kind: "refused", id, detail };
 }
 
 interface Harness {
@@ -300,6 +339,11 @@ function harness(
     readonly completed?: readonly GdprDeletionRequest[];
     readonly storedMissing?: boolean;
     readonly scan?: readonly StoredTombstone[];
+    /**
+     * The table as rows rather than as records, for a page that holds one the store refused.
+     * Takes precedence over `scan`, which is the all-readable shorthand every other test uses.
+     */
+    readonly scanRows?: readonly ScanRow[];
     /** Which request ids `requests.read` finds. Absent means every one asked for. */
     readonly knownRequestIds?: readonly string[];
     /** Rows the store's own page could not represent, reported rather than returned. */
@@ -377,14 +421,26 @@ function harness(
     scanAll: async (input: {
       limit: number;
       afterTombstoneId?: string | null;
-    }): Promise<readonly StoredTombstone[]> => {
+    }): Promise<TombstoneScanPage> => {
       scanCalls.push({ limit: input.limit, afterTombstoneId: input.afterTombstoneId });
-      const all = behaviour.scan ?? [];
+      const all = behaviour.scanRows ?? (behaviour.scan ?? []).map((s) => readableRow(s));
       const after = input.afterTombstoneId ?? null;
       // A real keyset page, so a test about the cursor is a test about the cursor.
-      const ordered = [...all].sort((a, b) => a.record.id.localeCompare(b.record.id));
-      const from = after === null ? ordered : ordered.filter((t) => t.record.id > after);
-      return from.slice(0, input.limit);
+      const ordered = [...all].sort((a, b) => a.id.localeCompare(b.id));
+      const from = after === null ? ordered : ordered.filter((r) => r.id > after);
+      const rows = from.slice(0, input.limit);
+      const last = rows[rows.length - 1];
+      return {
+        records: rows.flatMap((r) => (r.kind === "record" ? [r.stored] : [])),
+        unreadable: rows.flatMap((r) =>
+          r.kind === "refused" ? [{ identity: r.id, detail: r.detail }] : [],
+        ),
+        // Off the last **row**, readable or not, which is what the store does and the reason the
+        // page carries it: a fake that took it from the records would agree with a caller that
+        // derived it the same wrong way, and the pair would be green together.
+        lastTombstoneId: last === undefined ? null : last.id,
+        rowsRead: rows.length,
+      };
     },
   } as unknown as PostgresTombstoneStore;
 
@@ -690,6 +746,7 @@ describe("verifyStoredEvidence", () => {
       "scope_tampered",
       "proof_mismatch",
       "scope_disagrees_with_attestations",
+      "attestations_unreadable",
       "unwitnessed",
     ]);
   });
@@ -799,11 +856,58 @@ describe("verifyStoredEvidence", () => {
 
   it("reports no attestations as cannot-say, and does not fail over it", () => {
     const honest = tombstoneOf();
-    const check = verifyStoredEvidence({ ...honest, attestations: [] });
+    const check = verifyStoredEvidence({ ...honest, attestations: [], attestationsRead: "parsed" });
     // null, not false: the hashes still establish the record is intact and commits to its own scope,
-    // which is what completing a request needs (ADR-0318's habit).
+    // which is what completing a request needs (ADR-0318's habit). This is the legitimate case —
+    // `'[]'` is what `write(record)` and the column default both produce — and it must not regress
+    // into a defect now that a destroyed column is one.
     expect(check.matchesAttestations).toBeNull();
     expect(check.ok).toBe(true);
+    expect(check.defects).toEqual([]);
+  });
+
+  it("makes a destroyed evidence column a defect, which was the easier tamper of the two", () => {
+    // Measured live: with the attestations edited to a valid array that *disagrees*, the record was
+    // caught by name; with the column replaced by `'{}'`, `'null'` or `'"x"'` it read
+    // `ok=true defects=[] matchesAttestations=null`. So editing the evidence was caught and
+    // destroying it was not — and `tombstoneMatchesAttestations` is one of only two detectors for a
+    // tampered scope, so this is how you switch it off.
+    const check = verifyStoredEvidence(destroyedEvidence());
+    expect(check.ok).toBe(false);
+    expect(check.defects).toEqual(["attestations_unreadable"]);
+  });
+
+  it("keeps matchesAttestations null for it, because nothing could be compared", () => {
+    const check = verifyStoredEvidence(destroyedEvidence());
+    // Both are true at once and neither is the other's substitute: `null` is the honest answer to
+    // "did the scope match its evidence" when there was no evidence to read, and the defect beside
+    // it is what says the absence is a finding. Reporting `false` here would claim a disagreement
+    // nobody established, which is the confusion the comment on that gate has always forbidden.
+    expect(check.matchesAttestations).toBeNull();
+    expect(check.defects).toContain("attestations_unreadable");
+  });
+
+  it("reads the mapper's reading rather than inferring it from the array being empty", () => {
+    // The two differ in exactly one field and in nothing a length could see.
+    const honest = { ...tombstoneOf(), attestations: [], attestationsRead: "parsed" } as const;
+    expect(verifyStoredEvidence(honest).defects).toEqual([]);
+    expect(verifyStoredEvidence({ ...honest, attestationsRead: "unreadable" }).defects).toEqual([
+      "attestations_unreadable",
+    ]);
+  });
+
+  it("reports it beside the defects a destroyed column cannot hide", () => {
+    // Destroying the evidence silences the comparison and nothing else, so a record that is also
+    // internally tampered still reports both — the one defect does not mask the other.
+    const check = verifyStoredEvidence({
+      ...tamperedTombstone(),
+      attestations: [],
+      attestationsRead: "unreadable",
+    });
+    expect(check.defects).toContain("attestations_unreadable");
+    expect(check.defects).toContain("scope_tampered");
+    // And not the comparison's own defect, which could not run at all.
+    expect(check.defects).not.toContain("scope_disagrees_with_attestations");
   });
 });
 
@@ -1115,7 +1219,100 @@ describe("auditTombstones", () => {
   it("ends the sweep on an empty table without claiming anything was checked", async () => {
     const h = harness({ scan: [] });
     const page = await h.reconciler.auditTombstones();
-    expect(page).toEqual({ examined: 0, findings: [], nextAfterTombstoneId: null });
+    expect(page).toEqual({
+      examined: 0,
+      findings: [],
+      unreadable: [],
+      nextAfterTombstoneId: null,
+    });
+  });
+
+  it("counts what it verified and not what it read, so a refusal is beside the figure", async () => {
+    const h = harness({
+      scanRows: [
+        readableRow(unreferencedTombstone("tomb_aaaa0000aaaa")),
+        refusedRow("tomb_bbbb0000bbbb"),
+        readableRow(unreferencedTombstone("tomb_cccc0000cccc")),
+      ],
+    });
+    const page = await h.reconciler.auditTombstones();
+    // `3` would claim an examination that did not occur: a row the contract refused was read and
+    // not verified, so it sits beside this figure rather than inside it (ADR-0371).
+    expect(page.examined).toBe(2);
+    expect(page.unreadable).toHaveLength(1);
+    expect(page.unreadable[0]?.identity).toBe("tomb_bbbb0000bbbb");
+  });
+
+  it("is not a clean sweep when the findings are empty and a row could not be read", async () => {
+    const h = harness({
+      scanRows: [readableRow(unreferencedTombstone("tomb_aaaa0000aaaa")), refusedRow("tomb_zzzz")],
+    });
+    const page = await h.reconciler.auditTombstones();
+    // The pair is the claim, so it is asserted as a pair: "nothing wrong in what I could read" is a
+    // different statement from "nothing wrong", and the second is the one an auditor is owed.
+    expect({ findings: page.findings, unreadable: page.unreadable }).toEqual({
+      findings: [],
+      unreadable: [{ identity: "tomb_zzzz", detail: "approvedBy: custom" }],
+    });
+  });
+
+  it("is a clean sweep when every row read and nothing was wrong", async () => {
+    const h = harness({ scan: [unreferencedTombstone("tomb_aaaa0000aaaa")] });
+    const page = await h.reconciler.auditTombstones();
+    expect({ findings: page.findings, unreadable: page.unreadable }).toEqual({
+      findings: [],
+      unreadable: [],
+    });
+  });
+
+  it("continues the lap past a refused last row, cursored on that row's own id", async () => {
+    const h = harness({
+      scanRows: [
+        readableRow(unreferencedTombstone("tomb_aaaa0000aaaa")),
+        refusedRow("tomb_bbbb0000bbbb"),
+      ],
+    });
+    const first = await h.reconciler.auditTombstones({ limit: 2 });
+    // The records reach only `tomb_aaaa…`, so a cursor derived from them would ask again from
+    // before the refused row and read it on every page for ever. A null here would be worse: the
+    // lap would end at a full page and every row behind it would go unverified.
+    expect(first.nextAfterTombstoneId).toBe("tomb_bbbb0000bbbb");
+    expect(first.examined).toBe(1);
+    const second = await h.reconciler.auditTombstones({
+      limit: 2,
+      afterTombstoneId: first.nextAfterTombstoneId,
+    });
+    expect(second.examined).toBe(0);
+    expect(second.unreadable).toEqual([]);
+    expect(second.nextAfterTombstoneId).toBeNull();
+  });
+
+  it("ends the lap on a short page, refused last row or not", async () => {
+    const h = harness({
+      scanRows: [
+        readableRow(unreferencedTombstone("tomb_aaaa0000aaaa")),
+        refusedRow("tomb_bbbb0000bbbb"),
+      ],
+    });
+    const page = await h.reconciler.auditTombstones({ limit: 10 });
+    // Fewer rows came back than were asked for, which is the end of the table — and the refusal
+    // does not change that, because the figure the cursor turns on is rows and not records.
+    expect(page.nextAfterTombstoneId).toBeNull();
+    expect(page.unreadable).toHaveLength(1);
+  });
+
+  it("keeps a refused row out of the findings and out of every finding's fields", async () => {
+    const h = harness({
+      scanRows: [refusedRow("tomb_refused0001"), readableRow(tamper(unreferencedTombstone()))],
+    });
+    const page = await h.reconciler.auditTombstones();
+    // A `TombstoneAudit` carries a `verifyStoredEvidence` result and a reference state, and neither
+    // can be computed for a row nobody could represent — so it cannot be one, and reporting it as
+    // `unverified` would claim an examination that never happened.
+    expect(page.findings).toHaveLength(1);
+    expect(page.findings[0]?.tombstoneId).toBe("tomb_unref0001aaaa");
+    expect(JSON.stringify(page.findings)).not.toContain("tomb_refused0001");
+    expect(page.unreadable.map((r) => r.identity)).toEqual(["tomb_refused0001"]);
   });
 
   it("clamps the page size to the store's cap, so a short page is not misread as the end", async () => {
@@ -1368,13 +1565,22 @@ describe("auditTombstones writes nothing", () => {
   function realHarness(
     scan: readonly StoredTombstone[],
     requestsFound: readonly GdprDeletionRequest[],
+    /**
+     * Columns written over whatever `tombstoneRow` derived, for a row no `StoredTombstone` can
+     * describe: `attestations: "{}"` is storable (`JSONB NOT NULL` with no array CHECK) and the
+     * mapper is the only thing that can answer for it, so the fixture has to be the row.
+     */
+    rowOverride: Record<string, unknown> = {},
   ): { readonly reconciler: DeletionReconciler; readonly sql: () => string[] } {
     const sql: string[] = [];
     const conn = {
       query: async (statement: string) => {
         sql.push(statement);
         if (statement.includes(`FROM meta.tenant_tombstones`)) {
-          return { rows: scan.map((s) => tombstoneRow(s)), rowCount: scan.length };
+          return {
+            rows: scan.map((s) => ({ ...tombstoneRow(s), ...rowOverride })),
+            rowCount: scan.length,
+          };
         }
         if (statement.includes(`FROM meta.gdpr_deletion_requests`)) {
           return { rows: requestsFound.map((r) => requestRow(r)), rowCount: requestsFound.length };
@@ -1427,6 +1633,30 @@ describe("auditTombstones writes nothing", () => {
     const page = await h.reconciler.auditTombstones();
     expect(page.findings[0]?.reference).toBe("dangling");
     expect(h.sql().filter((s) => MUTATING.test(s))).toEqual([]);
+  });
+
+  it("reports a destroyed evidence column as a finding, through the real mapper", async () => {
+    // The thesis end to end, and on the one reader that does not start from something already
+    // naming a tombstone (ADR-0327): a row the sweep cannot read is what the sweep exists to find,
+    // so it is routed into the finding set rather than out of the answer. Before this it came back
+    // examined, clean and silent — the same page as an honest proof written with no evidence.
+    const h = realHarness([unreferencedTombstone()], [], { attestations: "{}" });
+    const page = await h.reconciler.auditTombstones();
+    expect(page.examined).toBe(1);
+    expect(page.findings).toHaveLength(1);
+    expect(page.findings[0]?.check.defects).toEqual(["attestations_unreadable"]);
+    expect(page.findings[0]?.detail).toContain("attestations_unreadable");
+    expect(h.sql().filter((s) => MUTATING.test(s))).toEqual([]);
+  });
+
+  it("still reports an honest no-evidence row as clean, through the same mapper", async () => {
+    // The negative control the one above needs: `'[]'` is what `write(record)` and the column
+    // default both produce, so a sweep that flagged it would report every such proof as falsified
+    // and escalate a `sev1` over it (ADR-0324) — the direction this whole family is wrong in.
+    const h = realHarness([unreferencedTombstone()], [], { attestations: "[]" });
+    const page = await h.reconciler.auditTombstones();
+    expect(page.examined).toBe(1);
+    expect(page.findings).toEqual([]);
   });
 
   it("reads the table under the platform grant and keyset-ordered", async () => {

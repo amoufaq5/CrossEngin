@@ -20,7 +20,12 @@ import {
   scopedWrite,
   type DrFailoverExecutionRecord,
 } from "./records.js";
-import { mockConnection, type Captured } from "./test-fakes.js";
+import {
+  collectUnreadable,
+  EXPECT_ALL_READABLE,
+  mockConnection,
+  type Captured,
+} from "./test-fakes.js";
 
 /**
  * The statement under test, found by what it *is* rather than by where it sits.
@@ -34,6 +39,9 @@ function written(capture: readonly Captured[]): Captured {
   if (found === undefined) throw new Error("no statement other than the session setting was issued");
   return found;
 }
+
+/** `FORBIDDEN_OUTCOME`'s argument in `drill-store.test.ts`: a value `FailoverStatusSchema` refuses. */
+const FORBIDDEN_STATUS = "zzz-not-a-status";
 
 const NOW = "2026-06-02T12:00:00.000Z";
 const LATER = "2026-06-02T12:30:00.000Z";
@@ -256,7 +264,7 @@ describe("PostgresDrFailoverStore.listRecent", () => {
     const store = new PostgresDrFailoverStore(
       mockConnection(capture, { rows: [dbRow], rowCount: 1 }),
     );
-    const rows = await store.listRecent(null, 25);
+    const rows = await store.listRecent(null, EXPECT_ALL_READABLE, 25);
     expect(capture[0]?.sql).toContain("ORDER BY recorded_at DESC");
     expect(capture[0]?.params?.[0]).toBe(25);
     expect(rows).toHaveLength(1);
@@ -273,13 +281,48 @@ describe("PostgresDrFailoverStore.listRecent", () => {
         rowCount: 1,
       }),
     );
-    const rows = await store.listRecent(null);
+    const rows = await store.listRecent(null, EXPECT_ALL_READABLE);
     expect(rows[0]?.record.id).toBe("fov_00000001");
   });
 
   it("rejects a non-positive limit", async () => {
     const store = new PostgresDrFailoverStore(mockConnection());
-    await expect(store.listRecent(null, 0)).rejects.toThrow();
+    await expect(store.listRecent(null, EXPECT_ALL_READABLE, 0)).rejects.toThrow();
+  });
+
+  /** `unreadableDbRow`'s argument, one table over — read the drill store's. */
+  function unreadableDbRow() {
+    return {
+      ...dbRow,
+      execution_id: "fov_00000002",
+      record: { ...failover(), status: FORBIDDEN_STATUS },
+    };
+  }
+
+  it("returns the readable rows and reports the one it could not represent", async () => {
+    const seen = collectUnreadable();
+    const store = new PostgresDrFailoverStore(
+      mockConnection(undefined, {
+        rows: [dbRow, unreadableDbRow(), { ...dbRow, execution_id: "fov_00000003" }],
+        rowCount: 3,
+      }),
+    );
+    const rows = await store.listRecent(null, seen.report, 25);
+    expect(rows.map((r) => r.executionId)).toEqual(["fov_00000001", "fov_00000003"]);
+    expect(seen.rows).toHaveLength(1);
+    expect(seen.rows[0]?.identity).toBe("fov_00000002");
+  });
+
+  it("names a field path and an issue code, and no value off the row", async () => {
+    const seen = collectUnreadable();
+    const store = new PostgresDrFailoverStore(
+      mockConnection(undefined, { rows: [unreadableDbRow()], rowCount: 1 }),
+    );
+    await store.listRecent(null, seen.report, 25);
+    const detail = seen.rows[0]?.detail ?? "";
+    expect(detail).toContain("record.status");
+    expect(detail).toContain("invalid_enum_value");
+    expect(detail).not.toContain(FORBIDDEN_STATUS);
   });
 });
 
@@ -328,7 +371,11 @@ describe("the platform write arm", () => {
     // The platform read policy is `SELECT`-scoped on `tenant_id IS NULL` and demands no grant, so a
     // read behaves exactly as it did before the split.
     const capture: Captured[] = [];
-    await new PostgresDrFailoverStore(mockConnection(capture)).listRecent(null, 5);
+    await new PostgresDrFailoverStore(mockConnection(capture)).listRecent(
+      null,
+      EXPECT_ALL_READABLE,
+      5,
+    );
     expect(capture.some((c) => c.sql.includes("set_config"))).toBe(false);
   });
 

@@ -227,7 +227,7 @@ function report(
     fullBecause: mode === "full" ? fullBecause : null,
     checkpointSequence: mode === "from_checkpoint" ? 0 : null,
     integrity: { valid: ok, brokenAt: ok ? null : 3 },
-    signatures: { valid: ok, checked: 1, results: [], unresolvedFingerprints: [] },
+    signatures: { valid: ok, checked: 1, results: [], unresolvedFingerprints: [], unreadable: [] },
   };
 }
 

@@ -10,7 +10,15 @@ import {
   SET_PLATFORM_RECORD_WRITE_SQL,
   SET_TENANT_CONTEXT_SQL,
 } from "./records.js";
-import { mockConnection, type Captured } from "./test-fakes.js";
+import {
+  collectUnreadable,
+  EXPECT_ALL_READABLE,
+  mockConnection,
+  type Captured,
+} from "./test-fakes.js";
+
+/** An axis `DrEvidenceAxisSchema` refuses — what a newer binary's vocabulary looks like from here. */
+const FORBIDDEN_AXIS = "zzz-not-an-axis";
 
 /**
  * The statement under test, found by what it *is* rather than by where it sits.
@@ -179,7 +187,7 @@ describe("PostgresDrReadinessStore.listRecent / latest", () => {
     const store = new PostgresDrReadinessStore(
       mockConnection(capture, { rows: [dbRow], rowCount: 1 }),
     );
-    const rows = await store.listRecent(null, 5);
+    const rows = await store.listRecent(null, EXPECT_ALL_READABLE, 5);
     expect(capture[0]?.sql).toContain("ORDER BY generated_at DESC");
     expect(capture[0]?.params?.[0]).toBe(5);
     expect(rows[0]?.snapshotId).toBe("drr_snap0001");
@@ -193,7 +201,11 @@ describe("PostgresDrReadinessStore.listRecent / latest", () => {
     // hands back the rows the test author wrote, so a SELECT missing a column still round-trips
     // the fixture.
     const capture: Captured[] = [];
-    await new PostgresDrReadinessStore(mockConnection(capture)).listRecent(null, 5);
+    await new PostgresDrReadinessStore(mockConnection(capture)).listRecent(
+      null,
+      EXPECT_ALL_READABLE,
+      5,
+    );
     expect(capture[0]?.sql).toContain("unevidenced_axes");
   });
 
@@ -276,7 +288,45 @@ describe("PostgresDrReadinessStore.listRecent / latest", () => {
 
   it("rejects a non-positive listRecent limit", async () => {
     const store = new PostgresDrReadinessStore(mockConnection());
-    await expect(store.listRecent(null, 0)).rejects.toThrow();
+    await expect(store.listRecent(null, EXPECT_ALL_READABLE, 0)).rejects.toThrow();
+  });
+
+  /**
+   * `listRecent` has **no caller anywhere in the workspace**, so these two pin the artifact and not
+   * a deployment: the row they describe is a stored readiness verdict, which is what an auditor
+   * reads, and a reader added later would otherwise inherit the `.map` that drops its neighbours.
+   * The unreadable row is the one `latest` already refuses above — an axis this binary does not
+   * recognise — which is the realistic case for this table, since a newer binary's vocabulary is
+   * how a correct row becomes unrepresentable here.
+   */
+  function unreadableDbRow() {
+    return { ...dbRow, snapshot_id: "drr_snap0002", unevidenced_axes: [FORBIDDEN_AXIS] };
+  }
+
+  it("listRecent returns the readable rows and reports the one it could not represent", async () => {
+    const seen = collectUnreadable();
+    const store = new PostgresDrReadinessStore(
+      mockConnection(undefined, {
+        rows: [dbRow, unreadableDbRow(), { ...dbRow, snapshot_id: "drr_snap0003" }],
+        rowCount: 3,
+      }),
+    );
+    const rows = await store.listRecent(null, seen.report, 5);
+    expect(rows.map((r) => r.snapshotId)).toEqual(["drr_snap0001", "drr_snap0003"]);
+    expect(seen.rows).toHaveLength(1);
+    expect(seen.rows[0]?.identity).toBe("drr_snap0002");
+  });
+
+  it("listRecent names a field path and an issue code, and no value off the row", async () => {
+    const seen = collectUnreadable();
+    const store = new PostgresDrReadinessStore(
+      mockConnection(undefined, { rows: [unreadableDbRow()], rowCount: 1 }),
+    );
+    await store.listRecent(null, seen.report, 5);
+    const detail = seen.rows[0]?.detail ?? "";
+    expect(detail).toContain("unevidencedAxes.0");
+    expect(detail).toContain("invalid_enum_value");
+    expect(detail).not.toContain(FORBIDDEN_AXIS);
   });
 });
 
@@ -299,7 +349,11 @@ describe("the platform write arm", () => {
 
   it("claims nothing at all on a read, which the split left unchanged", async () => {
     const capture: Captured[] = [];
-    await new PostgresDrReadinessStore(mockConnection(capture)).listRecent(null, 5);
+    await new PostgresDrReadinessStore(mockConnection(capture)).listRecent(
+      null,
+      EXPECT_ALL_READABLE,
+      5,
+    );
     expect(capture.some((c) => c.sql.includes("set_config"))).toBe(false);
   });
 });

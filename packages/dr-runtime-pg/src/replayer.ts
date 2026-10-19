@@ -1,4 +1,4 @@
-import { isoInstant } from "@crossengin/kernel-pg";
+import { isoInstant, type UnreadableRow } from "@crossengin/kernel-pg";
 
 import type {
   DrDrillExecutionRecord,
@@ -33,6 +33,22 @@ export const DR_DRIFT_ISSUE_KINDS = [
   "executed_without_timestamp",
   "drill_breach_without_measurement",
   "projection_disagrees_with_record",
+  /**
+   * A row the contract refused, which is the one kind here that is **not** a fact about a record.
+   *
+   * The nine above are intra-row consistency checks over a *parsed* `DrFailoverExecutionRecord` or
+   * `DrDrillExecutionRecord`, so every one of them presupposes the parse. This one is the parse
+   * failing — ADR-0289's rule that a row edited into a state the contract forbids and a CHECK
+   * permits is a **finding** and not an exception — and it is therefore the only kind whose
+   * `executionId` may be a placeholder, because the column naming the row can itself be what was
+   * wrong.
+   *
+   * Spelled `unparseable_record` rather than coining a tenth name, because
+   * `incident-response-runtime-pg`'s replayer already reports this exact class under it and
+   * `operate-server replay` renders all six subsystems' findings into one list: two spellings
+   * would make "which rows could not be read this pass" a question needing two filters.
+   */
+  "unparseable_record",
 ] as const;
 export type DrDriftIssueKind = (typeof DR_DRIFT_ISSUE_KINDS)[number];
 
@@ -40,6 +56,24 @@ export interface DrDriftIssue {
   readonly kind: DrDriftIssueKind;
   readonly executionId: string;
   readonly detail: string;
+}
+
+/**
+ * The handle an `unparseable_record` finding carries when the row names none.
+ *
+ * `UnreadableRow.identity` is `string | null` on purpose — `null` says *the row does not name one*
+ * rather than inventing a handle — and `DrDriftIssue.executionId` is a required string, so the two
+ * meet here. A literal rather than an empty string, which would render as a stray `[]` in
+ * `operate-server replay`'s `${kind} [${executionId}]` line and read as a formatting bug.
+ */
+export const UNIDENTIFIED_EXECUTION = "<unknown>";
+
+function unparseableIssue(row: UnreadableRow): DrDriftIssue {
+  return {
+    kind: "unparseable_record",
+    executionId: row.identity ?? UNIDENTIFIED_EXECUTION,
+    detail: row.detail,
+  };
 }
 
 const INCIDENT_TRIGGERS = new Set(["primary_outage", "regional_failure"]);
@@ -235,9 +269,24 @@ export function verifyDrillExecutionShape(
 }
 
 export interface DrReplaySummary {
+  /** Rows this pass could represent. A row the contract refused is in `unreadable`, not here. */
   readonly failovers: number;
   readonly drills: number;
   readonly issues: number;
+  /**
+   * Rows the contract refused, across both tables, each of which is also one `issues` finding.
+   *
+   * Required rather than optional, so a reader has to decide what it means for its own figure
+   * instead of inheriting zero: a caller computing *rows examined* wants
+   * `failovers + drills + unreadable`, where one computing *records verified* wants the first two.
+   */
+  readonly unreadable: number;
+}
+
+/** A page read back, with the rows the contract refused already turned into findings. */
+interface ReadPage<T> {
+  readonly records: readonly T[];
+  readonly unreadable: readonly DrDriftIssue[];
 }
 
 export class DrReplayer {
@@ -252,20 +301,60 @@ export class DrReplayer {
     this.drillStore = drillStore;
   }
 
+  /**
+   * The verifier half of `read-rows.ts`' split, assembled from the reporter the stores forward.
+   *
+   * A detector is the consumer for which an unreadable row *is* part of the answer rather than a
+   * note beside it, so it collects the reports instead of passing them on — a verdict computed over
+   * the readable rows alone is a verdict about a different set of rows than the one on disk.
+   */
+  private async readFailovers(
+    scope: DrReadScope,
+    limit: number,
+  ): Promise<ReadPage<DrFailoverExecutionRecord>> {
+    const unreadable: DrDriftIssue[] = [];
+    const records = await this.failoverStore.listRecent(
+      scope,
+      (row) => unreadable.push(unparseableIssue(row)),
+      limit,
+    );
+    return { records, unreadable };
+  }
+
+  private async readDrills(
+    scope: DrReadScope,
+    limit: number,
+  ): Promise<ReadPage<DrDrillExecutionRecord>> {
+    const unreadable: DrDriftIssue[] = [];
+    const records = await this.drillStore.listRecent(
+      scope,
+      (row) => unreadable.push(unparseableIssue(row)),
+      limit,
+    );
+    return { records, unreadable };
+  }
+
+  /**
+   * Unreadable rows lead the list, which is `evidenceFromDrReadiness`' rule in this domain one
+   * layer out: a real finding beside a row that could not be examined must not bury the one fact
+   * saying part of the page was never checked.
+   */
   async verifyRecentFailovers(
     scope: DrReadScope,
     limit = 100,
   ): Promise<readonly DrDriftIssue[]> {
-    const rows = await this.failoverStore.listRecent(scope, limit);
-    return rows.flatMap((row) => verifyFailoverExecutionShape(row));
+    const page = await this.readFailovers(scope, limit);
+    const shape = page.records.flatMap((row) => verifyFailoverExecutionShape(row));
+    return [...page.unreadable, ...shape];
   }
 
   async verifyRecentDrills(
     scope: DrReadScope,
     limit = 100,
   ): Promise<readonly DrDriftIssue[]> {
-    const rows = await this.drillStore.listRecent(scope, limit);
-    return rows.flatMap((row) => verifyDrillExecutionShape(row));
+    const page = await this.readDrills(scope, limit);
+    const shape = page.records.flatMap((row) => verifyDrillExecutionShape(row));
+    return [...page.unreadable, ...shape];
   }
 
   async bulkVerify(scope: DrReadScope, limit = 100): Promise<readonly DrDriftIssue[]> {
@@ -284,12 +373,19 @@ export class DrReplayer {
    */
   async summarize(scope: DrReadScope, limit = 100): Promise<DrReplaySummary> {
     const [failovers, drills] = await Promise.all([
-      this.failoverStore.listRecent(scope, limit),
-      this.drillStore.listRecent(scope, limit),
+      this.readFailovers(scope, limit),
+      this.readDrills(scope, limit),
     ]);
     const issues =
-      failovers.flatMap((row) => verifyFailoverExecutionShape(row)).length +
-      drills.flatMap((row) => verifyDrillExecutionShape(row)).length;
-    return { failovers: failovers.length, drills: drills.length, issues };
+      failovers.unreadable.length +
+      drills.unreadable.length +
+      failovers.records.flatMap((row) => verifyFailoverExecutionShape(row)).length +
+      drills.records.flatMap((row) => verifyDrillExecutionShape(row)).length;
+    return {
+      failovers: failovers.records.length,
+      drills: drills.records.length,
+      issues,
+      unreadable: failovers.unreadable.length + drills.unreadable.length,
+    };
   }
 }

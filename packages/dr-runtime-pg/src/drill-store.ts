@@ -1,4 +1,9 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  readRows,
+  textIdentity,
+  type PgConnection,
+  type UnreadableRowReporter,
+} from "@crossengin/kernel-pg";
 import {
   DrDrillExecutionRecordSchema,
   scopedWrite,
@@ -92,9 +97,25 @@ export class PostgresDrDrillStore {
    * `scope` is required and first. Unscoped, this is the read that mattered most of the three:
    * `assessDrReadiness` scores **drill recency** from it, so an owner-connected deployment was in
    * cadence because *some other tenant* had run a drill recently.
+   *
+   * `onUnreadable` is required and precedes `limit`, which is what the requirement costs: a
+   * required parameter cannot follow an optional one, and `limit` keeps its default. It reports
+   * rather than returning the pair because this method has **two** consumers and only one of them
+   * is a verifier (`DrReplayer`, which turns each report into a `DrDriftIssue`); the other is a
+   * scheduler, `dr-readiness.ts`, and a reporter is the shape that lets each decide at its own call
+   * site. That split is the one `read-rows.ts` names, and the reporter form is the general one —
+   * `readRowsWithUnreadable` is this plus a collecting callback.
+   *
+   * Why it matters here more than anywhere else this page is read: `.map(rowToRecord)` threw one
+   * refused row out of the whole page, and the throw propagated through
+   * `buildDrReadinessLifecycle`'s `assessOnce` into `DrReadinessScheduler`'s error handler — so a
+   * single row the contract refuses meant **no readiness snapshot was recorded at all**, and
+   * `drReadinessSource` then certified against a stale snapshot or none. One unreadable drill
+   * silenced every tick.
    */
   async listRecent(
     scope: DrReadScope,
+    onUnreadable: UnreadableRowReporter,
     limit = 100,
   ): Promise<readonly DrDrillExecutionRecord[]> {
     if (limit <= 0) throw new Error("limit must be positive");
@@ -106,7 +127,7 @@ export class PostgresDrDrillStore {
        LIMIT $${String(filter.params.length + 1)}`,
       [...filter.params, limit],
     );
-    return result.rows.map((row) => rowToRecord(row));
+    return readRows(result.rows, rowToRecord, drillIdentity, onUnreadable);
   }
 
   async countSince(scope: DrReadScope, since: Date): Promise<number> {
@@ -145,6 +166,18 @@ function asNullableIso(value: unknown): string | null {
 
 function asRecord(value: unknown): unknown {
   return typeof value === "string" ? JSON.parse(value) : value;
+}
+
+/**
+ * The handle a finding about a refused drill row may name, and nothing else off that row.
+ *
+ * `execution_id` is the conflict key and the one column a remedy can address, so it is also the one
+ * column worth reporting: every other value on a row the contract refused is of unestablished
+ * trustworthiness, and `tier`/`outcome` are exactly the sort of value that may *be* the reason it
+ * was refused.
+ */
+function drillIdentity(row: Record<string, unknown>): string | null {
+  return textIdentity(row, "execution_id");
 }
 
 function rowToRecord(

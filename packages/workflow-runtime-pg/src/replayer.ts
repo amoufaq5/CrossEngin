@@ -1,4 +1,4 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import type { PgConnection, UnreadableRow } from "@crossengin/kernel-pg";
 import type { WorkflowDefinition } from "@crossengin/workflow-engine";
 import {
   type ProjectedInstance,
@@ -113,6 +113,21 @@ export interface VerifyReport {
    * ones behind it (ADR-0289's rule — a row that no longer satisfies its contract is a finding).
    */
   readonly logUnprojectable: string | null;
+  /**
+   * Rows of the log the contract refused, which are in `hasEvents` and in no projection.
+   *
+   * It makes every other field here a statement about a **shorter log than the one on disk**, and in
+   * the direction that invents drift: an activity whose `activity_scheduled` was the unreadable row
+   * is in the stored table and not in the expected projection, so it reads as `extraIds` — a
+   * finding that says the row is unexplained when what is unexplained is the reader. So it
+   * contributes to `drifted` (a pass that met one has found something) and a consumer must read it
+   * before believing a `missingIds` / `extraIds` / `mismatchedIds` figure, exactly as
+   * `definitionResolved` governs a `status` finding.
+   *
+   * Reported and never repaired: `resyncInstance` refuses `log_has_unreadable_rows` instead, and
+   * the honest repair is the row, which nothing here can synthesise.
+   */
+  readonly unreadableEvents: readonly UnreadableRow[];
   readonly instance: InstanceDrift;
   readonly activities: ChildEntityDrift;
   readonly signals: ChildEntityDrift;
@@ -169,6 +184,18 @@ export const RESYNC_REFUSALS = [
   "instance_row_absent",
   /** `projectInstance` refused the log; see `VerifyReport.logUnprojectable`. */
   "log_unprojectable",
+  /**
+   * A row of the log could not be represented, so the log this repair would fold is not the log on
+   * disk.
+   *
+   * A **refusal and not a throw**, which is this list's own stated reason for existing — a typed
+   * refusal is a fact a caller can act on where an exception message is one it can only print — and
+   * it is what keeps `bulkResync` sweeping past the one instance whose log is damaged. Refused
+   * rather than repaired on the rule the three provenance refusals already follow: a projection
+   * written from a *shorter* log is a repair that reports success while making the row less true
+   * than it found it, and that is strictly worse than leaving the drift to be reported.
+   */
+  "log_has_unreadable_rows",
 ] as const;
 export type ResyncRefusal = (typeof RESYNC_REFUSALS)[number];
 
@@ -419,7 +446,19 @@ export class WorkflowReplayer {
     if (!visibility.usable) {
       return noWrites(instanceId, false, "rls_would_confine_this_session", visibility.detail);
     }
-    const events = await this.eventLog.listByInstance(instanceId);
+    // The `WithUnreadable` sibling, because the plain `listByInstance` refuses the whole read rather
+    // than hand a fold a short log — right for the engine, and here it would end the sweep with an
+    // exception where a named refusal is what `bulkResync` can carry.
+    const log = await this.eventLog.listByInstanceWithUnreadable(instanceId);
+    const events = log.records;
+    if (log.unreadable.length > 0) {
+      return noWrites(
+        instanceId,
+        events.length > 0,
+        "log_has_unreadable_rows",
+        describeUnreadable(log.unreadable),
+      );
+    }
     if (events.length === 0) {
       return noWrites(instanceId, false, null, null);
     }
@@ -492,11 +531,17 @@ export class WorkflowReplayer {
 
   async verifyInstance(instanceId: string): Promise<VerifyReport> {
     const verifiable = (await this.probeVisibility()).usable;
-    const events = await this.eventLog.listByInstance(instanceId);
+    const log = await this.eventLog.listByInstanceWithUnreadable(instanceId);
+    const unreadableEvents = log.unreadable;
+    const events = log.records;
     if (events.length === 0) {
       // The row is still read. An instance row with an empty log is drift — the drift this
       // deployment's write ordering actually produces — and the old early return reported it as
       // health without issuing the query. See `InstanceDrift.instanceOrphaned`.
+      //
+      // `hasEvents: false` with a non-empty `unreadableEvents` is a third state and not a
+      // contradiction: the log has rows and none of them could be read, which is the opposite of
+      // `instanceOrphaned` and would otherwise be reported as it.
       const orphan = await this.fetchInstanceRow(instanceId);
       return {
         instanceId,
@@ -505,11 +550,16 @@ export class WorkflowReplayer {
         definitionResolved: false,
         verifiable,
         logUnprojectable: null,
-        instance: { instanceMissing: false, instanceOrphaned: orphan !== null, fields: [] },
+        unreadableEvents,
+        instance: {
+          instanceMissing: false,
+          instanceOrphaned: orphan !== null && unreadableEvents.length === 0,
+          fields: [],
+        },
         activities: { missingIds: [], extraIds: [], mismatchedIds: [] },
         signals: { missingIds: [], extraIds: [], mismatchedIds: [] },
         timers: { missingIds: [], extraIds: [], mismatchedIds: [] },
-        drifted: orphan !== null,
+        drifted: orphan !== null || unreadableEvents.length > 0,
       };
     }
     const definitionId = definitionIdOf(events);
@@ -576,6 +626,7 @@ export class WorkflowReplayer {
 
     const drifted =
       logUnprojectable !== null ||
+      unreadableEvents.length > 0 ||
       instanceDrift.instanceMissing ||
       instanceDrift.instanceOrphaned ||
       instanceDrift.fields.length > 0 ||
@@ -598,6 +649,7 @@ export class WorkflowReplayer {
       definitionId,
       definitionResolved: definition !== undefined,
       verifiable,
+      unreadableEvents,
       logUnprojectable,
       instance: instanceDrift,
       activities: activityDrift,
@@ -752,6 +804,20 @@ function definitionIdOf(
   if (first === undefined) return null;
   const value = first.payload["definitionId"];
   return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/**
+ * A refusal's detail, built from `identity` and `detail` alone.
+ *
+ * No other column of a refused row may travel into it: a detail scoped by one invites an operator
+ * to act on the value that may be the reason the row was refused.
+ */
+function describeUnreadable(unreadable: readonly UnreadableRow[]): string {
+  return (
+    `${String(unreadable.length)} event row(s) could not be represented, so a projection from the ` +
+    "rest would be a projection of a different log — " +
+    unreadable.map((u) => `${u.identity ?? "<unidentified>"} (${u.detail})`).join("; ")
+  );
 }
 
 function noWrites(

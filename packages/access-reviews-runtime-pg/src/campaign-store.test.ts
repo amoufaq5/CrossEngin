@@ -122,10 +122,60 @@ describe("PostgresAccessReviewCampaignStore reads", () => {
       sql.includes("SELECT") ? { rows: [dbRow], rowCount: 1 } : { rows: [], rowCount: 0 },
     );
     const store = new PostgresAccessReviewCampaignStore(conn);
-    const list = await store.listByTenant(UUIDS.tenant);
-    expect(list).toHaveLength(1);
+    const read = await store.listByTenant(UUIDS.tenant);
+    expect(read.records).toHaveLength(1);
+    expect(read.unreadable).toEqual([]);
     expect(conn.find("ORDER BY c.created_at")).toBeDefined();
     // The predicate beside RLS: without it this read was global as the table's owner.
     expect(conn.find("c.tenant_id = $1")?.params).toEqual([UUIDS.tenant]);
+  });
+
+  it("listByTenant reports an unreadable row and keeps the rest of the tenant's campaigns", async () => {
+    // It used to `.map`, so `rowToCampaign`'s throw escaped the read and one row with a NULL
+    // required timestamp cost every *other* campaign in the tenant its findings — and the sweep
+    // above it reported nothing at all, which an operator reads as a clean bill of health.
+    const broken = { ...dbRow, campaign_id: "arc_0000bad1", deadline_at: null };
+    const conn = new FakeConn((sql) =>
+      sql.includes("SELECT") ? { rows: [broken, dbRow], rowCount: 2 } : { rows: [], rowCount: 0 },
+    );
+    const read = await new PostgresAccessReviewCampaignStore(conn).listByTenant(UUIDS.tenant);
+    expect(read.records.map((c) => c.id)).toEqual([dbRow.campaign_id]);
+    expect(read.unreadable).toEqual([
+      {
+        identity: "arc_0000bad1",
+        detail: "row is missing required timestamp: deadline_at",
+      },
+    ]);
+  });
+
+  it("discloses no value from a refused row beyond its business key", async () => {
+    const broken = {
+      ...dbRow,
+      campaign_id: "arc_0000bad2",
+      label: "Payroll admins — Q1 offboarding",
+      deadline_at: null,
+    };
+    const conn = new FakeConn((sql) =>
+      sql.includes("SELECT") ? { rows: [broken], rowCount: 1 } : { rows: [], rowCount: 0 },
+    );
+    const read = await new PostgresAccessReviewCampaignStore(conn).listByTenant(UUIDS.tenant);
+    const rendered = JSON.stringify(read.unreadable);
+    expect(rendered).toContain("arc_0000bad2");
+    expect(rendered).not.toContain("Payroll admins");
+    expect(rendered).not.toContain(UUIDS.creator);
+  });
+
+  it("getByCampaignId still throws, because a point lookup must not answer what it cannot read", async () => {
+    // One row is the whole answer there, so there is no "rest of the page" to protect — and its
+    // other consumer acts on the row it gets back. `AccessReviewReplayer.replayCampaign` catches
+    // this and turns it into a finding; see that method.
+    const conn = new FakeConn((sql) =>
+      sql.includes("SELECT")
+        ? { rows: [{ ...dbRow, created_at: null }], rowCount: 1 }
+        : { rows: [], rowCount: 0 },
+    );
+    await expect(
+      new PostgresAccessReviewCampaignStore(conn).getByCampaignId(UUIDS.tenant, dbRow.campaign_id),
+    ).rejects.toThrow(/created_at/);
   });
 });

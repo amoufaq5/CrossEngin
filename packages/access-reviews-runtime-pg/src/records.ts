@@ -6,8 +6,76 @@ import {
   type AccessReviewEvidence,
   type AccessReviewItem,
 } from "@crossengin/access-reviews";
+import type { RowRead, UnreadableRow } from "@crossengin/kernel-pg";
 
 type Timestampish = string | Date | null | undefined;
+
+/**
+ * Every row a read could represent, with a report for every row it could not — `kernel-pg`'s own
+ * shape, re-exported so this package's stores name one type.
+ *
+ * This file used to hold a second copy of the loop as well, because the primitive typed its mapper
+ * `(row: Record<string, unknown>) => T` and an `interface Row` with no index signature reaches
+ * neither that parameter nor `Record<string, unknown>` itself — a function parameter is
+ * contravariant, so no widening gets there. The primitive is generic in its row type now, which is
+ * what that copy's own comment said would retire it.
+ */
+export type TypedRowRead<T> = RowRead<T>;
+
+/**
+ * A refused row's business key, which is the one handle a remedy can name.
+ *
+ * Declared as `unknown` rather than taking the row interface's own field type, because the column
+ * may itself be what is wrong — and `null` then says *this row does not name one* rather than
+ * inventing a handle (ADR-0331). Every *other* column of a refused row is of unestablished
+ * trustworthiness, so a finding carries none of them.
+ */
+export function rowKey(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/**
+ * The refusal a read takes when its consumer cannot be handed a short list.
+ *
+ * It carries the `UnreadableRow`s rather than only a message, so a future caller can act on the
+ * fact where today's can only print it — and it carries **every** refused row, where the mapper's
+ * own throw named the first and stopped, so an operator repairing them one at a time needed a sweep
+ * per row.
+ *
+ * `message` is built from `identity` and `detail` alone, which is the whole of what may be said
+ * about a refused row: `detail` is a field path and an issue code, and no other column is reported
+ * because scoping a manual fix by one invites an operator to act on the value that may be the
+ * reason the row was refused.
+ */
+export class UnreadableRowsError extends Error {
+  readonly unreadable: readonly UnreadableRow[];
+
+  constructor(subject: string, unreadable: readonly UnreadableRow[]) {
+    super(
+      `${subject}: ${String(unreadable.length)} row(s) could not be represented — ` +
+        unreadable.map((u) => `${u.identity ?? "<unidentified>"} (${u.detail})`).join("; "),
+    );
+    this.name = "UnreadableRowsError";
+    this.unreadable = unreadable;
+  }
+}
+
+/**
+ * The records of a read, or a refusal naming every row that could not be represented.
+ *
+ * This is the *other* of the two legitimate answers, and which one a read gives is decided by its
+ * consumer and not by taste. A read whose only consumer is a verifier returns the pair, because
+ * there an unreadable row is part of the answer. A read a scheduler or a runtime also calls has to
+ * refuse: `PersistingAccessReviewRuntime` and `AccessReviewCampaignLifecycle` both decide whether a
+ * campaign is finished by counting the rows this returns against the campaign's own counters, so a
+ * row silently dropped under-counts and a campaign completes with an item unaccounted for. A read
+ * that cannot be trusted must not answer (ADR-0333's `IdempotencyStore.get` rule — not knowing
+ * whether something is there must not admit that it is not).
+ */
+export function recordsOrRefuse<T>(subject: string, read: TypedRowRead<T>): readonly T[] {
+  if (read.unreadable.length > 0) throw new UnreadableRowsError(subject, read.unreadable);
+  return read.records;
+}
 
 export function toIso(value: Timestampish): string | null {
   if (value === null || value === undefined) return null;

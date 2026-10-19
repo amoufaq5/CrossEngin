@@ -96,6 +96,7 @@ function fullReportFor(report: IntegrityProofReportLike): IntegrityProofReport {
         checked: report.chain.signatures.checked,
         results: [],
         unresolvedFingerprints: [],
+        unreadable: [],
       },
     },
     anchors:
@@ -113,8 +114,15 @@ function fullReportFor(report: IntegrityProofReportLike): IntegrityProofReport {
               sequenceNumber: t.sequenceNumber,
             })),
             results: [],
+            unreadable: [],
           },
     truncation: report.truncation,
+    // The mirror omits it because the verdict payload does not commit to it, which is the parity
+    // check's whole subject: a refused chain row reaches the stored record through `verdict` and
+    // not through a count of its own (ADR-0371's rule, and the trap that ADR reverted a field out
+    // of — four places would have to move together or the stored report stops being byte-identical
+    // to the committed payload).
+    chainRowsRefused: [],
   };
 }
 

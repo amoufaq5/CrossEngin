@@ -15,6 +15,7 @@ import {
 } from "./records.js";
 import {
   DrReplayer,
+  UNIDENTIFIED_EXECUTION,
   verifyDrillExecutionShape,
   verifyFailoverExecutionShape,
 } from "./replayer.js";
@@ -443,6 +444,111 @@ describe("DrReplayer", () => {
     );
     const replayer = new DrReplayer(failoverStore, drillStore);
     const summary = await replayer.summarize(null);
-    expect(summary).toEqual({ failovers: 0, drills: 0, issues: 0 });
+    expect(summary).toEqual({ failovers: 0, drills: 0, issues: 0, unreadable: 0 });
+  });
+});
+
+/**
+ * A row the contract refused is a **finding** here and not an exception (ADR-0289), which is the
+ * one thing the nine intra-row kinds could not say: every one of them presupposes the parse that
+ * failed. Before this, one such row threw out of `listRecent` and `operate-server replay` filed the
+ * whole DR section `NOT READ — read failed: …`, so a defect in one row cost the verdict on every
+ * other row in both tables.
+ */
+describe("a row the contract refuses is reported as drift, not thrown", () => {
+  /**
+   * A drill row whose every projected column agrees with its own embedded record.
+   *
+   * Spelled this carefully because the obvious fixture is not clean: `projection_disagrees_with_record`
+   * compares six column/record pairs, so a row built by overriding one column — an `executed_at` set
+   * to null, an `execution_id` that is not the record's `id` — produces divergence findings of its
+   * own and drowns whatever the test meant to observe. Each case below moves only a column the
+   * divergence check does not read.
+   */
+  function drillRow(executionId: string) {
+    return {
+      execution_id: executionId,
+      tenant_id: null,
+      kind: "restore_test",
+      tier: "tier_1_business_critical",
+      outcome: "not_executed",
+      passing: null,
+      rpo_breached: null,
+      rto_breached: null,
+      scheduled_for: new Date(NOW),
+      executed_at: null,
+      record: embeddedDrill({ id: executionId }),
+      recorded_at: new Date(LATER),
+    };
+  }
+
+  /** The same row with an embedded record `DrillOutcomeSchema` refuses. */
+  function unreadableDrillRow(executionId: string) {
+    const row = drillRow(executionId);
+    return { ...row, record: { ...row.record, outcome: "zzz-not-an-outcome" } };
+  }
+
+  /**
+   * One ordinary finding, from a column the divergence check does not read: `rpo_breached` is
+   * projected from the tier verdict and has no counterpart in the record, so a `true` there beside
+   * an unmeasured drill is exactly `drill_breach_without_measurement` and nothing else.
+   */
+  function driftingDrillRow(executionId: string) {
+    return { ...drillRow(executionId), rpo_breached: true };
+  }
+
+  function emptyFailoverStore(): PostgresDrFailoverStore {
+    return new PostgresDrFailoverStore(mockConnection(undefined, { rows: [], rowCount: 0 }));
+  }
+
+  it("reports unparseable_record against the row's own business key", async () => {
+    const drillStore = new PostgresDrDrillStore(
+      mockConnection(undefined, { rows: [unreadableDrillRow("drl_00000002")], rowCount: 1 }),
+    );
+    const issues = await new DrReplayer(emptyFailoverStore(), drillStore).verifyRecentDrills(null);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.kind).toBe("unparseable_record");
+    expect(issues[0]?.executionId).toBe("drl_00000002");
+    expect(issues[0]?.detail).toContain("record.outcome");
+  });
+
+  it("still verifies every other row on the page", async () => {
+    const drillStore = new PostgresDrDrillStore(
+      mockConnection(undefined, {
+        rows: [unreadableDrillRow("drl_00000002"), driftingDrillRow("drl_00000003")],
+        rowCount: 2,
+      }),
+    );
+    const issues = await new DrReplayer(emptyFailoverStore(), drillStore).verifyRecentDrills(null);
+    // The second row's finding is the one that used to be lost with the refused row beside it.
+    // Unreadable first, so a reader meets the row that could not be examined before the findings
+    // from the rows that could.
+    expect(issues.map((i) => i.kind)).toEqual([
+      "unparseable_record",
+      "drill_breach_without_measurement",
+    ]);
+    expect(issues[1]?.executionId).toBe("drl_00000003");
+  });
+
+  it("summarize counts it as unreadable and as an issue, and not as a record", async () => {
+    const drillStore = new PostgresDrDrillStore(
+      mockConnection(undefined, {
+        rows: [unreadableDrillRow("drl_00000002"), drillRow("drl_00000003")],
+        rowCount: 2,
+      }),
+    );
+    const summary = await new DrReplayer(emptyFailoverStore(), drillStore).summarize(null);
+    expect(summary).toEqual({ failovers: 0, drills: 1, issues: 1, unreadable: 1 });
+  });
+
+  it("names a placeholder when the row does not name a key", async () => {
+    const drillStore = new PostgresDrDrillStore(
+      mockConnection(undefined, {
+        rows: [{ ...unreadableDrillRow("drl_00000002"), execution_id: null }],
+        rowCount: 1,
+      }),
+    );
+    const issues = await new DrReplayer(emptyFailoverStore(), drillStore).verifyRecentDrills(null);
+    expect(issues[0]?.executionId).toBe(UNIDENTIFIED_EXECUTION);
   });
 });

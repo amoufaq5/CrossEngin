@@ -630,7 +630,7 @@ describe("DeletionScheduler — the tombstone sweep (ADR-0327)", () => {
   const TOMB = "tomb_aaaabbbbccccdddd";
 
   function pageOf(over: Partial<TombstoneSweepPage> = {}): TombstoneSweepPage {
-    return { examined: 412, findings: [], nextAfterTombstoneId: null, ...over };
+    return { examined: 412, findings: [], unreadable: [], nextAfterTombstoneId: null, ...over };
   }
 
   function sweepFinding(id = TOMB): TombstoneSweepPage["findings"][number] {
@@ -995,7 +995,7 @@ describe("DeletionScheduler — lap accounting (ADR-0328)", () => {
   const NEXT = "tomb_bbbbccccddddeeee";
 
   function pageOf(over: Partial<TombstoneSweepPage> = {}): TombstoneSweepPage {
-    return { examined: 10, findings: [], nextAfterTombstoneId: null, ...over };
+    return { examined: 10, findings: [], unreadable: [], nextAfterTombstoneId: null, ...over };
   }
 
   function sweepFinding(id = TOMB): TombstoneSweepPage["findings"][number] {
@@ -1400,7 +1400,7 @@ describe("DeletionScheduler — a sweep that says it stalled (ADR-0329)", () => 
   const NEXT = "tomb_bbbbccccddddeeee";
 
   function pageOf(over: Partial<TombstoneSweepPage> = {}): TombstoneSweepPage {
-    return { examined: 10, findings: [], nextAfterTombstoneId: null, ...over };
+    return { examined: 10, findings: [], unreadable: [], nextAfterTombstoneId: null, ...over };
   }
 
   /** A page, or a page that never arrives — the two shapes the stall exists to tell apart. */
@@ -1741,7 +1741,7 @@ describe("DeletionScheduler — a sweep that says it recovered (ADR-0329)", () =
   const NEXT = "tomb_bbbbccccddddeeee";
 
   function pageOf(over: Partial<TombstoneSweepPage> = {}): TombstoneSweepPage {
-    return { examined: 10, findings: [], nextAfterTombstoneId: null, ...over };
+    return { examined: 10, findings: [], unreadable: [], nextAfterTombstoneId: null, ...over };
   }
 
   type Step = TombstoneSweepPage | "throws";

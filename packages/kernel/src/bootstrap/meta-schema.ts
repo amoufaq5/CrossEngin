@@ -4065,8 +4065,32 @@ export const META_TENANT_TOMBSTONES: TableDefinition = {
     { name: "retained_reason", type: "TEXT" },
     { name: "retained_data_reference", type: "TEXT" },
     { name: "invalidation_of_prior_tombstone_id", type: "TEXT" },
-    /** The per-subsystem reports the scope was composed from (ADR-0317), so the claim keeps its evidence. */
-    { name: "attestations", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    /**
+     * The per-subsystem reports the scope was composed from (ADR-0317), so the claim keeps its evidence.
+     *
+     * **A JSON array, checked** (ADR-0373), where `JSONB NOT NULL DEFAULT '[]'` was the whole fence:
+     * `'{}'`, `'null'` and `'"x"'` all stored, and every reader coerced each of them to `[]`, which
+     * both consumers read as *"the record was written with no evidence"* rather than as a defect. So
+     * **destroying** the evidence disarmed `tombstoneMatchesAttestations` — one of only two detectors
+     * for a tampered scope, and the cheaper attack of the two, since editing an element into a lie is
+     * what that function catches.
+     *
+     * `jsonb_typeof(...) = 'array'` and not the `jsonb_array_length(...) BETWEEN A AND B` the two
+     * workflow-definition columns use, for two measured reasons: an empty array is the legitimate
+     * claim here (it is this column's own default), so a length bound would have to be `>= 0`, which
+     * says nothing about what it is really testing; and `jsonb_array_length` **raises** on a
+     * non-array rather than violating the constraint — verified on PG 16.13, `cannot get array
+     * length of a non-array` (22023) where this spelling gives a plain 23514. The element shape stays
+     * the contract's: a CHECK cannot parse a `.strict()` schema with a `superRefine`, so this says
+     * *is it evidence-shaped at all* and `readAttestations` says *is each element an attestation*.
+     */
+    {
+      name: "attestations",
+      type: "JSONB",
+      notNull: true,
+      default: "'[]'::jsonb",
+      check: "jsonb_typeof(attestations) = 'array'",
+    },
     /**
      * Which domain tag the content manifest was hashed under (ADR-0329).
      *
@@ -11243,7 +11267,23 @@ export const META_FORENSIC_CHAIN_ENTRIES: TableDefinition = {
         "kind IN ('audit_event', 'access_event', 'data_change', 'config_change', 'security_event', 'deletion_event', 'approval_decision')",
     },
     { name: "recorded_at", type: "TIMESTAMPTZ", notNull: true },
-    { name: "actor_reference", type: "TEXT", notNull: true },
+    /**
+     * Non-empty, matching `ChainedLogEntrySchema`'s `z.string().min(1)` and no more (ADR-0373).
+     *
+     * This and `signature` below were the only two columns on this table carrying no CHECK, in the
+     * one table whose purpose is to be checkable — every other one is a value set, a
+     * `^[0-9a-f]{64}$` regex or a range. So `''` stored, and because the contract refuses it the
+     * reader could not load the row: the entry's `actorReference` is inside `canonicalEntryBytes`,
+     * so emptying it is a real signature-breaking tamper **whose own detector then cannot run**.
+     * ADR-0289's class, and the one place where it disarms the detector rather than merely
+     * admitting a row nobody can parse.
+     *
+     * `char_length(...) >= 1` is the catalog's existing spelling for this predicate (seven columns
+     * write it as `char_length(x) BETWEEN 1 AND N`) with the upper bound left off, because the
+     * contract declares no maximum and a CHECK that refuses what the contract permits is the same
+     * defect pointing the other way.
+     */
+    { name: "actor_reference", type: "TEXT", notNull: true, check: "char_length(actor_reference) >= 1" },
     { name: "payload_sha256", type: "CHAR(64)", notNull: true, check: "payload_sha256 ~ '^[0-9a-f]{64}$'" },
     { name: "payload_size_bytes", type: "BIGINT", notNull: true, check: "payload_size_bytes >= 0" },
     { name: "prior_entry_hash", type: "CHAR(64)", notNull: true, check: "prior_entry_hash ~ '^[0-9a-f]{64}$'" },
@@ -11255,7 +11295,15 @@ export const META_FORENSIC_CHAIN_ENTRIES: TableDefinition = {
       check: "entry_hash ~ '^[0-9a-f]{64}$'",
     },
     { name: "signing_key_fingerprint", type: "CHAR(64)", notNull: true, check: "signing_key_fingerprint ~ '^[0-9a-f]{64}$'" },
-    { name: "signature", type: "TEXT", notNull: true },
+    /**
+     * Non-empty, matching `ChainedLogEntrySchema`'s `z.string().min(1)` and no more (ADR-0373).
+     *
+     * `actor_reference`'s reason above, and deliberately **no length or encoding bound**: the
+     * contract says only that it is a non-empty string, and the signature's width is a property of
+     * whichever algorithm `signing_key_fingerprint` resolves to rather than of this column, so a
+     * bound here would be a second place for the two to disagree.
+     */
+    { name: "signature", type: "TEXT", notNull: true, check: "char_length(signature) >= 1" },
     { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
   ],
   primaryKey: ["id"],

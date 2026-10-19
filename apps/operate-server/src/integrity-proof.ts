@@ -7,7 +7,7 @@ import {
   PostgresChainLogStore,
   type ChainSigner,
 } from "@crossengin/forensics-pg";
-import type { PgConnection } from "@crossengin/kernel-pg";
+import type { PgConnection, UnreadableRow } from "@crossengin/kernel-pg";
 
 import { verifyAuditAnchors, type AuditAnchorReport } from "./audit-anchor.js";
 import { IntegrityEscalationConfigSchema } from "./integrity-escalation-config.js";
@@ -141,6 +141,24 @@ export interface IntegrityProofReport {
    */
   readonly anchors: AuditAnchorReport | null;
   readonly truncation: ChainTruncationCheck;
+  /**
+   * Chain entries the reader refused, over the **whole** chain — which the anchor half reads
+   * unconditionally and the chain half, in bounded mode, does not.
+   *
+   * This exists because the first draft of this increment discarded them with a comment claiming
+   * *"the chain half already carries them"*, and that premise is false in the mode this binary
+   * defaults to: `verifyChainFromCheckpoint` reads `loadFrom(anchor + 1)`, so a refused row
+   * **below** the anchor is absent from its `unreadable`, while the whole-chain read performed two
+   * statements later has it. Measured through the real `proveScopeIntegrity` with a `verified_full`
+   * anchor at 4 and a refused row at 2: `verdict = verified`, both lists empty, the row reported by
+   * nothing — ADR-0371's class (a bounded pass skipping a prefix) reappearing for refused rows, in
+   * the increment that exists to route them.
+   *
+   * It is kept apart from `anchors.unreadable` because the two are about different tables and
+   * different identities: one names a `meta.audit_log` id, the other a chain sequence, and merging
+   * them would hand an operator a list they cannot act on from.
+   */
+  readonly chainRowsRefused: readonly UnreadableRow[];
 }
 
 /**
@@ -209,22 +227,29 @@ export async function proveScopeIntegrity(
       (tail === null || tail.sequenceNumber < checkpoint.sequenceNumber),
   };
 
-  const rows = await deps.audit.listAnchoredForScope(scope, { limit: deps.auditRowLimit });
-  // The anchor check needs the entries the rows point at, which a checkpoint-bounded suffix
-  // may not contain, so it always reads the whole chain. The chain *half* stays bounded.
+  const audit = await deps.audit.listAnchoredForScope(scope, { limit: deps.auditRowLimit });
+  // The anchor check needs the entries the rows point at, which a checkpoint-bounded suffix may not
+  // contain, so it always reads the whole chain. The chain *half* stays bounded — which is why this
+  // read's own refusals are carried out separately rather than assumed to be the chain half's: see
+  // `chainRowsRefused`. An audit row pointing at a refused entry is `unanchored` to
+  // `verifyAuditAnchors`, and ADR-0286 deliberately does not page on that, so the fact has to reach
+  // the verdict by the axis that does.
+  const chainRead = await deps.logStore.loadChain(scope);
   const anchors: AuditAnchorReport = verifyAuditAnchors(
     scope,
-    rows,
-    await deps.logStore.loadChain(scope),
+    audit.rows,
+    chainRead.entries,
+    audit.unreadable,
   );
 
   return {
     scope,
-    verdict: integrityVerdictFor(chain, anchors, truncation),
+    verdict: integrityVerdictFor(chain, anchors, truncation, chainRead.unreadable),
     verifiedAt: deps.now().toISOString(),
     chain,
     anchors,
     truncation,
+    chainRowsRefused: chainRead.unreadable,
   };
 }
 
@@ -236,6 +261,7 @@ export function integrityVerdictFor(
   chain: ChainVerificationReport,
   anchors: AuditAnchorReport | null,
   truncation: ChainTruncationCheck,
+  chainRowsRefused: readonly UnreadableRow[],
 ): IntegrityVerdict {
   // Checked first: a truncated chain still passes every link and signature check, so nothing
   // else in the report would reveal it.
@@ -243,8 +269,25 @@ export function integrityVerdictFor(
   // A broken or unsigned chain is disproven regardless of what the rows say: the anchors it
   // holds cannot be trusted to attest to anything.
   if (!chain.ok) return "compromised";
+  // Checked beside `chain.ok` rather than folded into it, because in bounded mode the chain half
+  // never read these rows: they come from the whole-chain read the anchor half performs, and a
+  // refused row below the anchor is invisible to `verifyChainFromCheckpoint` by construction. The
+  // bounded proof's trust is in the verification that produced the anchor, so a row that cannot be
+  // read *now* is either a row rewritten since, or one the anchoring verification was wrong about —
+  // both findings, and neither softer than a broken link.
+  if (chainRowsRefused.length > 0) return "compromised";
   if (anchors === null) return "verified";
   if (anchors.tampered.length > 0) return "compromised";
+  // Beside `tampered` and not beside `unanchored`, which is the one judgement in this function
+  // that had to be argued rather than copied. An unanchored row is the *absence* of evidence — a
+  // deployment upgrading from before ADR-0286 has such rows for ever — while a row this
+  // deployment's own reader refuses is evidence of something: `assertEmittable` parses through the
+  // same schema the reader does, so no write this binary can perform produces one. The row was
+  // therefore edited or written out of band, which is the same standing as `hash_mismatch` and
+  // deliberately **not** softer, because rewriting a row into a shape the contract refuses is
+  // *easier* than rewriting it into a valid one — so grading it below `compromised` would leave the
+  // cheaper attack as the one that does not page.
+  if (anchors.unreadable.length > 0) return "compromised";
   // `anchors.ok` also requires nothing unanchored; that is split out here, because an unanchored
   // row is unproven rather than disproven and must not page anyone. A deployment upgrading from
   // before ADR-0286 has such rows forever, and treating them as findings would make the whole
@@ -418,11 +461,26 @@ export function formatIntegrityProof(report: IntegrityProofReport): string {
     report.chain.fullBecause === null
       ? report.chain.mode
       : `${report.chain.mode}: ${report.chain.fullBecause}`;
+  // The reason is printed, not just the position: `verifyChainIntegrity` and
+  // `unreadableEntryVerdict` both answer `{valid: false, brokenAt}`, so without it a chain entry
+  // the contract refuses reads identically to a broken hash link on the one surface that runs
+  // unattended — and the two send an operator to opposite remedies (go and look at a present,
+  // malformed row, versus go and look for a deleted one).
+  const integrityPhrase = report.chain.integrity.valid
+    ? "valid"
+    : `BROKEN at ${String(report.chain.integrity.brokenAt)}` +
+      (report.chain.integrity.reason === undefined ? "" : ` (${report.chain.integrity.reason})`);
   lines.push(
-    `  chain [${anchorage}]: integrity ${report.chain.integrity.valid ? "valid" : `BROKEN at ${String(report.chain.integrity.brokenAt)}`}` +
+    `  chain [${anchorage}]: integrity ${integrityPhrase}` +
       `, signatures ${report.chain.signatures.valid ? "valid" : "INVALID"}` +
       ` (${report.chain.signatures.checked.toString()} checked)`,
   );
+  // The whole-chain read's refusals, which in bounded mode the chain half never saw. Named here
+  // because this is the only unattended surface and the verdict alone cannot say which of three
+  // axes failed.
+  for (const u of report.chainRowsRefused) {
+    lines.push(`  unreadable chain entry ${u.identity ?? "<unidentified>"} (${u.detail})`);
+  }
   if (report.truncation.truncated) {
     lines.push(
       `  TRUNCATED: checkpoint at ${String(report.truncation.checkpointSequence)}` +
@@ -437,10 +495,21 @@ export function formatIntegrityProof(report: IntegrityProofReport): string {
       `  anchors: checked ${report.anchors.checked.toString()}` +
         `, verified ${report.anchors.verified.toString()}` +
         `, unanchored ${report.anchors.unanchored.toString()}` +
-        `, tampered ${report.anchors.tampered.length.toString()}`,
+        `, tampered ${report.anchors.tampered.length.toString()}` +
+        `, unreadable ${report.anchors.unreadable.length.toString()}`,
     );
     for (const t of report.anchors.tampered) {
       lines.push(`    ${t.verdict}: audit ${t.auditId}`);
+    }
+    // The refused rows are named here and nowhere else, which is ADR-0371's split: a diagnostic
+    // belongs where diagnostics are read, and the durable record carries only what the digest
+    // covers — so the *fact* travels in `verdict`, which is both signed and projected, while the
+    // ids travel in the line an operator sees. Adding a count to the stored report would have to
+    // move `integrityVerdictPayload`, `StoredIntegrityReportSchema`, `canonicalStoredReport` and
+    // `storedReportFrom` together or break the parity that lets a reader confirm the row's content
+    // *is* the committed content — the exact trap ADR-0371 reverted a field out of.
+    for (const u of report.anchors.unreadable) {
+      lines.push(`    unreadable: audit ${u.identity ?? "<unidentified>"} (${u.detail})`);
     }
   }
   return lines.join("\n");

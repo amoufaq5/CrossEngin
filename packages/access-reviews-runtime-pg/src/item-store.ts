@@ -1,8 +1,17 @@
 import type { AccessReviewItem } from "@crossengin/access-reviews";
-import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  readRowsWithUnreadable,
+  type PgConnection,
+} from "@crossengin/kernel-pg";
 
 import { CampaignUuidResolver, ItemUuidResolver } from "./id-mapping.js";
-import { rowToItem, type ItemRow } from "./records.js";
+import {
+  recordsOrRefuse,
+  rowKey,
+  rowToItem,
+  type ItemRow,
+  type TypedRowRead,
+} from "./records.js";
 import { tenantScopePredicate, withTenantContext } from "./tenant-context.js";
 
 const SCHEMA = "meta";
@@ -118,6 +127,25 @@ export class PostgresAccessReviewItemStore {
     tenantId: string,
     campaignId: string,
   ): Promise<readonly AccessReviewItem[]> {
+    return recordsOrRefuse(
+      `items of campaign ${campaignId}`,
+      await this.listByCampaignWithUnreadable(tenantId, campaignId),
+    );
+  }
+
+  /**
+   * The same read, with the rows the contract refused beside the ones it accepted.
+   *
+   * A sibling rather than a replacement, because `listByCampaign` has consumers of **both** kinds —
+   * `AccessReviewReplayer` verifies, while `PersistingAccessReviewRuntime` and
+   * `AccessReviewCampaignLifecycle` settle and count — and `recordsOrRefuse` explains why the second
+   * pair must be refused rather than handed a short list. Only the verifier calls this one, and the
+   * finding it produces is `unreadable_item_row`.
+   */
+  async listByCampaignWithUnreadable(
+    tenantId: string,
+    campaignId: string,
+  ): Promise<TypedRowRead<AccessReviewItem>> {
     return withTenantContext(this.conn, tenantId, async (tx) => {
       const result = await tx.query<ItemRow>(
         `${SELECT_JOINED}
@@ -127,7 +155,7 @@ export class PostgresAccessReviewItemStore {
           ORDER BY i.created_at ASC, i.item_id ASC`,
         [campaignId, tenantId],
       );
-      return result.rows.map(rowToItem);
+      return readRowsWithUnreadable(result.rows, rowToItem, (row) => rowKey(row.item_id));
     });
   }
 }

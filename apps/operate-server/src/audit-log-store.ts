@@ -7,7 +7,12 @@ import type {
 } from "@crossengin/auth";
 import { canonicalAuditEntryPayload } from "@crossengin/auth";
 import type { ChainAppendInput, ChainedLogEntry } from "@crossengin/forensics-pg";
-import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  readRowsWithUnreadable,
+  textIdentity,
+  type PgConnection,
+  type UnreadableRow,
+} from "@crossengin/kernel-pg";
 import { withTenantContext } from "@crossengin/operate-runtime-pg";
 import { z } from "zod";
 
@@ -132,9 +137,21 @@ const AuditLogEntrySchema = z
   })
   .strict();
 
+/**
+ * A `TIMESTAMPTZ` as the contract's instant. `occurredAt` can never be refused by zod from a stored
+ * row — `toISOString()` always emits a `Z` offset — so this guard is the *only* way that column
+ * reports itself unreadable, and `new Date("x").toISOString()` raises
+ * `RangeError: Invalid time value`, which names neither the column nor the table. That message
+ * would be the whole `detail` of the finding (`unreadableDetail` passes a non-zod `Error` through),
+ * so it says what the guard can and the primitive cannot.
+ */
 function isoOf(value: unknown): string {
   if (value instanceof Date) return value.toISOString();
-  return new Date(String(value)).toISOString();
+  const parsed = new Date(String(value));
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error("occurred_at: not a readable timestamp");
+  }
+  return parsed.toISOString();
 }
 
 function textOrNull(value: unknown): string | null {
@@ -213,6 +230,24 @@ export function auditEntry(input: {
   return input.reason === undefined ? base : { ...base, reason: input.reason };
 }
 
+/**
+ * What this emitter refuses to write, and why it ends in the read path's own parse.
+ *
+ * The four hand-written clauses come first because their messages name the field, where a
+ * `ZodError`'s path reads worse for the two mistakes a caller actually makes. The `parse` behind
+ * them is not a fifth clause — it is what makes the set of rows this emitter can write a **subset**
+ * of the rows `auditEntryFromRow` can read, and that is the premise `verifyAuditAnchors` rests on
+ * when it treats an unreadable row as disproven integrity rather than unproven.
+ *
+ * It was not a subset, and neither side contained the other. The guard checked four things while
+ * the reader parses through `AuditLogEntrySchema`, which is `.strict()` and refuses a stored
+ * `actor` carrying an extra key, a malformed `eSignature`, an `occurredAt` with no offset and any
+ * extra top-level key — none of which this guard saw. Meanwhile the guard refuses
+ * `operation: " "`, which `z.string().min(1)` admits. Two spellings of one rule with neither
+ * nesting the other is ADR-0353's `META_DEPLOYMENTS` shape, and it makes every "the writer is
+ * stricter" test structurally blind. The trims stay for that reason: they are the two clauses the
+ * schema genuinely does not cover.
+ */
 function assertEmittable(entry: AuditLogEntry): void {
   if (!UUID_RE.test(entry.id)) {
     throw new Error(`audit entry id must be a UUID: ${JSON.stringify(entry.id)}`);
@@ -229,6 +264,7 @@ function assertEmittable(entry: AuditLogEntry): void {
   if (entry.entity.trim().length === 0) {
     throw new Error("audit entry entity must be a non-empty string");
   }
+  AuditLogEntrySchema.parse(entry);
 }
 
 export function auditEntryFromRow(row: Record<string, unknown>): AuditLogEntry {
@@ -276,12 +312,17 @@ export function anchorFromRow(row: Record<string, unknown>): AuditAnchorRef | nu
   return { sequenceNumber, entryHash: String(hash) };
 }
 
-export function tryAuditEntryFromRow(row: Record<string, unknown>): AuditLogEntry | null {
-  try {
-    return auditEntryFromRow(row);
-  } catch {
-    return null;
-  }
+/**
+ * The scope's anchored rows, and the rows this reader refused.
+ *
+ * `ChainRead`'s shape, and for the same reason: the consumer is a **verifier**, so an unreadable
+ * row is not a note on the side — `verifyAuditAnchors` is the only detector there is for an edited
+ * audit row (ADR-0286), and a report computed over the readable rows alone is a report about a
+ * different set of rows than the one on disk.
+ */
+export interface AnchoredAuditRead {
+  readonly rows: readonly AnchoredAuditEntry[];
+  readonly unreadable: readonly UnreadableRow[];
 }
 
 /**
@@ -428,7 +469,7 @@ export class PostgresAuditEmitter implements AuditEmitter {
     query: AuditLogQuery = {},
   ): Promise<readonly AuditLogEntry[]> {
     const anchored = await this.listAnchoredForTenant(tenantId, query);
-    return anchored.map((a) => a.entry);
+    return anchored.rows.map((a) => a.entry);
   }
 
   /**
@@ -439,7 +480,7 @@ export class PostgresAuditEmitter implements AuditEmitter {
   async listAnchoredForTenant(
     tenantId: string,
     query: AuditLogQuery = {},
-  ): Promise<readonly AnchoredAuditEntry[]> {
+  ): Promise<AnchoredAuditRead> {
     return this.listAnchoredForScope(tenantId, query);
   }
 
@@ -455,7 +496,7 @@ export class PostgresAuditEmitter implements AuditEmitter {
   async listAnchoredForScope(
     scope: string | null,
     query: AuditLogQuery = {},
-  ): Promise<readonly AnchoredAuditEntry[]> {
+  ): Promise<AnchoredAuditRead> {
     const limit = clampLimit(query.limit);
     return this.inScope(scope, "read", async (tx) => {
       const { conditions, params } = this.whereFor(scope, query);
@@ -464,14 +505,19 @@ export class PostgresAuditEmitter implements AuditEmitter {
         `SELECT ${SELECT_COLUMNS} FROM ${this.table} WHERE ${conditions.join(" AND ")}` +
         ` ORDER BY occurred_at DESC, id DESC LIMIT $${params.length}`;
       const result = await tx.query(sql, params);
-      const out: AnchoredAuditEntry[] = [];
-      for (const row of result.rows) {
-        // A row the current contract cannot represent is dropped rather than
-        // failing the whole read: an old record must not hide every newer one.
-        const entry = tryAuditEntryFromRow(row);
-        if (entry !== null) out.push({ entry, anchor: anchorFromRow(row) });
-      }
-      return out;
+      // The old comment here was right about throwing and wrong about dropping: *"an old record
+      // must not hide every newer one"* argues against taking the page down, and then dropped the
+      // row, which is the same silence one layer in. This read's consumer is the anchor check — the
+      // only detector there is for an edited audit row — so a dropped row is a row the detector is
+      // never asked about, and rewriting one into a shape the contract refuses (blanking
+      // `operation`, which no CHECK constrains) was *easier* than rewriting it into a valid one
+      // that `hash_mismatch` catches. The refused rows come back beside the readable ones.
+      const read = readRowsWithUnreadable(
+        result.rows,
+        (row) => ({ entry: auditEntryFromRow(row), anchor: anchorFromRow(row) }),
+        (row) => textIdentity(row, "id"),
+      );
+      return { rows: read.records, unreadable: read.unreadable };
     });
   }
 

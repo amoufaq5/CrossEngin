@@ -196,4 +196,82 @@ describe("PostgresAccessReviewDecisionStore.record", () => {
     expect(select?.sql).toContain("c.tenant_id = $2");
     expect(select?.params).toEqual(["arc_00000001", UUIDS.tenant]);
   });
+
+  it("listByCampaignWithUnreadable issues the identical statement", async () => {
+    // The sibling changes what is done with a refused row, not what is asked of the database — so
+    // one of the three scope predicates added to one and not the other fails here.
+    const plain = resolvedStore();
+    await plain.store.listByCampaign(UUIDS.tenant, "arc_00000001");
+    const paired = resolvedStore();
+    await paired.store.listByCampaignWithUnreadable(UUIDS.tenant, "arc_00000001");
+    expect(paired.conn.calls.map((c) => c.sql)).toEqual(plain.conn.calls.map((c) => c.sql));
+    expect(paired.conn.calls.map((c) => c.params)).toEqual(plain.conn.calls.map((c) => c.params));
+  });
+});
+
+describe("PostgresAccessReviewDecisionStore reports a row it cannot represent", () => {
+  /** A row the writer really produces, so a mapper/writer disagreement cannot hide in the fixture. */
+  async function storedRow(): Promise<DecisionRow> {
+    const { conn, store } = resolvedStore();
+    await store.record(makeDecision());
+    return rowFromInsert(conn.find("INSERT INTO meta.access_review_decisions"));
+  }
+
+  function connWith(rows: readonly DecisionRow[]): FakeConn {
+    return new FakeConn((sql) =>
+      sql.includes("FROM meta.access_review_decisions d")
+        ? { rows: rows as unknown as Record<string, unknown>[], rowCount: rows.length }
+        : { rows: [], rowCount: 0 },
+    );
+  }
+
+  it("keeps the other rows and names the refused one by decision_id", async () => {
+    const good = await storedRow();
+    // `ADR-0362` gave `rowToDecision` its `parse`, which is what makes a stored row refusable at
+    // all: `attestation_kind` is one of the schema's enums, and the column's CHECK constrains the
+    // value while only the contract pairs it with the rest of the attestation.
+    const broken: DecisionRow = {
+      ...good,
+      decision_id: "ard_0000bad1",
+      attestation_kind: "sworn_affidavit" as DecisionRow["attestation_kind"],
+    };
+    const read = await new PostgresAccessReviewDecisionStore(
+      connWith([broken, good]),
+    ).listByCampaignWithUnreadable(UUIDS.tenant, "arc_00000001");
+    expect(read.records.map((d) => d.id)).toEqual([good.decision_id]);
+    expect(read.unreadable).toHaveLength(1);
+    expect(read.unreadable[0]?.identity).toBe("ard_0000bad1");
+  });
+
+  it("discloses no value from the refused row beyond its business key", async () => {
+    const good = await storedRow();
+    const broken: DecisionRow = {
+      ...good,
+      decision_id: "ard_0000bad2",
+      attestation_kind: "sworn_affidavit" as DecisionRow["attestation_kind"],
+    };
+    const read = await new PostgresAccessReviewDecisionStore(
+      connWith([broken]),
+    ).listByCampaignWithUnreadable(UUIDS.tenant, "arc_00000001");
+    const rendered = JSON.stringify(read.unreadable);
+    expect(rendered).toContain("ard_0000bad2");
+    expect(rendered).not.toContain("sworn_affidavit");
+    expect(rendered).not.toContain(UUIDS.system);
+    expect(rendered).not.toContain("127.0.0.1");
+  });
+
+  it("the plain listByCampaign refuses rather than hand a scheduler a short list", async () => {
+    const good = await storedRow();
+    const broken: DecisionRow = {
+      ...good,
+      decision_id: "ard_0000bad3",
+      attestation_kind: "sworn_affidavit" as DecisionRow["attestation_kind"],
+    };
+    await expect(
+      new PostgresAccessReviewDecisionStore(connWith([broken, good])).listByCampaign(
+        UUIDS.tenant,
+        "arc_00000001",
+      ),
+    ).rejects.toThrow(/could not be represented/);
+  });
 });

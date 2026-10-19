@@ -1,5 +1,10 @@
 import { sha256 } from "@crossengin/crypto";
-import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  numericIdentity,
+  readRowsWithUnreadable,
+  type PgConnection,
+  type UnreadableRow,
+} from "@crossengin/kernel-pg";
 import {
   GENESIS_HASH,
   buildChainEntry,
@@ -37,6 +42,70 @@ const READ_COLUMNS = `sequence_number, kind, recorded_at, actor_reference, paylo
 
 export interface PostgresChainLogStoreOptions {
   readonly schema?: string;
+}
+
+/**
+ * A chain as it reads: the entries the contract can represent, and every row it refuses.
+ *
+ * The pair rather than `readonly ChainedLogEntry[]` because **every caller of this read is a
+ * verifier** — the signature check, the integrity fold, the hourly proof, the `verify-chain`
+ * subcommand and the certification audit control — so a row this reader drops or throws on is not a
+ * detail of the read, it is the thing those callers exist to find. `.map(rowToChainEntry)` threw out
+ * of the whole array, and ADR-0373 measured what that costs: blanking `actor_reference` is a
+ * signature-breaking tamper **inside the signed bytes** which no CHECK refused, and the one check
+ * that could catch it (`verifyStoredChainSignatures`, the only check in this stack binding an
+ * entry's stored columns to its content — ADR-0371) reaches that content through this mapper. So the
+ * tamper prevented its own detector from running, and an hourly `sev1` became one `console.error`
+ * per hour, for ever.
+ *
+ * An unreadable row here is **conclusive** rather than inferred (ADR-0322's axis): both append paths
+ * parse `ChainAppendInputSchema` before any statement, so a stored row this reader refuses cannot
+ * have been written by this code.
+ */
+export interface ChainRead {
+  readonly entries: readonly ChainedLogEntry[];
+  readonly unreadable: readonly UnreadableRow[];
+}
+
+/**
+ * The verdict an unreadable row forces, or `null` when every row read.
+ *
+ * Unreadable rows take precedence over the fold's own answer, unconditionally, and that is the
+ * decision rather than an ordering preference: **a fold over a chain with a row missing is not a
+ * fold over that chain.** `verifyChainIntegrity` walks the entries it was given, so a refused row
+ * reads to it as a `sequence gap` — which is a true statement about the array and a false one about
+ * the table, and it sends an operator to look for a deleted entry when the entry is present and
+ * malformed. Naming the row that is there is ADR-0334's rule: a remedy that cannot work is worse
+ * than none.
+ *
+ * `brokenAt` is the first unreadable row's sequence, which reads because the column is
+ * `INTEGER NOT NULL CHECK (sequence_number >= 0)` — the one field that always answers is the one
+ * that says which row to go and look at. `null` where even that did not read, rather than a
+ * fabricated position.
+ */
+export function unreadableEntryVerdict(
+  unreadable: readonly UnreadableRow[],
+): ChainSuffixVerdict | null {
+  const first = unreadable[0];
+  if (first === undefined) return null;
+  const at = first.identity === null ? Number.NaN : Number(first.identity);
+  return {
+    valid: false,
+    brokenAt: Number.isInteger(at) ? at : null,
+    reason: `${String(unreadable.length)} entr${unreadable.length === 1 ? "y" : "ies"} the contract refuses (first: ${first.detail})`,
+  };
+}
+
+/**
+ * One spelling of the read, so `loadChain` and `loadFrom` cannot come to disagree about what a
+ * refused row is. `detail` carries no value from the row by construction (`unreadableDetail`), which
+ * is what makes it safe to interpolate into a verdict a log line and a stored record both carry.
+ */
+function readChain(rows: readonly Record<string, unknown>[]): ChainRead {
+  const { records, unreadable } = readRowsWithUnreadable(rows, rowToChainEntry, (row) =>
+    numericIdentity(row, "sequence_number"),
+  );
+  return { entries: records, unreadable };
 }
 
 /**
@@ -88,7 +157,7 @@ export class PostgresChainLogReader {
     }
   }
 
-  async loadChain(tenantId: string | null): Promise<readonly ChainedLogEntry[]> {
+  async loadChain(tenantId: string | null): Promise<ChainRead> {
     const scope = scopeFilter(tenantId);
     return this.scoped(tenantId, async (tx) => {
       const result = await tx.query<Record<string, unknown>>(
@@ -96,14 +165,13 @@ export class PostgresChainLogReader {
          WHERE ${scope.sql} ORDER BY sequence_number ASC`,
         scope.params,
       );
-      return result.rows.map((row) => rowToChainEntry(row));
+      return readChain(result.rows);
     });
   }
 
-  async verify(
-    tenantId: string | null,
-  ): Promise<{ readonly valid: boolean; readonly brokenAt: number | null; readonly reason?: string }> {
-    return verifyChainIntegrity(await this.loadChain(tenantId));
+  async verify(tenantId: string | null): Promise<ChainSuffixVerdict> {
+    const read = await this.loadChain(tenantId);
+    return unreadableEntryVerdict(read.unreadable) ?? verifyChainIntegrity(read.entries);
   }
 
   async tail(tenantId: string | null): Promise<ChainTail | null> {
@@ -111,10 +179,7 @@ export class PostgresChainLogReader {
   }
 
   /** The chain suffix at or after `fromSequence`, ordered — the input to a checkpoint-anchored verify. */
-  async loadFrom(
-    tenantId: string | null,
-    fromSequence: number,
-  ): Promise<readonly ChainedLogEntry[]> {
+  async loadFrom(tenantId: string | null, fromSequence: number): Promise<ChainRead> {
     const scope = scopeFilter(tenantId, 2);
     return this.scoped(tenantId, async (tx) => {
       const result = await tx.query<Record<string, unknown>>(
@@ -122,7 +187,7 @@ export class PostgresChainLogReader {
          WHERE sequence_number >= $1 AND ${scope.sql} ORDER BY sequence_number ASC`,
         [fromSequence, ...scope.params],
       );
-      return result.rows.map((row) => rowToChainEntry(row));
+      return readChain(result.rows);
     });
   }
 
@@ -167,8 +232,11 @@ export class PostgresChainLogReader {
       throw new ChainAnchorNotVerified(checkpoint.sequenceNumber, checkpoint.provenance);
     }
     const fromSequence = checkpoint.sequenceNumber + 1;
-    const entries = await this.loadFrom(tenantId, fromSequence);
-    return verifyChainSuffix(entries, { fromSequence, priorRootHash: checkpoint.rootHash });
+    const read = await this.loadFrom(tenantId, fromSequence);
+    return (
+      unreadableEntryVerdict(read.unreadable) ??
+      verifyChainSuffix(read.entries, { fromSequence, priorRootHash: checkpoint.rootHash })
+    );
   }
 
   /**

@@ -3,12 +3,34 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { canonicalAuditEntryPayload, type AuditLogEntry } from "@crossengin/auth";
-import { sha256 } from "@crossengin/crypto";
-import type { ChainedLogEntry } from "@crossengin/forensics";
+import {
+  ed25519PublicKeyFingerprint,
+  generateEd25519Keypair,
+  sha256,
+  signEd25519,
+} from "@crossengin/crypto";
+import {
+  GENESIS_HASH,
+  buildChainEntry,
+  verifyChainIntegrity,
+  type ChainCheckpoint,
+  type ChainedLogEntry,
+} from "@crossengin/forensics";
+import {
+  unreadableEntryVerdict,
+  verifyChainSuffix,
+  type ChainRead,
+} from "@crossengin/forensics-pg";
+import type { UnreadableRow } from "@crossengin/kernel-pg";
 import { describe, expect, it } from "vitest";
 
 import type { AuditAnchorReport, AuditAnchorResult } from "./audit-anchor.js";
-import { CHAIN_FULL_REASONS, type ChainVerificationReport } from "./chain-verify.js";
+import {
+  CHAIN_FULL_REASONS,
+  verifyChainFromCheckpoint,
+  verifyChainFull,
+  type ChainVerificationReport,
+} from "./chain-verify.js";
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
 import {
   INTEGRITY_VERDICTS,
@@ -40,7 +62,7 @@ function chainOk(over: Partial<ChainVerificationReport> = {}): ChainVerification
     fullBecause: null,
     checkpointSequence: 3,
     integrity: { valid: true, brokenAt: null },
-    signatures: { valid: true, checked: 4, results: [], unresolvedFingerprints: [] },
+    signatures: { valid: true, checked: 4, results: [], unresolvedFingerprints: [], unreadable: [] },
     ...over,
   };
 }
@@ -54,6 +76,7 @@ function anchors(over: Partial<AuditAnchorReport> = {}): AuditAnchorReport {
     unanchored: 0,
     tampered: [],
     results: [],
+    unreadable: [],
     ...over,
   };
 }
@@ -75,6 +98,7 @@ function report(over: Partial<IntegrityProofReport> = {}): IntegrityProofReport 
     verifiedAt: AT,
     chain: chainOk(),
     anchors: anchors(),
+    chainRowsRefused: [],
     truncation: noTruncation(),
     ...over,
   };
@@ -242,7 +266,7 @@ describe("IntegrityProofScheduler — verdicts", () => {
 describe("IntegrityProofScheduler — passes", () => {
   it("skips a scope with no chain entries and no audit rows", async () => {
     const empty = report({
-      chain: chainOk({ signatures: { valid: true, checked: 0, results: [], unresolvedFingerprints: [] } }),
+      chain: chainOk({ signatures: { valid: true, checked: 0, results: [], unresolvedFingerprints: [], unreadable: [] } }),
       anchors: anchors({ checked: 0, verified: 0 }),
       truncation: noTruncation({ checkpointSequence: null, tailSequence: null }),
     });
@@ -265,7 +289,7 @@ describe("IntegrityProofScheduler — passes", () => {
     // Rows pointing at a chain with nothing in it is the anchor_missing case — very much not empty.
     const r = report({
       verdict: "compromised",
-      chain: chainOk({ signatures: { valid: true, checked: 0, results: [], unresolvedFingerprints: [] } }),
+      chain: chainOk({ signatures: { valid: true, checked: 0, results: [], unresolvedFingerprints: [], unreadable: [] } }),
       anchors: anchors({ ok: false, checked: 1, verified: 0, tampered: [tamperedResult] }),
       truncation: noTruncation({ checkpointSequence: null, tailSequence: null }),
     });
@@ -504,21 +528,23 @@ describe("INTEGRITY_VERDICTS", () => {
 
 describe("integrityVerdictFor", () => {
   it("verified: the chain holds and every row matches its anchor", () => {
-    expect(integrityVerdictFor(chainOk(), anchors(), noTruncation())).toBe("verified");
+    expect(integrityVerdictFor(chainOk(), anchors(), noTruncation(), [])).toBe("verified");
   });
 
   it("verified: the platform chain, which has no rows to anchor", () => {
-    expect(integrityVerdictFor(chainOk(), null, noTruncation())).toBe("verified");
+    expect(integrityVerdictFor(chainOk(), null, noTruncation(), [])).toBe("verified");
   });
 
   it("compromised: a row no longer matches its anchor", () => {
     expect(
-      integrityVerdictFor(chainOk(), anchors({ ok: false, tampered: [tamperedResult] }), noTruncation()),
+      integrityVerdictFor(chainOk(), anchors({ ok: false, tampered: [tamperedResult] }), noTruncation(), []),
     ).toBe("compromised");
   });
 
   it("unproven: nothing disproven, but some rows carry no anchor", () => {
-    expect(integrityVerdictFor(chainOk(), anchors({ ok: false, unanchored: 1 }), noTruncation())).toBe("unproven");
+    expect(integrityVerdictFor(chainOk(), anchors({ ok: false, unanchored: 1 }), noTruncation(), [])).toBe(
+      "unproven",
+    );
   });
 
   it("compromised beats unproven when both are present", () => {
@@ -527,6 +553,7 @@ describe("integrityVerdictFor", () => {
         chainOk(),
         anchors({ ok: false, unanchored: 3, tampered: [tamperedResult] }),
         noTruncation(),
+        [],
       ),
     ).toBe("compromised");
   });
@@ -535,20 +562,52 @@ describe("integrityVerdictFor", () => {
     // The anchors it holds cannot attest to anything once the chain they live in is broken, so a
     // clean anchor report must not soften the verdict.
     const broken = chainOk({ ok: false, integrity: { valid: false, brokenAt: 2 } });
-    expect(integrityVerdictFor(broken, anchors(), noTruncation())).toBe("compromised");
-    expect(integrityVerdictFor(broken, null, noTruncation())).toBe("compromised");
+    expect(integrityVerdictFor(broken, anchors(), noTruncation(), [])).toBe("compromised");
+    expect(integrityVerdictFor(broken, null, noTruncation(), [])).toBe("compromised");
   });
 
   it("compromised: valid links but an unverifiable signature", () => {
     const unsigned = chainOk({
       ok: false,
-      signatures: { valid: false, checked: 4, results: [], unresolvedFingerprints: [] },
+      signatures: { valid: false, checked: 4, results: [], unresolvedFingerprints: [], unreadable: [] },
     });
-    expect(integrityVerdictFor(unsigned, anchors(), noTruncation())).toBe("compromised");
+    expect(integrityVerdictFor(unsigned, anchors(), noTruncation(), [])).toBe("compromised");
+  });
+
+  it("compromised: a chain row the contract refuses, through the chain half", () => {
+    const refusedRow: UnreadableRow = { identity: "2", detail: "kind: invalid_enum_value" };
+    const verdict = unreadableEntryVerdict([refusedRow]);
+    expect(verdict).not.toBeNull();
+    const refused = chainOk({
+      ok: false,
+      integrity: verdict!,
+      signatures: {
+        valid: false,
+        checked: 2,
+        results: [],
+        unresolvedFingerprints: [],
+        unreadable: [refusedRow],
+      },
+    });
+    expect(integrityVerdictFor(refused, anchors(), noTruncation(), [])).toBe("compromised");
+    expect(integrityVerdictFor(refused, null, noTruncation(), [])).toBe("compromised");
+  });
+
+  it("compromised: an audit row the reader refuses, where an unanchored one is only unproven", () => {
+    const refused = anchors({
+      ok: false,
+      unreadable: [{ identity: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", detail: "operation: too_small" }],
+    });
+    expect(integrityVerdictFor(chainOk(), refused, noTruncation(), [])).toBe("compromised");
+    expect(
+      integrityVerdictFor(chainOk(), anchors({ ok: false, unanchored: 1 }), noTruncation(), []),
+    ).toBe("unproven");
   });
 
   it("treats a zero-row anchor report as verified, not unproven", () => {
-    expect(integrityVerdictFor(chainOk(), anchors({ checked: 0, verified: 0 }), noTruncation())).toBe("verified");
+    expect(
+      integrityVerdictFor(chainOk(), anchors({ checked: 0, verified: 0 }), noTruncation(), []),
+    ).toBe("verified");
   });
 });
 
@@ -558,22 +617,22 @@ describe("integrityVerdictFor — truncation", () => {
   it("compromised when the chain ends before a checkpoint it was committed to", () => {
     // The decisive case: every link and signature still verifies, because a truncated chain is a
     // shorter well-formed chain. Only the checkpoint reveals that history went missing.
-    expect(integrityVerdictFor(chainOk(), anchors(), cut)).toBe("compromised");
+    expect(integrityVerdictFor(chainOk(), anchors(), cut, [])).toBe("compromised");
   });
 
   it("outranks a clean chain and clean anchors", () => {
-    expect(integrityVerdictFor(chainOk({ ok: true }), anchors({ ok: true }), cut)).toBe(
+    expect(integrityVerdictFor(chainOk({ ok: true }), anchors({ ok: true }), cut, [])).toBe(
       "compromised",
     );
   });
 
   it("compromised on the platform chain too", () => {
-    expect(integrityVerdictFor(chainOk(), null, cut)).toBe("compromised");
+    expect(integrityVerdictFor(chainOk(), null, cut, [])).toBe("compromised");
   });
 
   it("not truncated when the tail is at or beyond the checkpoint", () => {
     expect(
-      integrityVerdictFor(chainOk(), anchors(), noTruncation({ checkpointSequence: 4, tailSequence: 4 })),
+      integrityVerdictFor(chainOk(), anchors(), noTruncation({ checkpointSequence: 4, tailSequence: 4 }), []),
     ).toBe("verified");
   });
 
@@ -585,6 +644,7 @@ describe("integrityVerdictFor — truncation", () => {
         chainOk(),
         anchors(),
         noTruncation({ checkpointSequence: null, tailSequence: null }),
+        [],
       ),
     ).toBe("verified");
   });
@@ -626,7 +686,7 @@ describe("IntegrityProofScheduler — emptiness is judged by the tail, not the s
         tenantId: null,
         mode: "from_checkpoint",
         checkpointSequence: 11,
-        signatures: { valid: true, checked: 0, results: [], unresolvedFingerprints: [] },
+        signatures: { valid: true, checked: 0, results: [], unresolvedFingerprints: [], unreadable: [] },
       }),
       truncation: noTruncation({ checkpointSequence: 11, tailSequence: 11 }),
     });
@@ -706,7 +766,7 @@ describe("proveScopeIntegrity — the platform scope is anchored too", () => {
         logStore: {
           loadChain: async (scope: string | null) => {
             asked.push(scope);
-            return [chainEntry];
+            return { entries: [chainEntry], unreadable: [] };
           },
           tail: async () => ({ sequenceNumber: 0 }),
           verify: async () => ({ valid: true, brokenAt: null }),
@@ -716,7 +776,10 @@ describe("proveScopeIntegrity — the platform scope is anchored too", () => {
         audit: {
           listAnchoredForScope: async (scope: string | null) => {
             asked.push(`audit:${String(scope)}`);
-            return [{ entry, anchor: { sequenceNumber: 0, entryHash: "e".repeat(64) } }];
+            return {
+              rows: [{ entry, anchor: { sequenceNumber: 0, entryHash: "e".repeat(64) } }],
+              unreadable: [],
+            };
           },
         },
         auditRowLimit: 10,
@@ -760,5 +823,235 @@ describe("proveScopeIntegrity — the platform scope is anchored too", () => {
     const d = depsFor();
     await proveScopeIntegrity(TENANT_A, d.deps);
     expect(d.asked).toContain(`audit:${TENANT_A}`);
+  });
+});
+
+/**
+ * `verifyChainFull` / `verifyChainFromCheckpoint` over a read carrying a refused row.
+ *
+ * These live here rather than in `chain-verify.test.ts` because the consequence they are about is
+ * this file's: the hourly proof used to lose the pass to a throw out of `loadChain`, and the last
+ * test in the block is that pass filing a verdict instead.
+ */
+describe("a chain row the contract refuses", () => {
+  const keypair = generateEd25519Keypair();
+  const FINGERPRINT = ed25519PublicKeyFingerprint(keypair.publicKeyBase64);
+  const REFUSED: UnreadableRow = { identity: "1", detail: "kind: invalid_enum_value" };
+
+  /** Genuinely signed and linked, so each half's `valid` is that half's own answer. */
+  async function signedChain(count: number): Promise<readonly ChainedLogEntry[]> {
+    const out: ChainedLogEntry[] = [];
+    let prior = GENESIS_HASH;
+    for (let n = 0; n < count; n += 1) {
+      const sealed = await buildChainEntry({
+        sequenceNumber: n,
+        priorEntryHash: prior,
+        entry: {
+          kind: "audit_event",
+          recordedAt: AT,
+          actorReference: "gateway",
+          payloadBytes: `event-${n.toString()}`,
+        },
+        signingKeyFingerprint: FINGERPRINT,
+        sign: async (bytes) =>
+          signEd25519(keypair.privateKeyBase64, keypair.publicKeyBase64, bytes),
+      });
+      prior = sealed.entry.entryHash;
+      out.push(sealed.entry);
+    }
+    return out;
+  }
+
+  function reader(read: ChainRead): Parameters<typeof verifyChainFull>[0] {
+    return {
+      loadChain: async () => read,
+      loadFrom: async () => read,
+    } as unknown as Parameters<typeof verifyChainFull>[0];
+  }
+
+  const registry = {
+    getByFingerprint: async (fp: string) =>
+      fp === FINGERPRINT ? { publicKeyBase64: keypair.publicKeyBase64 } : null,
+  } as unknown as Parameters<typeof verifyChainFull>[1];
+
+  function checkpoints(checkpoint: ChainCheckpoint): Parameters<typeof verifyChainFromCheckpoint>[2] {
+    return { latest: async () => checkpoint } as unknown as Parameters<
+      typeof verifyChainFromCheckpoint
+    >[2];
+  }
+
+  it("fails the verification instead of throwing out of the load", async () => {
+    const entries = await signedChain(3);
+    const report = await verifyChainFull(
+      reader({ entries: [entries[0]!, entries[2]!], unreadable: [REFUSED] }),
+      registry,
+      TENANT_A,
+    );
+    expect(report.ok).toBe(false);
+    expect(report.integrity.valid).toBe(false);
+    expect(report.signatures.valid).toBe(false);
+  });
+
+  it("names the row that is there, not the sequence gap the shortened array shows", async () => {
+    const entries = await signedChain(3);
+    const held = [entries[0]!, entries[2]!];
+    // What the fold alone says about this array — true of it, false of the table it came from.
+    expect(verifyChainIntegrity(held).reason).toBe("sequence gap");
+
+    const report = await verifyChainFull(reader({ entries: held, unreadable: [REFUSED] }), registry, TENANT_A);
+    expect(report.integrity.brokenAt).toBe(1);
+    expect(report.integrity.reason).toBe(
+      "1 entry the contract refuses (first: kind: invalid_enum_value)",
+    );
+    expect(report.integrity.reason).not.toContain("sequence gap");
+  });
+
+  it("outranks a fold and signatures that would both have passed", async () => {
+    const entries = await signedChain(2);
+    expect(verifyChainIntegrity(entries).valid).toBe(true);
+
+    const report = await verifyChainFull(
+      reader({ entries, unreadable: [{ identity: "7", detail: "<root>: custom" }] }),
+      registry,
+      TENANT_A,
+    );
+    expect(report.integrity.valid).toBe(false);
+    expect(report.integrity.brokenAt).toBe(7);
+    // Every signature it examined verified, so this `false` is the refused row's answer too.
+    expect(report.signatures.results.map((r) => r.ok)).toEqual([true, true]);
+    expect(report.signatures.valid).toBe(false);
+    expect(report.ok).toBe(false);
+  });
+
+  it("counts the entries it examined and not the rows on disk", async () => {
+    const entries = await signedChain(2);
+    const report = await verifyChainFull(reader({ entries, unreadable: [REFUSED] }), registry, TENANT_A);
+    expect(report.signatures.checked).toBe(2);
+    expect(report.signatures.unreadable).toEqual([REFUSED]);
+  });
+
+  it("reports no position when the refused row does not name one", async () => {
+    const entries = await signedChain(1);
+    const report = await verifyChainFull(
+      reader({ entries, unreadable: [{ identity: null, detail: "sequence_number: invalid_type" }] }),
+      registry,
+      TENANT_A,
+    );
+    expect(report.integrity.brokenAt).toBeNull();
+    expect(report.integrity.valid).toBe(false);
+  });
+
+  it("fails the bounded suffix on the same terms as the full fold", async () => {
+    const entries = await signedChain(3);
+    const anchor: ChainCheckpoint = {
+      sequenceNumber: 0,
+      rootHash: entries[0]!.entryHash,
+      checkpointedAt: AT,
+      checkpointedBy: "auditor",
+      algorithm: "sha256",
+      provenance: "verified_full",
+    };
+    const suffix = [entries[1]!, entries[2]!];
+    expect(
+      verifyChainSuffix(suffix, { fromSequence: 1, priorRootHash: anchor.rootHash }).valid,
+    ).toBe(true);
+
+    const report = await verifyChainFromCheckpoint(
+      reader({ entries: suffix, unreadable: [{ identity: "3", detail: "signature: too_small" }] }),
+      registry,
+      checkpoints(anchor),
+      TENANT_A,
+    );
+    expect(report.mode).toBe("from_checkpoint");
+    expect(report.ok).toBe(false);
+    expect(report.integrity.valid).toBe(false);
+    expect(report.integrity.brokenAt).toBe(3);
+    expect(report.signatures.valid).toBe(false);
+    expect(report.signatures.checked).toBe(2);
+  });
+
+  it("the hourly proof files compromised rather than losing the pass", async () => {
+    const entries = await signedChain(2);
+    const read: ChainRead = { entries, unreadable: [REFUSED] };
+    const proof = await proveScopeIntegrity(TENANT_A, {
+      logStore: {
+        loadChain: async () => read,
+        tail: async () => ({ sequenceNumber: 1, entryHash: entries[1]!.entryHash }),
+      },
+      checkpoints: { latest: async () => null },
+      registry,
+      audit: { listAnchoredForScope: async () => ({ rows: [], unreadable: [] }) },
+      auditRowLimit: 10,
+      fromCheckpoint: false,
+      now: () => new Date(AT),
+    } as unknown as Parameters<typeof proveScopeIntegrity>[1]);
+
+    expect(proof.chain.ok).toBe(false);
+    expect(proof.verdict).toBe("compromised");
+    expect(formatIntegrityProof(proof)).toContain("COMPROMISED");
+  });
+
+  // The default mode, and the one where the chain half cannot see the row at all: it reads
+  // `loadFrom(anchor + 1)`, so a refusal below the anchor is absent from its `unreadable` while the
+  // whole-chain read the anchor half performs two statements later has it. The first draft of this
+  // increment discarded that list on a comment claiming the chain half already carried it.
+  it("files compromised for a refused row below the anchor, which the bounded chain half never reads", async () => {
+    const entries = await signedChain(5);
+    const anchor: ChainCheckpoint = {
+      sequenceNumber: 3,
+      rootHash: entries[3]!.entryHash,
+      checkpointedAt: AT,
+      checkpointedBy: "auditor",
+      algorithm: "sha256",
+      provenance: "verified_full",
+    };
+    const belowAnchor: UnreadableRow = { identity: "2", detail: "kind: invalid_enum_value" };
+    const suffix: ChainRead = { entries: [entries[4]!], unreadable: [] };
+    const whole: ChainRead = {
+      entries: [entries[0]!, entries[1]!, entries[3]!, entries[4]!],
+      unreadable: [belowAnchor],
+    };
+    const proof = await proveScopeIntegrity(TENANT_A, {
+      logStore: {
+        loadChain: async () => whole,
+        loadFrom: async () => suffix,
+        tail: async () => ({ sequenceNumber: 4, entryHash: entries[4]!.entryHash }),
+      },
+      checkpoints: { latest: async () => anchor },
+      registry,
+      audit: { listAnchoredForScope: async () => ({ rows: [], unreadable: [] }) },
+      auditRowLimit: 10,
+      fromCheckpoint: true,
+      now: () => new Date(AT),
+    } as unknown as Parameters<typeof proveScopeIntegrity>[1]);
+
+    // The bounded half is clean, and honestly so — it verified what it read.
+    expect(proof.chain.mode).toBe("from_checkpoint");
+    expect(proof.chain.ok).toBe(true);
+    expect(proof.chain.signatures.unreadable).toEqual([]);
+    // And the anchor half's read is where the row is, so that is where the verdict comes from.
+    expect(proof.chainRowsRefused).toEqual([belowAnchor]);
+    expect(proof.verdict).toBe("compromised");
+    expect(formatIntegrityProof(proof)).toContain("unreadable chain entry 2 (kind: invalid_enum_value)");
+  });
+
+  it("prints the integrity reason, so a refused entry does not read as a broken hash link", async () => {
+    const entries = await signedChain(3);
+    const report = await verifyChainFull(
+      reader({ entries: [entries[0]!, entries[2]!], unreadable: [REFUSED] }),
+      registry,
+      TENANT_A,
+    );
+    const line = formatIntegrityProof({
+      scope: TENANT_A,
+      verdict: "compromised",
+      verifiedAt: AT,
+      chain: report,
+      anchors: null,
+      truncation: noTruncation(),
+      chainRowsRefused: [],
+    });
+    expect(line).toContain("1 entry the contract refuses");
+    expect(line).not.toMatch(/integrity BROKEN at 1,/);
   });
 });

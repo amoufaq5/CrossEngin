@@ -2450,7 +2450,20 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       // a map narrowed to `published` would silently strand in-flight instances of a `deprecated`
       // definition; `startInstance` already refuses a non-published one by name.
       const definitionStore = new PostgresWorkflowDefinitionStore(conn, schemaOpt);
-      const definitions = await definitionStore.loadEngineDefinitions({});
+      const definitions = await definitionStore.loadEngineDefinitions({
+        // Required, which is what made this get written rather than remembered. A refused row costs
+        // exactly the instances of that one definition — they go quiet, because a missing
+        // definition makes the engine skip a due timer and decline a signal — where the throw it
+        // replaces cost every instance in the deployment its engine. Narrowing the blast radius is
+        // only honest if the absence is said.
+        onUnreadable: (row) => {
+          console.error(
+            `[workflow] a stored definition could not be read` +
+              ` (${row.identity ?? "unidentified"}): ${row.detail};` +
+              ` its instances will report an unknown definition`,
+          );
+        },
+      });
       // Said out loud, because this is the degradation ADR-0329 refused to mount for. Under RLS as
       // a non-owner role with no tenant context the load sees only platform-wide rows, so a
       // deployment whose definitions are all tenant-scoped gets an empty map — and the route would
@@ -3220,6 +3233,18 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
                 (axes.includes("drills") ? "; drills come from the drill store, not the config" : ""),
             );
           }
+        },
+        // Required on the options rather than optional, which is what made this line get written
+        // instead of remembered (ADR-0371's `onRefused`). It is the only surface a refused
+        // execution row reaches: the snapshot records the readable rows and `unevidencedAxes`
+        // deliberately does NOT name the axis, because "no record on drills" is false when one
+        // readable drill is sitting beside the refused one — and that sentence is rendered verbatim
+        // into a SOC 2 pack by `drAxisUnevidencedFinding`.
+        onUnreadableExecution: (row) => {
+          console.error(
+            `[dr] readiness: a ${row.axis} row could not be read` +
+              ` (${row.identity ?? "unidentified"}): ${row.detail}`,
+          );
         },
         onError: (err) => console.error("[dr] readiness error", err),
       });
@@ -4147,6 +4172,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
               progress.lapsCompleted,
               page.examined,
               page.findings.map((f) => [f.tombstoneId, f.detail]),
+              // In the fingerprint, so a page whose only change is a refused row is not read as a
+              // repeat and suppressed. Before this the sweep could not report one at all: one
+              // unparseable proof threw out of `scanAll` and ended the lap.
+              page.unreadable.map((u) => [u.identity, u.detail]),
             ]);
             if (fingerprint === last) return;
             last = fingerprint;
@@ -4162,15 +4191,31 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
                 ` ${(progress.examinedLastLap ?? 0).toString()} proof(s) verified`
               : `lap ${(progress.lapsCompleted + 1).toString()} in progress,` +
                 ` ${progress.examinedThisLap.toString()} proof(s) verified so far`;
-            if (page.findings.length === 0) {
+            // A refused row is named with the findings and never instead of "clean", because the
+            // two are different claims: `findings: []` beside a non-empty `unreadable` is "nothing
+            // was found in what could be read", and calling that clean is the silence this sweep
+            // exists to end. It is not a `TombstoneAudit` either — that shape carries a
+            // `verifyStoredEvidence` result, which cannot be computed for a row nobody could
+            // represent — so it is listed on its own axis.
+            const refused = page.unreadable.map(
+              (u) => `  ${u.identity ?? "<unidentified>"} UNREADABLE: ${u.detail}`,
+            );
+            if (page.findings.length === 0 && refused.length === 0) {
               console.info(`[platform] tombstone sweep: ${lap}, clean`);
               return;
             }
+            const counts = [
+              page.findings.length > 0 ? `${page.findings.length.toString()} UNPROVEN` : null,
+              refused.length > 0 ? `${refused.length.toString()} UNREADABLE` : null,
+            ].filter((part): part is string => part !== null);
             console.error(
-              `[platform] tombstone sweep: ${lap}, ${page.findings.length.toString()} UNPROVEN —\n` +
-                page.findings
-                  .map((f) => `  ${f.tombstoneId} (${f.reference}) tenant=${f.tenantId}: ${f.detail}`)
-                  .join("\n"),
+              `[platform] tombstone sweep: ${lap}, ${counts.join(" + ")} —\n` +
+                [
+                  ...page.findings.map(
+                    (f) => `  ${f.tombstoneId} (${f.reference}) tenant=${f.tenantId}: ${f.detail}`,
+                  ),
+                  ...refused,
+                ].join("\n"),
             );
           };
         })(),
@@ -4967,9 +5012,16 @@ function buildReplayRunners(
         const scope = coverage.kind === "tenant" ? coverage.tenantId : null;
         const issues = await replayer.bulkVerify(scope, limit);
         const summary = await replayer.summarize(scope, limit);
+        // A refused row is a row this pass examined, so it counts in both figures: `scanned` is
+        // what was read and `complete` asks whether the window cut the set, and both answer about
+        // the table rather than about the subset the contract could represent. Omitting it
+        // understates the sweep by exactly the rows it found something wrong with — and would make
+        // `complete` read true at the limit, claiming a whole scope was covered because the
+        // unreadable rows were not counted toward it.
+        const read = summary.failovers + summary.drills + summary.unreadable;
         return {
-          complete: summary.failovers + summary.drills < limit * 2,
-          scanned: summary.failovers + summary.drills,
+          complete: read < limit * 2,
+          scanned: read,
           refusal: null,
           findings: issues.map((i) => `${i.kind} [${i.executionId}]: ${i.detail}`),
         };
@@ -4999,14 +5051,22 @@ function buildReplayRunners(
           itemStore: new PostgresAccessReviewItemStore(conn),
           decisionStore: new PostgresAccessReviewDecisionStore(conn),
         });
-        const replays = await replayer.replayTenant(coverage.tenantId);
+        const replay = await replayer.replayTenant(coverage.tenantId);
+        // `complete` is no longer an unconditional `true`: a campaign whose row the contract
+        // refuses is one this pass could not read, so claiming the tenant was covered would be the
+        // silence this increment exists to end — and the refusals are findings in their own right,
+        // listed first because a cross-row finding computed beside an unreadable campaign is an
+        // inference rather than an observation.
         return {
-          complete: true,
-          scanned: replays.length,
+          complete: replay.unreadableCampaigns.length === 0,
+          scanned: replay.replays.length + replay.unreadableCampaigns.length,
           refusal: null,
-          findings: replays.flatMap((r) =>
-            r.issues.map((i) => `${i.kind} [${r.campaignId}]: ${i.detail}`),
-          ),
+          findings: [
+            ...replay.unreadableCampaigns.map((i) => `${i.kind} [${i.id}]: ${i.detail}`),
+            ...replay.replays.flatMap((r) =>
+              r.issues.map((i) => `${i.kind} [${r.campaignId}]: ${i.detail}`),
+            ),
+          ],
         };
       },
     },

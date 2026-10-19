@@ -1,6 +1,7 @@
 import { PostgresKeyRegistry } from "@crossengin/crypto-pg";
 import { checkpointAnchorsBoundedProof, verifyChainIntegrity } from "@crossengin/forensics";
 import {
+  unreadableEntryVerdict,
   verifyChainSignatures,
   verifyChainSuffix,
   verifyStoredChainSignatures,
@@ -127,9 +128,19 @@ async function foldFromGenesis(
   // each load the chain themselves, so asking both read the table twice and held two whole-chain
   // copies for one fold — and a refused anchor makes this the steady state for a scope rather than
   // the rare path, so the cost is paid every pass.
-  const entries = await reader.loadChain(tenantId);
-  const integrity = verifyChainIntegrity(entries);
-  const signatures = await verifyChainSignatures(entries, keyRegistryResolver(registry, tenantId));
+  const read = await reader.loadChain(tenantId);
+  // A row the contract refuses fails **both** halves, and neither is redundant: the fold would
+  // otherwise call it a `sequence gap` (true of the array it was handed, false of the table), and
+  // the signature check is the only thing in this stack that binds a row's columns to its content,
+  // so a refused row has failed that binding in the one way this check cannot examine. `ok` then
+  // carries it to `integrityVerdictFor`, which answers `compromised` off `!chain.ok` with no change
+  // of its own — which is what makes the hourly `sev1` fire where it used to log and skip.
+  const integrity = unreadableEntryVerdict(read.unreadable) ?? verifyChainIntegrity(read.entries);
+  const signatures = await verifyChainSignatures(
+    read.entries,
+    keyRegistryResolver(registry, tenantId),
+    read.unreadable,
+  );
   return {
     tenantId,
     ok: integrity.valid && signatures.valid,
@@ -191,8 +202,14 @@ export async function verifyChainFromCheckpoint(
   }
   const fromSequence = checkpoint.sequenceNumber + 1;
   const suffix = await reader.loadFrom(tenantId, fromSequence);
-  const integrity = verifyChainSuffix(suffix, { fromSequence, priorRootHash: checkpoint.rootHash });
-  const signatures = await verifyChainSignatures(suffix, keyRegistryResolver(registry, tenantId));
+  const integrity =
+    unreadableEntryVerdict(suffix.unreadable) ??
+    verifyChainSuffix(suffix.entries, { fromSequence, priorRootHash: checkpoint.rootHash });
+  const signatures = await verifyChainSignatures(
+    suffix.entries,
+    keyRegistryResolver(registry, tenantId),
+    suffix.unreadable,
+  );
   return {
     tenantId,
     ok: integrity.valid && signatures.valid,
@@ -229,6 +246,16 @@ export function formatChainVerification(report: ChainVerificationReport): string
   const bad = report.signatures.results.filter((r) => !r.ok);
   for (const r of bad) {
     lines.push(`    seq ${r.sequenceNumber.toString()}: ${r.reason ?? "invalid"} (fp ${r.fingerprint.slice(0, 12)})`);
+  }
+  // Named here because `results` cannot say it: a refused row never becomes an
+  // `EntrySignatureResult`, so a verdict failing on this axis alone has `results.every(ok)` true
+  // and would otherwise print `signatures: INVALID` followed by nothing — a verdict that reports a
+  // failure and names no cause, which is the one shape an operator cannot act on.
+  //
+  // Parenthesised rather than colon-separated, like every other refused-row line in the stack: a
+  // `detail` is itself `<path>: <code>`, so `row 2: operation: too_small` reads as three fields.
+  for (const u of report.signatures.unreadable) {
+    lines.push(`    unreadable row ${u.identity ?? "<unidentified>"} (${u.detail})`);
   }
   if (report.signatures.unresolvedFingerprints.length > 0) {
     lines.push(`    unresolved keys: ${report.signatures.unresolvedFingerprints.length.toString()}`);

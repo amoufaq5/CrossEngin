@@ -13,5 +13,6 @@ export * from "./introspection.js";
 export * from "./migration-log.js";
 export * from "./node-pg.js";
 export * from "./preconditions.js";
+export * from "./read-rows.js";
 export * from "./scoped-write.js";
 export * from "./statement-hash.js";

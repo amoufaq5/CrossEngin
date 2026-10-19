@@ -1,6 +1,11 @@
 import { assertBindArity } from "@crossengin/testing";
 import { vi } from "vitest";
-import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
+import type {
+  PgConnection,
+  PgQueryResult,
+  UnreadableRow,
+  UnreadableRowReporter,
+} from "@crossengin/kernel-pg";
 
 export interface Captured {
   sql: string;
@@ -34,6 +39,29 @@ export function assertStatementIsScoped(sql: string): void {
       "`tenant_id`-nullable table must name tenant_id, as a supplied column or as a predicate — " +
       `got: ${sql.replace(/\s+/g, " ").slice(0, 120)}`,
   );
+}
+
+/**
+ * The reporter a test passes when it means every row on the page to be readable.
+ *
+ * It **throws** rather than ignoring, which is this module's own fallback rule one argument over:
+ * an answer for a case the test did not mean is how an assertion passes vacuously. Silently
+ * dropping a report here would let a fixture drift into a shape the contract refuses and have the
+ * test still read green — in a package whose whole subject is that a dropped row goes unnoticed.
+ */
+export const EXPECT_ALL_READABLE: UnreadableRowReporter = (row) => {
+  throw new Error(
+    `a row was unexpectedly unreadable (identity ${row.identity ?? "<none>"}): ${row.detail}`,
+  );
+};
+
+/** A reporter that keeps what it was told, for the tests that mean to produce an unreadable row. */
+export function collectUnreadable(): {
+  readonly rows: readonly UnreadableRow[];
+  readonly report: UnreadableRowReporter;
+} {
+  const rows: UnreadableRow[] = [];
+  return { rows, report: (row) => rows.push(row) };
 }
 
 export function mockConnection(

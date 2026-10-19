@@ -1,4 +1,9 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  readRows,
+  textIdentity,
+  type PgConnection,
+  type UnreadableRowReporter,
+} from "@crossengin/kernel-pg";
 import {
   DrReadinessSnapshotRecordSchema,
   scopedWrite,
@@ -66,8 +71,20 @@ export class PostgresDrReadinessStore {
     );
   }
 
+  /**
+   * **This method has no caller anywhere in the workspace**, and the shape is chosen for the first
+   * one rather than read off a consumer that does not exist: a required reporter, matching its two
+   * sibling stores, so whoever wires it finds one convention in the package instead of two.
+   *
+   * It carried the same `.map(rowToRecord)` as its siblings and is swept with them because the
+   * defect is in the artifact rather than in a deployment — a reader added later would inherit it,
+   * and the row it would lose is a stored readiness verdict, which is what a SOC 2 auditor reads.
+   * Nothing here closed a live gap; `latest()` below is the method certification actually calls,
+   * and it reads one row, where there is no other row to take down.
+   */
   async listRecent(
     scope: DrReadScope,
+    onUnreadable: UnreadableRowReporter,
     limit = 100,
   ): Promise<readonly DrReadinessSnapshotRecord[]> {
     if (limit <= 0) throw new Error("limit must be positive");
@@ -79,7 +96,7 @@ export class PostgresDrReadinessStore {
        LIMIT $${String(filter.params.length + 1)}`,
       [...filter.params, limit],
     );
-    return result.rows.map((row) => rowToRecord(row));
+    return readRows(result.rows, rowToRecord, snapshotIdentity, onUnreadable);
   }
 
   /**
@@ -133,6 +150,11 @@ function asReport(value: unknown): unknown {
  */
 function asAxes(value: unknown): unknown {
   return value === null || value === undefined ? null : value;
+}
+
+/** `drillIdentity`'s argument, one table over: the conflict key is the only addressable handle. */
+function snapshotIdentity(row: Record<string, unknown>): string | null {
+  return textIdentity(row, "snapshot_id");
 }
 
 function rowToRecord(

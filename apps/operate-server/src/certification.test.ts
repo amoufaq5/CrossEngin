@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
+import { verifyChainIntegrity } from "@crossengin/forensics";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import {
   FixedClock,
@@ -149,15 +150,35 @@ describe("evidence sources", () => {
   });
 
   it("forensicChainSource yields nothing for an empty chain (not a vacuous pass)", async () => {
-    const src = forensicChainSource({ loadChain: async () => [] });
+    const src = forensicChainSource({ loadChain: async () => ({ entries: [], unreadable: [] }) });
     expect(await src.collect("soc2_type2", AT)).toEqual([]);
+  });
+
+  it("forensicChainSource reports a chain whose every row is refused, where an empty chain yields nothing", async () => {
+    const refused = forensicChainSource({
+      loadChain: async () => ({
+        entries: [],
+        unreadable: [{ identity: "0", detail: "kind: invalid_enum_value" }],
+      }),
+    });
+    const items = await refused.collect("soc2_type2", AT);
+    expect(items).toHaveLength(1);
+    expect(items[0]?.sourceKind).toBe("forensic_chain");
+    expect(items[0]?.satisfied).toBe(false);
+    expect(items[0]?.findings[0]).toContain("the contract refuses");
+
+    const empty = forensicChainSource({ loadChain: async () => ({ entries: [], unreadable: [] }) });
+    expect(await empty.collect("soc2_type2", AT)).toEqual([]);
   });
 
   it("forensicChainSource verifies an intact chain from genesis", async () => {
     const h1 = "1".repeat(64);
     const h2 = "2".repeat(64);
     const src = forensicChainSource({
-      loadChain: async () => [chainEntry(0, G, h1), chainEntry(1, h1, h2)],
+      loadChain: async () => ({
+        entries: [chainEntry(0, G, h1), chainEntry(1, h1, h2)],
+        unreadable: [],
+      }),
     });
     const [ev] = await src.collect("soc2_type2", AT);
     expect(ev?.sourceKind).toBe("forensic_chain");
@@ -169,11 +190,35 @@ describe("evidence sources", () => {
     const h2 = "2".repeat(64);
     const src = forensicChainSource({
       // entry 1 claims a wrong priorEntryHash → chain broken at 1
-      loadChain: async () => [chainEntry(0, G, h1), chainEntry(1, "9".repeat(64), h2)],
+      loadChain: async () => ({
+        entries: [chainEntry(0, G, h1), chainEntry(1, "9".repeat(64), h2)],
+        unreadable: [],
+      }),
     });
     const [ev] = await src.collect("soc2_type2", AT);
     expect(ev?.satisfied).toBe(false);
     expect(ev?.findings[0]).toContain("1");
+  });
+
+  it("forensicChainSource takes the refused row over a fold that would have passed", async () => {
+    const h1 = "1".repeat(64);
+    const h2 = "2".repeat(64);
+    const entries = [chainEntry(0, G, h1), chainEntry(1, h1, h2)];
+    // The fold's own answer over these same entries, so the verdict below is the refused row's.
+    expect(verifyChainIntegrity(entries).valid).toBe(true);
+
+    const src = forensicChainSource({
+      loadChain: async () => ({
+        entries,
+        unreadable: [{ identity: "2", detail: "kind: invalid_enum_value" }],
+      }),
+    });
+    const [ev] = await src.collect("soc2_type2", AT);
+    expect(ev?.satisfied).toBe(false);
+    expect(ev?.findings[0]).toBe(
+      "chain broken at sequence 2: 1 entry the contract refuses (first: kind: invalid_enum_value)",
+    );
+    expect(ev?.findings[0]).not.toContain("sequence gap");
   });
 
   it("accessReviewSource is framework-aware and skips a missing pack", async () => {

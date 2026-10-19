@@ -394,10 +394,11 @@ describe("AuditChainObserver", () => {
     expect(observer.pending()).toBe(0);
 
     const chain = await store.loadChain(TENANT);
-    expect(chain).toHaveLength(3);
-    expect(chain[0]?.priorEntryHash).toBe(GENESIS_HASH);
-    expect(verifyChainIntegrity(chain).valid).toBe(true);
-    for (const entry of chain) {
+    expect(chain.entries).toHaveLength(3);
+    expect(chain.unreadable).toEqual([]);
+    expect(chain.entries[0]?.priorEntryHash).toBe(GENESIS_HASH);
+    expect(verifyChainIntegrity(chain.entries).valid).toBe(true);
+    for (const entry of chain.entries) {
       expect(verifyChainEntrySignature(entry, keypair.publicKeyBase64)).toBe(true);
     }
   });
@@ -410,12 +411,12 @@ describe("AuditChainObserver", () => {
     expect(observer.pending()).toBe(0);
     expect(observer.activeScopes()).toBe(0);
     await observer.drain();
-    expect(await store.loadChain(TENANT)).toHaveLength(0);
+    expect((await store.loadChain(TENANT)).entries).toHaveLength(0);
 
     // A passing (matching) request still appends as before.
     observer.record(execution({ finalOutcome: "deny", finalResponseStatus: 403, requestId: "req_bbbbbbbb22222222" }));
     await observer.drain();
-    expect(await store.loadChain(TENANT)).toHaveLength(1);
+    expect((await store.loadChain(TENANT)).entries).toHaveLength(1);
   });
 
   it("a per-tenant override that filters out a tenant appends nothing while another tenant still appends", async () => {
@@ -428,8 +429,8 @@ describe("AuditChainObserver", () => {
 
     observer.record(execution({ tenantId: TENANT_B, requestId: "req_bbbbbbbb22222222" }));
     await observer.drain();
-    expect(await store.loadChain(TENANT)).toHaveLength(0);
-    expect(await store.loadChain(TENANT_B)).toHaveLength(1);
+    expect((await store.loadChain(TENANT)).entries).toHaveLength(0);
+    expect((await store.loadChain(TENANT_B)).entries).toHaveLength(1);
   });
 
   it("routes an append failure to onError without stalling the queue", async () => {
@@ -454,7 +455,7 @@ describe("AuditChainObserver", () => {
     const chain = buildAuditChain(fakeChainPg(), config());
     chain.observer.asExecutionSink()(execution());
     await chain.observer.drain();
-    expect(await chain.store.loadChain(TENANT)).toHaveLength(1);
+    expect((await chain.store.loadChain(TENANT)).entries).toHaveLength(1);
   });
 
   it("appends for different tenants proceed in parallel; drain clears the scopes", async () => {
@@ -503,8 +504,8 @@ describe("AuditChainObserver", () => {
 
     observer.record(execution({ tenantId: TENANT_B, requestId: "req_bbbbbbbb22222222" }));
     await observer.drain();
-    expect(await store.loadChain(TENANT)).toHaveLength(0);
-    expect(await store.loadChain(TENANT_B)).toHaveLength(1);
+    expect((await store.loadChain(TENANT)).entries).toHaveLength(0);
+    expect((await store.loadChain(TENANT_B)).entries).toHaveLength(1);
   });
 
   it("a tenant with no live policy falls back to the config path", async () => {
@@ -515,11 +516,11 @@ describe("AuditChainObserver", () => {
     // config's outcomes allowlist still applies when the cache has nothing for this tenant.
     observer.record(execution({ finalOutcome: "pass", requestId: "req_aaaaaaaa11111111" }));
     await observer.drain();
-    expect(await store.loadChain(TENANT)).toHaveLength(0);
+    expect((await store.loadChain(TENANT)).entries).toHaveLength(0);
 
     observer.record(execution({ finalOutcome: "deny", finalResponseStatus: 403, requestId: "req_bbbbbbbb22222222" }));
     await observer.drain();
-    expect(await store.loadChain(TENANT)).toHaveLength(1);
+    expect((await store.loadChain(TENANT)).entries).toHaveLength(1);
   });
 
   it("a live policy overrides a config tenantOverride (live wins per-field)", async () => {
@@ -534,7 +535,7 @@ describe("AuditChainObserver", () => {
 
     observer.record(execution({ tenantId: TENANT, requestId: "req_aaaaaaaa11111111" }));
     await observer.drain();
-    expect(await store.loadChain(TENANT)).toHaveLength(1);
+    expect((await store.loadChain(TENANT)).entries).toHaveLength(1);
   });
 
   it("a live outcomes allowlist filters a tenant while another still appends", async () => {
@@ -547,8 +548,8 @@ describe("AuditChainObserver", () => {
     observer.record(execution({ tenantId: TENANT, finalOutcome: "pass", finalResponseStatus: 200, requestId: "req_aaaaaaaa11111111" }));
     observer.record(execution({ tenantId: TENANT_B, finalOutcome: "pass", finalResponseStatus: 200, requestId: "req_bbbbbbbb22222222" }));
     await observer.drain();
-    expect(await store.loadChain(TENANT)).toHaveLength(0);
-    expect(await store.loadChain(TENANT_B)).toHaveLength(1);
+    expect((await store.loadChain(TENANT)).entries).toHaveLength(0);
+    expect((await store.loadChain(TENANT_B)).entries).toHaveLength(1);
   });
 
   it("keeps a single tenant's appends strictly ordered on its own queue", async () => {

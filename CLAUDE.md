@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 19,693 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 19,934 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -1693,6 +1693,64 @@ type errors.
   on PG 16.13: seven checks, the migration **1 planned step / 0 unreconciled on a populated table**
   with a clean re-plan, and the three pre-upgrade rows reading **SQL NULL rather than `{}`**.
 
+  ADR-0373 closes ADR-0372's own Q2 and the class is **a sweep one bad row stops**. That increment
+  gave three reads in one store a required `onUnreadable` reporter and established *report and carry
+  on*; the missing half is that **where a sweep's purpose is to find defective rows, an unreadable row
+  *is* the finding — so it must be routed into the finding set, not out of the answer.** Dropping it is
+  the same silence one layer in; throwing takes every other row's finding with it, and both land on the
+  reassuring side. The class has **51** members (63 single-row reads excluded, since there the caller
+  asked about that row and ADR-0289 says it must not be served past), **13** of them a sweep or an
+  audit, and the two live ones show the two routes to that silence: one makes the **row** unreadable
+  (the sweep stops), the other makes the **evidence** unreadable in a way the contract tolerates (the
+  detector answers *cannot say*, which is not a defect).
+
+  Live on PG 16.13 as a non-owner, the two faces. A blanked `actor_reference` on a chain entry is a
+  genuine signature-breaking tamper — the field is inside `canonicalEntryBytes` and no CHECK refused
+  `''` — and `loadChain` **threw**, so the hourly integrity pass filed `outcome: "error"`: no verdict
+  row, no `onFinding`, no `escalate`, **no paging sev1**, one log line an hour for ever, while
+  `verifyStoredChainSignatures` — the only check in the stack that binds an entry's stored columns to
+  its content (ADR-0371) — is the detector the tamper disabled. And a blanked `operation` on an
+  anchored audit row was **dropped**, so the anchor check (the only detector there is for an edited
+  audit row, ADR-0286) was never asked about it and the proof read **`verified`** — where the *same
+  row rewritten into a valid shape* read `hash_mismatch` and `compromised`. **The two rewrites
+  answered oppositely, and the one that did not page is the easier one**: both are one `UPDATE` as the
+  same role, and the contract-refusing one needs no knowledge of the canonical payload. That is why
+  the new verdict clause sits beside `tampered` and not beside `unanchored` — an unanchored row is the
+  *absence* of evidence, and the write path's new parse makes this one conclusive rather than inferred
+  (ADR-0322's axis).
+
+  The recurring rule held an **eleventh** time — the honest fix sits one level up. The pain was 51
+  reads; one level up is `kernel-pg`'s `read-rows.ts` plus the twelfth workspace rule over the class,
+  and the primitive's two shapes are the whole design: a store whose consumer is a scheduler or a
+  route **forwards** a reporter, while one whose consumer is a **verifier** returns the refused rows
+  beside the records, because there the unreadable row is not a note on the side and a verdict computed
+  over the readable rows alone is a verdict about a different set of rows than the one on disk.
+
+  Three things were sharper than the defect. **It corrects ADR-0372 on the one thing that increment
+  argued hardest for**: that module says no other column of a refused row may be reported and then
+  reports `err.message`, which for an `invalid_enum_value` issue *is* the stored value — so
+  `unreadableDetail` answers the field path and the issue code, sorted and de-duplicated, and a test
+  pins that `err.message` contains the value while the detail does not. **The write path's refusals
+  were not a superset of the read path's and neither nested the other**: `assertEmittable` checked
+  four things by hand while the reader parses through a `.strict()` `AuditLogEntrySchema` that refuses
+  an `actor` with an extra key, an `occurredAt` with no offset and any extra top-level key — while the
+  guard refuses `operation: " "`, which `z.string().min(1)` admits. That is ADR-0353's
+  `META_DEPLOYMENTS` shape and it makes every *the writer is stricter* test structurally blind; the
+  guard ends in the reader's own parse now, which is the premise the `compromised` verdict rests on.
+  And **`certification.ts`'s duplicate chain reader carried ADR-0331's defect in its second
+  spelling**: its `SELECT` had **no `WHERE` clause in either branch** while its own comment claimed *"a
+  null tenant reads the platform chain"*, so as the owner — which the shipped compose is — it read
+  every scope interleaved, the fold reported a `sequence gap`, and `audit.tamper_evident_log` read
+  **not satisfied** on a healthy chain. Deleted rather than fixed; `forensicChainReaderFor` is the one
+  reader there is.
+
+  The stated cost is a **forward**-compatibility hazard rather than a current false positive, and it
+  is concrete: `ActorSchema` is `.strict()` with five required-and-nullable keys, so adding a sixth to
+  `AuditActor` makes every stored row unreadable and therefore every scope `compromised` — a paging
+  sev1 caused by a schema evolution, where the same change used to be silent. The remedy belongs to
+  the contract change (the field must be `.optional()`, or arrive with a migration — ADR-0351's
+  versioning rule one table over), and it is the increment's second open end.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -2096,6 +2154,28 @@ packages exist at only one layer, noted below where that is true.
   guarantees under `verify-full`'s name, nothing can repair it by configuration, and the measured
   count of `verify-ca` anywhere in the repo is **zero**. The one remaining mode comparison is
   `disable`, which the assurance deliberately cannot answer.
+  Append to the `kernel-pg` entry:
+
+  **`read-rows.ts` is what a multi-row read does with a row its contract refuses** (ADR-0373), and it
+  is here rather than copied per store for `scopeFilter`'s reason (ADR-0334). Two shapes and the
+  store's own contract picks: `readRows(rows, map, identify, onUnreadable)` **forwards** the fact,
+  which is right where the consumer is a scheduler or a route; `readRowsWithUnreadable(rows, map,
+  identify)` returns the refused rows **beside** the records, which is right where the consumer is a
+  **verifier**, because there the unreadable row is part of the answer rather than a note on the side.
+  `identify` is separate from `map` because it reads the business key straight off the **raw** row, so
+  it still answers for the row the mapper refused — and it runs **inside the catch**, so a throw from
+  it costs only its own row's identity (`null`) and not the rows after it. `unreadableDetail` answers
+  the **field path and the issue code**, sorted and de-duplicated: a `ZodError`'s own `message` is the
+  JSON of its issues and an `invalid_enum_value` issue carries `received`, which is the stored value,
+  so ADR-0372's `detail = err.message` is a disclosure into a log line, an HTTP body and an incident
+  note — ADR-0367's rule in a new place, and a correction to the ADR this generalises. The sorting is
+  not tidiness: a detail that varies with the order zod walked the object cannot be compared across two
+  sweeps. `numericIdentity` is separate from `textIdentity` because a `BIGINT` arrives from
+  node-postgres as a **string** and an `INTEGER` as a **number** (ADR-0331), so one `typeof` predicate
+  would answer for one and not the other. Its reach is bounded and the bound is stated: the no-value
+  property is **enforced** for a `ZodError` and **assumed** for a mapper's own guard, whose message
+  passes through — a convention of exactly the kind ADR-0367 found failing in four of six refusal
+  strings, and the only honest fence is a text test over the construction sites.
 - **`types`** — deliberately tiny: branded primitive id types (`TenantId`, `UserId`,
   `RequestId`, `ManifestId`) plus the `meta-schema` record shapes.
   **`classifiedFields(fields)` takes a field list and not an `Entity`** (ADR-0361), and the signature
@@ -3646,6 +3726,29 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   supersedes an earlier one and a mistake falls toward re-folding. Asserted on the recorded SQL,
   because the fake de-duplicates on `(tenant, sequence)` in its INSERT branch and so cannot hold the
   two rows the rule is about — slice 1's recorded-SQL-versus-round-trip argument in a second place.
+  Append:
+
+  **A refused row is part of the chain's verdict, not absent from it** (ADR-0373). `loadChain` and
+  `loadFrom` answer `ChainRead {entries, unreadable}` through one private `readChain`, so the two
+  cannot come to disagree about what a refused row is, and neither throws on one.
+  `unreadableEntryVerdict(unreadable)` is the one place the precedence lives, applied as
+  `unreadableEntryVerdict(read.unreadable) ?? verifyChainIntegrity(read.entries)` by both `verify()`
+  and `verifyChainFromCheckpoint` — **unconditionally**, because a fold over a chain with a row missing
+  is not a fold over that chain: `verifyChainIntegrity` walks the entries it was given, so a refused row
+  reads to it as a `sequence gap`, which is a true statement about the array and a false one about the
+  table and sends an operator to look for a deleted entry that is present and malformed. The sharpest
+  case is the refused row at the **tail**, where what reads back is a contiguous genesis-anchored chain
+  the fold pronounces `{valid: true, brokenAt: null}` — so without the precedence `verify()` calls a
+  chain carrying a signature-breaking tamper healthy. `brokenAt` is the **first** unreadable row's
+  sequence and the ordering belongs to the read's `ORDER BY sequence_number ASC` rather than to the
+  function, which a test pins. `ChainSignatureVerdict.unreadable` is its own axis and
+  `verifyChainSignatures(entries, resolver, unreadable)` takes it **required**, because
+  `EntrySignatureResult` demands a `fingerprint` and the fingerprint is one of the columns whose
+  unreadability lands a row there — reporting `""` for it would read as a value. `valid` is
+  `allOk && unreadable.length === 0` while `checked` stays `entries.length`, which is ADR-0371's point
+  about zero being a readable figure. One asymmetry is worth knowing: a verdict failing on this axis
+  alone has `results.every(ok)` true, so a surface rendering `results` without reading `unreadable`
+  reports a failure and names no cause — `formatChainVerification` names them for that reason.
 - **`access-reviews`** — periodic attestation campaigns (SOC 2 / ISO 27001 / HIPAA / PCI /
   GDPR / 21 CFR Part 11): campaigns, scoped items, decisions with attestation kinds and
   four-eyes, exceptions with per-reason duration caps, templates, sealed evidence with
@@ -4876,6 +4979,28 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   the matcher and a test pins the two agreeing. `MAX_LIMIT` became `REGISTRY_LIST_MAX_LIMIT` because
   **eleven** sibling modules in this app hold the bare name privately, none exports it, and
   `index.ts` re-exports this file with `export *`.
+  Append:
+
+  **The anchor check's own finding** (ADR-0373). `listAnchoredForScope` used to **drop** a row the
+  contract refuses, under a comment arguing *"an old record must not hide every newer one"* — right
+  about throwing and wrong about dropping, because this read's consumer is the anchor check and a
+  dropped row is a row the detector is never asked about. It answers `AnchoredAuditRead {rows,
+  unreadable}` now; `verifyAuditAnchors(tenantId, rows, chain, unreadable)` takes the fourth argument
+  **required** and `AuditAnchorReport.unreadable` is its own axis rather than a sixth
+  `AuditAnchorVerdict` — structurally, because a refused row never becomes an `AnchoredAuditEntry` and
+  so cannot be *in* `results`, and because `TAMPERED` is a `ReadonlySet` so a sixth member added to it
+  and to nothing else compiles and reads as neither disproven nor unproven (ADR-0351). The verdict
+  clause sits **beside `tampered`**: an unanchored row is the absence of evidence and pages nobody,
+  while a row this reader refuses is evidence of something, since `assertEmittable` now ends in the same
+  `AuditLogEntrySchema.parse` the reader runs. `listForTenant` still answers a bare array and still
+  drops the refusal, because its consumer is a reader; `audit-read-store.ts`'s `rowToEntry` still
+  **throws**, with its reasoning already on file (*"the caller turns it into a refused page, not a
+  shorter one"*) — two opposite choices for one mapper in one app, decided by whether the consumer is
+  serving a page or computing a verdict, which is the increment's thesis confirmed in-repo. The refused
+  rows are named by `formatIntegrityProof` and nowhere else: the durable record carries the fact
+  through `verdict`, and a count in the stored report would have to move `integrityVerdictPayload`,
+  `StoredIntegrityReportSchema`, `canonicalStoredReport` and `storedReportFrom` together or break the
+  parity ADR-0371 reverted a field out of.
 - **`apps/operate-web`** — **long-running process** (Next.js app router + Tailwind, `next
   dev`/`next start` on :3000). The generic manifest-driven UI: a catch-all `/api/[...path]`
   proxy to operate-server, dynamic entity list/record/form pages under `/e/[slug]` rendered
@@ -5142,6 +5267,28 @@ The migration is free for ADR-0358's reason — measured on a populated table wi
 to reproduce an un-upgraded deployment: **1 planned step, 0 unreconciled, 1 executed, re-plan
 clean**, and the three pre-upgrade rows read SQL NULL rather than `{}`.
 
+**Three columns whose unreadability defeats an audit carry a CHECK** (ADR-0373):
+`meta.forensic_chain_entries.actor_reference` and `.signature` as `char_length(x) >= 1`, and
+`meta.tenant_tombstones.attestations` as `jsonb_typeof(attestations) = 'array'`. Only three, measured
+rather than chosen: **505 TEXT and 159 JSONB columns carry no CHECK**, 36+ of them
+`NOT NULL DEFAULT '[]'::jsonb` with no array constraint, so "every contract refinement gets a CHECK"
+is a separate increment and probably a further workspace rule — ADR-0362 established that none of the
+rules compares a *contract field* to a *catalog column*, and this is that question's other half. The
+upper bound is deliberately absent on the two TEXT columns, against the catalog's majority
+`char_length(x) BETWEEN 1 AND N` idiom, because both contracts are `z.string().min(1)` with **no
+maximum** and a CHECK refusing what the contract permits is the same defect reversed. The JSONB one
+is `jsonb_typeof` and not `jsonb_array_length >= 0`, for two measured reasons: an empty array is that
+column's own default and its legitimate claim, so a length bound would be testing something other
+than what it says, and `jsonb_array_length` **raises** `22023` on a non-array rather than violating,
+where this spelling raises a plain `23514`. None needs a `pg-value-set-domains.ts` declaration —
+`catalogValueSets` matches `IN (…)` and `col = 'literal'` only, so the count is **288 before and
+after**. Standing manual SQL on every existing deployment (three `ALTER`s, reported with the exact
+statement until run), and the arm an operator meets depends on their rows: a clean deployment gets
+three `constraint_widening_unproven` with the `BEGIN`/`ALTER`/`COMMIT` triple, while one holding a
+violating row gets `constraint_violated_by_existing_rows` with the violator `SELECT` and no `ALTER` —
+**the migration finding a tamper rather than merely preventing the next one**. Verified both ways on
+PG 16.13, with a clean re-plan and `drift` exit 0 afterwards.
+
 **Every column-level value-set CHECK declares which contract domain governs it** (ADR-0353), in
 `packages/testing/src/strategy/pg-value-set-domains.ts` rather than in the catalog — a ref is a
 string either way, since the kernel cannot import *all* of the packages it would name, so the
@@ -5183,7 +5330,7 @@ typechecks *something*, which is the dangerous outcome) and runs the one script.
 (`packages/config`, which is JSON only, and `apps/operate-web`, a Next app that already includes every
 `.ts`/`.tsx`) are spelled out as lines, so adding a third is visible in a diff.
 
-**`packages/testing/src/strategy/` holds the workspace-level rules**, and there are **eleven** now:
+**`packages/testing/src/strategy/` holds the workspace-level rules**, and there are **twelve** now:
 `typecheck-config.ts` (ADR-0307), `pg-column-coverage.ts` (ADR-0333), which reads `META_TABLES`
 and every store's SQL *as text* and asserts the two things a fake `PgConnection` structurally
 cannot — that every column a statement names exists, and that every `notNull`-with-no-default
@@ -5524,6 +5671,25 @@ opposite. And **three mutations survived its first battery**: every `: Entity = 
 packs is reached by its array, so a test over the real workspace cannot distinguish this scan from
 one taking every const it finds — ADR-0355's *a measurement taken once goes stale silently*,
 answered with fixture tests beside the live ones.
+The twelfth is `pg-unreadable-rows.ts` (ADR-0373), and it is the first that asks **what a read does
+with a row its contract refuses** — a question every one of the eleven is blind to, because all of
+them compare an artifact against the catalog, a value set, a declaration or a producer, and a
+`rows.map(rowToX)` that throws is well-formed SQL naming existing columns with a complete `INSERT`
+and a mapper that applies its contract correctly. What is wrong is what happens to the **page** when
+one row fails. **110 conversions over 906 source files** (`array_map` 74, `row_loop` 24, `primitive`
+12), six verdicts over two total maps, **68 needing a declaration, 68 declared, 0 findings in either
+direction** — 45 of them `unmigrated`, which is explicitly the backlog, each naming what a refused
+row costs today. **Throw-capability decides the fence and the record type only classifies a *silent*
+conversion**, which is the module's load-bearing line and was reversed in its own first draft:
+evidence that a refusal is possible **is** proof a contract is applied, so it needs no annotation to
+confirm it. Each reason costs something checkable — `page_refusal_declared` names a `refusalCode`
+the rule then finds in the named file, `record_asserted_not_parsed` names a `fencedBy` symbol some
+workspace source must declare or the literal `nothing`, and a reason contradicting the derived
+verdict is refused. It reproduced its **own** under-reporting direction while being written:
+`rows.map(rowToX)` passes the mapper by reference, so a scan over *calls* found no evidence of a
+parse and 12 sites read `record_total` that end in one. Seven generalisations refused with their
+figures, the sharpest being that every *invocation* of a row mapper is 114 sites of which **63 are
+single-row reads where throwing is correct** — which is why the anchor is an array.
 `workspace-sql-scan.ts` is the fs walk extracted out of the column-coverage test so one scan feeds
 both SQL rules, and it gained a **reference collector** (`from`/`join`/`into`/`update`/`delete`/
 `truncate`, 312 references across 862 files) — without which three tables read as writerless that are
@@ -5710,6 +5876,16 @@ isolated copy of the package instead, which is the better answer when more than 
   a handler. The honest fence is one function building every name and the survey enumerating its
   domain, plus a rule per **resolved pack**, since an overlay replacing a lifecycle takes its
   transition targets with it and an over-wide producible set under-reports.
+  **And a page that one refused row takes down, or quietly shortens, is a failure too**
+  (`pg-unreadable-rows.ts`, ADR-0373), the **ninth** reading and the first about the read's *control
+  flow* rather than its SQL or its names. A fake connection cannot see it and neither can a real one:
+  `result.rows.map(rowToX)` is correct for every row it maps, and what is wrong is that the first
+  failure takes the other rows' findings with it — so the defect is invisible to any test whose
+  fixture holds only representable rows, which is every fixture until somebody writes one that does
+  not. Measured: **13 of the 51 multi-row sites are a sweep or an audit**, where the page exists
+  *because* a defective row is the thing being looked for. A single-row read that throws is correct
+  and is excluded structurally (63 of them), because there the caller asked about that row and
+  ADR-0289 says it must not be served past.
   **And a query that is missing a predicate satisfies all of them** (ADR-0359), which is the blind
   spot the rules share rather than a seventh reading. Every one of them asks whether a column
   exists, whether an `INSERT` is complete, whether a live database admits a value, whether a CHECK
@@ -5937,6 +6113,42 @@ Nothing planned is unbuilt; what remains are follow-ups named in the ADRs that
 opened them.
 
 **Load-bearing**
+
+- **A sweep survives the row it exists to find, and what is left of it** (ADR-0373 closed ADR-0372's
+  Q2). The class has **51** members — 63 single-row reads excluded, since there the caller asked
+  about that row — of which **13** are a sweep or an audit, and those are closed: the chain reader,
+  the audit-anchor read, the tombstone sweep, the DR drill/failover/readiness reads, the SLO
+  enforcement reads, the access-review campaign/item/decision reads, the workflow event log and the
+  engine's definition load. `kernel-pg`'s `read-rows.ts` is the one spelling, generic in the row
+  type, with two shapes the store's contract picks between (**forward** a reporter, or return the
+  refused rows **beside** the records when the consumer is a verifier), and
+  `packages/testing/src/strategy/pg-unreadable-rows.ts` is the twelfth rule over the whole class.
+  What remains, in order: **(1)** **45 of the 68 declared sites are `unmigrated`** — the backlog,
+  each naming what a refused row costs today, and the sharpest are `column-store::listPageOn` (every
+  tenant list request), `crypto-pg::listKeys`, `forensics-pg::checkpoint-store::listRecent` and
+  `access-reviews-runtime-pg::evidence-store::listByTenant`; nine are latent on declared-callerless
+  stores and say so. **(2)** **nothing fences a consumer that reads `.records` and drops
+  `.unreadable`** — measured at **50** reads of `.unreadable` against **45** of `.records`, and
+  `audit-log-store::listForTenant` is the live instance (deliberate, because its consumer is a
+  reader), which is one level up from a conversion and so outside the twelfth rule by construction.
+  **(3)** `unreadableDetail`'s no-value property is **enforced** for a `ZodError` and **assumed** for
+  a mapper's own guard, whose message passes through — a convention of exactly the kind ADR-0367
+  found failing in four of six refusal strings, one of them an id; the only honest fence is a text
+  test over the construction sites with a vacuity floor. **(4)** a new required field on a
+  `.strict()` stored shape now turns every pre-existing row into a paging `sev1`, where the same
+  change used to be silent — the remedy is a contract-evolution rule (`.optional()`, or a version
+  tag) rather than anything in the read. **(5)** `DrReadinessReport` has no field for *this axis's
+  evidence was partly unreadable*, so a page of one readable drill beside one refused one still
+  reads `ready: true` with `totalIssues: 0`; `unevidencedAxes` cannot say it, because naming
+  `failovers` is a compile error by design and naming `drills` renders a false sentence into a SOC 2
+  pack. **(6)** two spellings of *forward the reporter* (positional and an options field), each
+  matching its own call site's existing signature, with nothing deciding which. **(7)**
+  `tombstone-store`'s `listForTenant` and `findForRequest` still throw, and the second is a verdict
+  decision rather than a read one: it is the reconciler's *evidence* lookup, where a refused row is
+  not a missing proof but an unanswerable question. **(8)** `deletion-request-store`'s
+  `UnreadableRequestRow` keeps its own field name (`requestId`, deliberately — it is what its three
+  audiences act on) while sharing the primitive's `detail` rule, so the vocabulary is one and the
+  shape is two.
 
 - **Every money figure is read over the whole set, and what is left of it** (ADR-0367,
   user-directed). Thirteen capped reads drain their cursor to a declared ceiling now, and the
@@ -8083,7 +8295,7 @@ three make the rest honest, cheap or verifiable.
    P2 item 14's third clause, from the other end.)
 3. **No CI, no git hook, no smoke, e2e, load or migration test** — while `strategy/ci.ts` models
    triggers, budgets and a topological sort with no reader. No `.github/workflows`, no
-   `core.hooksPath`, so the eleven rules and 19,693 tests run only when a human types `pnpm -r test`,
+   `core.hooksPath`, so the twelve rules and 19,934 tests run only when a human types `pnpm -r test`,
    and this file's instruction never to use `--no-verify` describes a guardrail that does not
    exist. `operate-web` has **zero tests** against 15 pages and 34 unfenced `fetch` sites — the
    serialized-body boundary that shipped a broken console button for an hour (ADR-0335).
@@ -8319,6 +8531,18 @@ land with or before it.
     actually rotates is 2. `buildCursorKeySource` takes a generation and its only caller passes none,
     and `SEALED_CURSOR_PREFIX` is a fixed `"s1."` with no generation field — so rotating the
     secret 400s every walk in flight at the page boundary. Both downstream of P0 item 2.
+12b. **A column admits what its contract refuses, on hundreds of columns** — the inverse of item 13
+    and a class the register did not have. Measured from the built catalog: **505 TEXT and 159 JSONB
+    columns carry no CHECK**, 36+ of the latter `NOT NULL DEFAULT '[]'::jsonb` with no array
+    constraint (`plans.metered_prices`, `feature_flags.variants`, `incidents.role_assignments`,
+    `incident_postmortems.action_items`). So a row the deployment's own reader refuses is storable
+    almost everywhere, and ADR-0373 answered it at the **read** — where the consequence lives — with
+    CHECKs on only the three columns whose unreadability defeats an audit. Closing the class means
+    comparing a contract field's **refinement** to its column's CHECK, which no rule does: ADR-0362
+    established that none compares a contract *field* to a catalog *column*, and this is that
+    question's other half. It would also not retire the read-side fix, because a CHECK added to a
+    populated table is reported rather than planned when the rows violate it (ADR-0363), so a
+    deployment already holding a refused row still needs the read to behave.
 13. **Four contracts admit or assert something structurally false**, each in a subsystem whose job
     is to be checkable: a **late GDPR 72-hour breach notification is unrepresentable** (the
     refinement and the CHECK both refuse `publishedAt` past the deadline, so
@@ -8474,7 +8698,12 @@ method is that a stale figure misleads.
    such a field must not survive under its old name**. Plus two flag vocabularies sharing six
    names, two runbook contracts joined by a thrice-duplicated regex, and two `Accept-Language`
    parsers.
-3. **The ten rules have seven self-blind spots, including a silent skip and a structural anchor.**
+3. **The twelve rules have seven self-blind spots, including a silent skip and a structural anchor.**
+    (This item was written against ten and was already stale at eleven when `manifest-event-names.ts`
+    landed in ADR-0362; `pg-unreadable-rows.ts` is the twelfth. Its own limits are declared in it and
+    add nothing here, with one exception worth knowing: two inline conversions in one scope share a
+    key, which is safe exactly while at most one of them needs a declaration — a workspace test
+    asserts that rather than assuming it.)
    `pg-record-reads.ts` drops a row interface with fewer than three catalogued columns with a bare
    `continue` and no finding — the same shape as that increment's own defect, caught only because a
    count moved. `stripComments` is shared by all ten and was wrong about regex literals for four
@@ -8545,7 +8774,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 366 records; 287 Accepted, 79 Proposed (the
+title or status change cannot drift. 368 records; 289 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

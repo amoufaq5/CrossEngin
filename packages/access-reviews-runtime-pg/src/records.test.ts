@@ -1,13 +1,17 @@
 import { describe, expect, it } from "vitest";
+import { readRowsWithUnreadable } from "@crossengin/kernel-pg";
 
 import {
+  recordsOrRefuse,
   requireIso,
   requireNumeric,
+  rowKey,
   rowToCampaign,
   rowToEvidence,
   rowToDecision,
   rowToItem,
   toIso,
+  UnreadableRowsError,
   type CampaignRow,
   type DecisionRow,
   type ItemRow,
@@ -342,5 +346,99 @@ describe("rowToEvidence", () => {
   it("refuses a sealed row with no digest, which only the superRefine catches", () => {
     const row = { ...evidenceRowFor(makeSealedEvidence()), sealed_sha256: null };
     expect(() => rowToEvidence(row as never)).toThrow();
+  });
+});
+
+describe("readRowsWithUnreadable", () => {
+  interface Row {
+    readonly key: string | null;
+    readonly value: number;
+  }
+  const map = (row: Row): number => {
+    if (row.value < 0) throw new Error("value must not be negative");
+    return row.value;
+  };
+  const identify = (row: Row): string | null => rowKey(row.key);
+
+  it("keeps every row the mapper accepts", () => {
+    const read = readRowsWithUnreadable([{ key: "a", value: 1 }, { key: "b", value: 2 }], map, identify);
+    expect(read.records).toEqual([1, 2]);
+    expect(read.unreadable).toEqual([]);
+  });
+
+  it("reports the refused row and returns the rest, which a .map took with it", () => {
+    const read = readRowsWithUnreadable(
+      [{ key: "a", value: 1 }, { key: "bad", value: -1 }, { key: "c", value: 3 }],
+      map,
+      identify,
+    );
+    expect(read.records).toEqual([1, 3]);
+    expect(read.unreadable).toEqual([
+      { identity: "bad", detail: "value must not be negative" },
+    ]);
+  });
+
+  it("reports an unidentified row rather than losing the rows behind it", () => {
+    // `identify` runs inside the catch, so its own throw costs this row's handle and nothing else.
+    const read = readRowsWithUnreadable(
+      [{ key: null, value: -1 }, { key: "c", value: 3 }],
+      map,
+      (row) => {
+        if (row.key === null) throw new Error("no key");
+        return row.key;
+      },
+    );
+    expect(read.records).toEqual([3]);
+    expect(read.unreadable).toEqual([{ identity: null, detail: "value must not be negative" }]);
+  });
+
+  it("names the field path and the issue code for a zod refusal, and no value the row held", () => {
+    // Shared with the primitive rather than restated, which is the half that must not diverge: a
+    // `ZodError`'s own message quotes the stored value for an enum miss.
+    const row = { ...evidenceRowFor(makeSealedEvidence()), framework: "iso_9001" } as never;
+    const read = readRowsWithUnreadable([row], rowToEvidence, (r) => rowKey(r.evidence_id));
+    expect(read.records).toEqual([]);
+    expect(read.unreadable[0]?.detail).toBe("framework: invalid_enum_value");
+    expect(read.unreadable[0]?.detail).not.toContain("iso_9001");
+  });
+});
+
+describe("recordsOrRefuse", () => {
+  it("hands back the records when nothing was withheld", () => {
+    expect(recordsOrRefuse("subject", { records: [1, 2], unreadable: [] })).toEqual([1, 2]);
+  });
+
+  it("refuses rather than return a short list, naming every withheld row", () => {
+    // The other legitimate answer: a scheduler counting these rows must not be handed a subset.
+    let caught: unknown = null;
+    try {
+      recordsOrRefuse("items of campaign arc_1", {
+        records: [1],
+        unreadable: [
+          { identity: "ari_1", detail: "due_at: invalid_type" },
+          { identity: null, detail: "row is missing required timestamp: created_at" },
+        ],
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(UnreadableRowsError);
+    const err = caught as UnreadableRowsError;
+    expect(err.unreadable).toHaveLength(2);
+    expect(err.message).toContain("ari_1");
+    expect(err.message).toContain("<unidentified>");
+    expect(err.message).toContain("items of campaign arc_1");
+  });
+});
+
+describe("rowKey", () => {
+  it("answers null for everything that is not a non-empty string", () => {
+    // `null` says *this row does not name one* rather than inventing a handle, and an empty string
+    // is not a handle either — a `WHERE campaign_id = ''` sends an operator nowhere.
+    expect(rowKey("arc_1")).toBe("arc_1");
+    expect(rowKey("")).toBeNull();
+    expect(rowKey(null)).toBeNull();
+    expect(rowKey(undefined)).toBeNull();
+    expect(rowKey(7)).toBeNull();
   });
 });

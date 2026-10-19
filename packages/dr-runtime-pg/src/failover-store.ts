@@ -1,4 +1,9 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  readRows,
+  textIdentity,
+  type PgConnection,
+  type UnreadableRowReporter,
+} from "@crossengin/kernel-pg";
 import {
   DrFailoverExecutionRecordSchema,
   scopedWrite,
@@ -108,9 +113,14 @@ export class PostgresDrFailoverStore {
    * first, and the limit could crowd out the scope the caller meant entirely. `dr-readiness.ts`
    * feeds the result straight into `assessDrReadiness`, so a deployment scored its DR readiness
    * off other tenants' failovers.
+   *
+   * `onUnreadable` is required and precedes `limit` for the same reasons as its drill sibling —
+   * read that one; the rule, the ordering and the two consumers are identical, and the only
+   * difference is which axis of the readiness report the lost evidence belonged to.
    */
   async listRecent(
     scope: DrReadScope,
+    onUnreadable: UnreadableRowReporter,
     limit = 100,
   ): Promise<readonly DrFailoverExecutionRecord[]> {
     if (limit <= 0) throw new Error("limit must be positive");
@@ -122,7 +132,7 @@ export class PostgresDrFailoverStore {
        LIMIT $${String(filter.params.length + 1)}`,
       [...filter.params, limit],
     );
-    return result.rows.map((row) => rowToRecord(row));
+    return readRows(result.rows, rowToRecord, failoverIdentity, onUnreadable);
   }
 
   /** Measured answering 3 where the scope's own count was 1 — a wrong scalar, not a long list. */
@@ -166,6 +176,11 @@ function asNullableIso(value: unknown): string | null {
 
 function asRecord(value: unknown): unknown {
   return typeof value === "string" ? JSON.parse(value) : value;
+}
+
+/** `drillIdentity`'s argument, one table over: the conflict key is the only addressable handle. */
+function failoverIdentity(row: Record<string, unknown>): string | null {
+  return textIdentity(row, "execution_id");
 }
 
 function rowToRecord(

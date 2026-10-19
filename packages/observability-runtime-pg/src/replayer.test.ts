@@ -1,16 +1,29 @@
+import type { UnreadableRow } from "@crossengin/kernel-pg";
 import { describe, expect, it } from "vitest";
 import type { SloEnforcementActionRecord } from "./records.js";
 import {
   SLO_DRIFT_ISSUE_KINDS,
   SloEnforcementReplayer,
   summarizeEnforcement,
+  unreadableRowIssues,
   verifyEnforcementActionShape,
   verifyEnforcementHistory,
 } from "./replayer.js";
-import { PostgresSloEnforcementActionStore } from "./enforcement-action-store.js";
+import {
+  PostgresSloEnforcementActionStore,
+  type SloEnforcementActionRead,
+} from "./enforcement-action-store.js";
 
 const NOW = Date.parse("2026-06-02T12:00:00.000Z");
 const iso = (offsetMs: number): string => new Date(NOW + offsetMs).toISOString();
+
+/** A clean read: every row represented, nothing withheld. */
+function read(
+  records: readonly SloEnforcementActionRecord[],
+  unreadable: readonly UnreadableRow[] = [],
+): SloEnforcementActionRead {
+  return { records, unreadable };
+}
 
 function action(
   overrides: Partial<SloEnforcementActionRecord> & {
@@ -292,8 +305,8 @@ describe("SloEnforcementReplayer declares which of its reads is a window", () =>
 
   function store(): PostgresSloEnforcementActionStore {
     return {
-      listForIncident: async () => MID_EPISODE,
-      listRecent: async () => MID_EPISODE,
+      listForIncident: async () => read(MID_EPISODE),
+      listRecent: async () => read(MID_EPISODE),
     } as unknown as PostgresSloEnforcementActionStore;
   }
 
@@ -313,13 +326,32 @@ describe("summarizeEnforcement", () => {
       action({ actionId: "sloa_c0000001", incidentId: "INC-2026-0001", decision: "breach_opened", occurredAt: iso(0), paged: true, pageChannelCount: 2 }),
       action({ actionId: "sloa_c0000002", incidentId: "INC-2026-0001", decision: "breach_ongoing", occurredAt: iso(1_000) }),
       action({ actionId: "sloa_c0000003", incidentId: "INC-2026-0001", decision: "recovered", occurredAt: iso(2_000) }),
-    ]);
-    expect(summary).toMatchObject({ total: 3, opened: 1, ongoing: 1, recovered: 1, paged: 1 });
+    ], 0);
+    expect(summary).toMatchObject({
+      total: 3,
+      opened: 1,
+      ongoing: 1,
+      recovered: 1,
+      paged: 1,
+      unreadable: 0,
+    });
     expect(summary.pagedRatio).toBeCloseTo(1 / 3);
   });
 
   it("is empty-safe", () => {
-    expect(summarizeEnforcement([]).pagedRatio).toBe(0);
+    expect(summarizeEnforcement([], 0).pagedRatio).toBe(0);
+  });
+
+  it("carries the withheld count beside the ratio it is not in", () => {
+    // `pagedRatio` is a ratio over the rows that could be read, which is a different quantity from
+    // a ratio over the rows on disk. Reporting the second as the first is how a page that paged
+    // comes back as 0 — so the figure is published next to the count that qualifies it.
+    const summary = summarizeEnforcement(
+      [action({ actionId: "sloa_c0000004", incidentId: "INC-2026-0001", decision: "breach_ongoing", occurredAt: iso(0) })],
+      2,
+    );
+    expect(summary).toMatchObject({ total: 1, unreadable: 2 });
+    expect(summary.pagedRatio).toBe(0);
   });
 });
 
@@ -330,8 +362,8 @@ describe("SloEnforcementReplayer", () => {
       action({ actionId: "sloa_d0000002", incidentId: "INC-2026-0001", decision: "recovered", occurredAt: iso(1_000) }),
     ];
     const store = {
-      listForIncident: async () => rows,
-      listRecent: async () => rows,
+      listForIncident: async () => read(rows),
+      listRecent: async () => read(rows),
     } as unknown as PostgresSloEnforcementActionStore;
     const replayer = new SloEnforcementReplayer(store);
     expect(await replayer.verifyIncident("INC-2026-0001")).toHaveLength(0);
@@ -344,12 +376,117 @@ describe("SloEnforcementReplayer", () => {
       action({ actionId: "sloa_d0000004", incidentId: "INC-2026-0002", decision: "recovered", occurredAt: iso(1_000), closeOut: "failed" }),
     ];
     const store = {
-      listForIncident: async () => rows,
-      listRecent: async () => rows,
+      listForIncident: async () => read(rows),
+      listRecent: async () => read(rows),
     } as unknown as PostgresSloEnforcementActionStore;
     const replayer = new SloEnforcementReplayer(store);
     const issues = await replayer.verifyRecent();
     expect(issues.map((i) => i.kind)).toEqual(["recovered_close_out_failed"]);
+  });
+});
+
+describe("SloEnforcementReplayer reports an unreadable row rather than losing the pass", () => {
+  const WITHHELD: UnreadableRow = {
+    identity: "sloa_g0000001",
+    detail: "closeOut: custom",
+  };
+
+  function store(
+    records: readonly SloEnforcementActionRecord[],
+    unreadable: readonly UnreadableRow[],
+  ): PostgresSloEnforcementActionStore {
+    return {
+      listForIncident: async () => read(records, unreadable),
+      listRecent: async () => read(records, unreadable),
+    } as unknown as PostgresSloEnforcementActionStore;
+  }
+
+  const HEALTHY = [
+    action({ actionId: "sloa_g0000002", incidentId: "INC-2026-0020", decision: "recovered", occurredAt: iso(1_000), closeOut: "failed" }),
+  ];
+
+  it("keeps every other row's findings, which a thrown read took with it", async () => {
+    const issues = await new SloEnforcementReplayer(store(HEALTHY, [WITHHELD])).verifyRecent();
+    expect(issues.map((i) => i.kind)).toEqual([
+      "unreadable_action_row",
+      "recovered_close_out_failed",
+    ]);
+  });
+
+  it("names the refused row by its business key", async () => {
+    const issues = await new SloEnforcementReplayer(store([], [WITHHELD])).verifyRecent();
+    expect(issues[0]?.actionId).toBe("sloa_g0000001");
+  });
+
+  it("admits it cannot name the row when the identifying column is what is wrong", async () => {
+    const issues = await new SloEnforcementReplayer(
+      store([], [{ identity: null, detail: "actionId: invalid_string" }]),
+    ).verifyRecent();
+    expect(issues[0]?.actionId).toBe("<unknown>");
+  });
+
+  it("discloses no value from the refused row", async () => {
+    // The whole finding, rendered. `detail` names the field and the issue code and nothing the row
+    // held: an operator scoping a manual fix by a value that may be the reason the row was refused
+    // is the hazard, and `incident_id` is withheld for that reason even though a reader would want
+    // it. Asserted over the *rendered* finding so a field added later cannot smuggle one in.
+    const issues = await new SloEnforcementReplayer(
+      store([], [{ identity: "sloa_g0000003", detail: "severity: invalid_enum_value" }]),
+    ).verifyRecent();
+    const rendered = JSON.stringify(issues);
+    expect(rendered).not.toContain("sev9");
+    expect(rendered).not.toContain("INC-2026-0099");
+    expect(issues[0]?.incidentId).toBe("<unknown>");
+  });
+
+  it("verifyIncident names the incident the caller asked about, not one read off the row", async () => {
+    const issues = await new SloEnforcementReplayer(store([], [WITHHELD])).verifyIncident(
+      "INC-2026-0020",
+    );
+    expect(issues[0]?.incidentId).toBe("INC-2026-0020");
+  });
+
+  it("stops verifyIncident claiming a complete history once a row is withheld", async () => {
+    // `listForIncident` is unbounded, so an absence normally means something — and a refused row is
+    // an absence this pass caused. The missing `breach_opened` may be precisely the row the contract
+    // rejected, so `ongoing_without_open` would be a finding manufactured out of the detector's own
+    // blind spot.
+    const midEpisode = [
+      action({ actionId: "sloa_g0000004", incidentId: "INC-2026-0021", decision: "breach_ongoing", occurredAt: iso(0) }),
+    ];
+    expect(
+      (await new SloEnforcementReplayer(store(midEpisode, [])).verifyIncident("INC-2026-0021")).map(
+        (i) => i.kind,
+      ),
+    ).toEqual(["ongoing_without_open"]);
+    expect(
+      (
+        await new SloEnforcementReplayer(store(midEpisode, [WITHHELD])).verifyIncident(
+          "INC-2026-0021",
+        )
+      ).map((i) => i.kind),
+    ).toEqual(["unreadable_action_row"]);
+  });
+
+  it("still reports a duplicate open beside a withheld row, because presence is conclusive", () => {
+    // The other half of the same rule (ADR-0322): a withheld row cannot explain away two rows that
+    // are both in hand, so gating this one too would have been the fail-open direction.
+    const issues = unreadableRowIssues([WITHHELD]);
+    expect(issues).toHaveLength(1);
+    expect(
+      verifyEnforcementHistory(
+        [
+          action({ actionId: "sloa_g0000005", incidentId: "INC-2026-0022", decision: "breach_opened", occurredAt: iso(0), paged: true, pageChannelCount: 1 }),
+          action({ actionId: "sloa_g0000006", incidentId: "INC-2026-0022", decision: "breach_opened", occurredAt: iso(1_000), paged: true, pageChannelCount: 1 }),
+        ],
+        { historyIsComplete: false },
+      ).map((i) => i.kind),
+    ).toEqual(["duplicate_open"]);
+  });
+
+  it("counts the withheld rows in summarizeRecent", async () => {
+    const summary = await new SloEnforcementReplayer(store(HEALTHY, [WITHHELD])).summarizeRecent();
+    expect(summary).toMatchObject({ total: 1, unreadable: 1 });
   });
 });
 
@@ -359,11 +496,11 @@ describe("SloEnforcementReplayer passes the scope down to the store", () => {
     return {
       listForIncident: async (_id: string, tenantId?: string | null) => {
         asked.push(tenantId);
-        return [];
+        return read([]);
       },
       listRecent: async (_limit?: number, tenantId?: string | null) => {
         asked.push(tenantId);
-        return [];
+        return read([]);
       },
     } as unknown as PostgresSloEnforcementActionStore;
   }

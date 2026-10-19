@@ -162,6 +162,9 @@ describe("auto_revoke_kind_mismatch is reachable and policy-aware", () => {
 describe("ACCESS_REVIEW_DRIFT_ISSUE_KINDS", () => {
   it("names every kind, as a value a test can assert against", () => {
     expect([...ACCESS_REVIEW_DRIFT_ISSUE_KINDS]).toEqual([
+      "unreadable_campaign_row",
+      "unreadable_item_row",
+      "unreadable_decision_row",
       "counter_overflow",
       "completed_without_timestamp",
       "completed_with_open_items",
@@ -187,7 +190,7 @@ function connFor(
   itemRows: unknown[],
   decisionRows: unknown[],
 ): FakeConn {
-  return new FakeConn((sql) => {
+  return new FakeConn((sql, params) => {
     if (sql.includes("FROM meta.access_review_items i")) {
       return { rows: itemRows as Record<string, unknown>[], rowCount: itemRows.length };
     }
@@ -195,7 +198,17 @@ function connFor(
       return { rows: decisionRows as Record<string, unknown>[], rowCount: decisionRows.length };
     }
     if (sql.includes("FROM meta.access_review_campaigns")) {
-      return { rows: campaignRows as Record<string, unknown>[], rowCount: campaignRows.length };
+      // `getByCampaignId` is a point lookup and `listByTenant` is a sweep, and this fake used to
+      // answer both with every campaign row — so a sweep over two campaigns handed the point lookup
+      // the *first* one whatever id it asked for. Harmless while every fixture was well-formed and
+      // not once one of them is deliberately unreadable, which is the shape of fake defect this
+      // repo keeps finding (`fakeCertificationPg` ignoring `tenant_id` entirely).
+      const rows = sql.includes("c.campaign_id = $1")
+        ? campaignRows.filter(
+            (row) => (row as Record<string, unknown>)["campaign_id"] === params?.[0],
+          )
+        : campaignRows;
+      return { rows: rows as Record<string, unknown>[], rowCount: rows.length };
     }
     return { rows: [], rowCount: 0 };
   });
@@ -299,6 +312,34 @@ const itemDbRow = {
   notes: null,
 };
 
+/** One stored decision row, in the spelling `SELECT_JOINED` aliases its columns to. */
+const decisionDbRow = {
+  decision_id: "ard_00000001",
+  item_natural_id: "ari_00000001",
+  campaign_natural_id: "arc_00000001",
+  tenant_id: UUIDS.tenant,
+  decided_by_user_id: UUIDS.system,
+  decided_at: "2026-02-01T00:00:00.000Z",
+  kind: "revoke",
+  reason: "no_response_auto_default",
+  comment: null,
+  time_bound_extend_until: null,
+  modified_grant_attributes: null,
+  attestation_kind: "click_through_acknowledgement",
+  attestation_phrase: null,
+  attestation_signature_sha256: null,
+  attestation_signing_key_fingerprint: null,
+  co_attesting_user_id: null,
+  co_attested_at: null,
+  ip_address: "127.0.0.1",
+  user_agent: "crossengin-access-reviews-runtime",
+  supersedes_decision_id: null,
+  related_exception_id: null,
+  applied_at: null,
+  application_failed_at: null,
+  application_failure_reason: null,
+};
+
 describe("AccessReviewReplayer", () => {
   it("returns no issues for a clean campaign graph", async () => {
     const replayer = stores([campaignDbRow], [itemDbRow], []);
@@ -343,11 +384,134 @@ describe("AccessReviewReplayer", () => {
 
   it("replayTenant walks every campaign the tenant owns", async () => {
     const second = { ...campaignDbRow, campaign_id: "arc_00000002" };
-    const replays = await replayerOn(
+    const tenantReplay = await replayerOn(
       connFor([campaignDbRow, second], [itemDbRow], []),
     ).replayTenant(UUIDS.tenant);
-    expect(replays).toHaveLength(2);
-    expect(replays.every((r) => r.tenantId === UUIDS.tenant)).toBe(true);
+    expect(tenantReplay.replays).toHaveLength(2);
+    expect(tenantReplay.replays.every((r) => r.tenantId === UUIDS.tenant)).toBe(true);
+    expect(tenantReplay.unreadableCampaigns).toEqual([]);
+  });
+
+  it("replayTenant reports an unreadable campaign and still sweeps the others", async () => {
+    // The whole increment, in one assertion. `rowToCampaign` throws on a NULL required timestamp,
+    // and that throw used to escape `listByTenant`'s `.map` — so one such row ended the entire
+    // tenant's sweep and the pass reported nothing at all, which reads as a clean bill of health.
+    const broken = {
+      ...campaignDbRow,
+      campaign_id: "arc_0000bad1",
+      scheduled_start_at: null,
+    };
+    const tenantReplay = await replayerOn(
+      connFor([broken, campaignDbRow], [itemDbRow], []),
+    ).replayTenant(UUIDS.tenant);
+    expect(tenantReplay.replays.map((r) => r.campaignId)).toEqual(["arc_00000001"]);
+    expect(tenantReplay.unreadableCampaigns).toEqual([
+      {
+        kind: "unreadable_campaign_row",
+        id: "arc_0000bad1",
+        detail: "row is missing required timestamp: scheduled_start_at",
+      },
+    ]);
+  });
+
+  it("names a refused campaign by its business key and discloses nothing else of it", async () => {
+    // `detail` names the column and nothing the row held. Asserted over the rendered finding, so a
+    // field added later cannot smuggle a value in: an operator scoping a manual fix by a value that
+    // may be the reason the row was refused is the hazard.
+    const broken = {
+      ...campaignDbRow,
+      campaign_id: "arc_0000bad2",
+      label: "Payroll admins — Q1 offboarding",
+      created_by: UUIDS.creator,
+      created_at: null,
+    };
+    const tenantReplay = await replayerOn(connFor([broken], [], [])).replayTenant(UUIDS.tenant);
+    const rendered = JSON.stringify(tenantReplay.unreadableCampaigns);
+    expect(rendered).toContain("arc_0000bad2");
+    expect(rendered).not.toContain("Payroll admins");
+    expect(rendered).not.toContain(UUIDS.creator);
+  });
+
+  it("admits it cannot name a campaign whose own id column is what is wrong", async () => {
+    const tenantReplay = await replayerOn(
+      connFor([{ ...campaignDbRow, campaign_id: null, created_at: null }], [], []),
+    ).replayTenant(UUIDS.tenant);
+    expect(tenantReplay.unreadableCampaigns[0]?.id).toBe("<unidentified>");
+  });
+
+  it("reports an unreadable item and keeps the campaign's other findings", async () => {
+    const broken = { ...itemDbRow, item_id: "ari_0000bad1", granted_at: null };
+    const flagged = { ...itemDbRow, item_id: "ari_00000002", status: "decided", decision_id: null };
+    const replay = await replayerOn(
+      connFor([campaignDbRow], [broken, flagged], []),
+    ).replayCampaign(UUIDS.tenant, "arc_00000001");
+    expect(replay.issues.map((i) => i.kind)).toEqual([
+      "unreadable_item_row",
+      "decided_without_decision_id",
+    ]);
+    expect(replay.items).toBe(1);
+  });
+
+  it("reports an unreadable decision through the same campaign replay", async () => {
+    const broken = { ...decisionDbRow, decision_id: "ard_0000bad1", decided_at: null };
+    const replay = await replayerOn(
+      connFor([campaignDbRow], [itemDbRow], [broken]),
+    ).replayCampaign(UUIDS.tenant, "arc_00000001");
+    expect(replay.issues.map((i) => i.kind)).toEqual(["unreadable_decision_row"]);
+    expect(replay.issues[0]?.id).toBe("ard_0000bad1");
+    expect(replay.decisions).toBe(0);
+  });
+
+  it("stops claiming a complete graph once any row is withheld", async () => {
+    // `complete: false` is what makes every cross-row finding an inference: a decision whose item
+    // was the unreadable row reads as having no item at all, so the question is not asked.
+    const clean = await replayerOn(connFor([campaignDbRow], [itemDbRow], [])).replayCampaign(
+      UUIDS.tenant,
+      "arc_00000001",
+    );
+    expect(clean.complete).toBe(true);
+    const withheld = await replayerOn(
+      connFor([campaignDbRow], [{ ...itemDbRow, granted_at: null }], []),
+    ).replayCampaign(UUIDS.tenant, "arc_00000001");
+    expect(withheld.complete).toBe(false);
+  });
+
+  it("an absent campaign is complete, because there was nothing it failed to read", async () => {
+    const replay = await replayerOn(connFor([], [], [])).replayCampaign(
+      UUIDS.tenant,
+      "arc_00000001",
+    );
+    expect(replay).toMatchObject({ found: false, complete: true });
+  });
+
+  it("the plain listByCampaign still refuses, because a scheduler counts from it", async () => {
+    // The other of the two legitimate answers. `PersistingAccessReviewRuntime` and
+    // `AccessReviewCampaignLifecycle` decide whether a campaign is finished by counting these rows,
+    // so a short list under-counts and completes a campaign with an item unaccounted for.
+    const conn = connFor([campaignDbRow], [{ ...itemDbRow, granted_at: null }], []);
+    const store = new PostgresAccessReviewItemStore(conn);
+    await expect(store.listByCampaign(UUIDS.tenant, "arc_00000001")).rejects.toThrow(
+      /could not be represented/,
+    );
+  });
+
+  it("the refusal names every unreadable row, where the mapper's throw named the first", async () => {
+    const conn = connFor(
+      [campaignDbRow],
+      [
+        { ...itemDbRow, item_id: "ari_0000bad1", granted_at: null },
+        { ...itemDbRow, item_id: "ari_0000bad2", created_at: null },
+      ],
+      [],
+    );
+    const store = new PostgresAccessReviewItemStore(conn);
+    const err = await store
+      .listByCampaign(UUIDS.tenant, "arc_00000001")
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain("ari_0000bad1");
+    expect((err as Error).message).toContain("ari_0000bad2");
   });
 
   it("summarize reads each table once, not twice", async () => {

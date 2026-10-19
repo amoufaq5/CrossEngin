@@ -5,6 +5,7 @@ import {
   type AutoRevokePolicy,
   type DecisionKind,
 } from "@crossengin/access-reviews";
+import { unreadableDetail, type UnreadableRow } from "@crossengin/kernel-pg";
 
 import type { PostgresAccessReviewCampaignStore } from "./campaign-store.js";
 import type { PostgresAccessReviewDecisionStore } from "./decision-store.js";
@@ -19,6 +20,23 @@ import type { PostgresAccessReviewItemStore } from "./item-store.js";
  * be checked against anything.
  */
 export const ACCESS_REVIEW_DRIFT_ISSUE_KINDS = [
+  /**
+   * A stored row this package's mappers cannot represent.
+   *
+   * Three kinds and not one, because they are reported by three different reads and the sweep
+   * carries on differently after each: an unreadable **campaign** is one campaign dropped from a
+   * tenant's sweep, where an unreadable **item** or **decision** leaves that campaign's own graph
+   * incomplete — so every cross-row finding over it (`item_campaign_mismatch`,
+   * `decision_item_mismatch`, `decision_campaign_mismatch`, `auto_revoke_kind_mismatch`) becomes an
+   * inference. One kind would have lost that, and `CampaignReplay.complete` is what reports it.
+   *
+   * These are **findings and not obstacles to finding** (ADR-0289). Before them, one row threw out
+   * of a `.map` and took every other row in the read with it: a campaign with a NULL
+   * `scheduled_start_at` ended the whole tenant's sweep, which reports as a clean bill of health.
+   */
+  "unreadable_campaign_row",
+  "unreadable_item_row",
+  "unreadable_decision_row",
   "counter_overflow",
   "completed_without_timestamp",
   "completed_with_open_items",
@@ -39,6 +57,34 @@ export interface AccessReviewDriftIssue {
   readonly detail: string;
 }
 
+/** What a finding puts where an id belongs when the identifying column is itself what is wrong. */
+const UNIDENTIFIED = "<unidentified>";
+
+/**
+ * Every check here is **also** a clause of `AccessReviewCampaignSchema`, and that is why
+ * `rowToCampaign` is deliberately left not parsing.
+ *
+ * ADR-0362 gave `rowToDecision` a `parse` where it had returned a bare literal typed as the
+ * contract, and `rowToCampaign`/`rowToItem` are the two that still do — the same
+ * `mapper_cannot_throw` shape, in the same file, which looks like the obvious thing to close next.
+ * Measured instead of assumed, by building the row each predicate below fires on and asking the
+ * schema whether it would have refused it first: **6 of this module's 10 kinds become unreachable**,
+ * which is all four of this function's plus `decided_without_decision_id` and
+ * `auto_revoked_without_reason`. This function would be entirely dead — exactly the fate
+ * `incident-response-runtime-pg`'s `terminal_without_timestamp` suffered once `rowToIncident`
+ * parsed, and that module deleted the kind for it.
+ *
+ * The trade is worse than a label. `counter_overflow` reads *"resolved 7 exceeds totalItems 5"*;
+ * what replaces it is `unreadable_campaign_row` with `detail: "totalItems: custom"`, because zod
+ * renders a `superRefine` issue as the opaque code `custom` — so the parse buys a strictly less
+ * useful report for six findings and reaches no cross-row one.
+ *
+ * The gap it leaves is real: a clause nobody here hand-checks — a `deadlineAt` before its
+ * `scheduledStartAt`, a `post_incident` campaign naming no incident, an item whose reviewer is its
+ * own principal — is caught on no path. Closing it honestly means a `contract_violation` kind
+ * **beside** these six rather than instead of them, which is a decision about whether one defect may
+ * produce two findings.
+ */
 export function verifyCampaignRowShape(
   campaign: AccessReviewCampaign,
 ): readonly AccessReviewDriftIssue[] {
@@ -192,6 +238,20 @@ export interface AccessReviewReplayerStores {
   readonly decisionStore: PostgresAccessReviewDecisionStore;
 }
 
+/**
+ * One tenant's sweep: a replay per campaign that could be read, and a finding per campaign that
+ * could not.
+ *
+ * `unreadableCampaigns` is its own field rather than a `CampaignReplay` with `found: false`, because
+ * a refused row names no campaign id to replay — `found: false` means *this id has no row*, which is
+ * a different fact and has a different remedy. A bare array return could carry neither.
+ */
+export interface TenantReplay {
+  readonly tenantId: string;
+  readonly replays: readonly CampaignReplay[];
+  readonly unreadableCampaigns: readonly AccessReviewDriftIssue[];
+}
+
 /** One campaign's graph and every finding over it, read once. */
 export interface CampaignReplay {
   readonly tenantId: string;
@@ -199,7 +259,38 @@ export interface CampaignReplay {
   readonly found: boolean;
   readonly items: number;
   readonly decisions: number;
+  /**
+   * Whether this replay saw the whole of the campaign's graph.
+   *
+   * `false` makes every **cross-row** finding an inference rather than an observation, and makes the
+   * absence of one say nothing: `verifyDecisionRowShape` compares a decision against the item
+   * `itemsById` holds, so a decision whose item was the unreadable row reads as having no item at
+   * all, and the question is simply not asked. `items` and `decisions` are counts of what could be
+   * read, which is a different quantity from what is on disk — so a clean replay with
+   * `complete: false` is "nothing wrong was found in what could be read", not "nothing is wrong".
+   * `IncidentReplayReport.windowComplete`'s rule for a different kind of incompleteness.
+   */
+  readonly complete: boolean;
   readonly issues: readonly AccessReviewDriftIssue[];
+}
+
+/**
+ * The unreadable rows of a read, as findings.
+ *
+ * The kind is supplied by the caller rather than derived, because only the caller knows which read
+ * produced them — and `UNIDENTIFIED` stands in where `identity` is `null`, which is exactly when the
+ * identifying column is itself what is wrong, so inventing a handle would be worse than admitting
+ * there is none (ADR-0331).
+ */
+function unreadableIssues(
+  kind: AccessReviewDriftIssueKind,
+  unreadable: readonly UnreadableRow[],
+): readonly AccessReviewDriftIssue[] {
+  return unreadable.map((row) => ({
+    kind,
+    id: row.identity ?? UNIDENTIFIED,
+    detail: row.detail,
+  }));
 }
 
 /**
@@ -224,18 +315,62 @@ export class AccessReviewReplayer {
    * reported summary came from two different reads of a table that can change between them.
    */
   async replayCampaign(tenantId: string, campaignId: string): Promise<CampaignReplay> {
-    const campaign = await this.stores.campaignStore.getByCampaignId(tenantId, campaignId);
-    if (campaign === null) {
-      return { tenantId, campaignId, found: false, items: 0, decisions: 0, issues: [] };
+    let campaign: AccessReviewCampaign | null;
+    try {
+      campaign = await this.stores.campaignStore.getByCampaignId(tenantId, campaignId);
+    } catch (err) {
+      // `getByCampaignId` is a point lookup, so it refuses rather than answers — right for
+      // `AccessReviewCampaignLifecycle`, which acts on the row it gets back. Here it is a finding.
+      // `found` stays **true**, because a refused row is a row: *this campaign's row cannot be
+      // represented* and *there is no such campaign* are different answers with different remedies,
+      // and ADR-0322's rule is that a sweep must not read the first as the second.
+      return {
+        tenantId,
+        campaignId,
+        found: true,
+        items: 0,
+        decisions: 0,
+        complete: false,
+        issues: [
+          {
+            kind: "unreadable_campaign_row",
+            // The id the *caller* asked about, never one read off a row whose columns are of
+            // unestablished trustworthiness.
+            id: campaignId,
+            detail: unreadableDetail(err),
+          },
+        ],
+      };
     }
-    const items = await this.stores.itemStore.listByCampaign(tenantId, campaignId);
-    const decisions = await this.stores.decisionStore.listByCampaign(tenantId, campaignId);
-    const itemsById = new Map(items.map((it) => [it.id, it] as const));
-    const issues: AccessReviewDriftIssue[] = [...verifyCampaignRowShape(campaign)];
-    for (const item of items) {
+    if (campaign === null) {
+      return {
+        tenantId,
+        campaignId,
+        found: false,
+        items: 0,
+        decisions: 0,
+        complete: true,
+        issues: [],
+      };
+    }
+    // The `*WithUnreadable` siblings, because this is the verifier: the plain `listByCampaign`
+    // refuses the whole read rather than hand a scheduler a short list, which is right for the
+    // scheduler and would end the sweep here. See `recordsOrRefuse`.
+    const items = await this.stores.itemStore.listByCampaignWithUnreadable(tenantId, campaignId);
+    const decisions = await this.stores.decisionStore.listByCampaignWithUnreadable(
+      tenantId,
+      campaignId,
+    );
+    const itemsById = new Map(items.records.map((it) => [it.id, it] as const));
+    const issues: AccessReviewDriftIssue[] = [
+      ...unreadableIssues("unreadable_item_row", items.unreadable),
+      ...unreadableIssues("unreadable_decision_row", decisions.unreadable),
+      ...verifyCampaignRowShape(campaign),
+    ];
+    for (const item of items.records) {
       issues.push(...verifyItemRowShape(item, campaign));
     }
-    for (const decision of decisions) {
+    for (const decision of decisions.records) {
       issues.push(
         ...verifyDecisionRowShape(decision, itemsById.get(decision.itemId), campaign),
       );
@@ -244,8 +379,9 @@ export class AccessReviewReplayer {
       tenantId,
       campaignId,
       found: true,
-      items: items.length,
-      decisions: decisions.length,
+      items: items.records.length,
+      decisions: decisions.records.length,
+      complete: items.unreadable.length === 0 && decisions.unreadable.length === 0,
       issues,
     };
   }
@@ -278,12 +414,19 @@ export class AccessReviewReplayer {
    * only way to replay a tenant was to list its campaigns through a store the caller also holds,
    * which is the step a sweep would otherwise have to reinvent.
    */
-  async replayTenant(tenantId: string): Promise<readonly CampaignReplay[]> {
+  async replayTenant(tenantId: string): Promise<TenantReplay> {
     const campaigns = await this.stores.campaignStore.listByTenant(tenantId);
     const replays: CampaignReplay[] = [];
-    for (const campaign of campaigns) {
+    for (const campaign of campaigns.records) {
       replays.push(await this.replayCampaign(tenantId, campaign.id));
     }
-    return replays;
+    return {
+      tenantId,
+      replays,
+      unreadableCampaigns: unreadableIssues(
+        "unreadable_campaign_row",
+        campaigns.unreadable,
+      ),
+    };
   }
 }

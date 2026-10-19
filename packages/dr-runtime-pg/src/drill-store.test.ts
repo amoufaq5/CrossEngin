@@ -15,7 +15,12 @@ import {
   SET_TENANT_CONTEXT_SQL,
   type DrDrillExecutionRecord,
 } from "./records.js";
-import { mockConnection, type Captured } from "./test-fakes.js";
+import {
+  collectUnreadable,
+  EXPECT_ALL_READABLE,
+  mockConnection,
+  type Captured,
+} from "./test-fakes.js";
 
 /**
  * The statement under test, found by what it *is* rather than by where it sits.
@@ -29,6 +34,13 @@ function written(capture: readonly Captured[]): Captured {
   if (found === undefined) throw new Error("no statement other than the session setting was issued");
   return found;
 }
+
+/**
+ * A value `DrillOutcomeSchema` refuses, distinctive enough that a test can assert it is *absent*
+ * from a finding's detail. Not a near-miss of a real outcome, so the assertion cannot pass by
+ * accidentally matching a legitimate word in the message.
+ */
+const FORBIDDEN_OUTCOME = "zzz-not-an-outcome";
 
 const NOW = "2026-06-02T12:00:00.000Z";
 const LATER = "2026-06-02T12:30:00.000Z";
@@ -241,7 +253,7 @@ describe("PostgresDrDrillStore.listRecent", () => {
     const store = new PostgresDrDrillStore(
       mockConnection(capture, { rows: [dbRow], rowCount: 1 }),
     );
-    const rows = await store.listRecent(null, 10);
+    const rows = await store.listRecent(null, EXPECT_ALL_READABLE, 10);
     expect(capture[0]?.sql).toContain("ORDER BY recorded_at DESC");
     expect(capture[0]?.params?.[0]).toBe(10);
     expect(rows[0]?.executionId).toBe("drl_00000001");
@@ -271,14 +283,60 @@ describe("PostgresDrDrillStore.listRecent", () => {
         rowCount: 1,
       }),
     );
-    const rows = await store.listRecent(null);
+    const rows = await store.listRecent(null, EXPECT_ALL_READABLE);
     expect(rows[0]?.executedAt).toBeNull();
     expect(rows[0]?.passing).toBeNull();
   });
 
   it("rejects a non-positive limit", async () => {
     const store = new PostgresDrDrillStore(mockConnection());
-    await expect(store.listRecent(null, -1)).rejects.toThrow();
+    await expect(store.listRecent(null, EXPECT_ALL_READABLE, -1)).rejects.toThrow();
+  });
+
+  /**
+   * The row that is the subject of ADR-0373: readable columns, a readable business key, and an
+   * embedded record the contract refuses — the state ADR-0289 names, a row edited into a shape the
+   * contract forbids and the CHECK permits. `record.outcome` is a `z.enum`, so the issue zod raises
+   * is `invalid_enum_value`, which is the one issue kind that carries the stored value on it.
+   */
+  function unreadableDbRow() {
+    return {
+      ...dbRow,
+      execution_id: "drl_00000002",
+      record: { ...drill(), outcome: FORBIDDEN_OUTCOME },
+    };
+  }
+
+  it("returns the readable rows and reports the one it could not represent", async () => {
+    const seen = collectUnreadable();
+    const store = new PostgresDrDrillStore(
+      mockConnection(undefined, {
+        rows: [dbRow, unreadableDbRow(), { ...dbRow, execution_id: "drl_00000003" }],
+        rowCount: 3,
+      }),
+    );
+    const rows = await store.listRecent(null, seen.report, 10);
+    // The defect: one refused row used to throw out of `.map`, so the other two were lost with it
+    // — and the throw reached `DrReadinessScheduler`, which records no snapshot at all.
+    expect(rows.map((r) => r.executionId)).toEqual(["drl_00000001", "drl_00000003"]);
+    expect(seen.rows).toHaveLength(1);
+    expect(seen.rows[0]?.identity).toBe("drl_00000002");
+  });
+
+  it("names a field path and an issue code, and no value off the row", async () => {
+    const seen = collectUnreadable();
+    const store = new PostgresDrDrillStore(
+      mockConnection(undefined, { rows: [unreadableDbRow()], rowCount: 1 }),
+    );
+    await store.listRecent(null, seen.report, 10);
+    const detail = seen.rows[0]?.detail ?? "";
+    expect(detail).toContain("record.outcome");
+    expect(detail).toContain("invalid_enum_value");
+    // The store must not route around `unreadableDetail`, which exists because a `ZodError`'s own
+    // `message` embeds `received` — so an `err.message` detail would carry a stored value into a
+    // log line, an HTTP body or an incident note (ADR-0310's rule). Asserted on the value rather
+    // than on the absence of a substring of the message, so it holds however zod words it.
+    expect(detail).not.toContain(FORBIDDEN_OUTCOME);
   });
 });
 
@@ -310,7 +368,11 @@ describe("the platform write arm", () => {
 
   it("claims nothing at all on a read, which the split left unchanged", async () => {
     const capture: Captured[] = [];
-    await new PostgresDrDrillStore(mockConnection(capture)).listRecent(null, 10);
+    await new PostgresDrDrillStore(mockConnection(capture)).listRecent(
+      null,
+      EXPECT_ALL_READABLE,
+      10,
+    );
     expect(capture.some((c) => c.sql.includes("set_config"))).toBe(false);
   });
 });

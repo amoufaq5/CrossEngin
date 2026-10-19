@@ -5,6 +5,9 @@ import { PostgresDrFailoverStore } from "./failover-store.js";
 import { PostgresDrReadinessStore } from "./readiness-store.js";
 import { DrReplayer } from "./replayer.js";
 import { assertTenantId, scopeFilter } from "./tenant-context.js";
+// These cases are about the scope predicate and nothing else: `capturingConn` answers no
+// rows, so this reporter can never fire — and it throws if it ever does.
+import { EXPECT_ALL_READABLE } from "./test-fakes.js";
 
 const TENANT = "11111111-1111-7111-8111-111111111111";
 
@@ -69,7 +72,8 @@ describe("every DR read carries a scope predicate", () => {
   }[] = [
     {
       name: "failover listRecent",
-      run: (c, s) => new PostgresDrFailoverStore(capturingConn(c)).listRecent(s, 10),
+      run: (c, s) =>
+        new PostgresDrFailoverStore(capturingConn(c)).listRecent(s, EXPECT_ALL_READABLE, 10),
     },
     {
       name: "failover countSince",
@@ -77,7 +81,8 @@ describe("every DR read carries a scope predicate", () => {
     },
     {
       name: "drill listRecent",
-      run: (c, s) => new PostgresDrDrillStore(capturingConn(c)).listRecent(s, 10),
+      run: (c, s) =>
+        new PostgresDrDrillStore(capturingConn(c)).listRecent(s, EXPECT_ALL_READABLE, 10),
     },
     {
       name: "drill countSince",
@@ -85,7 +90,8 @@ describe("every DR read carries a scope predicate", () => {
     },
     {
       name: "readiness listRecent",
-      run: (c, s) => new PostgresDrReadinessStore(capturingConn(c)).listRecent(s, 10),
+      run: (c, s) =>
+        new PostgresDrReadinessStore(capturingConn(c)).listRecent(s, EXPECT_ALL_READABLE, 10),
     },
     {
       name: "readiness latest",
@@ -114,7 +120,11 @@ describe("every DR read carries a scope predicate", () => {
 
   it("keeps the limit's placeholder after the scope's, so the two cannot collide", async () => {
     const captured: Captured[] = [];
-    await new PostgresDrFailoverStore(capturingConn(captured)).listRecent(TENANT, 7);
+    await new PostgresDrFailoverStore(capturingConn(captured)).listRecent(
+      TENANT,
+      EXPECT_ALL_READABLE,
+      7,
+    );
     const read = captured.at(-1);
     // $1 is the tenant, $2 the limit — the numbering is derived from the filter's own parameter
     // count rather than hardcoded, so the platform arm (which binds nothing) shifts the limit to $1.
@@ -123,7 +133,11 @@ describe("every DR read carries a scope predicate", () => {
     expect(read?.params).toEqual([TENANT, 7]);
 
     const platform: Captured[] = [];
-    await new PostgresDrFailoverStore(capturingConn(platform)).listRecent(null, 7);
+    await new PostgresDrFailoverStore(capturingConn(platform)).listRecent(
+      null,
+      EXPECT_ALL_READABLE,
+      7,
+    );
     expect(platform.at(-1)?.sql).toContain("LIMIT $1");
     expect(platform.at(-1)?.params).toEqual([7]);
   });

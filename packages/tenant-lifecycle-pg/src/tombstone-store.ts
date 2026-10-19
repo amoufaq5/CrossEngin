@@ -1,5 +1,11 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
 import {
+  readRowsWithUnreadable,
+  textIdentity,
+  type PgConnection,
+  type UnreadableRow,
+} from "@crossengin/kernel-pg";
+import {
+  DeletionAttestationSchema,
   TombstoneRecordSchema,
   tombstoneMatchesAttestations,
   verifyTombstoneHashes,
@@ -7,6 +13,8 @@ import {
   type TombstoneKind,
   type TombstoneRecord,
 } from "@crossengin/tenant-lifecycle";
+
+import { SET_TENANT_CONTEXT_SQL } from "./tenant-context.js";
 
 /**
  * Persisting a tombstone, and anchoring it in the same transaction that writes it.
@@ -44,6 +52,21 @@ const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0
 
 /** The chain's `deletion_event` kind, which is what a tombstone is. */
 export const TOMBSTONE_LOG_KIND = "deletion_event";
+
+/**
+ * One `scanAll` page: the tombstones it could represent, the rows it could not, and the two
+ * figures a keyset sweep needs that the records alone cannot give.
+ *
+ * `rowsRead` decides whether the table ended and `lastTombstoneId` is where the next page starts,
+ * both over every row the page held. A refused row is a row: it occupies a position in the
+ * ordering, and this sweep's coverage claim is a completed lap over that ordering.
+ */
+export interface TombstoneScanPage {
+  readonly records: readonly StoredTombstone[];
+  readonly unreadable: readonly UnreadableRow[];
+  readonly lastTombstoneId: string | null;
+  readonly rowsRead: number;
+}
 
 /**
  * The most rows one `scanAll` page may hold.
@@ -130,9 +153,36 @@ export class TombstoneWriteRefused extends Error {
   }
 }
 
+/**
+ * Whether the evidence beside a stored record could be read as evidence at all.
+ *
+ * **Two members, and `parsed` covers the empty array.** `'[]'` is the legitimate claim *written with
+ * no attestations* — it is both `write`'s default and the column's — so an empty list is read
+ * evidence that says nothing, which is a fact the existing readers already handle by answering
+ * "cannot say". `unreadable` is the new state: the column held something that is not a list of
+ * attestations, so there is nothing to compare and the row itself is the finding.
+ */
+export const STORED_ATTESTATIONS_READS = ["parsed", "unreadable"] as const;
+export type StoredAttestationsRead = (typeof STORED_ATTESTATIONS_READS)[number];
+
 export interface StoredTombstone {
   readonly record: TombstoneRecord;
   readonly attestations: readonly DeletionAttestation[];
+  /**
+   * How `attestations` came to be what it is, which `attestations.length` cannot say.
+   *
+   * `meta.tenant_tombstones.attestations` is `JSONB NOT NULL DEFAULT '[]'` with **no CHECK that it
+   * is an array**, so `'{}'`, `'null'` and `'"x"'` are all storable — and every reader of this
+   * record gates on `attestations.length === 0`, which answers `null` for "cannot say". So without
+   * this field a destroyed evidence column is indistinguishable from an honest proof written with
+   * no evidence, and *destroying* the evidence is strictly easier than editing it into a lie that
+   * `tombstoneMatchesAttestations` catches.
+   *
+   * **Required, not optional.** An optional field can be forgotten with the type still valid, and
+   * absent would read as the safe value — the same reason `Principal.abacAttributes` and
+   * `DeletionAttestation.outcome` are required.
+   */
+  readonly attestationsRead: StoredAttestationsRead;
   /** Null only for a row written before anchoring existed; this store always sets it. */
   readonly chainEntryHash: string | null;
   readonly chainSequenceNumber: number | null;
@@ -160,6 +210,42 @@ function textOrUndefined(value: unknown): string | undefined {
 
 function isoOf(value: unknown): string {
   return value instanceof Date ? value.toISOString() : String(value);
+}
+
+/** The pair an unreadable column yields, named once so the two fields cannot be set apart. */
+const UNREADABLE_ATTESTATIONS = {
+  attestations: [],
+  attestationsRead: "unreadable",
+} as const satisfies Pick<StoredTombstone, "attestations" | "attestationsRead">;
+
+/**
+ * The `attestations` column, read as attestations or reported as unreadable.
+ *
+ * **The elements are parsed, not asserted.** `Array.isArray` was the whole check, so an element
+ * naming a subsystem that does not exist came back typed as a `DeletionAttestation`; the schema is
+ * `.strict()` with a `superRefine`, so it is the only thing that can say an element is one.
+ *
+ * **It never throws**, which is the half that makes this a finding rather than an outage: the
+ * callers are sweeps whose purpose is to find defective rows, and a mapper that threw would turn a
+ * destroyed evidence column into a page nobody can read past — the opposite half of the same class.
+ * The row is readable enough to report, so it is reported.
+ *
+ * An unreadable column yields `[]` and **not** a half-parsed prefix: a consumer reads the array as
+ * the evidence, and a prefix of a list that failed to parse is not evidence of anything. The fact
+ * that it could not be read travels in `attestationsRead` and never in the array's length.
+ */
+function readAttestations(
+  value: unknown,
+): Pick<StoredTombstone, "attestations" | "attestationsRead"> {
+  const parsed = parseJson(value);
+  if (!Array.isArray(parsed)) return UNREADABLE_ATTESTATIONS;
+  const attestations: DeletionAttestation[] = [];
+  for (const element of parsed) {
+    const result = DeletionAttestationSchema.safeParse(element);
+    if (!result.success) return UNREADABLE_ATTESTATIONS;
+    attestations.push(result.data);
+  }
+  return { attestations, attestationsRead: "parsed" };
 }
 
 /**
@@ -212,11 +298,24 @@ export class PostgresTombstoneStore {
    * the ones the caller passed. Refuses, before any write, a record whose own hashes do not verify,
    * one whose scope no longer matches its attestations, and one whose executor approved it.
    *
-   * **No tenant context.** The connection is platform-scoped and the insert deliberately does not run
-   * under `withTenantContext`: a tombstone is written at the moment a tenant's data is gone, and
-   * setting that tenant's context to write the record of its deletion is a dependency on the thing
-   * being deleted. The row carries `tenant_id` and the table's isolation policy still confines any
-   * tenant-scoped *reader*.
+   * **The row's own tenant context, and it is not optional.** Both tables this write touches carry
+   * their isolation policy as the only arm with a `WITH CHECK` — `tenant_tombstones_isolation` and
+   * `forensic_chain_entries_tenant_isolation`, both `ALL`-scope, so the `USING` serves as the check
+   * — and both platform arms are `SELECT`-only. The chain's `INSERT` arm cannot serve this either:
+   * it requires `tenant_id IS NULL`, and a tombstone anchors under the tenant's own chain. So with
+   * no `app.current_tenant_id` the whole synchronous write raises `42501` as any non-owner role,
+   * which is ADR-0335's class — verified live, where the same write succeeds with the context set
+   * and succeeded all along as the table's owner, who bypasses RLS. `appendWithin`'s contract says
+   * so in so many words: *the RLS context is the caller's responsibility.*
+   *
+   * This previously argued that setting the deleted tenant's context to write the record of its
+   * deletion would be "a dependency on the thing being deleted", and that is **false in its
+   * mechanism**: the GUC is a transaction setting, not a row of the tenant's data, so dropping their
+   * schema cannot affect it — and the scope is read off `record.tenantId` rather than supplied, so
+   * nothing is looked up to establish it. What survives of the original reasoning is the rest of it:
+   * the row carries `tenant_id` and the isolation policy still confines a tenant-scoped *reader*,
+   * which is why `read` elevates through `app.platform_audit` rather than setting a context a
+   * deleted tenant no longer has a session for.
    */
   async write(
     record: TombstoneRecord,
@@ -290,6 +389,11 @@ export class PostgresTombstoneStore {
     attestations: readonly DeletionAttestation[],
   ): Promise<StoredTombstone> {
     return (async () => {
+      // Before the append, not merely before the insert: the chain's isolation policy is the only
+      // arm that can admit a tenant-scoped entry, and `appendWithin` reads that scope's tail first
+      // — unscoped, a non-owner sees none of it and would restart the tenant's chain at sequence 0.
+      // `record.tenantId` is `UUID_RE`-checked by `assertWritable`, which both entry points run.
+      await tx.query(SET_TENANT_CONTEXT_SQL, [record.tenantId]);
       // Appended first so the row can carry its coordinates without an UPDATE, which would give an
       // append-only table a rewrite path (ADR-0286).
       const entry = await this.anchorer.appendWithin(tx, {
@@ -364,6 +468,10 @@ export class PostgresTombstoneStore {
       return {
         record: stored,
         attestations,
+        // The caller's own typed array, never round-tripped through the column, so there is nothing
+        // here that could have failed to read. The field answers "is the evidence beside this
+        // record usable", and on this path it is.
+        attestationsRead: "parsed",
         chainEntryHash: entry.entryHash,
         chainSequenceNumber: entry.sequenceNumber,
       };
@@ -454,7 +562,7 @@ export class PostgresTombstoneStore {
   async scanAll(input: {
     readonly limit: number;
     readonly afterTombstoneId?: string | null;
-  }): Promise<readonly StoredTombstone[]> {
+  }): Promise<TombstoneScanPage> {
     const limit = Math.max(1, Math.min(TOMBSTONE_SCAN_MAX_LIMIT, Math.trunc(input.limit)));
     const after = input.afterTombstoneId ?? null;
     // The cursor predicate is omitted rather than written `($1 IS NULL OR tombstone_id > $1)`: that
@@ -469,7 +577,23 @@ export class PostgresTombstoneStore {
           ` ORDER BY tombstone_id LIMIT ${limitPlaceholder}`,
         params,
       );
-      return result.rows.map((row) => rowToStoredTombstone(row));
+      const read = readRowsWithUnreadable(result.rows, rowToStoredTombstone, (row) =>
+        textIdentity(row, "tombstone_id"),
+      );
+      // The cursor is read off the **last row of the page**, readable or not, and that is why this
+      // page carries it rather than letting the caller take it from the last record. A refused row
+      // at the end of a page leaves the records' last id *earlier* in the ordering, so a caller
+      // deriving the cursor from them asks again from before the refused row and reads it for
+      // ever; and treating a short record list as the end of the table steps over every row behind
+      // it instead. This sweep's whole guarantee is a completed lap (ADR-0327), and the two
+      // mistakes break the lap in opposite directions.
+      const last = result.rows[result.rows.length - 1];
+      return {
+        records: read.records,
+        unreadable: read.unreadable,
+        lastTombstoneId: last === undefined ? null : textIdentity(last, "tombstone_id"),
+        rowsRead: result.rows.length,
+      };
     });
   }
 
@@ -487,6 +611,12 @@ export class PostgresTombstoneStore {
     readonly proofOk: boolean;
     readonly anchored: boolean;
     readonly matchesAttestations: boolean | null;
+    /**
+     * Carried beside `matchesAttestations` because that field alone cannot distinguish its two
+     * reasons for being `null` — an honest proof written with no evidence, and a column somebody
+     * destroyed. `unreadable` here is a finding; `verifyStoredEvidence` is what names it as one.
+     */
+    readonly attestationsRead: StoredAttestationsRead | null;
   }> {
     const stored = await this.read(tombstoneId);
     if (stored === null) {
@@ -496,6 +626,8 @@ export class PostgresTombstoneStore {
         proofOk: false,
         anchored: false,
         matchesAttestations: null,
+        // Null rather than `unreadable`: there is no row, so nothing failed to be read.
+        attestationsRead: null,
       };
     }
     const hashes = verifyTombstoneHashes(stored.record);
@@ -505,11 +637,14 @@ export class PostgresTombstoneStore {
       proofOk: hashes.proofOk,
       anchored: stored.chainEntryHash !== null,
       // Null, not false, when there is no evidence: "cannot say" and "disagrees" are different
-      // answers and an auditor must not read one as the other.
+      // answers and an auditor must not read one as the other. An **unreadable** column reaches
+      // this gate as an empty list too, which is why the reading travels beside the answer — the
+      // mapper must not manufacture "cannot say" out of a tamper.
       matchesAttestations:
         stored.attestations.length === 0
           ? null
           : tombstoneMatchesAttestations(stored.record, stored.attestations),
+      attestationsRead: stored.attestationsRead,
     };
   }
 }
@@ -566,12 +701,13 @@ export function rowToStoredTombstone(row: Record<string, unknown>): StoredTombst
   if (storage !== null && storage !== undefined) candidate["recordStorage"] = storage;
 
   const record = TombstoneRecordSchema.parse(candidate);
-  const attestations = parseJson(row["attestations"]);
   const hash = row["chain_entry_hash"];
   const sequence = row["chain_sequence_number"];
   return {
     record,
-    attestations: Array.isArray(attestations) ? (attestations as DeletionAttestation[]) : [],
+    // Spread, so the array and the reading of it come from one call: a caller that could set the
+    // two apart could report `parsed` over an empty list it never read.
+    ...readAttestations(row["attestations"]),
     chainEntryHash: hash === null || hash === undefined ? null : String(hash).trim(),
     chainSequenceNumber:
       sequence === null || sequence === undefined ? null : Number(sequence),

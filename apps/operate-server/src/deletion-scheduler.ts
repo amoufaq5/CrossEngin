@@ -45,6 +45,19 @@ export interface TombstoneSweepPage {
     readonly relatedDeletionRequestId: string | null;
     readonly detail: string;
   }[];
+  /**
+   * Rows the store could not represent — read, not verified, and deliberately not expressible as a
+   * finding above: that shape carries a `verifyStoredEvidence` result and a reference state, and
+   * neither can be computed for a row nobody could read. `examined` counts only the verified ones,
+   * so a page is clean when **both** lists are empty and not when the findings alone are.
+   *
+   * Structural like the rest of this mirror, so the file still imports no store type — which also
+   * means it does not import `UnreadableRow`, and the two fields are spelled out instead.
+   */
+  readonly unreadable: readonly {
+    readonly identity: string | null;
+    readonly detail: string;
+  }[];
   readonly nextAfterTombstoneId: string | null;
 }
 

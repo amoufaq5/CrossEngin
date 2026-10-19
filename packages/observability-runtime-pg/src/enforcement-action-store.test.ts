@@ -205,21 +205,21 @@ describe("PostgresSloEnforcementActionStore.listForIncident", () => {
     const store = new PostgresSloEnforcementActionStore(
       mockConnection(undefined, { rows: [dbRow], rowCount: 1 }),
     );
-    const rows = await store.listForIncident("INC-2026-0001");
-    expect(rows).toHaveLength(1);
-    expect(rows[0]?.actionId).toBe("sloa_auto00000001");
-    expect(rows[0]?.occurredAt).toBe("2026-06-02T12:00:00.000Z");
-    expect(rows[0]?.paged).toBe(true);
-    expect(rows[0]?.closeOut).toBeNull();
+    const { records } = await store.listForIncident("INC-2026-0001");
+    expect(records).toHaveLength(1);
+    expect(records[0]?.actionId).toBe("sloa_auto00000001");
+    expect(records[0]?.occurredAt).toBe("2026-06-02T12:00:00.000Z");
+    expect(records[0]?.paged).toBe(true);
+    expect(records[0]?.closeOut).toBeNull();
   });
 
   it("reads a recovery's close-out back off the row", async () => {
     const store = new PostgresSloEnforcementActionStore(
       mockConnection(undefined, { rows: [recoveredDbRow], rowCount: 1 }),
     );
-    const rows = await store.listForIncident("INC-2026-0001");
-    expect(rows[0]?.decision).toBe("recovered");
-    expect(rows[0]?.closeOut).toBe("cancelled");
+    const { records } = await store.listForIncident("INC-2026-0001");
+    expect(records[0]?.decision).toBe("recovered");
+    expect(records[0]?.closeOut).toBe("cancelled");
   });
 
   it("maps a missing close_out column to null rather than guessing", async () => {
@@ -231,19 +231,53 @@ describe("PostgresSloEnforcementActionStore.listForIncident", () => {
         rowCount: 1,
       }),
     );
-    const rows = await store.listForIncident("INC-2026-0001");
-    expect(rows[0]?.closeOut).toBeNull();
+    const { records } = await store.listForIncident("INC-2026-0001");
+    expect(records[0]?.closeOut).toBeNull();
   });
 
-  it("refuses a row whose decision and close-out contradict each other", async () => {
+  it("reports a row whose decision and close-out contradict each other", async () => {
     // Only the schema can catch this: the column's CHECK constrains the value, not the pairing.
+    //
+    // It used to `reject`, and the inversion is the whole increment: the mapper's throw escaped the
+    // read, so one such row cost every *other* row in the scope its findings and the replayer's
+    // pass reported nothing at all. A parse failure is a finding (ADR-0289), and a sweep reports an
+    // unrepresentable row without taking the rest with it.
     const store = new PostgresSloEnforcementActionStore(
       mockConnection(undefined, {
-        rows: [{ ...recoveredDbRow, decision: "breach_ongoing" }],
+        rows: [dbRow, { ...recoveredDbRow, decision: "breach_ongoing" }],
+        rowCount: 2,
+      }),
+    );
+    const { records, unreadable } = await store.listForIncident("INC-2026-0001");
+    expect(records.map((r) => r.actionId)).toEqual(["sloa_auto00000001"]);
+    expect(unreadable).toHaveLength(1);
+    expect(unreadable[0]?.identity).toBe("sloa_auto00000002");
+  });
+
+  it("names the field and the issue code, and no value the refused row held", async () => {
+    // `detail` is the field path and the issue code on purpose: a `ZodError`'s own message quotes
+    // the stored value for an enum miss, and that value then travels into a log line, so an
+    // operator could scope a manual fix by the very value that made the row unreadable.
+    const store = new PostgresSloEnforcementActionStore(
+      mockConnection(undefined, {
+        rows: [{ ...dbRow, severity: "sev9" }],
         rowCount: 1,
       }),
     );
-    await expect(store.listForIncident("INC-2026-0001")).rejects.toThrow();
+    const { records, unreadable } = await store.listForIncident("INC-2026-0001");
+    expect(records).toHaveLength(0);
+    expect(unreadable[0]?.detail).toBe("severity: invalid_enum_value");
+    expect(unreadable[0]?.detail).not.toContain("sev9");
+  });
+
+  it("falls back to no identity rather than inventing one", async () => {
+    const { action_id: _dropped, ...withoutId } = dbRow;
+    const store = new PostgresSloEnforcementActionStore(
+      mockConnection(undefined, { rows: [withoutId], rowCount: 1 }),
+    );
+    const { unreadable } = await store.listForIncident("INC-2026-0001");
+    expect(unreadable).toHaveLength(1);
+    expect(unreadable[0]?.identity).toBeNull();
   });
 
   it("selects the close_out column", async () => {
@@ -271,6 +305,18 @@ describe("PostgresSloEnforcementActionStore.listRecent", () => {
   it("rejects a non-positive limit", async () => {
     const store = new PostgresSloEnforcementActionStore(mockConnection());
     await expect(store.listRecent(0)).rejects.toThrow();
+  });
+
+  it("reports an unreadable row and keeps the page", async () => {
+    const store = new PostgresSloEnforcementActionStore(
+      mockConnection(undefined, {
+        rows: [{ ...dbRow, severity: "sev9" }, recoveredDbRow],
+        rowCount: 2,
+      }),
+    );
+    const { records, unreadable } = await store.listRecent(25);
+    expect(records.map((r) => r.actionId)).toEqual(["sloa_auto00000002"]);
+    expect(unreadable.map((u) => u.identity)).toEqual(["sloa_auto00000001"]);
   });
 });
 

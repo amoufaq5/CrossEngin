@@ -12,6 +12,7 @@ import {
   PostgresChainLogReader,
   PostgresChainLogStore,
   advisoryKeyFor,
+  unreadableEntryVerdict,
 } from "./chain-log-store.js";
 import { PostgresChainCheckpointStore } from "./checkpoint-store.js";
 import { keyStoreChainSigner } from "./signer.js";
@@ -58,10 +59,14 @@ describe("PostgresChainLogStore.append", () => {
     expect(e1.priorEntryHash).toBe(e0.entryHash);
     expect(e2.priorEntryHash).toBe(e1.entryHash);
 
-    const chain = await store.loadChain(TENANT_A);
-    expect(chain).toHaveLength(3);
-    expect(verifyChainIntegrity(chain).valid).toBe(true);
-    for (const entry of chain) {
+    const { entries, unreadable } = await store.loadChain(TENANT_A);
+    // `unreadable` is asserted rather than discarded, because this test's claim is that the chain is
+    // VERIFIABLE and a read that refused a row would hand `verifyChainIntegrity` a shorter array it
+    // would pronounce valid. The empty list is the claim that there was nothing to refuse.
+    expect(unreadable).toEqual([]);
+    expect(entries).toHaveLength(3);
+    expect(verifyChainIntegrity(entries).valid).toBe(true);
+    for (const entry of entries) {
       expect(verifyChainEntrySignature(entry, publicKeyBase64)).toBe(true);
     }
   });
@@ -82,18 +87,19 @@ describe("PostgresChainLogStore.append", () => {
 
     expect(b0.sequenceNumber).toBe(0);
     expect(b0.priorEntryHash).toBe(GENESIS_HASH);
-    expect(await store.loadChain(TENANT_A)).toHaveLength(2);
-    expect(await store.loadChain(TENANT_B)).toHaveLength(1);
-    expect(verifyChainIntegrity(await store.loadChain(TENANT_B)).valid).toBe(true);
+    expect((await store.loadChain(TENANT_A)).entries).toHaveLength(2);
+    expect((await store.loadChain(TENANT_B)).entries).toHaveLength(1);
+    expect(verifyChainIntegrity((await store.loadChain(TENANT_B)).entries).valid).toBe(true);
   });
 
   it("supports a platform (null-tenant) chain", async () => {
     const { store } = await newStore();
     await append(store, null, 0);
     await append(store, null, 1);
-    const chain = await store.loadChain(null);
-    expect(chain).toHaveLength(2);
-    expect(verifyChainIntegrity(chain).valid).toBe(true);
+    const { entries, unreadable } = await store.loadChain(null);
+    expect(unreadable).toEqual([]);
+    expect(entries).toHaveLength(2);
+    expect(verifyChainIntegrity(entries).valid).toBe(true);
   });
 
   it("verify() returns the integrity verdict for a scope", async () => {
@@ -204,7 +210,8 @@ describe("PostgresChainLogStore checkpoint anchoring", () => {
     const { store } = await newStore();
     for (let i = 0; i < 4; i++) await append(store, TENANT_A, i);
     const from2 = await store.loadFrom(TENANT_A, 2);
-    expect(from2.map((e) => e.sequenceNumber)).toEqual([2, 3]);
+    expect(from2.entries.map((e) => e.sequenceNumber)).toEqual([2, 3]);
+    expect(from2.unreadable).toEqual([]);
   });
 
   it("createCheckpoint throws on an empty chain", async () => {
@@ -320,10 +327,11 @@ describe("PostgresChainLogReader (signer-free)", () => {
 
     // A reader over the SAME connection — constructed with NO signer.
     const reader = new PostgresChainLogReader(conn);
-    const chain = await reader.loadChain(TENANT_A);
-    expect(chain).toHaveLength(2);
-    expect(verifyChainIntegrity(chain).valid).toBe(true);
-    for (const entry of chain) {
+    const { entries, unreadable } = await reader.loadChain(TENANT_A);
+    expect(unreadable).toEqual([]);
+    expect(entries).toHaveLength(2);
+    expect(verifyChainIntegrity(entries).valid).toBe(true);
+    for (const entry of entries) {
       expect(verifyChainEntrySignature(entry, publicKeyBase64)).toBe(true);
     }
     expect(await reader.verify(TENANT_A)).toEqual({ valid: true, brokenAt: null });
@@ -352,6 +360,160 @@ describe("PostgresChainLogReader (signer-free)", () => {
 
   it("rejects a bad schema on the reader too", () => {
     expect(() => new PostgresChainLogReader(fakeChainPg(), { schema: "Bad-Schema" })).toThrow(/schema/);
+  });
+});
+
+/**
+ * Serves every full chain-entry read with `patch` applied to the row at that sequence — the offline
+ * stand-in for the `UPDATE meta.forensic_chain_entries SET actor_reference = ''` ADR-0373 ran live
+ * as the non-owner `serving` role, which was `UPDATE 1` because that column is `TEXT NOT NULL` with
+ * no CHECK while the contract declares `z.string().min(1)`.
+ *
+ * It patches the **read** and never the stored row, so one helper covers `loadChain` and `loadFrom`
+ * alike and the append path still writes a genuinely signed chain — which is what makes the tamper a
+ * tamper rather than a fixture. Keyed on `actor_reference` appearing in the SELECT list, which
+ * `READ_COLUMNS` has and the one-row tail read does not, so an append still reads an untouched tail
+ * and chains onto it.
+ */
+function patchedReadConn(
+  inner: PgConnection,
+  ...patches: readonly [number, Record<string, unknown>][]
+): PgConnection {
+  const bySequence = new Map(patches);
+  const wrap = (c: PgConnection): PgConnection => ({
+    query: (async (sql: string, params?: readonly unknown[]) => {
+      const res = await c.query(sql, params);
+      if (!sql.includes("SELECT") || !sql.includes("actor_reference")) return res;
+      const rows = res.rows.map((r) => {
+        const row = { ...r } as Record<string, unknown>;
+        const patch = bySequence.get(Number(row["sequence_number"]));
+        return patch === undefined ? row : { ...row, ...patch };
+      });
+      return { rows, rowCount: rows.length };
+    }) as PgConnection["query"],
+    transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) =>
+      inner.transaction((tx) => fn(wrap(tx)))) as PgConnection["transaction"],
+    withAdvisoryLock: c.withAdvisoryLock,
+    close: c.close,
+  });
+  return wrap(inner);
+}
+
+/** `entryCount` real signed entries written through a clean connection, read back through a patched one. */
+async function chainReadThrough(
+  entryCount: number,
+  ...patches: readonly [number, Record<string, unknown>][]
+): Promise<PostgresChainLogReader> {
+  const { signer } = await newSignerAndKey();
+  const conn = fakeChainPg();
+  const store = new PostgresChainLogStore(conn, signer);
+  for (let i = 0; i < entryCount; i++) await append(store, TENANT_A, i);
+  return new PostgresChainLogReader(patchedReadConn(conn, ...patches));
+}
+
+describe("a stored row the contract refuses", () => {
+  it("returns the readable entries and reports the refused row by its sequence", async () => {
+    const reader = await chainReadThrough(3, [1, { actor_reference: "" }]);
+
+    const read = await reader.loadChain(TENANT_A);
+
+    expect(read.entries.map((e) => e.sequenceNumber)).toEqual([0, 2]);
+    // Two fields and no more: the business key, which is what a `WHERE` clause needs, and the cause.
+    expect(read.unreadable).toEqual([{ identity: "1", detail: "actorReference: too_small" }]);
+  });
+
+  it("names the field path and the issue code, and no value from the row", async () => {
+    // `kind` rather than `actor_reference` because `invalid_enum_value` is the one zod issue that
+    // carries `received` — the stored value — which is exactly what `unreadableDetail` exists to
+    // drop. A tamper can put anything in that column, and `detail` travels into a verdict, a log
+    // line and a stored record.
+    const forged = "user:alice@example.test";
+    const reader = await chainReadThrough(2, [0, { kind: forged }]);
+
+    const read = await reader.loadChain(TENANT_A);
+
+    expect(read.unreadable).toHaveLength(1);
+    expect(read.unreadable[0]!.detail).toBe("kind: invalid_enum_value");
+    expect(read.unreadable[0]!.detail).not.toContain(forged);
+    expect(read.unreadable[0]!.detail).not.toContain("alice");
+    // The one thing it does name is the row to go and look at, which is the whole of what a remedy
+    // needs — and the sequence is a column the caller supplied the predicate for, not a value the
+    // refusal was about.
+    expect(read.unreadable[0]!.identity).toBe("0");
+    expect(read.entries.map((e) => e.sequenceNumber)).toEqual([1]);
+  });
+
+  it("reports identity null when the sequence itself does not read, and keeps the other rows", async () => {
+    const reader = await chainReadThrough(3, [1, { sequence_number: "not-a-sequence" }]);
+
+    const read = await reader.loadChain(TENANT_A);
+
+    expect(read.entries.map((e) => e.sequenceNumber)).toEqual([0, 2]);
+    expect(read.unreadable).toEqual([{ identity: null, detail: "sequenceNumber: invalid_type" }]);
+    // `null` says the row does not name a handle rather than inventing one, and the verdict declines
+    // to guess a position from it.
+    expect(unreadableEntryVerdict(read.unreadable)?.brokenAt).toBeNull();
+  });
+
+  it("loadFrom answers the same way, since the two entry points share one read", async () => {
+    const reader = await chainReadThrough(4, [2, { actor_reference: "" }]);
+
+    const read = await reader.loadFrom(TENANT_A, 1);
+
+    expect(read.entries.map((e) => e.sequenceNumber)).toEqual([1, 3]);
+    expect(read.unreadable).toEqual([{ identity: "2", detail: "actorReference: too_small" }]);
+  });
+
+  it("verify() refuses a chain whose refused row the fold would have called clean", async () => {
+    // The precedence as a measurement rather than an ordering preference. The refused row is the
+    // TAIL, so what read is [0, 1] — a contiguous genesis-anchored chain the fold pronounces valid.
+    // Without `unreadableEntryVerdict` in front of it, `verify()` calls a chain carrying a
+    // signature-breaking tamper healthy.
+    const reader = await chainReadThrough(3, [2, { actor_reference: "" }]);
+
+    const read = await reader.loadChain(TENANT_A);
+    expect(verifyChainIntegrity(read.entries)).toEqual({ valid: true, brokenAt: null });
+
+    const verdict = await reader.verify(TENANT_A);
+    expect(verdict.valid).toBe(false);
+    expect(verdict.brokenAt).toBe(2);
+    expect(verdict.reason).toContain("the contract refuses");
+  });
+
+  it("verify() names the row that is there, and never a sequence gap", async () => {
+    // A refused row in the MIDDLE is where the two answers diverge in kind rather than in value:
+    // `verifyChainIntegrity` walks the array it was handed, so the hole reads to it as a deleted
+    // entry — a true statement about the array and a false one about the table, which sends an
+    // operator looking for a row that is present and malformed. The two answers are asserted side
+    // by side because that is the whole content of the decision.
+    const reader = await chainReadThrough(3, [1, { actor_reference: "" }]);
+
+    const read = await reader.loadChain(TENANT_A);
+    expect(verifyChainIntegrity(read.entries).reason).toBe("sequence gap");
+
+    const verdict = await reader.verify(TENANT_A);
+    expect(verdict.valid).toBe(false);
+    expect(verdict.reason).not.toBe("sequence gap");
+    expect(verdict.reason).toBe("1 entry the contract refuses (first: actorReference: too_small)");
+  });
+
+  it("counts every refused row and points at the first", async () => {
+    // Two refusals of different causes, so `detail` is the FIRST row's cause and not a merge: the
+    // verdict is a handle onto one row to go and read, and a merged cause names none of them.
+    const reader = await chainReadThrough(
+      4,
+      [1, { actor_reference: "" }],
+      [3, { kind: "not-a-log-kind" }],
+    );
+
+    const verdict = await reader.verify(TENANT_A);
+
+    expect(verdict.brokenAt).toBe(1);
+    expect(verdict.reason).toBe("2 entries the contract refuses (first: actorReference: too_small)");
+  });
+
+  it("unreadableEntryVerdict answers null when every row read, so the fold decides", () => {
+    expect(unreadableEntryVerdict([])).toBeNull();
   });
 });
 
@@ -501,8 +663,8 @@ describe("scope predicates on reads", () => {
     expect(tenant0.priorEntryHash).toBe(GENESIS_HASH);
 
     const reader = new PostgresChainLogReader(conn);
-    expect(await reader.loadChain(null)).toHaveLength(1);
-    expect(await reader.loadChain(TENANT_A)).toHaveLength(1);
+    expect((await reader.loadChain(null)).entries).toHaveLength(1);
+    expect((await reader.loadChain(TENANT_A)).entries).toHaveLength(1);
     expect(await reader.tail(null)).toEqual({ sequenceNumber: 0, entryHash: platform0.entryHash });
     expect(await reader.tail(TENANT_A)).toEqual({ sequenceNumber: 0, entryHash: tenant0.entryHash });
     // Two independent single-entry chains, each valid — where one interleaved chain of

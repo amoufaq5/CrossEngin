@@ -3,12 +3,13 @@ import type { ChainAppendInput, ChainedLogEntry } from "@crossengin/forensics-pg
 import type { PgConnection } from "@crossengin/kernel-pg";
 import type { TenantId } from "@crossengin/types";
 import { describe, expect, it } from "vitest";
+import { ZodError } from "zod";
 
 import {
   PostgresAuditEmitter,
   auditActor,
   auditEntry,
-  tryAuditEntryFromRow,
+  auditEntryFromRow,
 } from "./audit-log-store.js";
 
 const TENANT_A = "00000000-0000-4000-8000-000000000001";
@@ -21,6 +22,28 @@ const ENTRY_3 = "11111111-1111-4111-8111-000000000003";
 const OPERATION = "digest.read_other_scope";
 const ENTITY = "NotificationDigest";
 const OCCURRED_AT = "2026-08-01T09:15:30.000Z";
+
+/**
+ * The two stored shapes whose zod issue carries row content in its own message, which is what
+ * makes them the usable probes for the disclosure property.
+ */
+const BAD_ACTOR_KIND = "impersonated-root";
+const BAD_KIND_ACTOR = {
+  kind: BAD_ACTOR_KIND,
+  userId: USER_A,
+  sessionId: null,
+  ip: null,
+  userAgent: null,
+};
+const EXTRA_ACTOR_KEY = "escalated_via";
+const ACTOR_WITH_EXTRA_KEY = {
+  kind: "user",
+  userId: USER_A,
+  sessionId: null,
+  ip: null,
+  userAgent: null,
+  [EXTRA_ACTOR_KEY]: "sudo",
+};
 
 interface Captured {
   readonly sql: string;
@@ -414,6 +437,78 @@ describe("audit-log-store — validation happens before any SQL", () => {
   });
 });
 
+/**
+ * What the write path refuses that only the read path's own parse catches.
+ *
+ * `verifyAuditAnchors` treats a refused row as disproven integrity rather than unproven, and that
+ * reading is only honest if nothing this emitter writes could be refused on the way back — so the
+ * rows `emit` admits have to be a subset of the rows `auditEntryFromRow` admits. The four
+ * hand-written clauses are not that subset on their own.
+ */
+describe("audit-log-store — the writer's refusals cover the reader's", () => {
+  it("refuses an actor carrying an extra key, which no hand-written clause sees", async () => {
+    const { conn, captured } = fakeAuditDb();
+    const entry = entryOf({
+      actor: ACTOR_WITH_EXTRA_KEY as unknown as AuditLogEntry["actor"],
+    });
+    await expect(new PostgresAuditEmitter(conn).emit(entry)).rejects.toThrow(ZodError);
+    expect(captured).toHaveLength(0);
+  });
+
+  it("refuses an occurredAt with no offset", async () => {
+    const { conn, captured } = fakeAuditDb();
+    await expect(
+      new PostgresAuditEmitter(conn).emit(entryOf({ occurredAt: "2026-08-01T09:15:30" })),
+    ).rejects.toThrow(ZodError);
+    expect(captured).toHaveLength(0);
+  });
+
+  it("refuses an actor whose kind is not a principal kind", async () => {
+    const { conn, captured } = fakeAuditDb();
+    const entry = entryOf({ actor: BAD_KIND_ACTOR as unknown as AuditLogEntry["actor"] });
+    await expect(new PostgresAuditEmitter(conn).emit(entry)).rejects.toThrow(ZodError);
+    expect(captured).toHaveLength(0);
+  });
+
+  it("refuses a malformed eSignature", async () => {
+    const { conn, captured } = fakeAuditDb();
+    const entry = entryOf({
+      eSignature: {
+        method: "e_signature_digital",
+        challengeId: "chal_1",
+        signedAt: "yesterday",
+      } as AuditLogEntry["eSignature"],
+    });
+    await expect(new PostgresAuditEmitter(conn).emit(entry)).rejects.toThrow(ZodError);
+    expect(captured).toHaveLength(0);
+  });
+
+  it("refuses an extra top-level key", async () => {
+    const { conn, captured } = fakeAuditDb();
+    const entry = { ...entryOf(), escalatedVia: "sudo" } as unknown as AuditLogEntry;
+    await expect(new PostgresAuditEmitter(conn).emit(entry)).rejects.toThrow(ZodError);
+    expect(captured).toHaveLength(0);
+  });
+
+  it("neither side nests the other: the reader admits an operation the writer refuses", async () => {
+    // So the trims stay. `z.string().min(1)` admits a single space; the hand-written clause does
+    // not, and it is the hand-written clause that keeps a whitespace operation out of the table.
+    const { conn, captured } = fakeAuditDb();
+    await expect(new PostgresAuditEmitter(conn).emit(entryOf({ operation: " " }))).rejects.toThrow(
+      /operation must be a non-empty string/,
+    );
+    expect(captured).toHaveLength(0);
+    expect(auditEntryFromRow(storedRow({ operation: " " })).operation).toBe(" ");
+  });
+
+  it("writes an entry both sides admit, and reads it back unchanged", async () => {
+    const { conn, rows } = fakeAuditDb();
+    const entry = entryOf({ reason: "auditor escalation" });
+    await new PostgresAuditEmitter(conn).emit(entry);
+    expect(auditEntryFromRow(rows[0] as Row)).toEqual(entry);
+  });
+});
+
 describe("audit-log-store — listForTenant", () => {
   it("returns newest first, breaking ties on id descending", async () => {
     const { conn, rows } = fakeAuditDb();
@@ -512,7 +607,11 @@ describe("audit-log-store — listForTenant", () => {
     expect(listed.map((e) => e.id)).toEqual([ENTRY_1]);
   });
 
-  it("drops a row it cannot map instead of failing the whole read", async () => {
+  it("answers only the entries it can represent, and reports no refusal to its caller", async () => {
+    // This asserted "drops a row it cannot map instead of failing the whole read" and read the
+    // dropping as the virtue. Dropping is still what `listForTenant` does — its consumer is a
+    // reader, not a verifier — but it is half the answer, and the asymmetry with
+    // `listAnchoredForScope` is pinned below rather than left as a property of one method's title.
     const { conn, rows } = fakeAuditDb();
     rows.push(
       storedRow({ id: ENTRY_1, occurred_at: "2026-08-01T09:00:00.000Z" }),
@@ -529,6 +628,7 @@ describe("audit-log-store — listForTenant", () => {
     );
     const listed = await new PostgresAuditEmitter(conn).listForTenant(TENANT_A);
     expect(listed.map((e) => e.id)).toEqual([ENTRY_1]);
+    expect(Array.isArray(listed)).toBe(true);
   });
 
   it("maps a jsonb column whether the driver returns an object or raw text", async () => {
@@ -569,6 +669,154 @@ describe("audit-log-store — listForTenant", () => {
     const store = new PostgresAuditEmitter(conn);
     expect((await store.listForTenant(TENANT_A)).map((e) => e.id)).toEqual([ENTRY_1]);
     expect((await store.listForTenant(TENANT_B)).map((e) => e.id)).toEqual([ENTRY_2]);
+  });
+});
+
+/**
+ * What `listAnchoredForScope` does with a row `AuditLogEntrySchema` refuses.
+ *
+ * Its consumer is `verifyAuditAnchors`, the only detector there is for an edited audit row — so the
+ * refusal is part of the answer, not a note on the side. The three rows are ordered so the refused
+ * one is in the middle of the returned page, which is where a drop is least visible.
+ */
+describe("audit-log-store — a row the contract refuses", () => {
+  /** Newest first, so the returned order is ENTRY_3, (refused), ENTRY_1. */
+  function threeRowsWithMiddleRefused(middle: Row): Row[] {
+    return [
+      storedRow({ id: ENTRY_3, occurred_at: "2026-08-01T11:00:00.000Z" }),
+      storedRow({ id: ENTRY_2, occurred_at: "2026-08-01T10:00:00.000Z", ...middle }),
+      storedRow({ id: ENTRY_1, occurred_at: "2026-08-01T09:00:00.000Z" }),
+    ];
+  }
+
+  it("costs only itself: the other rows come back in order and the refusal is reported", async () => {
+    const { conn, rows } = fakeAuditDb();
+    rows.push(...threeRowsWithMiddleRefused({ operation: "" }));
+    const read = await new PostgresAuditEmitter(conn).listAnchoredForScope(TENANT_A);
+    expect(read.rows.map((a) => a.entry.id)).toEqual([ENTRY_3, ENTRY_1]);
+    expect(read.unreadable).toHaveLength(1);
+    expect(read.unreadable[0]?.identity).toBe(ENTRY_2);
+  });
+
+  it("reports a malformed actor the same way — the schema is .strict()", async () => {
+    const { conn, rows } = fakeAuditDb();
+    rows.push(...threeRowsWithMiddleRefused({ actor: { ...ACTOR_WITH_EXTRA_KEY } }));
+    const read = await new PostgresAuditEmitter(conn).listAnchoredForScope(TENANT_A);
+    expect(read.rows.map((a) => a.entry.id)).toEqual([ENTRY_3, ENTRY_1]);
+    expect(read.unreadable[0]?.identity).toBe(ENTRY_2);
+  });
+
+  it("reports one refusal per refused row, not one per page", async () => {
+    const { conn, rows } = fakeAuditDb();
+    rows.push(
+      storedRow({ id: ENTRY_3, occurred_at: "2026-08-01T11:00:00.000Z", operation: "" }),
+      storedRow({ id: ENTRY_2, occurred_at: "2026-08-01T10:00:00.000Z", actor: null }),
+      storedRow({ id: ENTRY_1, occurred_at: "2026-08-01T09:00:00.000Z" }),
+    );
+    const read = await new PostgresAuditEmitter(conn).listAnchoredForScope(TENANT_A);
+    expect(read.rows.map((a) => a.entry.id)).toEqual([ENTRY_1]);
+    expect(read.unreadable.map((u) => u.identity)).toEqual([ENTRY_3, ENTRY_2]);
+  });
+
+  it("identifies the refusal by the refused row's own id, read off the raw row", async () => {
+    const { conn, rows } = fakeAuditDb();
+    // The id is well-formed and every *other* column is sound, so nothing but `identity` could
+    // name this row — and the id is read straight off the row rather than off the mapped entry,
+    // which does not exist.
+    rows.push(...threeRowsWithMiddleRefused({ entity: "" }));
+    const read = await new PostgresAuditEmitter(conn).listAnchoredForScope(TENANT_A);
+    expect(read.unreadable).toEqual([{ identity: ENTRY_2, detail: "entity: too_small" }]);
+  });
+
+  it("answers a null identity when the id column is what does not read", async () => {
+    const { conn, rows } = fakeAuditDb();
+    rows.push(...threeRowsWithMiddleRefused({ id: null }));
+    const read = await new PostgresAuditEmitter(conn).listAnchoredForScope(TENANT_A);
+    expect(read.rows.map((a) => a.entry.id)).toEqual([ENTRY_3, ENTRY_1]);
+    expect(read.unreadable).toHaveLength(1);
+    expect(read.unreadable[0]?.identity).toBeNull();
+  });
+
+  it("details the field path and the issue code", async () => {
+    const { conn, rows } = fakeAuditDb();
+    rows.push(...threeRowsWithMiddleRefused({ actor: { ...BAD_KIND_ACTOR } }));
+    const read = await new PostgresAuditEmitter(conn).listAnchoredForScope(TENANT_A);
+    expect(read.unreadable[0]?.detail).toBe("actor.kind: invalid_enum_value");
+  });
+
+  it("details no value from the row, though the raw error carries one", async () => {
+    // Both ends of the disclosure property: zod's own `invalid_enum_value` message quotes the
+    // stored value, so the formatter has it in hand and drops it deliberately.
+    let raised: unknown = null;
+    try {
+      auditEntryFromRow(storedRow({ actor: { ...BAD_KIND_ACTOR } }));
+    } catch (err) {
+      raised = err;
+    }
+    expect(raised).toBeInstanceOf(ZodError);
+    expect((raised as ZodError).message).toContain(BAD_ACTOR_KIND);
+
+    const { conn, rows } = fakeAuditDb();
+    rows.push(...threeRowsWithMiddleRefused({ actor: { ...BAD_KIND_ACTOR } }));
+    const read = await new PostgresAuditEmitter(conn).listAnchoredForScope(TENANT_A);
+    const detail = read.unreadable[0]?.detail ?? "";
+    expect(detail).not.toContain(BAD_ACTOR_KIND);
+    expect(detail).toContain("actor.kind");
+  });
+
+  it("details no key name either, where zod's own message quotes the extra key", async () => {
+    // The other issue code whose message carries row content: `unrecognized_keys` names the key,
+    // and a JSONB key is as much a stored value as what it holds.
+    const extra = { ...ACTOR_WITH_EXTRA_KEY };
+    let raised: unknown = null;
+    try {
+      auditEntryFromRow(storedRow({ actor: extra }));
+    } catch (err) {
+      raised = err;
+    }
+    expect(raised).toBeInstanceOf(ZodError);
+    expect((raised as ZodError).message).toContain(EXTRA_ACTOR_KEY);
+
+    const { conn, rows } = fakeAuditDb();
+    rows.push(...threeRowsWithMiddleRefused({ actor: extra }));
+    const read = await new PostgresAuditEmitter(conn).listAnchoredForScope(TENANT_A);
+    expect(read.unreadable[0]?.detail).toBe("actor: unrecognized_keys");
+  });
+
+  it("reports nothing when every row reads", async () => {
+    const { conn, rows } = fakeAuditDb();
+    rows.push(...threeRowsWithMiddleRefused({}));
+    const read = await new PostgresAuditEmitter(conn).listAnchoredForScope(TENANT_A);
+    expect(read.rows).toHaveLength(3);
+    expect(read.unreadable).toEqual([]);
+  });
+
+  it("listForTenant answers a bare array and withholds the refusal its sibling reports", async () => {
+    // The asymmetry is deliberate and this is the only place it is written down: one read, two
+    // consumers. A reader gets the entries it can be shown; a verifier gets the finding too.
+    const { conn, rows } = fakeAuditDb();
+    rows.push(...threeRowsWithMiddleRefused({ operation: "" }));
+    const store = new PostgresAuditEmitter(conn);
+
+    const listed = await store.listForTenant(TENANT_A);
+    expect(Array.isArray(listed)).toBe(true);
+    expect(listed.map((e) => e.id)).toEqual([ENTRY_3, ENTRY_1]);
+    expect(listed).toHaveLength(rows.length - 1);
+
+    const read = await store.listAnchoredForScope(TENANT_A);
+    expect(read.rows.map((a) => a.entry.id)).toEqual(listed.map((e) => e.id));
+    expect(read.unreadable).toHaveLength(1);
+  });
+
+  it("reports a refused platform row too, so a platform chain is verifiable", async () => {
+    const { conn, rows } = fakeAuditDb();
+    rows.push(
+      storedRow({ id: ENTRY_1, tenant_id: null }),
+      storedRow({ id: ENTRY_2, tenant_id: null, operation: "" }),
+    );
+    const read = await new PostgresAuditEmitter(conn).listAnchoredForScope(null);
+    expect(read.rows.map((a) => a.entry.id)).toEqual([ENTRY_1]);
+    expect(read.unreadable[0]?.identity).toBe(ENTRY_2);
   });
 });
 
@@ -738,7 +986,7 @@ describe("audit-log-store — pure builders", () => {
     await new PostgresAuditEmitter(conn).emit(entry);
     const row = rows[0];
     expect(row).toBeDefined();
-    expect(tryAuditEntryFromRow(row as Record<string, unknown>)).toEqual(entry);
+    expect(auditEntryFromRow(row as Record<string, unknown>)).toEqual(entry);
   });
 });
 
@@ -860,7 +1108,7 @@ describe("audit-log-store — forensic chain anchoring", () => {
     rows[0]!["chain_sequence_number"] = 9;
     rows[0]!["chain_entry_hash"] = "hash-9";
     const anchored = await store.listAnchoredForTenant(TENANT_A);
-    expect(anchored[0]?.anchor).toEqual({ sequenceNumber: 9, entryHash: "hash-9" });
+    expect(anchored.rows[0]?.anchor).toEqual({ sequenceNumber: 9, entryHash: "hash-9" });
   });
 
   it("reports a row with no anchor columns as unanchored", async () => {
@@ -868,7 +1116,7 @@ describe("audit-log-store — forensic chain anchoring", () => {
     const store = new PostgresAuditEmitter(conn);
     await store.emit(entryOf());
     const anchored = await store.listAnchoredForTenant(TENANT_A);
-    expect(anchored[0]?.anchor).toBeNull();
+    expect(anchored.rows[0]?.anchor).toBeNull();
   });
 
   it("treats half an anchor as no anchor", async () => {
@@ -877,7 +1125,7 @@ describe("audit-log-store — forensic chain anchoring", () => {
     await store.emit(entryOf());
     rows[0]!["chain_sequence_number"] = 3;
     rows[0]!["chain_entry_hash"] = null;
-    expect((await store.listAnchoredForTenant(TENANT_A))[0]?.anchor).toBeNull();
+    expect((await store.listAnchoredForTenant(TENANT_A)).rows[0]?.anchor).toBeNull();
   });
 
   it("listForTenant still returns plain entries", async () => {
@@ -997,7 +1245,7 @@ describe("audit-log-store — platform scope", () => {
     await store.emit(entryOf({ id: ENTRY_2 }));
     expect(rows).toHaveLength(2);
     const tenantView = await store.listAnchoredForTenant(TENANT_A);
-    expect(tenantView.map((a) => a.entry.id)).toEqual([ENTRY_2]);
+    expect(tenantView.rows.map((a) => a.entry.id)).toEqual([ENTRY_2]);
   });
 
   it("reads back under the platform scope with an IS NULL predicate and no bound tenant", async () => {
@@ -1005,7 +1253,7 @@ describe("audit-log-store — platform scope", () => {
     const store = new PostgresAuditEmitter(conn);
     await store.emit(platformEntry());
     const read = await store.listAnchoredForScope(null);
-    expect(read.map((a) => a.entry.id)).toEqual([ENTRY_1]);
+    expect(read.rows.map((a) => a.entry.id)).toEqual([ENTRY_1]);
     const select = captured.find((c) => c.sql.startsWith("SELECT id,"));
     expect(select?.sql).toContain("tenant_id IS NULL");
     expect(select?.sql).not.toContain("tenant_id = $1");
@@ -1021,7 +1269,7 @@ describe("audit-log-store — platform scope", () => {
       operation: "platform.page_undelivered",
       entity: "incident",
     });
-    expect(read).toHaveLength(1);
+    expect(read.rows).toHaveLength(1);
     const select = captured.find((c) => c.sql.startsWith("SELECT id,"));
     expect(select?.sql).toContain("operation = $1");
     expect(select?.sql).toContain("entity = $2");
@@ -1031,7 +1279,10 @@ describe("audit-log-store — platform scope", () => {
     const { conn } = fakeAuditDb();
     const store = new PostgresAuditEmitter(conn);
     await store.emit(platformEntry());
-    expect(await store.listAnchoredForScope(null, { operation: "something.else" })).toEqual([]);
+    const read = await store.listAnchoredForScope(null, { operation: "something.else" });
+    expect(read.rows).toEqual([]);
+    // The filter excluded the row; nothing about it was unrepresentable.
+    expect(read.unreadable).toEqual([]);
   });
 
   it("counts platform rows under the platform scope", async () => {
@@ -1055,13 +1306,13 @@ describe("audit-log-store — platform scope", () => {
   });
 
   it("reads a stored platform row back as a null tenantId", () => {
-    expect(tryAuditEntryFromRow(storedRow({ tenant_id: null }))?.tenantId).toBeNull();
+    expect(auditEntryFromRow(storedRow({ tenant_id: null })).tenantId).toBeNull();
   });
 
   it("does not read a stored null tenant as the string 'null'", () => {
     // `String(null)` is `"null"`, which the schema rejects as a malformed UUID — so without the
-    // null guard a platform row would be dropped by the re-parse-on-read path as unparseable.
-    expect(tryAuditEntryFromRow(storedRow({ tenant_id: null }))).not.toBeNull();
+    // null guard every platform row would be refused by the re-parse-on-read path.
+    expect(() => auditEntryFromRow(storedRow({ tenant_id: null }))).not.toThrow();
   });
 
   it("still rejects a non-UUID, non-null tenantId before any SQL", async () => {

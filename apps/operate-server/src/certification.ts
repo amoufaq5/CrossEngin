@@ -23,11 +23,12 @@ import {
 } from "@crossengin/kernel-pg";
 import { PostgresDrReadinessStore } from "@crossengin/dr-runtime-pg";
 import { withTenantContext } from "@crossengin/access-reviews-runtime-pg";
+import { verifyChainIntegrity } from "@crossengin/forensics";
 import {
-  ChainedLogEntrySchema,
-  verifyChainIntegrity,
-  type ChainedLogEntry,
-} from "@crossengin/forensics";
+  PostgresChainLogReader,
+  unreadableEntryVerdict,
+  type ChainRead,
+} from "@crossengin/forensics-pg";
 
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
 
@@ -300,13 +301,18 @@ export class PostgresAccessReviewEvidenceReader
 }
 
 export interface ForensicChainReader {
-  loadChain(): Promise<readonly ChainedLogEntry[]>;
+  loadChain(): Promise<ChainRead>;
 }
 
 /**
  * Verifies a persisted tamper-evident hash-chain. An **empty** chain yields no evidence (the audit
  * control stays `not_assessed` — a valid-by-vacuity empty log must not read as a satisfied control);
  * a non-empty chain is folded from genesis by `verifyChainIntegrity`.
+ *
+ * **"Every row refused" is not an empty chain**, which is why the vacuity guard asks both halves.
+ * Reading it as empty would make the control `not_assessed` for a chain whose every entry the
+ * contract rejects — ADR-0372's "an absence of evidence is not evidence" in the place ADR-0373 is
+ * about, and the reassuring direction twice over.
  */
 export function forensicChainSource(
   reader: ForensicChainReader,
@@ -314,59 +320,45 @@ export function forensicChainSource(
 ): EvidenceSource {
   return {
     async collect(_framework, at) {
-      const entries = await reader.loadChain();
-      if (entries.length === 0) return [];
-      return [evidenceFromForensicChain(controlId, verifyChainIntegrity(entries), at)];
+      const read = await reader.loadChain();
+      if (read.entries.length === 0 && read.unreadable.length === 0) return [];
+      return [
+        evidenceFromForensicChain(
+          controlId,
+          unreadableEntryVerdict(read.unreadable) ?? verifyChainIntegrity(read.entries),
+          at,
+        ),
+      ];
     },
   };
 }
 
 /**
- * Loads the ordered `forensic_chain_entries` for a scope so the chain can be verified from genesis.
- * A tenant chain is read within the tenant's RLS context; a null tenant reads the platform chain
- * (rows with `tenant_id IS NULL`). Entries are ordered by `sequence_number` ascending — the whole
- * chain, since integrity verification starts at the genesis hash.
+ * The scope's chain, through the one reader there is.
+ *
+ * This file used to carry its own `PostgresForensicChainReader`: its own `SELECT`, its own
+ * eleven-field copy of `rowToChainEntry`, and `rows.map(… ChainedLogEntrySchema.parse …)`. Deleting
+ * it closes three defects, and the middle one is **not** this increment's class.
+ *
+ * Its `SELECT` carried **no `WHERE` clause in either branch**, while its own doc comment said *"a
+ * null tenant reads the platform chain (rows with `tenant_id IS NULL`)"*. For a tenant it leaned on
+ * `withTenantContext` and RLS, which is sound only for a non-owner; for the platform scope it issued
+ * a bare query. So as the owner — an ordinary deployment, since the compose stack connects as the
+ * role that ran `migrate` — it read **every scope's entries interleaved**, `verifyChainIntegrity`
+ * saw `0,0,1,1,2,…` and reported a `sequence gap`, and the `audit.tamper_evident_log` control read
+ * **not satisfied** on a perfectly healthy chain. That is ADR-0331's defect exactly, in the second
+ * spelling that increment did not reach: it fixed `loadChain(null)` in `forensics-pg` and this copy
+ * kept the unscoped read. `PostgresChainLogReader.loadChain` carries the `scopeFilter` branch
+ * ADR-0331 measured (`tenant_id = $1` / `tenant_id IS NULL`, branched rather than
+ * `IS NOT DISTINCT FROM`, which is not indexable with a bound parameter).
  */
-export class PostgresForensicChainReader implements ForensicChainReader {
-  private readonly schema: string;
-
-  constructor(
-    private readonly conn: PgConnection,
-    private readonly tenantId: string | null,
-    schema = "meta",
-  ) {
-    if (!SCHEMA_RE.test(schema)) {
-      throw new Error(`invalid schema identifier: ${JSON.stringify(schema)}`);
-    }
-    this.schema = schema;
-  }
-
-  async loadChain(): Promise<readonly ChainedLogEntry[]> {
-    const sql = `SELECT sequence_number, kind, recorded_at, actor_reference, payload_sha256,
-        payload_size_bytes, prior_entry_hash, entry_hash, signing_key_fingerprint, signature
-      FROM ${this.schema}.forensic_chain_entries
-      ORDER BY sequence_number ASC`;
-    const rows =
-      this.tenantId === null
-        ? (await this.conn.query<Record<string, unknown>>(sql)).rows
-        : await withTenantContext(this.conn, this.tenantId, async (tx) =>
-            (await tx.query<Record<string, unknown>>(sql)).rows,
-          );
-    return rows.map((row) =>
-      ChainedLogEntrySchema.parse({
-        sequenceNumber: Number(row["sequence_number"]),
-        kind: String(row["kind"]),
-        recordedAt: toIso(row["recorded_at"]),
-        actorReference: String(row["actor_reference"]),
-        payloadSha256: String(row["payload_sha256"]),
-        payloadSizeBytes: Number(row["payload_size_bytes"]),
-        priorEntryHash: String(row["prior_entry_hash"]),
-        entryHash: String(row["entry_hash"]),
-        signingKeyFingerprint: String(row["signing_key_fingerprint"]),
-        signature: String(row["signature"]),
-      }),
-    );
-  }
+export function forensicChainReaderFor(
+  conn: PgConnection,
+  tenantId: string | null,
+  schema?: string,
+): ForensicChainReader {
+  const reader = new PostgresChainLogReader(conn, schema === undefined ? {} : { schema });
+  return { loadChain: () => reader.loadChain(tenantId) };
 }
 
 export interface CertificationSchedulerOptions {
@@ -509,9 +501,7 @@ export function defaultLiveSources(
   }
   if (config.forensicChain) {
     sources.push(
-      forensicChainSource(
-        new PostgresForensicChainReader(conn, config.tenantId, config.schema),
-      ),
+      forensicChainSource(forensicChainReaderFor(conn, config.tenantId, config.schema)),
     );
   }
   return sources;
@@ -570,10 +560,6 @@ function requireRate(value: unknown, column: string): number {
     );
   }
   return n;
-}
-
-function toIso(value: unknown): string {
-  return value instanceof Date ? value.toISOString() : String(value);
 }
 
 function safeParse(text: string): unknown {

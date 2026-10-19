@@ -1,4 +1,9 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  readRowsWithUnreadable,
+  textIdentity,
+  type PgConnection,
+  type UnreadableRow,
+} from "@crossengin/kernel-pg";
 import {
   scopedRead,
   scopedWrite,
@@ -46,6 +51,35 @@ export const SLO_ENFORCEMENT_ACTION_COLUMNS: readonly string[] = COLUMN_BINDINGS
 const COLUMN_LIST = SLO_ENFORCEMENT_ACTION_COLUMNS.join(", ");
 const PLACEHOLDER_LIST = COLUMN_BINDINGS.map((_, index) => `$${index + 1}`).join(", ");
 
+/**
+ * Every action a read could represent, with a report for every row it could not.
+ *
+ * Both reads here return the pair rather than forwarding a reporter, because both have exactly one
+ * consumer and it is a **verifier**: `SloEnforcementReplayer` computes a drift verdict over the set,
+ * and a verdict computed over the readable rows alone is a verdict about a different set of rows
+ * than the one on disk. `readRowsWithUnreadable`'s own note says why the shape matters — a caller
+ * that wants only the records has to write `.records`, which a reviewer and a grep can both see,
+ * where a discarded callback is invisible.
+ *
+ * It is also the input to `historyIsComplete`, which is the half with teeth: a withheld row makes
+ * every `*_without_open` finding an inference rather than an observation, since the missing
+ * `breach_opened` may be precisely the row that could not be read.
+ */
+export interface SloEnforcementActionRead {
+  readonly records: readonly SloEnforcementActionRecord[];
+  readonly unreadable: readonly UnreadableRow[];
+}
+
+/**
+ * `action_id` and never `incident_id`, though the latter is what a reader of a finding would most
+ * like to have. It is the row's business key, so it is the one handle a remedy can name; every other
+ * column of a refused row is of unestablished trustworthiness, and scoping a manual fix by one
+ * invites an operator to act on the value that may be the reason the row was refused.
+ */
+function actionIdentity(row: Record<string, unknown>): string | null {
+  return textIdentity(row, "action_id");
+}
+
 export class PostgresSloEnforcementActionStore {
   private readonly conn: PgConnection;
 
@@ -77,7 +111,7 @@ export class PostgresSloEnforcementActionStore {
   async listForIncident(
     incidentId: string,
     tenantId: string | null = null,
-  ): Promise<readonly SloEnforcementActionRecord[]> {
+  ): Promise<SloEnforcementActionRead> {
     const scope = scopeFilter(tenantId, 2);
     const result = await scopedRead(this.conn, tenantId, (tx) =>
       tx.query<Record<string, unknown>>(
@@ -88,7 +122,7 @@ export class PostgresSloEnforcementActionStore {
         [incidentId, ...scope.params],
       ),
     );
-    return result.rows.map((row) => rowToRecord(row));
+    return readRowsWithUnreadable(result.rows, rowToRecord, actionIdentity);
   }
 
   /**
@@ -102,7 +136,7 @@ export class PostgresSloEnforcementActionStore {
   async listRecent(
     limit = 100,
     tenantId: string | null = null,
-  ): Promise<readonly SloEnforcementActionRecord[]> {
+  ): Promise<SloEnforcementActionRead> {
     if (limit <= 0) throw new Error("limit must be positive");
     const scope = scopeFilter(tenantId, 1);
     const result = await scopedRead(this.conn, tenantId, (tx) =>
@@ -115,7 +149,7 @@ export class PostgresSloEnforcementActionStore {
         [...scope.params, limit],
       ),
     );
-    return result.rows.map((row) => rowToRecord(row));
+    return readRowsWithUnreadable(result.rows, rowToRecord, actionIdentity);
   }
 
   async countSince(since: Date, tenantId: string | null = null): Promise<number> {
