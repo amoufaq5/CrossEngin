@@ -1700,11 +1700,17 @@ type errors.
   the same silence one layer in; throwing takes every other row's finding with it, and both land on the
   reassuring side. Counted on the rule's own anchor — a conversion applied to a row *page*, since a
   single-row read that throws is correct and ADR-0289 says its caller must not be served past — the
-  class had **82** members needing a declaration and has **67**, so 15 are closed and 44 of the rest
+  class had **82** members needing a declaration and has **65**, so 17 are closed and 42 of the rest
   are an explicit backlog. (An earlier version of this entry said **51**, with "63 single-row reads
   excluded"; that triple is the *refused* anchor's — every invocation of a row mapper, 114 sites of
-  which 63 are single-row — and `REFUSED_ROW_PAGE_ANCHORS` refuses it for exactly that reason. Both
-  figures move with every slice that migrates a store, so re-derive them by calling the module.)
+  which 63 are single-row — and `REFUSED_ROW_PAGE_ANCHORS` refuses it for exactly that reason. It
+  then said **67** and **44**, which were right when written and wrong one increment later, because
+  ADR-0374 migrated `listRecent` and `getBySequence`: both figures move with every slice that
+  migrates a store, which is why this entry says to **re-derive them by calling the module** —
+  `scanWorkspacePageReads(readWorkspaceSources())` over `VERDICT_NEEDS_DECLARATION` — rather than
+  reading them here. As of ADR-0374 the module answers 906 files, 110 sites, 65 needing a
+  declaration, 65 declared, and `{guarded_by_primitive: 15, guarded_in_place: 2, record_throwing: 50,
+  record_total: 11, record_dropping: 2, projection: 30}`.)
   The two live members show the two routes to that silence: one makes the **row** unreadable
   (the sweep stops), the other makes the **evidence** unreadable in a way the contract tolerates (the
   detector answers *cannot say*, which is not a defect).
@@ -6216,9 +6222,12 @@ opened them.
   type, with two shapes the store's contract picks between (**forward** a reporter, or return the
   refused rows **beside** the records when the consumer is a verifier), and
   `packages/testing/src/strategy/pg-unreadable-rows.ts` is the twelfth rule over the whole class.
-  What remains, in order: **(1)** **44 of the 67 declared sites are `unmigrated`** — the backlog,
+  What remains, in order: **(1)** **42 of the 65 declared sites are `unmigrated`** (re-derived from
+  the module after ADR-0374, which closed `forensics-pg::checkpoint-store::listRecent` — the figure
+  this entry carried, 44 of 67, was right when written and wrong one increment later, which is the
+  entry above's own warning landing on this one) — the backlog,
   each naming what a refused row costs today, and the sharpest are `column-store::listPageOn` (every
-  tenant list request), `crypto-pg::listKeys`, `forensics-pg::checkpoint-store::listRecent` and
+  tenant list request), `crypto-pg::listKeys` and
   `access-reviews-runtime-pg::evidence-store::listByTenant`; nine are latent on declared-callerless
   stores and say so. **(2)** **nothing fences a consumer that reads `.records` and drops
   `.unreadable`** — the direction is right and the figures are not reproducible with a plain grep
