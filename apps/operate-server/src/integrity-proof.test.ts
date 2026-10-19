@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -34,8 +34,10 @@ import {
 } from "./chain-verify.js";
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
 import {
+  COMPROMISE_CAUSES,
   INTEGRITY_VERDICTS,
   IntegrityProofScheduler,
+  compromiseCauses,
   formatIntegrityProof,
   integrityConfigScopes,
   integrityVerdictFor,
@@ -44,6 +46,8 @@ import {
   parseIntegrityProofConfig,
   proveScopeIntegrity,
   type ChainTruncationCheck,
+  type CompromiseCause,
+  type CompromiseEvidence,
   type IntegrityProofReport,
 } from "./integrity-proof.js";
 
@@ -679,6 +683,126 @@ describe("integrityVerdictFor — truncation", () => {
   });
 });
 
+/**
+ * The compromise half of `integrityVerdictFor`, which is a list rather than a sequence of `if`s
+ * because a seventh branch added to that sequence was invisible to the whole suite: the escalation
+ * row named two of six conditions, and the block that claimed one test per branch was refuted by
+ * mutation (ADR-0374's addendum).
+ *
+ * Every assertion here is walked from the enum. The hand-written per-condition tests above are the
+ * golden for the answers themselves — they were written against the sequence of `if`s and are
+ * untouched — which is deliberately not a truth table compared against that sequence rewritten in
+ * the test: a rule compared against a derivation of itself is ADR-0362's retired test.
+ */
+describe("COMPROMISE_CAUSES", () => {
+  const evidence = (over: Partial<CompromiseEvidence> = {}): CompromiseEvidence => ({
+    chain: chainOk(),
+    anchors: anchors(),
+    truncation: noTruncation(),
+    chainRowsRefused: [],
+    anchorRowsRefused: [],
+    ...over,
+  });
+  const refusedRow: UnreadableRow = { identity: "2", detail: "kind: invalid_enum_value" };
+  /**
+   * One evidence set per cause, exhibiting that cause and no other — which the second test proves
+   * rather than this comment claiming. Total, so a seventh member does not compile until somebody
+   * writes evidence that exhibits it.
+   */
+  const EXHIBITS: Record<CompromiseCause, Partial<CompromiseEvidence>> = {
+    chain_truncated: {
+      truncation: noTruncation({ checkpointSequence: 9, tailSequence: 4, truncated: true }),
+    },
+    chain_broken_or_unsigned: {
+      chain: chainOk({ ok: false, integrity: { valid: false, brokenAt: 2 } }),
+    },
+    chain_row_refused: { chainRowsRefused: [refusedRow] },
+    checkpoint_row_refused: { anchorRowsRefused: [refusedRow] },
+    audit_row_tampered: { anchors: anchors({ ok: false, tampered: [tamperedResult] }) },
+    audit_row_refused: { anchors: anchors({ ok: false, unreadable: [refusedRow] }) },
+  };
+  const verdictOf = (e: CompromiseEvidence) =>
+    integrityVerdictFor(e.chain, e.anchors, e.truncation, e.chainRowsRefused, e.anchorRowsRefused);
+
+  it("enumerates the six conditions in the order they were asked in", () => {
+    expect([...COMPROMISE_CAUSES]).toEqual([
+      "chain_truncated",
+      "chain_broken_or_unsigned",
+      "chain_row_refused",
+      "checkpoint_row_refused",
+      "audit_row_tampered",
+      "audit_row_refused",
+    ]);
+  });
+
+  it("names each cause, and only it, for evidence exhibiting exactly that one", () => {
+    for (const cause of COMPROMISE_CAUSES) {
+      expect(compromiseCauses(evidence(EXHIBITS[cause]))).toEqual([cause]);
+    }
+  });
+
+  it("answers nothing for evidence that disproves nothing", () => {
+    expect(compromiseCauses(evidence())).toEqual([]);
+    expect(compromiseCauses(evidence({ anchors: null }))).toEqual([]);
+    // An unanchored row is unproven and not a cause: the one judgement in the verdict that is
+    // neither `verified` nor a finding, and it must stay out of this list or every deployment
+    // upgrading from before ADR-0286 would page.
+    expect(compromiseCauses(evidence({ anchors: anchors({ ok: false, unanchored: 3 }) }))).toEqual(
+      [],
+    );
+  });
+
+  it("drives the verdict: every cause alone is compromised, and no cause never is", () => {
+    for (const cause of COMPROMISE_CAUSES) {
+      expect(verdictOf(evidence(EXHIBITS[cause])), cause).toBe("compromised");
+    }
+    expect(verdictOf(evidence())).toBe("verified");
+    expect(verdictOf(evidence({ anchors: anchors({ ok: false, unanchored: 3 }) }))).toBe(
+      "unproven",
+    );
+  });
+
+  it("reports several causes in enum order, so the one asked first still reads first", () => {
+    expect(
+      compromiseCauses(evidence({ ...EXHIBITS.chain_truncated, ...EXHIBITS.audit_row_refused })),
+    ).toEqual(["chain_truncated", "audit_row_refused"]);
+    // Every condition at once. The fixture is hand-built because two of the six are different
+    // fields of one `anchors`, but the **expectation** is the enum itself — so the precedence
+    // `chain_truncated` was given is a property of that list's order and of nothing else.
+    expect(
+      compromiseCauses(
+        evidence({
+          truncation: noTruncation({ checkpointSequence: 9, tailSequence: 4, truncated: true }),
+          chain: chainOk({ ok: false, integrity: { valid: false, brokenAt: 2 } }),
+          chainRowsRefused: [refusedRow],
+          anchorRowsRefused: [refusedRow],
+          anchors: anchors({ ok: false, tampered: [tamperedResult], unreadable: [refusedRow] }),
+        }),
+      ),
+    ).toEqual([...COMPROMISE_CAUSES]);
+  });
+
+  it("is the only route to a compromised verdict, which no type can fence", async () => {
+    // A total map makes a seventh *condition* a compile error; a bare `if (…) return` of that
+    // verdict in a function body is invisible to it, so reading the module as text is the only
+    // fence available (ADR-0357's shape). Two assertions, because the count alone would admit the
+    // gate being replaced by something else: there is one such statement, and it is the one
+    // `compromiseCauses` decides.
+    //
+    // Whole-line comments are dropped first, and the test found out why on its first run — the
+    // prose two functions up quotes the statement it is warning about, so matching the raw source
+    // counted two and the fence would have had to be written down to 2 and then been vacuous. The
+    // semicolon is the second half of that: a quoted fragment in prose carries none.
+    const source = await readFile(new URL("./integrity-proof.ts", import.meta.url), "utf8");
+    const code = source
+      .split("\n")
+      .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line));
+    const answered = code.filter((line) => line.includes('return "compromised";'));
+    expect(answered).toHaveLength(1);
+    expect(answered[0]).toMatch(/causes\.length > 0\) return "compromised";/);
+  });
+});
+
 describe("truncation in the verdict payload and format", () => {
   const cut = noTruncation({ checkpointSequence: 9, tailSequence: 4, truncated: true });
 
@@ -906,6 +1030,139 @@ describe("IntegrityProofScheduler — a refused row is not an empty scope", () =
       intervalMs: 1000,
     });
     expect((await s.runOnce())[0]?.outcome).toBe("proved");
+  });
+});
+
+/**
+ * The same rule one condition across, and the one the block above missed.
+ *
+ * `skipped_empty` discards the report, so what it must claim is *this pass found nothing to
+ * verify* — and that is answerable from the **verdict**, which is total over every condition,
+ * rather than from a conjunct list that has to be revisited whenever a condition is added.
+ * ADR-0373 added a fourth refusal axis to `readEveryRowFound` and argued at length about which
+ * axes fire there without re-reading the other two conjuncts against `integrityVerdictFor`, where
+ * `truncation.truncated` is asked **first** and was a conjunct of neither. So the *weaker*
+ * evidence — an anchor that cannot be read — was kept, and the *stronger*, a proven total
+ * truncation, was still thrown away.
+ *
+ * Driven through the real `proveScopeIntegrity` rather than a hand-built report, because that is
+ * what makes the pair below a measurement: the only difference between the two is whether the
+ * checkpoint read answers a row, and everything else — the verdict, the truncation flag, the
+ * outcome — is computed.
+ */
+describe("IntegrityProofScheduler — a proven truncation is not an empty scope", () => {
+  /** An empty chain: no entries, no tail. The shape that satisfies every other conjunct. */
+  const depsFor = (checkpoint: { readonly sequenceNumber: number } | null) =>
+    ({
+      logStore: {
+        loadChain: async () => ({ entries: [], unreadable: [] }),
+        tail: async () => null,
+      },
+      checkpoints: { latest: async () => checkpoint },
+      registry: { getByFingerprint: async () => null },
+      audit: { listAnchoredForScope: async () => ({ rows: [], unreadable: [] }) },
+      auditRowLimit: 10,
+      fromCheckpoint: false,
+      now: () => new Date(AT),
+    }) as unknown as Parameters<typeof proveScopeIntegrity>[1];
+
+  const passOver = async (deps: Parameters<typeof proveScopeIntegrity>[1]) => {
+    const passed: IntegrityProofReport[] = [];
+    const findings: IntegrityProofReport[] = [];
+    const recorded: IntegrityProofReport[] = [];
+    const escalated: IntegrityProofReport[] = [];
+    const s = new IntegrityProofScheduler({
+      prove: (scope) => proveScopeIntegrity(scope, deps),
+      record: async (r) => {
+        recorded.push(r);
+        return 7;
+      },
+      escalate: async (r) => {
+        escalated.push(r);
+        return { kind: "opened", incidentId: "INC-2026-0001" };
+      },
+      scopes: () => [TENANT_A],
+      intervalMs: 1000,
+      onPass: (r) => passed.push(r),
+      onFinding: (r) => findings.push(r),
+    });
+    return {
+      result: (await s.runOnce())[0],
+      callbacks: [passed.length, findings.length, recorded.length, escalated.length],
+    };
+  };
+
+  it("files the verdict and every callback when the chain ends before its checkpoint", async () => {
+    // Measured live on exactly this shape before the fix: `verdict=compromised truncated=true
+    // checkpointSequence=3 tailSequence=null`, `outcome=skipped_empty`, `callbacks=[]`, and the
+    // formatter's TRUNCATED line printed by nobody.
+    const proof = await proveScopeIntegrity(TENANT_A, depsFor({ sequenceNumber: 3 }));
+    expect(proof.truncation).toMatchObject({
+      checkpointSequence: 3,
+      tailSequence: null,
+      truncated: true,
+    });
+    expect(proof.verdict).toBe("compromised");
+    expect(formatIntegrityProof(proof)).toContain("TRUNCATED: checkpoint at 3");
+
+    const { result, callbacks } = await passOver(depsFor({ sequenceNumber: 3 }));
+    expect(result).toMatchObject({ outcome: "proved", recordedAt: 7 });
+    expect(callbacks).toEqual([1, 1, 1, 1]);
+  });
+
+  it("still skips the same scope when there is no checkpoint to be short of", async () => {
+    // The negative control, and the reason the clause is the verdict and not a fourth conjunct:
+    // the only thing that changed between the two passes is whether a checkpoint exists, and an
+    // idle tenant must not accrue an hourly verdict about nothing.
+    const proof = await proveScopeIntegrity(TENANT_A, depsFor(null));
+    expect(proof.verdict).toBe("verified");
+    const { result, callbacks } = await passOver(depsFor(null));
+    expect(result).toEqual({ scope: TENANT_A, outcome: "skipped_empty" });
+    expect(callbacks).toEqual([0, 0, 0, 0]);
+  });
+
+  it("cannot be reached by `unproven`, because the row that makes it unproven is a row", async () => {
+    // Asked rather than assumed. `unanchored > 0` needs a result in `anchors.results`, and
+    // `checked` **is** `results.length`, so the `noAuditRows` conjunct already excluded this
+    // verdict before the clause existed — measured here through the real `verifyAuditAnchors` by
+    // way of `proveScopeIntegrity`, with one row carrying no anchor.
+    const unanchored = {
+      ...(depsFor(null) as unknown as Record<string, unknown>),
+      audit: {
+        listAnchoredForScope: async () => ({
+          rows: [{ entry: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }, anchor: null }],
+          unreadable: [],
+        }),
+      },
+    } as unknown as Parameters<typeof proveScopeIntegrity>[1];
+    const proof = await proveScopeIntegrity(TENANT_A, unanchored);
+    expect(proof.verdict).toBe("unproven");
+    expect(proof.anchors).toMatchObject({ checked: 1, unanchored: 1 });
+    expect((await passOver(unanchored)).result?.outcome).toBe("proved");
+  });
+
+  it("does not skip a report carrying a verdict its own content does not explain", async () => {
+    // The clause's general statement, which the three cases above cannot make: `verdict` is a
+    // field on the report and `prove` is a seam, so a pass is handed whatever that seam returns.
+    // Neither of these is producible by `proveScopeIntegrity` — the point is that neither is
+    // skipped, because `skipped_empty` claims nothing was found and both verdicts say otherwise.
+    const emptyShape = {
+      anchors: anchors({ checked: 0, verified: 0 }),
+      truncation: noTruncation({ checkpointSequence: null, tailSequence: null }),
+    };
+    const outcomes: (string | undefined)[] = [];
+    for (const verdict of ["compromised", "unproven"] as const) {
+      const s = new IntegrityProofScheduler({
+        prove: async () => report({ ...emptyShape, verdict }),
+        scopes: () => [TENANT_A],
+        intervalMs: 1000,
+      });
+      outcomes.push((await s.runOnce())[0]?.outcome);
+    }
+    // Collected and asserted once, so a regression names both rather than aborting on the first —
+    // which matters here because the two arms differ in nothing but the verdict, and a predicate
+    // that stopped reading it would fail them identically.
+    expect(outcomes).toEqual(["proved", "proved"]);
   });
 });
 

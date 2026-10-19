@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 import type { AuditAnchorReport, AuditAnchorResult } from "./audit-anchor.js";
 import type { ChainVerificationReport } from "./chain-verify.js";
 import {
+  COMPROMISE_CAUSE_PAYLOAD_KEY,
   INCIDENT_DISPOSITIONS,
   INTEGRITY_ESCALATIONS,
   INTEGRITY_INCIDENT_OPERATION,
@@ -23,7 +24,10 @@ import {
   formatIntegrityEscalation,
 } from "./integrity-escalation.js";
 import {
+  COMPROMISE_CAUSES,
+  compromiseCauses,
   type ChainTruncationCheck,
+  type CompromiseCause,
   type IntegrityProofReport,
 } from "./integrity-proof.js";
 
@@ -336,11 +340,22 @@ describe("IntegrityEscalator — failure handling", () => {
 /**
  * The anchored row has to say **why**.
  *
- * `integrityVerdictFor` has six `compromised` branches and this row named two of them, so a
- * paging sev1 driven by any of the other four asserted that the trail was provably altered and
- * then named nothing — which is the one shape an operator cannot act on, and is the reason
- * ADR-0373 gave for printing them in `formatIntegrityProof`. One test per branch, so a seventh
- * cause arriving with no key is a failure here rather than a 03:00 page that explains nothing.
+ * `integrityVerdictFor` answers `compromised` for six conditions and this row named two of them, so
+ * a paging sev1 driven by any of the other four asserted that the trail was provably altered and
+ * then named nothing — which is the one shape an operator cannot act on, and is the reason ADR-0373
+ * gave for printing them in `formatIntegrityProof`.
+ *
+ * The tests below are five covering six conditions — the last one covers two — and the claim that
+ * used to sit here, that there is one per branch *"so a seventh cause arriving with no key is a
+ * failure here"*, was false in both halves. It was refuted by mutation in an isolated worktree:
+ * adding a seventh `compromised` branch to `integrityVerdictFor`, with no key in the `after`
+ * payload, passed **83 of 83**. Nothing enumerated the branches, so nothing could notice a seventh;
+ * ADR-0288's maintained list, and ADR-0351's documented hazard that checked nothing.
+ *
+ * The block after this one is that enumeration, walked from `COMPROMISE_CAUSES`. These five stay
+ * beside it because each carries an argument the derived walk cannot: which table an identity
+ * belongs to, why a refusal is not softer than a tamper, and what the cap on recorded identities
+ * buys.
  */
 describe("IntegrityEscalator — the audit row names the cause", () => {
   const cleanAnchors = (over: Partial<AuditAnchorReport> = {}): AuditAnchorReport => ({
@@ -509,6 +524,142 @@ describe("IntegrityEscalator — the audit row names the cause", () => {
     ).toMatchObject({
       chain: { ok: false, integrityValid: false, brokenAt: 3, signaturesValid: true },
     });
+  });
+});
+
+/**
+ * The fence the block above claimed to be.
+ *
+ * Three things are derived from `COMPROMISE_CAUSES` and nothing is hand-listed, which is what makes
+ * a seventh cause a failure here rather than a 03:00 page that explains nothing:
+ *
+ * 1. the fixture map is total, so a seventh member does not compile until somebody writes a report
+ *    that exhibits it;
+ * 2. each fixture is asserted to exhibit **exactly** its own cause, through the same
+ *    `compromiseCauses` the verdict is computed from — so a fixture that drifted into exhibiting
+ *    two, or none, fails rather than quietly testing the wrong thing;
+ * 3. the value at `COMPROMISE_CAUSE_PAYLOAD_KEY[cause]` is asserted to **discriminate**: it differs
+ *    from what every *other* cause's report puts at that same path. That is the checkable form of
+ *    "this key explains that cause", and it is why a key naming the wrong path fails — two absent
+ *    values compare equal.
+ *
+ * Deliberately not a 64-way truth table compared against the old `if` sequence rewritten in the
+ * test. That is ADR-0362's retired test exactly: a rule compared against a derivation of itself,
+ * calling the one disagreement a property. The golden for "the verdict is unchanged" is the 21
+ * `integrityVerdictFor` call sites in `integrity-proof.test.ts`, which were written against the
+ * sequence of `if`s and are untouched.
+ */
+describe("IntegrityEscalator — every compromise cause has a key that explains it", () => {
+  const cleanAnchors = (over: Partial<AuditAnchorReport> = {}): AuditAnchorReport => ({
+    tenantId: TENANT_A,
+    ok: true,
+    checked: 2,
+    verified: 2,
+    unanchored: 0,
+    tampered: [],
+    results: [],
+    unreadable: [],
+    ...over,
+  });
+  const brokenChain: ChainVerificationReport = {
+    tenantId: TENANT_A,
+    ok: false,
+    mode: "full",
+    fullBecause: "requested",
+    checkpointSequence: null,
+    integrity: { valid: false, brokenAt: 3 },
+    signatures: { valid: true, checked: 3, results: [], unresolvedFingerprints: [], unreadable: [] },
+  };
+  const refused = (identity: string): UnreadableRow => ({
+    identity,
+    detail: "kind: invalid_enum_value",
+  });
+
+  /**
+   * One report per cause, exhibiting that cause and no other — which assertion (2) proves rather
+   * than this comment claiming. Every entry overrides `anchors`, because the shared `report()`
+   * fixture carries a tampered row by default and would otherwise exhibit two causes everywhere.
+   */
+  const EXHIBITS: Record<CompromiseCause, Partial<IntegrityProofReport>> = {
+    chain_truncated: {
+      anchors: cleanAnchors(),
+      truncation: { checkpointSequence: 9, tailSequence: 4, truncated: true },
+    },
+    chain_broken_or_unsigned: { anchors: cleanAnchors(), chain: brokenChain },
+    chain_row_refused: { anchors: cleanAnchors(), chainRowsRefused: [refused("2")] },
+    checkpoint_row_refused: { anchors: cleanAnchors(), anchorRowsRefused: [refused("3")] },
+    audit_row_tampered: { anchors: cleanAnchors({ ok: false, tampered: [tamperedResult] }) },
+    audit_row_refused: {
+      anchors: cleanAnchors({
+        ok: false,
+        unreadable: [refused("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")],
+      }),
+    },
+  };
+
+  /** Walks a dotted path, because the three refusal axes are grouped under one `unreadable` key. */
+  function valueAt(payload: unknown, path: string): unknown {
+    let cursor: unknown = payload;
+    for (const key of path.split(".")) {
+      if (typeof cursor !== "object" || cursor === null) return undefined;
+      cursor = (cursor as Record<string, unknown>)[key];
+    }
+    return cursor;
+  }
+
+  async function emittedAfter(cause: CompromiseCause): Promise<unknown> {
+    const { audit, emitted } = fakeAudit();
+    const e = new IntegrityEscalator({ config: config(), audit, now: () => new Date(AT) });
+    await e.observe(report(EXHIBITS[cause]));
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]?.operation).toBe(INTEGRITY_INCIDENT_OPERATION);
+    return emitted[0]?.after;
+  }
+
+  it("has a fixture exhibiting exactly one cause for every member", () => {
+    for (const cause of COMPROMISE_CAUSES) {
+      expect(compromiseCauses(report(EXHIBITS[cause]))).toEqual([cause]);
+    }
+  });
+
+  it("names every cause by name in the row", async () => {
+    for (const cause of COMPROMISE_CAUSES) {
+      expect(await emittedAfter(cause)).toMatchObject({ verdict: "compromised", causes: [cause] });
+    }
+  });
+
+  it("carries evidence at the key declared for every cause, and nowhere else", async () => {
+    const afters = new Map<CompromiseCause, unknown>();
+    for (const cause of COMPROMISE_CAUSES) afters.set(cause, await emittedAfter(cause));
+
+    for (const cause of COMPROMISE_CAUSES) {
+      const path = COMPROMISE_CAUSE_PAYLOAD_KEY[cause];
+      const mine = valueAt(afters.get(cause), path);
+      // A declared path that resolves to nothing would otherwise pass the comparison below for
+      // every pair, since two absent values are equal and `not.toEqual` would fail — this says
+      // which of the two went wrong.
+      expect(mine, `${cause} -> ${path}`).not.toBeUndefined();
+      for (const other of COMPROMISE_CAUSES) {
+        if (other === cause) continue;
+        expect(valueAt(afters.get(other), path), `${other} at ${path}`).not.toEqual(mine);
+      }
+    }
+  });
+
+  it("claims no cause on the recovery row, rather than omitting the key", async () => {
+    // `[]` is the claim that none holds; a missing key would say nobody looked (ADR-0331). The
+    // recovery row is emitted with a `verified` verdict, so this is the one place the empty list is
+    // the honest answer rather than a gap.
+    const { audit, emitted } = fakeAudit();
+    const e = new IntegrityEscalator({ config: config(), audit, now: () => new Date(AT) });
+    await e.observe(report(EXHIBITS.chain_truncated));
+    await e.observe(report({ ...EXHIBITS.chain_truncated, verdict: "verified", truncation: {
+      checkpointSequence: 9,
+      tailSequence: 9,
+      truncated: false,
+    } }));
+    expect(emitted[1]).toMatchObject({ operation: INTEGRITY_RECOVERY_OPERATION });
+    expect(emitted[1]?.after).toMatchObject({ verdict: "verified", causes: [] });
   });
 });
 

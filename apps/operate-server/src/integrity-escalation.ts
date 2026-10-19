@@ -17,7 +17,12 @@ import { planPageDirective, type PageDirective } from "@crossengin/observability
 
 import { auditActor, auditEntry, type PostgresAuditEmitter } from "./audit-log-store.js";
 import type { IntegrityEscalationConfig } from "./integrity-escalation-config.js";
-import { formatIntegrityProof, type IntegrityProofReport } from "./integrity-proof.js";
+import {
+  compromiseCauses,
+  formatIntegrityProof,
+  type CompromiseCause,
+  type IntegrityProofReport,
+} from "./integrity-proof.js";
 
 export const INTEGRITY_INCIDENT_OPERATION = "audit.integrity_compromised";
 export const INTEGRITY_RECOVERY_OPERATION = "audit.integrity_recovered";
@@ -141,6 +146,35 @@ function recordedRefusal(rows: readonly UnreadableRow[]): RecordedRefusal {
     identities: rows.slice(0, MAX_RECORDED_UNREADABLE_IDENTITIES).map((row) => row.identity),
   };
 }
+
+/**
+ * Where in the escalation's `after` payload the **evidence** for each compromise cause lands.
+ *
+ * A total map over `COMPROMISE_CAUSES`, so a seventh cause is a compile error here: the row has to
+ * gain a key that explains it before it can be a cause at all. That is the half of the fence a type
+ * can carry; the other half is in this module's suite, which walks the enum and asserts, per cause,
+ * that a report exhibiting only that cause moves the value at this path. Written out rather than
+ * derived, because the payload is a nested literal and building it by path assignment would be
+ * worse code than the literal is.
+ *
+ * Its reader is that fence and not the payload builder, which is the same arrangement as
+ * `STORELESS_TABLES` and `VALUE_SET_DOMAINS` — a declaration whose consumer is the rule that checks
+ * it (ADR-0353). Deriving the payload *from* it would make the map load-bearing and the fence
+ * circular: a key named wrongly would still be the key written, and the test would pass.
+ *
+ * The three refusal axes carry a **dotted path** rather than a key, because they are grouped under
+ * one `unreadable` object on purpose: three tables and three identity namespaces (a chain sequence,
+ * a `meta.audit_log` id, a checkpoint's `(scope, sequence)`), which ADR-0373 kept apart as three
+ * lists and this groups without merging.
+ */
+export const COMPROMISE_CAUSE_PAYLOAD_KEY: Record<CompromiseCause, string> = {
+  chain_truncated: "truncated",
+  chain_broken_or_unsigned: "chain",
+  chain_row_refused: "unreadable.chainRows",
+  checkpoint_row_refused: "unreadable.checkpointRows",
+  audit_row_tampered: "tampered",
+  audit_row_refused: "unreadable.auditRows",
+};
 
 // `planIntegrityEscalation` lived here: it built an incident record around an id the *caller* invented,
 // which is the arrangement ADR-0293 replaced with the `IncidentDeclarer` seam — the declarer allocates
@@ -475,23 +509,38 @@ export class IntegrityEscalator {
             severity: this.opts.config.severity,
             category: this.opts.config.category,
             verdict: report.verdict,
+            // The cause **by name**, beside the six keys that carry its evidence, and the one
+            // reader of `COMPROMISE_CAUSES` on this path: a row saying `truncated: false,
+            // tampered: []` and nothing else leaves an operator to infer which of six conditions
+            // fired from which key moved. `[]` is the claim that none holds — true on the recovery
+            // row, which is emitted with a `verified` verdict — where a missing key would say
+            // nobody looked (ADR-0331).
+            //
+            // Asked of the same function the verdict was computed through, so the row cannot name a
+            // cause the verdict disagrees with. It is re-derived here rather than carried on the
+            // report because `IntegrityProofReport` is what `integrityVerdictPayload` and the
+            // stored projection read, and a field added there must move four modules together or
+            // break the parity ADR-0371 reverted a field out of.
+            causes: compromiseCauses(report),
             truncated: report.truncation.truncated,
             tampered: (report.anchors?.tampered ?? []).map((t) => ({
               auditId: t.auditId,
               verdict: t.verdict,
             })),
-            // `integrityVerdictFor` has six `compromised` branches and this row named two of them,
-            // so a paging sev1 driven by any of the other four asserted that the trail was
+            // `integrityVerdictFor` answers `compromised` for six conditions and this row named two
+            // of them, so a paging sev1 driven by any of the other four asserted that the trail was
             // provably altered and then named nothing — the one shape an operator cannot act on,
             // which is the reason ADR-0373 gave for printing these in `formatIntegrityProof` and
-            // `formatChainVerification` and then left this row alone. Every branch is named now,
-            // which is the only non-arbitrary stopping point: naming five would leave the oldest
-            // cause of all (a broken or unsigned chain, ADR-0286) as the one that explains nothing.
+            // `formatChainVerification` and then left this row alone. Every condition is named now,
+            // and the completeness is **structural** rather than counted: the conditions are
+            // `COMPROMISE_CAUSES`, `COMPROMISE_CAUSE_PAYLOAD_KEY` is total over it, and this
+            // module's suite walks the enum. Before that it was six `if`s and five `it`s, and
+            // adding a seventh branch with no key here passed the whole suite.
             //
             // ADR-0373's objection to carrying the fact durably does not reach here, and the
             // distinction is the whole licence for this block: that objection is about
             // `integrityVerdictPayload` / `StoredIntegrityReportSchema` / `canonicalStoredReport` /
-            // `storedReportFrom`, which must move together or the stored report stops being
+            // `storedIntegrityReportFor`, which must move together or the stored report stops being
             // byte-identical to its committed payload — the trap ADR-0371 reverted a field out of.
             // This is a free-form audit `after`, committed to the chain as *bytes it already
             // carries* rather than as a digest over a fixed shape, so a key added here breaks no
