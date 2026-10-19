@@ -333,6 +333,118 @@ its own implementation. The *field name* stays `requestId` rather than convergin
 deliberately: a reporter there is handed a request, and that is what its three audiences act on.
 What must not diverge is the detail, and that now has one definition.
 
+## Addendum — what an adversarial pass over the commit found
+
+An adversarial read of `102cad5` found nine things: four wrong on a deployment, five claims false or
+overstated, and five gaps. The claims are corrected in `f3948d0` and in CLAUDE.md; this section is
+the behaviour. **Three of the four were introduced or made reachable by this increment**, which is
+the useful shape of them — routing a refused row into an answer changes what every figure beside it
+means, and the readers of those figures do not move with it.
+
+### The route that reported clean over a proof it could not read
+
+`GET /v1/platform/tombstones/unproven` answered **`clean: true`** over an Article 17 proof the
+contract refuses, and wrote that claim into the forensic trail as an anchored audit row reading
+`status: clean`. The route file was simply not touched when `auditTombstones` stopped throwing: its
+structural mirror `TombstoneAuditPageLike` had no `unreadable` member, and **a missing member on a
+structural mirror does not fail to compile — it discards the field.** Before the increment the same
+database state hit the `catch` whose own comment reads *"do not treat this as an absence of
+findings"* and answered **503**.
+
+Reproduced against the real producer as the non-owner `serving` role, one planted
+`scope='null'::jsonb` row: `examined: 0, findings: 0, unreadable: [{identity:
+"tomb_slice3probe001", detail: "anchors: too_small, scope: invalid_type"}]` → `clean` is `false`
+under the fixed rule and **`true`** under the one it replaced.
+
+`clean` is **one predicate with two readers** now, the body's field and the audit row's `status`,
+because deriving them separately is how they came apart. The refusals ride **beside** `findings` (a
+refused row carries no reference state and no verify verdict, so it is not expressible as one) and
+**not** inside `examined`, which counts rows verified. They are deliberately **not** escalated:
+`escalateTombstone` keys its episode on the tombstone id, and a refused row's identity may itself be
+the refused column. The mirror's new member was mutation-checked by **renaming** it, which makes
+`node.ts` fail to compile — so it is bound to the real `DeletionReconciler` rather than decorative.
+
+`buildUnprovenHandler` over `auditCompleted` has the same shape and is **declared rather than
+fixed**: that function returns findings alone and sends a refused row to a *constructor-level*
+`onUnreadableRequest` that `node.ts` wires to `console.error`, so the refusals never reach the
+handler. Closing it needs `auditCompleted` to return its refusals beside its findings — the shape
+`auditTombstones` now has — plus its callers. The tempting shortcut is **worse than the silence**: a
+per-call reporter on the *mirror* alone would have the store ignore the extra argument, so the route
+would report `unreadable: []`, a falsely-true control replacing an honest gap.
+
+And a test surface that was vacuous in every one of its cases, found while writing the escalation
+assertion: the sweep harness never wired `escalateTombstone`, so
+`for (const finding of page.findings) await ctx.escalateTombstone?.(finding)` was a **no-op in every
+sweep test** — nothing could tell an escalated finding from a dropped one. Wired, with a positive
+control beside the new negative one.
+
+### The report the scheduler computed and threw away
+
+`isEmptyScope` read `tailSequence === null && (anchors === null || anchors.checked === 0)`. This
+increment made `checked` the number of rows **examined** — readable rows only — so `checked === 0`
+stopped meaning *there were no rows* and started coexisting with `unreadable.length === 1`, while
+the clause went on reading the new figure with the old meaning. `skipped_empty` is the one outcome
+from which nothing escapes: the scheduler pushes it and `continue`s past `onPass`, `onFinding`,
+`record` and `escalate`, so the verdict was computed, found `compromised`, and discarded — not even
+`formatIntegrityProof` ran.
+
+Reproduced end to end as the non-owner `serving` role on PG 16.13, both arms, by rebuilding the
+binary with and without the fix. One `meta.audit_log` row with `operation = ''` (`text NOT NULL`, no
+CHECK) for a scope holding no chain entries:
+
+| | before | after |
+|---|---|---|
+| outcomes | `["skipped_empty"]` | `["proved"]` |
+| callbacks | none | `onPass`, `onFinding`, `record`, `escalate` |
+
+`readEveryRowFound` is the third conjunct and it asks **all three** refusal axes rather than the two
+this was found through. `chain.signatures.unreadable` cannot fire as the code stands — `tail()` reads
+raw columns, so a chain holding any row answers a non-null `tailSequence` and never reaches here —
+and it is asked anyway, with the reason at the predicate: an unfireable axis can only turn a skip
+into a proof, which is the direction this function must fail in, while an axis omitted on the
+strength of what a read one layer down happens to do today is this same defect again the day that
+read starts parsing.
+
+### The sev1 whose durable record named nothing
+
+The escalation's anchored audit row carried `after: {verdict, truncated, tampered}`.
+`integrityVerdictFor` has five `compromised` branches and that row named two, so a paging sev1
+driven by either new axis read `truncated: false, tampered: []` — asserting the trail was provably
+altered and naming nothing. This increment added exactly that cause-naming to
+`formatIntegrityProof` and `formatChainVerification` and left the durable row alone.
+
+It carries `chain: {ok, integrityValid, brokenAt, signaturesValid}` and
+`unreadable: {chainRows, auditRows}` now, each a count with its identities. Four decisions:
+
+- **Counts and identities only, no `detail`.** An identity is a business key, which is what a `WHERE`
+  clause and a remedy need, and it is the one column of a refused row of established provenance.
+  `unreadableDetail`'s non-zod arm passes a mapper's own `Error.message` through on a convention
+  nothing fences — ADR-0367 found that convention failing in four of six refusal strings, one of
+  them an id — so a log line may carry it and a durable, anchored, chain-committed row may not.
+- **Two lists and not one**, because they are different tables with different identity namespaces (a
+  `meta.audit_log` id against a chain sequence number), and merging them hands an operator a list
+  they cannot act from. Deliberately no third list for the chain *half*'s own refusals: in bounded
+  mode they are a subset of the whole-chain read's and in full mode the same read, so it would be one
+  fact under two names, and that it fired arrives as `integrityValid: false`.
+- **A cap of 20 with the full count beside it.** `anchors.unreadable` is bounded by `auditRowLimit`,
+  which the store clamps at 500; `chainRowsRefused` comes from a whole-chain read and is bounded only
+  by the chain, so uncapped a scope whose entries the contract refuses writes its entire chain into
+  one JSONB column, inside the escalation path, at the moment the deployment can least afford it. The
+  count is the whole figure and the identities are the first of them, so `count > identities.length`
+  is how a reader sees the cap with no flag to interpret. *First* means the first its own read
+  returned, and the two reads are ordered oppositely — `loadChain` ascending, so the chain names kept
+  are the earliest, which is where `brokenAt` points and so where a remedy starts;
+  `listAnchoredForScope` descending, so the audit names kept are the most recent, which is the half
+  of a trail an operator is asked about first. What matters is that the slice is defined **by the
+  read** rather than chosen here, so two passes over unchanged rows name the same identities.
+- **All five branches named, not four.** `!chain.ok` was unnamed too, and stopping at four would have
+  left ADR-0286's oldest cause as the one that explains nothing.
+
+The payload is the free-form audit `after` and **not** the verdict's signed bytes:
+`integrityVerdictPayload`, `StoredIntegrityReportSchema`, `canonicalStoredReport` and
+`storedReportFrom` must move together or the stored report stops being byte-identical to its
+committed payload, which is the trap ADR-0371 reverted a field out of. None is touched.
+
 ## Open questions
 
 | Question | Owner | Deadline |
