@@ -48,7 +48,7 @@ function compliantEvidence(framework = "soc2_type2"): ControlEvidence[] {
     ),
     evidenceFromDrReadiness(
       "resilience.dr_readiness",
-      { ready: true, unevidencedAxes: [], counts: { totalIssues: 0 } },
+      { ready: true, unevidencedAxes: [], unreadableEvidenceAxes: [], counts: { totalIssues: 0 } },
       AT,
     ),
   ];

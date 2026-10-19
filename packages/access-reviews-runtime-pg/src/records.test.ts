@@ -324,6 +324,28 @@ describe("requireNumeric", () => {
   it("refuses a non-finite number", () => {
     expect(() => requireNumeric(Number.POSITIVE_INFINITY, "revoke_rate")).toThrow(/revoke_rate/);
   });
+
+  /**
+   * The message is `unreadableDetail`'s non-zod arm, which passes an `Error`'s own text through
+   * verbatim — so a guard that interpolates the column's value puts a row value into a finding
+   * (ADR-0367). It used to render `JSON.stringify(value)`, and the sibling guards beside it never
+   * did. Asserted on the value rather than on the message's wording, so it holds however the
+   * sentence is reworded.
+   */
+  it("names the column and never the value it refused, which reaches a finding verbatim", () => {
+    for (const value of ["000-11-2222", "MRN-1", { ssn: "000-11-2222" }, Number.NaN]) {
+      let message = "";
+      try {
+        requireNumeric(value, "completion_rate");
+      } catch (err) {
+        message = err instanceof Error ? err.message : String(err);
+      }
+      expect(message).toContain("completion_rate");
+      expect(message).not.toContain("000-11-2222");
+      expect(message).not.toContain("MRN-1");
+      expect(message).not.toContain("NaN");
+    }
+  });
 });
 
 describe("rowToEvidence", () => {

@@ -2,6 +2,7 @@ import { ZodError, z } from "zod";
 import { describe, expect, it } from "vitest";
 
 import {
+  WITHHELD_PATH_COMPONENT,
   numericIdentity,
   readRows,
   readRowsWithUnreadable,
@@ -186,9 +187,83 @@ describe("unreadableDetail", () => {
     expect(unreadableDetail(err)).not.toContain("retired-by-hand");
   });
 
-  it("names a nested field by its full path", () => {
+  /**
+   * This replaces an assertion that pinned the **old** behaviour, `"a.b: invalid_type"` — the full
+   * path render, which is the disclosure the `z.record` cases below demonstrate. It is inverted
+   * rather than deleted because the fact it was pinning is still a fact worth pinning: a nested
+   * refusal must still name the column, and that is what `a` is.
+   */
+  it("names a nested field by its column and withholds the component below it", () => {
     const Nested = z.object({ a: z.object({ b: z.string() }) });
-    expect(unreadableDetail(parseFailure(Nested, { a: { b: 7 } }))).toBe("a.b: invalid_type");
+    expect(unreadableDetail(parseFailure(Nested, { a: { b: 7 } }))).toBe(
+      `a.${WITHHELD_PATH_COMPONENT}: invalid_type`,
+    );
+  });
+
+  /**
+   * **The key is the hazard**: for a `z.record` the path component *is* a stored key, so the obvious
+   * `path.join(".")` render discloses it — and the key may embed the value, which is what
+   * `AccessReviewItem.grantAttributes` (`z.record(z.string(), z.string())`) makes reachable through
+   * `readRowsWithUnreadable`.
+   *
+   * Asserted in the same shape as the enum case above — the value is in the error we were handed and
+   * must not be in the detail — so the property is checkable rather than asserted in prose.
+   */
+  it("withholds a `z.record` key, because for a record the path component is the stored key", () => {
+    const WithRecord = z.object({ grantAttributes: z.record(z.string(), z.string()) });
+    const err = parseFailure(WithRecord, {
+      grantAttributes: { "employee_ssn_123-45-6789": 7 },
+    });
+    expect(err.message).toContain("employee_ssn_123-45-6789");
+    expect(unreadableDetail(err)).toBe(
+      `grantAttributes.${WITHHELD_PATH_COMPONENT}: invalid_type`,
+    );
+    expect(unreadableDetail(err)).not.toContain("employee_ssn");
+    expect(unreadableDetail(err)).not.toContain("123-45-6789");
+  });
+
+  it("de-duplicates the keys of a record, so the detail does not grow with the bad ones", () => {
+    // The old render printed one entry per key, so a row with fifty refused attributes printed
+    // fifty stored keys. They collapse to one entry now, which is also why the withheld component
+    // is a single marker rather than one per key.
+    const WithRecord = z.object({ grantAttributes: z.record(z.string(), z.string()) });
+    const err = parseFailure(WithRecord, { grantAttributes: { ssn: 1, dob: 2, salary: 3 } });
+    expect(err.issues).toHaveLength(3);
+    expect(unreadableDetail(err)).toBe(
+      `grantAttributes.${WITHHELD_PATH_COMPONENT}: invalid_type`,
+    );
+    for (const key of ["ssn", "dob", "salary"]) {
+      expect(unreadableDetail(err)).not.toContain(key);
+    }
+  });
+
+  it("still separates a bad JSONB column from a bad field inside it", () => {
+    // Two facts with two remedies: `record` is not an object at all, or a field in it is wrong.
+    // Collapsing the path to its head alone would have rendered both as `record: …`.
+    const Outer = z.object({ record: z.object({ outcome: z.enum(["passed", "failed"]) }) });
+    expect(unreadableDetail(parseFailure(Outer, { record: "not an object" }))).toBe(
+      "record: invalid_type",
+    );
+    expect(unreadableDetail(parseFailure(Outer, { record: { outcome: "x" } }))).toBe(
+      `record.${WITHHELD_PATH_COMPONENT}: invalid_enum_value`,
+    );
+  });
+
+  it("renders an array index, which is a position and never stored text", () => {
+    // So a refused element still says *which* element, where withholding every component past the
+    // head would have said only `attestations`.
+    const Outer = z.object({
+      attestations: z.array(z.object({ outcome: z.enum(["erased", "retained"]) })),
+      obligations: z.array(z.enum(["none", "tax_records_7y"])),
+    });
+    expect(
+      unreadableDetail(
+        parseFailure(Outer, { attestations: [{ outcome: "erased" }, { outcome: "x" }], obligations: [] }),
+      ),
+    ).toBe(`attestations.1.${WITHHELD_PATH_COMPONENT}: invalid_enum_value`);
+    expect(
+      unreadableDetail(parseFailure(Outer, { attestations: [], obligations: ["none", "nope"] })),
+    ).toBe("obligations.1: invalid_enum_value");
   });
 
   it("reads `<root>` for a refusal about the object rather than a field", () => {

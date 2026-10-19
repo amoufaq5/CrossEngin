@@ -85,7 +85,7 @@ import {
   sweepDanglingLinksForTenants,
   type MultiTenantSweepReport,
 } from "./link-sweep.js";
-import { formatUnevidencedAxes } from "@crossengin/dr-runtime";
+import { formatUnevidencedAxes, formatUnreadableEvidenceAxes } from "@crossengin/dr-runtime";
 import { DrReplayer, PostgresDrDrillStore, PostgresDrFailoverStore } from "@crossengin/dr-runtime-pg";
 import {
   PostgresSloEnforcementActionStore,
@@ -3213,7 +3213,13 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         onReport: (r) => {
           console.info(
             `[dr] readiness ready=${r.ready.toString()} issues=${r.counts.totalIssues.toString()}` +
-              ` unevidenced=${formatUnevidencedAxes(r.unevidencedAxes)}`,
+              ` unevidenced=${formatUnevidencedAxes(r.unevidencedAxes)}` +
+              // The second axis list, for the first list's reason one fact across: `ready=false
+              // issues=0 unevidenced=none` is otherwise a pair with nothing explaining it, and the
+              // explanation is that a row this pass read could not be represented. Both lists are
+              // three-valued (`null` is *nobody looked*, ADR-0331), and each formatter renders its
+              // own third state, so neither can be inferred from the other's text.
+              ` unreadable=${formatUnreadableEvidenceAxes(r.unreadableEvidenceAxes)}`,
           );
           // Named separately, and only when there is something to name, because the remedy is the
           // operator's and is not guessable: three of the four axes are hand-typed
@@ -3235,11 +3241,14 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           }
         },
         // Required on the options rather than optional, which is what made this line get written
-        // instead of remembered (ADR-0371's `onRefused`). It is the only surface a refused
-        // execution row reaches: the snapshot records the readable rows and `unevidencedAxes`
-        // deliberately does NOT name the axis, because "no record on drills" is false when one
-        // readable drill is sitting beside the refused one — and that sentence is rendered verbatim
-        // into a SOC 2 pack by `drAxisUnevidencedFinding`.
+        // instead of remembered (ADR-0371's `onRefused`). `unevidencedAxes` still deliberately does
+        // NOT name the axis, because "no record on drills" is false when one readable drill is
+        // sitting beside the refused one — and that sentence is rendered verbatim into a SOC 2 pack
+        // by `drAxisUnevidencedFinding`. What has changed is that this is no longer the *only*
+        // surface such a row reaches: the snapshot now names the axis on its own second list, which
+        // is what the `unreadable=` segment above renders and what stops the control certifying.
+        // This keeps the one thing that list cannot carry — WHICH row, and why — and that is the
+        // half an operator needs to go and look.
         onUnreadableExecution: (row) => {
           console.error(
             `[dr] readiness: a ${row.axis} row could not be read` +

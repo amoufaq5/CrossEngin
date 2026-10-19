@@ -297,7 +297,9 @@ describe("PostgresDrDrillStore.listRecent", () => {
    * The row that is the subject of ADR-0373: readable columns, a readable business key, and an
    * embedded record the contract refuses — the state ADR-0289 names, a row edited into a shape the
    * contract forbids and the CHECK permits. `record.outcome` is a `z.enum`, so the issue zod raises
-   * is `invalid_enum_value`, which is the one issue kind that carries the stored value on it.
+   * is `invalid_enum_value`, which is the one issue kind that carries the stored value on it — and
+   * the detail renders as `record.<withheld>`, since `renderIssuePath` keeps the column and drops
+   * what is under it.
    */
   function unreadableDbRow() {
     return {
@@ -330,7 +332,12 @@ describe("PostgresDrDrillStore.listRecent", () => {
     );
     await store.listRecent(null, seen.report, 10);
     const detail = seen.rows[0]?.detail ?? "";
-    expect(detail).toContain("record.outcome");
+    // `record.<withheld>` and not `record.outcome`: `renderIssuePath` prints the first component —
+    // which is the column, and so the thing a remedy needs — and collapses every deeper string one.
+    // The precision lost here is a real cost paid elsewhere: `outcome` is a declared key of a
+    // `z.object` and safe to print, but a `z.record` component IS the stored key, and the two are
+    // byte-identical in `issue.path` with nothing on the issue or the error to separate them.
+    expect(detail).toContain("record.<withheld>");
     expect(detail).toContain("invalid_enum_value");
     // The store must not route around `unreadableDetail`, which exists because a `ZodError`'s own
     // `message` embeds `received` — so an `err.message` detail would carry a stored value into a

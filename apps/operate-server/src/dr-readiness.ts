@@ -132,8 +132,8 @@ export function buildDrReadinessLifecycle(
    * `assessDrReadiness` to say which axes it had no evidence for rather than scoring `ready: true`
    * over an empty input — ran only on a pass that completed, so a single refused row disarmed it.
    *
-   * **What is deliberately *not* done: an unreadable row does not mark its axis unevidenced**, and
-   * the reason is that the report cannot say it without saying something false. Measured against
+   * **An unreadable row still does not mark its axis unevidenced**, and the reason is unchanged:
+   * the report cannot say that without saying something false. Measured against
    * `packages/dr-runtime/src/readiness.ts`:
    *
    * - For a **failover** it is not expressible at all. `unevidencedAxes` is typed
@@ -149,13 +149,25 @@ export function buildDrReadinessLifecycle(
    *   finding: ranked below an honest incomplete answer (ADR-0336), and ADR-0337's falsely-true
    *   control pointed the other way.
    *
-   * The degenerate case needs no special handling and is already right: if *every* row on an axis
-   * is unreadable the readable list is empty, `assessDrReadiness` names the axis for the ordinary
-   * reason, and `ready` is `false`. So the gap is the **partial** page, where the honest answer is
-   * the narrower one — record the snapshot, carry the count to the operator, claim nothing about
-   * the axis. Closing it properly needs `DrReadinessReport` to gain a field for a fact it has no
-   * vocabulary for today (*this axis's evidence was partly unreadable*, which is neither
-   * `unevidenced` nor an issue count), and that is a contract change in `@crossengin/dr-runtime`.
+   * **What the pass does instead, and what ADR-0373 left open until it did:** it tells
+   * `assessDrReadiness` which axes came back short, through `DrEvidenceReadOutcome` — the report's
+   * own second field for a fact that is neither `unevidenced` nor an issue count. Without it, the
+   * snapshot this pass records described the readable subset and nothing in it said so, so
+   * `drReadinessSource` read `ready: true, totalIssues: 0, unevidencedAxes: []` and
+   * `evidenceFromDrReadiness` signed the control `satisfied` — a figure computed over a scope that
+   * could not be fully read, published as a measurement. The refused row reached a `console.error`
+   * and nothing durable.
+   *
+   * The axis set is accumulated **in the same closure that calls the reporter**, so a row reported
+   * and not counted is not expressible here; that is the only fence available, because
+   * `unreadableEvidenceAxes` is optional on the contract (absence means `[]` there, since three of
+   * the five axes have no read behind them at all — see its own doc).
+   *
+   * The degenerate case needed no special handling and still does not: if *every* row on an axis is
+   * unreadable the readable list is empty and `assessDrReadiness` names the axis in
+   * `unevidencedAxes` for the ordinary reason. It now names it in **both** lists, which is strictly
+   * more than before — *nobody drilled* and *drills happened and cannot be read* are different
+   * facts with opposite remedies.
    */
   async function assessOnce(): Promise<DrReadinessReport> {
     // The scope is named, which it could not be before: these two reads took a limit alone, so as
@@ -165,9 +177,18 @@ export function buildDrReadinessLifecycle(
     const scope = config.tenantId ?? null;
     // The store's reporter says only `{identity, detail}`; which history the row came from is this
     // function's knowledge and not the store's, so the axis is attached here.
+    //
+    // The set and the callback are fed by **one** closure, which is the whole fence on the pair:
+    // `unreadableEvidenceAxes` is optional on `DrEvidenceReadOutcome`, so nothing in the contract
+    // can demand it of this function, and a second traversal to collect the axes would be the one
+    // place a reported row could go uncounted. A `Set` rather than a list because the reporter fires
+    // once per refused row; `assessDrReadiness` de-duplicates and orders off its own axis tuple
+    // anyway, so this is belt and braces rather than the only guard.
+    const unreadableAxes = new Set<UnreadableDrExecution["axis"]>();
     const reportOn =
       (axis: UnreadableDrExecution["axis"]): UnreadableRowReporter =>
       (row) => {
+        unreadableAxes.add(axis);
         opts.onUnreadableExecution({ ...row, axis });
       };
     const [failoverRows, drillRows] = await Promise.all([
@@ -178,6 +199,12 @@ export function buildDrReadinessLifecycle(
       ...config.input,
       failovers: failoverRows.map((row) => row.record),
       drills: drillRows.map((row) => row.record),
+      // Built **after** both reads have settled, so the set is complete before it is read — and
+      // carried on the input rather than as a parameter of `assess`, because this function is two
+      // hops from `assessDrReadiness` (`buildPersistentDrRuntime(...).assess` → `DrRuntime.assess`
+      // → it) and a parameter would be two intermediaries that could drop it. It travels with the
+      // two lists it is about instead, and no store or runtime signature changes to carry it.
+      evidenceRead: { unreadableEvidenceAxes: [...unreadableAxes] },
     };
     return persistent.assess(input, { tenantId: config.tenantId });
   }

@@ -1,4 +1,4 @@
-import { unreadableDetail, type PgConnection } from "@crossengin/kernel-pg";
+import { readRows, textIdentity, unreadableDetail, type PgConnection } from "@crossengin/kernel-pg";
 import {
   GdprDeletionRequestSchema,
   canTransitionDeletionRequest,
@@ -181,9 +181,11 @@ export class DeletionRequestCommittedUnreadable extends Error {
  * audiences — a scheduler, an HTTP route, an audit sweep — act on. What is **not** kept local is the
  * `detail`. This module computed it as `err.message`, and for an `invalid_enum_value` issue that
  * string *is* the stored value — so the rule argued three paragraphs above was broken by its own
- * implementation. `unreadableDetail` is imported for that, and the three sites that build one go
- * through it: this reporter, and the two `DeletionRequestCommittedUnreadable` throws, whose message
- * reaches an HTTP body and the runner's log.
+ * implementation. `unreadableDetail` is imported for that, and the two sites that still build a
+ * detail here go through it: both `DeletionRequestCommittedUnreadable` throws, whose message reaches
+ * an HTTP body and the runner's log. The **list** reporter no longer builds one at all —
+ * `readRequestRows` is `kernel-pg`'s `readRows`, which computes the detail itself, so the sweep path
+ * cannot drift from the rule even by someone editing this file.
  */
 export interface UnreadableRequestRow {
   readonly requestId: string | null;
@@ -203,12 +205,6 @@ export interface UnreadableRequestRow {
  */
 export type UnreadableRowReporter = (row: UnreadableRequestRow) => void;
 
-/** Best-effort handle for a row the contract refused. The column may be the reason it was refused. */
-function requestIdOf(row: Record<string, unknown>): string | null {
-  const raw = row["request_id"];
-  return typeof raw === "string" && raw.length > 0 ? raw : null;
-}
-
 /**
  * A page into requests: every row that can be represented, and a report for every row that cannot.
  *
@@ -220,24 +216,34 @@ function requestIdOf(row: Record<string, unknown>): string | null {
  * clean result. ADR-0289's rule (a parse failure is a finding, not an exception) and ADR-0327's (a
  * sweep that found a bad record has even less standing to act than one that found none).
  *
+ * **This is `kernel-pg`'s `readRows` and no longer a local copy of its loop.** ADR-0373 lifted the
+ * primitive and retired two copies, and this was a third it did not reach — verbatim apart from its
+ * field name, and *missing the one property the primitive exists to hold*: `requestIdOf(row)` sat
+ * inside the `catch` but not inside a `try` of its own, so a throw from the identity would have cost
+ * every row behind it, which is the defect one level in from the one the loop fixes. Latent, because
+ * `requestIdOf` could not throw — and that is exactly the argument for not keeping a copy, since the
+ * next identity expression written here is under no such guarantee. `requestIdOf` is gone with it: it
+ * was byte-identical to `textIdentity(row, "request_id")`, a fourth spelling of that predicate.
+ *
+ * **The whole of what is local is the mapping**, one line of it: the primitive answers
+ * `UnreadableRow {identity, detail}` and this surface's reporter is handed `UnreadableRequestRow
+ * {requestId, detail}`. The field name stays `requestId` deliberately — a reporter here is handed a
+ * *request*, and that is what its three audiences (a scheduler, an HTTP route, an audit sweep) act on
+ * — so `identity` is renamed at this one point rather than at three call sites, and the two types
+ * stay structurally identical so the rename cannot quietly become a change of meaning.
+ *
  * `read()` deliberately does **not** take this path; see its own comment for why.
  */
 function readRequestRows(
   rows: readonly Record<string, unknown>[],
   onUnreadable: UnreadableRowReporter,
 ): readonly GdprDeletionRequest[] {
-  const out: GdprDeletionRequest[] = [];
-  for (const row of rows) {
-    try {
-      out.push(rowToDeletionRequest(row));
-    } catch (err) {
-      onUnreadable({
-        requestId: requestIdOf(row),
-        detail: unreadableDetail(err),
-      });
-    }
-  }
-  return out;
+  return readRows(
+    rows,
+    rowToDeletionRequest,
+    (row) => textIdentity(row, "request_id"),
+    (unreadable) => onUnreadable({ requestId: unreadable.identity, detail: unreadable.detail }),
+  );
 }
 
 function isoOf(value: unknown): string {

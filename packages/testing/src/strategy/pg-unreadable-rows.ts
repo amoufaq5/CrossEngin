@@ -2356,16 +2356,6 @@ export const UNREADABLE_ROW_SITES: readonly UnreadableRowDeclaration[] = Object.
       "Every list request a tenant makes against the typed column store, so this is the most-travelled conversion in the product.",
   },
   {
-    file: "packages/tenant-lifecycle-pg/src/deletion-request-store.ts",
-    scope: "readRequestRows",
-    conversion: "rowToDeletionRequest",
-    reason: "unmigrated",
-    consequence:
-      "nothing is lost; the cost is that UnreadableRequestRow and UnreadableRow are two shapes for one fact",
-    note:
-      "ADR-0372's own implementation: readRequestRows is the try/catch-and-report loop readRows was lifted from, with its own UnreadableRequestRow type and its own reporter.",
-  },
-  {
     file: "packages/tenant-lifecycle-pg/src/lifecycle-event-store.ts",
     scope: "listForTenant",
     conversion: "rowToLifecycleEvent",

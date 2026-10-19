@@ -362,7 +362,14 @@ export function requireNumeric(value: unknown, field: string): number {
         ? value
         : Number(value);
   if (!Number.isFinite(n)) {
-    throw new Error(`row column ${field} is not a finite number: ${JSON.stringify(value)}`);
+    // The field and no value, which is `unreadableDetail`'s rule reaching a **non-zod** guard: that
+    // function passes an `Error`'s own `message` through verbatim, on the stated ground that the
+    // messages in this repo name no row value — so a message that interpolates one is the
+    // disclosure, not an exception to it. It was the only such guard among the migrated mappers
+    // (`requireIso` and `requireStringArray` beside it already name a field alone), and it is
+    // latent rather than live only because `rowToEvidence`'s read is still declared `unmigrated`:
+    // it would travel into a finding on the day that backlog entry is worked (ADR-0367).
+    throw new Error(`row column ${field} is not a finite number`);
   }
   return n;
 }

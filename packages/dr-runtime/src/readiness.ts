@@ -35,6 +35,54 @@ export interface DrReadinessInput {
   readonly maxRunbookDaysSinceReview?: number;
   readonly maxRunbookDaysSinceTest?: number;
   readonly now?: Date;
+  /**
+   * How the read that produced the five lists above came back, which is not itself evidence.
+   *
+   * **A nested object and deliberately not a sixth list-valued member**, because ADR-0372's type
+   * fence refused that and was right to: every list-valued member of this interface *is* an
+   * evidence axis by `DrReadinessAxis`' own definition, so a `readonly DrReadinessAxis[]` here
+   * makes the alias circular — measured, `TS2502` on the field and `TS2456` on the alias. One
+   * object is not a list, and what it holds is a statement *about* the evidence rather than more of
+   * it.
+   *
+   * It rides on the input and not on a second parameter of `assessDrReadiness`, which was built
+   * first and measured worse. The only caller that can fill it is two hops from this function —
+   * `apps/operate-server`'s readiness lifecycle calls `buildPersistentDrRuntime(...).assess`, which
+   * calls `DrRuntime.assess`, which calls this — so a parameter would be two new places to drop
+   * the fact, and dropping it reads as *no row was refused*: this run's most-found shape, in the
+   * increment that exists to close an instance of it. A field on the object that carries the lists
+   * cannot be separated from them, and `DrRuntime.assess`' own `{...input, now}` spread carries it
+   * with no edit at either hop.
+   */
+  readonly evidenceRead?: DrEvidenceReadOutcome;
+}
+
+/** What a caller's **read** of the evidence came back as. See `DrReadinessInput.evidenceRead`. */
+export interface DrEvidenceReadOutcome {
+  /**
+   * The axes whose page came back **incomplete** — at least one stored row this binary could not
+   * represent.
+   *
+   * Supplied rather than derived, and that is the whole reason it exists: `assessDrReadiness` is
+   * handed five lists and has no way to know whether a list is the whole of what is on disk. Only
+   * the caller that issued the read knows, and before ADR-0373 that caller never got the chance to
+   * say — a refused row threw out of the page, so no snapshot was recorded at all. Now the pass
+   * completes over the readable subset, and without this the report scores the subset as if it were
+   * everything (see `DrReadinessReportSchema.unreadableEvidenceAxes`).
+   *
+   * **Optional, with absence meaning `[]`**, which is the one place in this area that is not
+   * ADR-0331's claim-versus-nobody-looked rule, because here absence is decidable. **Three** of the
+   * five axes are read from no store: `--dr-readiness-config` supplies `runbooks`, `backups` and
+   * `replication` as literal JSON lists, so for a caller passing literals there is no read behind
+   * them and "no row was refused" is true by construction — a required field would demand a
+   * ceremonial `[]` from every caller for whom the question is meaningless, `assessDrReadiness({})`
+   * included. The one caller that *does* read from a store is fenced where the fence can bite:
+   * `DrReadinessLifecycleOptions.onUnreadableExecution` is required, and the lifecycle accumulates
+   * this list in the same closure that invokes it, so a row reported and not counted is not
+   * expressible there. The report's own field keeps the three-valued distinction, because there
+   * absence means a stored row written before the check and nothing can decide it.
+   */
+  readonly unreadableEvidenceAxes?: readonly DrReadinessAxis[];
 }
 
 export const DEFAULT_MAX_RUNBOOK_DAYS_SINCE_REVIEW = 180;
@@ -113,6 +161,46 @@ export const DR_EVIDENCE_AXES = [
 
 export const DrEvidenceAxisSchema = z.enum(DR_EVIDENCE_AXES);
 
+/**
+ * All five axes, `failovers` included — the vocabulary for facts that are **not** about an empty
+ * list.
+ *
+ * `DR_EVIDENCE_AXES` is the four whose emptiness is an absence of evidence, and narrowing it that
+ * way is what makes `unevidencedAxes` honest: naming `failovers` there is a compile error because
+ * an empty failover list is the healthy claim that nothing failed over. That narrowing is a
+ * statement about **emptiness**, so it does not transfer to any other question, and
+ * `unreadableEvidenceAxes` is the first question it was wrong for — a refused failover row is
+ * incomplete failover evidence whatever an empty list would have meant.
+ *
+ * Typed over all five and deliberately **not** over the two that have a store read today
+ * (`failovers` and `drills`; `runbooks`, `backups` and `replication` arrive as literal
+ * `--dr-readiness-config` lists, so no row can be refused on them). That narrowing was considered
+ * and refused on the difference between *unproduced* and *meaningless*: `failovers`-as-unevidenced
+ * is meaningless, while `backups`-as-partly-unreadable is merely unproduced **today** —
+ * `meta.backup_records` is catalogued and has no writer (ADR-0372's own open question 6), so the
+ * day it gets one a refused backup row is a legitimate value this enum would have to be widened to
+ * admit, with every stored row's vocabulary in question. A schema admitting a value no producer
+ * makes is this repo's accepted shape (`DR_VERDICT_UNEXPLAINED_FINDING` is the same); a schema
+ * refusing a value a future producer legitimately makes is a migration. The narrowing that *is*
+ * load-bearing lives at the call site that knows: `UnreadableDrExecution.axis` in
+ * `apps/operate-server/src/dr-readiness.ts` is `Extract`ed to exactly the two axes the lifecycle
+ * reads from a store.
+ *
+ * A literal tuple with `satisfies` for `DR_EVIDENCE_AXES`' two measured reasons — `z.enum` wants a
+ * non-empty tuple, and `pg-value-set-domains.ts` resolves an exported enum's members by reading
+ * them — and fenced in both directions: `satisfies` refuses a non-axis here, and the axis-map tests
+ * recompute exact membership from `DR_AXIS_EMPTY_MEANS` rather than from this list.
+ */
+export const DR_READINESS_AXES = [
+  "failovers",
+  "drills",
+  "runbooks",
+  "backups",
+  "replication",
+] as const satisfies readonly DrReadinessAxis[];
+
+export const DrReadinessAxisSchema = z.enum(DR_READINESS_AXES);
+
 export const FailoverBreachSchema = z.object({
   failoverId: z.string(),
   tier: z.string(),
@@ -156,6 +244,37 @@ export const DrReadinessReportSchema = z.object({
    * producer in this package can forget it.
    */
   unevidencedAxes: z.array(DrEvidenceAxisSchema).nullable().default(null),
+  /**
+   * Which axes' evidence came back with **at least one row this binary could not represent**, with
+   * absent kept apart from empty exactly as its sibling above.
+   *
+   * It is a different fact from `unevidencedAxes` and neither can say the other, which is why there
+   * are two fields rather than one list with a wider enum. `unevidencedAxes` means *this axis
+   * carried no record at all*, and `evidenceFromDrReadiness` renders it verbatim into a SOC 2 pack
+   * as `no <axis> record was supplied, so nothing on that axis was verified` — false the moment one
+   * readable row sits beside the refused one, which is the common case and is a refusal shaped like
+   * a finding (ADR-0336 ranks a wrong answer below a refusal, and a refusal built on a false
+   * statement is still a wrong answer). It also cannot carry `failovers` at all, by design.
+   *
+   * The two **compose** rather than excluding each other, and the pair is more informative than
+   * either: `unevidencedAxes: ["drills"]` alone is *nobody drilled*, while the same beside
+   * `unreadableEvidenceAxes: ["drills"]` is *drills happened and their rows cannot be read* —
+   * ADR-0331's claim-versus-nobody-looked at the axis level, and two opposite remedies (go drill;
+   * go fix the row). So this names an axis whenever **any** of its rows was refused, with no
+   * "partly" claim smuggled into the name.
+   *
+   * Three-valued, `null` by default and deliberately not `[]`, for the sibling's reason: a stored
+   * `report` JSONB written before this check carries no such key, and a `.default([])` would
+   * retro-assert *every axis read completely* over every one of those rows, which is the
+   * falsely-true direction. There is a measured counter-argument and it is refused: before ADR-0373
+   * a refused row threw out of `assessOnce` into the scheduler's `catch`, so **no snapshot was
+   * recorded at all** — every pre-existing row provably came from a pass in which every row read,
+   * and `[]` would be true of it. That proves something about one producer at one commit, where the
+   * default is applied on every parse for ever, including a hand-edited row and a later producer;
+   * and the premise is the behaviour ADR-0373 *removed*, so the population it holds for is closed.
+   * `null` asserts nothing, and the one reader refuses to certify on it.
+   */
+  unreadableEvidenceAxes: z.array(DrReadinessAxisSchema).nullable().default(null),
   counts: z.object({
     overdueDrills: z.number().int().nonnegative(),
     staleRunbooks: z.number().int().nonnegative(),
@@ -224,6 +343,16 @@ export function assessDrReadiness(input: DrReadinessInput): DrReadinessReport {
   };
   const unevidencedAxes = DR_EVIDENCE_AXES.filter((axis) => suppliedOnAxis[axis].length === 0);
 
+  // Filtered off `DR_READINESS_AXES` rather than copied from the caller, which de-duplicates and
+  // puts the list in the report's own axis order in one expression — `unevidencedAxes`' idiom one
+  // line up. A caller reporting the same axis per refused row (which the lifecycle does, once per
+  // row) must not produce `["drills", "drills", "drills"]` in a stored record, and an order that
+  // depended on which read finished first would make two passes over one estate compare unequal.
+  const reportedUnreadable = input.evidenceRead?.unreadableEvidenceAxes ?? [];
+  const unreadableEvidenceAxes = DR_READINESS_AXES.filter((axis) =>
+    reportedUnreadable.includes(axis),
+  );
+
   const counts = {
     overdueDrills: overdueDrillIds.length,
     staleRunbooks: staleRunbookIds.length,
@@ -249,8 +378,24 @@ export function assessDrReadiness(input: DrReadinessInput): DrReadinessReport {
     counts.drillBreaches;
 
   return DrReadinessReportSchema.parse({
-    ready: counts.totalIssues === 0 && unevidencedAxes.length === 0,
+    // **An unreadable axis is a third way to be not ready**, and folding it in here does not change
+    // what `ready` means — ADR-0372 already made this verdict "no issue was found *and* the
+    // evidence was complete" when it added the `unevidencedAxes` clause, so an axis whose page had
+    // refused rows is the second way evidence is incomplete rather than a new kind of fact. The
+    // alternative, guarding only in `evidenceFromDrReadiness`, was measured and refused for a
+    // reason this run keeps finding: `formatDrReadiness` and the `[dr] readiness ready=…` boot
+    // line read `ready`, so a stored `ready: true` beside a `satisfied: false` control would be
+    // one process contradicting itself about one estate, with the **reassuring** half on the
+    // surface an operator actually reads (ADR-0361). `totalIssues` is untouched for ADR-0372's
+    // stated reason: the seven counts are projected as their own `INTEGER` columns and a reader
+    // sums them, so an eighth summand would make the stored total disagree with the columns beside
+    // it. `ready = false` with `total_issues = 0` is explicable; a wrong sum is not.
+    ready:
+      counts.totalIssues === 0 &&
+      unevidencedAxes.length === 0 &&
+      unreadableEvidenceAxes.length === 0,
     unevidencedAxes,
+    unreadableEvidenceAxes,
     overdueDrillIds,
     staleRunbookIds,
     expiredBackupIds,
@@ -270,8 +415,44 @@ export function assessDrReadiness(input: DrReadinessInput): DrReadinessReport {
  * cannot make.
  */
 export function formatUnevidencedAxes(axes: readonly DrEvidenceAxis[] | null): string {
-  if (axes === null) return "not recorded (this report predates the check)";
-  if (axes.length === 0) return "none — every axis carried a record";
+  return formatThreeValuedAxes(
+    axes,
+    "not recorded (this report predates the check)",
+    "none — every axis carried a record",
+  );
+}
+
+/**
+ * The same three states for the second axis list, with its own two sentences.
+ *
+ * A sibling rather than a widened `formatUnevidencedAxes`, because the two lists answer different
+ * questions and a reader meeting one sentence under two labels learns nothing from the label. What
+ * must **not** diverge is the rule — `null` is not "none" — so that lives in one place below and
+ * both of these are the sentences.
+ */
+export function formatUnreadableEvidenceAxes(axes: readonly DrReadinessAxis[] | null): string {
+  return formatThreeValuedAxes(
+    axes,
+    "not recorded (this report predates the unreadable-row check)",
+    "none — every axis's evidence read completely",
+  );
+}
+
+/**
+ * `null` must not print as "none", which is the one rendering that would restate the defect in the
+ * line written to report it: "no axis is unevidenced" is the claim a report predating the check
+ * cannot make, and "every axis read completely" is the claim a report predating ADR-0373 cannot.
+ *
+ * One function and not two copies, so the rule cannot hold for one list and lapse for the other —
+ * which is how one half of a pair goes quiet (ADR-0373's own class, and ADR-0361's).
+ */
+function formatThreeValuedAxes(
+  axes: readonly string[] | null,
+  absentSentence: string,
+  emptySentence: string,
+): string {
+  if (axes === null) return absentSentence;
+  if (axes.length === 0) return emptySentence;
   return axes.join(", ");
 }
 
@@ -280,16 +461,28 @@ export function formatDrReadiness(report: DrReadinessReport): string {
   // The headline carries the unevidenced figure beside the issue count, because without it a reader
   // meets `NOT READY (0 issue(s))` on the first line with nothing on it explaining the pair.
   const unevidenced = report.unevidencedAxes;
+  const unreadable = report.unreadableEvidenceAxes;
   const verdictSuffix =
     unevidenced === null
       ? ", unevidenced axes not recorded"
       : unevidenced.length === 0
         ? ""
         : `, ${unevidenced.length} axis(es) unevidenced`;
+  // Appended rather than folded into the suffix above, so a report that is both carries both
+  // reasons: a `NOT READY (0 issue(s))` headline whose only explanation was dropped is the
+  // unexplained pair this function's own comment exists to prevent, and now there are two ways to
+  // reach it.
+  const unreadableSuffix =
+    unreadable === null
+      ? ", unreadable-row check not recorded"
+      : unreadable.length === 0
+        ? ""
+        : `, ${unreadable.length} axis(es) partly unreadable`;
   lines.push(
-    `DR readiness: ${report.ready ? "READY" : "NOT READY"} (${report.counts.totalIssues} issue(s)${verdictSuffix})`,
+    `DR readiness: ${report.ready ? "READY" : "NOT READY"} (${report.counts.totalIssues} issue(s)${verdictSuffix}${unreadableSuffix})`,
   );
   lines.push(`  unevidenced axes:       ${formatUnevidencedAxes(unevidenced)}`);
+  lines.push(`  unreadable evidence:    ${formatUnreadableEvidenceAxes(unreadable)}`);
   lines.push(`  overdue drills:         ${report.counts.overdueDrills}`);
   lines.push(`  stale runbooks:         ${report.counts.staleRunbooks}`);
   lines.push(`  expired backups:        ${report.counts.expiredBackups}`);

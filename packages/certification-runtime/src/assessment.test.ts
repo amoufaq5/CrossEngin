@@ -40,7 +40,7 @@ function fullyCompliantEvidence(): ControlEvidence[] {
     ),
     evidenceFromDrReadiness(
       "resilience.dr_readiness",
-      { ready: true, unevidencedAxes: [], counts: { totalIssues: 0 } },
+      { ready: true, unevidencedAxes: [], unreadableEvidenceAxes: [], counts: { totalIssues: 0 } },
       AT,
     ),
   ];
@@ -87,7 +87,7 @@ describe("assessControl", () => {
   it("ignores evidence whose sourceKind does not match the control", () => {
     const wrong = evidenceFromDrReadiness(
       "data.encryption_at_rest",
-      { ready: true, unevidencedAxes: [], counts: { totalIssues: 0 } },
+      { ready: true, unevidencedAxes: [], unreadableEvidenceAxes: [], counts: { totalIssues: 0 } },
       AT,
     );
     expect(assessControl(enc, "soc2_type2", [wrong]).status).toBe("not_assessed");

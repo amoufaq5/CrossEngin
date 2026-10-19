@@ -15,10 +15,14 @@ import {
   assessDrReadiness,
   formatDrReadiness,
   formatUnevidencedAxes,
+  formatUnreadableEvidenceAxes,
   DR_AXIS_EMPTY_MEANS,
   DR_EVIDENCE_AXES,
+  DR_READINESS_AXES,
   DrEvidenceAxisSchema,
+  DrReadinessAxisSchema,
   DrReadinessReportSchema,
+  type DrEvidenceReadOutcome,
   type DrReadinessInput,
 } from "./readiness.js";
 
@@ -347,6 +351,149 @@ describe("the evidence-axis map", () => {
     expect(DrEvidenceAxisSchema.safeParse("failovers").success).toBe(false);
     expect(DrEvidenceAxisSchema.safeParse("restores").success).toBe(false);
   });
+
+  it("DR_READINESS_AXES is exactly the map's keys, recomputed from the map", () => {
+    // The both-directions fence `DR_EVIDENCE_AXES` gets from the map, for the wider tuple:
+    // `satisfies readonly DrReadinessAxis[]` refuses a non-axis at compile time, and an axis
+    // *missing* from the tuple is what no type can catch, so membership is derived here.
+    expect([...DR_READINESS_AXES].sort()).toEqual(Object.keys(DR_AXIS_EMPTY_MEANS).sort());
+    expect([...DrReadinessAxisSchema.options]).toEqual([...DR_READINESS_AXES]);
+  });
+
+  it("DR_EVIDENCE_AXES is the narrower of the two, and failovers is the difference", () => {
+    // The narrowing is a statement about **emptiness** and so does not transfer to any other
+    // question — which is the whole reason `unreadableEvidenceAxes` is typed over the wider tuple.
+    const wider = new Set<string>(DR_READINESS_AXES);
+    for (const axis of DR_EVIDENCE_AXES) expect(wider.has(axis)).toBe(true);
+    const difference = DR_READINESS_AXES.filter(
+      (axis) => !(DR_EVIDENCE_AXES as readonly string[]).includes(axis),
+    );
+    expect(difference).toEqual(["failovers"]);
+  });
+
+  it("admits failovers as an unreadable-evidence axis, where the evidence enum refuses it", () => {
+    // The pair that says why there are two enums. A refused failover row is incomplete failover
+    // evidence whatever an *empty* failover list would have meant, and `DrEvidenceAxisSchema`
+    // cannot express it.
+    expect(DrReadinessAxisSchema.safeParse("failovers").success).toBe(true);
+    expect(DrEvidenceAxisSchema.safeParse("failovers").success).toBe(false);
+    expect(DrReadinessAxisSchema.safeParse("restores").success).toBe(false);
+  });
+});
+
+describe("unreadableEvidenceAxes", () => {
+  it("is empty when the caller named no unreadable row, and the estate stays ready", () => {
+    const report = assessDrReadiness(fullyEvidenced());
+    expect(report.unreadableEvidenceAxes).toEqual([]);
+    expect(report.ready).toBe(true);
+  });
+
+  it("is NOT ready when an axis's page carried a refused row, with totalIssues still 0", () => {
+    // The ADR-0373 gap, at the contract. A page of one readable drill beside one refused one used
+    // to produce `ready: true, totalIssues: 0, unevidencedAxes: []` — a fully-evidenced,
+    // issue-free verdict over a row set smaller than the one on disk — because the report had no
+    // field for the fact and `unevidencedAxes` could not carry it without rendering a false
+    // sentence into a SOC 2 pack.
+    const report = assessDrReadiness({
+      ...fullyEvidenced(),
+      evidenceRead: { unreadableEvidenceAxes: ["drills"] },
+    });
+    expect(report.unreadableEvidenceAxes).toEqual(["drills"]);
+    expect(report.ready).toBe(false);
+    // Not an eighth summand: the seven counts are projected as their own INTEGER columns and a
+    // reader sums them (ADR-0372).
+    expect(report.counts.totalIssues).toBe(0);
+    // And it is a distinct fact from an absence, so the sibling list is untouched.
+    expect(report.unevidencedAxes).toEqual([]);
+  });
+
+  it("carries failovers, which unevidencedAxes cannot", () => {
+    // The axis that forced a second field rather than a wider enum on the first.
+    const report = assessDrReadiness({
+      ...fullyEvidenced(),
+      evidenceRead: { unreadableEvidenceAxes: ["failovers"] },
+    });
+    expect(report.unreadableEvidenceAxes).toEqual(["failovers"]);
+    expect(report.ready).toBe(false);
+    expect(report.unevidencedAxes).toEqual([]);
+  });
+
+  it("names an axis in both lists when every row on it was refused", () => {
+    // The two compose rather than excluding each other, and the pair is strictly more informative:
+    // `unevidencedAxes: ["drills"]` alone is *nobody drilled*, and the pair is *drills happened
+    // and their rows cannot be read* — two opposite remedies (ADR-0331 at the axis level).
+    const report = assessDrReadiness({
+      ...fullyEvidenced(),
+      drills: [],
+      evidenceRead: { unreadableEvidenceAxes: ["drills"] },
+    });
+    expect(report.unevidencedAxes).toEqual(["drills"]);
+    expect(report.unreadableEvidenceAxes).toEqual(["drills"]);
+    expect(report.ready).toBe(false);
+  });
+
+  it("de-duplicates and orders off the axis tuple, not off the caller's list", () => {
+    // The lifecycle reports once per refused row, so `["drills", "drills"]` is the ordinary input
+    // and must not reach a stored record; and an order that followed which read finished first
+    // would make two passes over one estate compare unequal.
+    const report = assessDrReadiness({
+      ...fullyEvidenced(),
+      evidenceRead: { unreadableEvidenceAxes: ["drills", "failovers", "drills"] },
+    });
+    expect(report.unreadableEvidenceAxes).toEqual(["failovers", "drills"]);
+  });
+});
+
+describe("unreadableEvidenceAxes keeps absent apart from empty", () => {
+  it("parses a report stored before this check as null, never as []", () => {
+    // `unevidencedAxes`' argument one field over, and the counter-argument stated in the schema is
+    // refused here too: a pre-ADR-0373 row provably came from a pass in which every row read
+    // (a refused one threw out of `assessOnce` and no snapshot was written at all), but a
+    // `.default([])` applies on every parse for ever — including a hand-edited row and a later
+    // producer — and the premise is the behaviour ADR-0373 removed.
+    const withoutKey: Record<string, unknown> = { ...assessDrReadiness(fullyEvidenced()) };
+    delete withoutKey["unreadableEvidenceAxes"];
+    const parsed = DrReadinessReportSchema.parse(withoutKey);
+    expect(parsed.unreadableEvidenceAxes).toBeNull();
+    expect(parsed.unreadableEvidenceAxes).not.toEqual([]);
+  });
+
+  it("preserves an explicit [] as the claim it is", () => {
+    const parsed = DrReadinessReportSchema.parse({
+      ...assessDrReadiness(fullyEvidenced()),
+      unreadableEvidenceAxes: [],
+    });
+    expect(parsed.unreadableEvidenceAxes).toEqual([]);
+  });
+
+  it("refuses a stored axis this binary does not recognise rather than coercing it", () => {
+    expect(
+      DrReadinessReportSchema.safeParse({
+        ...assessDrReadiness(fullyEvidenced()),
+        unreadableEvidenceAxes: ["restores"],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("no producer in this package can leave it null", () => {
+    // The default is reachable only from a parse of stored data, which is what makes `null` mean
+    // "predates the check" rather than "the caller forgot" (`unevidencedAxes`' own rule). Every
+    // shape an absent read can take — no `evidenceRead` at all, an empty one, and an explicit
+    // empty list — answers `[]` and never `null`.
+    const reads: readonly (DrEvidenceReadOutcome | undefined)[] = [
+      undefined,
+      {},
+      { unreadableEvidenceAxes: [] },
+    ];
+    for (const evidenceRead of reads) {
+      const report = assessDrReadiness({
+        ...fullyEvidenced(),
+        ...(evidenceRead !== undefined ? { evidenceRead } : {}),
+      });
+      expect(report.unreadableEvidenceAxes).not.toBeNull();
+      expect(report.unreadableEvidenceAxes).toEqual([]);
+    }
+  });
 });
 
 describe("unevidencedAxes keeps absent apart from empty", () => {
@@ -406,6 +553,50 @@ describe("formatDrReadiness", () => {
     const text = formatDrReadiness(assessDrReadiness({ now: NOW }));
     expect(text).toContain("DR readiness: NOT READY (0 issue(s), 4 axis(es) unevidenced)");
     expect(text).toContain("unevidenced axes:       drills, runbooks, backups, replication");
+  });
+
+  it("names a partly-unreadable axis on the headline, so NOT READY (0 issue(s)) is explained", () => {
+    const text = formatDrReadiness(
+      assessDrReadiness({
+        ...fullyEvidenced(),
+        evidenceRead: { unreadableEvidenceAxes: ["drills"] },
+      }),
+    );
+    expect(text).toContain("DR readiness: NOT READY (0 issue(s), 1 axis(es) partly unreadable)");
+    expect(text).toContain("unreadable evidence:    drills");
+  });
+
+  it("carries both reasons when a report is unevidenced and partly unreadable at once", () => {
+    // Either suffix alone would leave the other reason off the one DR surface the binary has.
+    const text = formatDrReadiness(
+      assessDrReadiness({ now: NOW, evidenceRead: { unreadableEvidenceAxes: ["failovers"] } }),
+    );
+    expect(text).toContain("4 axis(es) unevidenced");
+    expect(text).toContain("1 axis(es) partly unreadable");
+  });
+});
+
+describe("formatUnreadableEvidenceAxes", () => {
+  it("does not print null as none, which would restate the defect in the reporting line", () => {
+    expect(formatUnreadableEvidenceAxes(null)).toContain("predates the unreadable-row check");
+    expect(formatUnreadableEvidenceAxes(null)).not.toContain("none");
+  });
+
+  it("renders all three states differently", () => {
+    const rendered = [
+      formatUnreadableEvidenceAxes(null),
+      formatUnreadableEvidenceAxes([]),
+      formatUnreadableEvidenceAxes(["drills"]),
+    ];
+    expect(new Set(rendered).size).toBe(3);
+    expect(formatUnreadableEvidenceAxes(["failovers", "drills"])).toBe("failovers, drills");
+  });
+
+  it("says a different thing from the unevidenced renderer in every state", () => {
+    // Two labels over one sentence teach a reader nothing; the shared part is only the rule that
+    // `null` is not "none".
+    expect(formatUnreadableEvidenceAxes(null)).not.toBe(formatUnevidencedAxes(null));
+    expect(formatUnreadableEvidenceAxes([])).not.toBe(formatUnevidencedAxes([]));
   });
 });
 

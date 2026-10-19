@@ -49,6 +49,77 @@ export interface UnreadableRow {
 export type UnreadableRowReporter = (row: UnreadableRow) => void;
 
 /**
+ * What stands in for a path component that may have come from the row rather than from the schema.
+ *
+ * Shaped like `<root>` on purpose: both are the module saying *this position has no field name I may
+ * print*, and one spelling convention means a reader meets one idiom.
+ */
+export const WITHHELD_PATH_COMPONENT = "<withheld>";
+
+/**
+ * A `ZodError` issue's path as a string that names no value from the row.
+ *
+ * `path.join(".")` is the obvious render and it is a **disclosure**, because a path component is not
+ * always a field name. For a `ZodObject` it always is — an undeclared key is either stripped or
+ * reported as `unrecognized_keys` at the *parent's* path with the keys in `issue.keys`, which this
+ * never prints — but for a `z.record` the component **is the stored key**, and the key may embed the
+ * value, since the contract bounds neither (`z.record(z.string(), z.string())`).
+ *
+ * Verified live as a non-owner on PG 16.13, through `PostgresAccessReviewDecisionStore.listByCampaign`
+ * over one hand-edited `meta.access_review_decisions` row — a shape the `jsonb` column takes with no
+ * CHECK against it. `AccessReviewDecision.modifiedGrantAttributes` rendered
+ * `modifiedGrantAttributes.employee_ssn_123-45-6789: invalid_type` and now reads
+ * `modifiedGrantAttributes.<withheld>: invalid_type`, which is also the text of that store's
+ * `UnreadableRowsError` and so reaches a caller. `AccessReviewItem.grantAttributes` is the **other**
+ * `z.record(z.string(), z.string())` in a stored shape a migrated read parses, and measured it is
+ * *not* reachable: `rowToItem` returns a bare object literal typed as `AccessReviewItem` and never
+ * parses, so that read produces no `ZodError` at all (ADR-0362's class, a type annotation standing in
+ * for the parse) — which means it becomes a live disclosure on the day that mapper is made to parse.
+ *
+ * **Measured, the error cannot tell the two apart.** A `ZodError`'s own keys are
+ * `stack, issues, addIssue, addIssues, name` — it carries no reference to the schema that produced
+ * it — and a record-key issue and a declared-key issue are byte-identical in `path`:
+ * `["grantAttributes", "employee_ssn_123456789"]` against `["actor", "kind"]`, both `string`, with no
+ * marker on the issue. So "render only the components the schema declares" needs the schema, which
+ * is a parameter this function must not grow: ten call sites would pass nothing, and an optional
+ * parameter defaulting to the old render is the disclosure restored as a default — the shape
+ * ADR-0364's addendum and ADR-0371's `onRefused` exist against. A shape test over the component
+ * (identifier-like, bounded) is refused for ADR-0355's reason: a record key is *precisely* a
+ * plausible field name, so every cutoff is unsound rather than merely imprecise — `department` and
+ * `ssn123456789` are both identifiers.
+ *
+ * So the rule is positional, and it is what the detail's job actually needs — **which column to look
+ * at.** `path[0]` is the field the *mapper's own source* names in an object literal, which is the
+ * column or the field mapped from one, and every multi-segment path in the workspace heads a real
+ * JSONB column (`meta.audit_log.actor`, `meta.dr_drill_executions.record`). Every deeper string
+ * component collapses into one `<withheld>` and the tail stops there, since a record's value may
+ * itself be an object. A **numeric** component is rendered wherever it sits: an array index is a
+ * position, never stored text, so `attestations.0.<withheld>` still says which element.
+ *
+ * Two things fall out. `record.<withheld>` and `record` stay distinguishable, so *the JSONB column is
+ * not an object* and *a field inside it is wrong* remain two details with two remedies rather than
+ * one string. And the detail no longer **grows with the number of bad keys**: fifty refused
+ * attributes used to render fifty keys, and now de-duplicate to one entry.
+ */
+function renderIssuePath(path: readonly (string | number)[]): string {
+  if (path.length === 0) return "<root>";
+  const rendered: string[] = [];
+  for (const component of path) {
+    if (typeof component === "number") {
+      rendered.push(component.toString());
+      continue;
+    }
+    if (rendered.length === 0) {
+      rendered.push(component);
+      continue;
+    }
+    rendered.push(WITHHELD_PATH_COMPONENT);
+    break;
+  }
+  return rendered.join(".");
+}
+
+/**
  * Why the contract refused a row, in terms that name no value from it.
  *
  * A `ZodError`'s own `message` is the JSON of its issues, and an `invalid_enum_value` issue carries
@@ -56,8 +127,9 @@ export type UnreadableRowReporter = (row: UnreadableRow) => void;
  * incident note, which is the disclosure ADR-0367 converted six interpolated refusal strings into
  * literals to stop. So the detail is the **field path and the issue code**: `kind:
  * invalid_enum_value` sends a reader to the one column to look at and discloses nothing about what
- * it holds. A path-less issue (a failed object-level refinement) reads `<root>`, because an empty
- * string would render as a stray separator.
+ * it holds. The path itself is rendered by `renderIssuePath`, because a path component is not always
+ * a field name either; a path-less issue (a failed object-level refinement) reads `<root>`, because
+ * an empty string would render as a stray separator.
  *
  * ADR-0372's own `detail` is `err.message`, so this is a correction to it found by generalising it:
  * that module argues at length that no other column of a refused row may be reported and then
@@ -65,9 +137,7 @@ export type UnreadableRowReporter = (row: UnreadableRow) => void;
  */
 export function unreadableDetail(err: unknown): string {
   if (err instanceof ZodError) {
-    const issues = err.issues.map(
-      (issue) => `${issue.path.length === 0 ? "<root>" : issue.path.join(".")}: ${issue.code}`,
-    );
+    const issues = err.issues.map((issue) => `${renderIssuePath(issue.path)}: ${issue.code}`);
     // Sorted and de-duplicated so the same defect reads the same whatever order zod walked the
     // object in — a detail that varies run to run cannot be compared across two sweeps.
     const unique = [...new Set(issues)].sort();

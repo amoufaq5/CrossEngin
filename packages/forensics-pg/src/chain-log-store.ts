@@ -79,9 +79,16 @@ export interface ChainRead {
  * than none.
  *
  * `brokenAt` is the first unreadable row's sequence, which reads because the column is
- * `INTEGER NOT NULL CHECK (sequence_number >= 0)` — the one field that always answers is the one
- * that says which row to go and look at. `null` where even that did not read, rather than a
- * fabricated position.
+ * `BIGINT NOT NULL CHECK (sequence_number >= 0)` — the one field that always answers is the one that
+ * says which row to go and look at. `null` where even that did not read, rather than a fabricated
+ * position.
+ *
+ * **`BIGINT` and not `INTEGER`, which this comment used to say, and the difference is the whole
+ * reason `numericIdentity` has two arms**: node-postgres returns a `BIGINT` as a **string** and an
+ * `INTEGER` as a number (measured on PG 16.13: `select 7::bigint` → `"7"`, `select 7::integer` → `7`;
+ * ADR-0331), so the identity arrives here as `"42"` and it is the string arm that reads it. Citing
+ * the number arm named the one shape this column never produces — and `Number("42")` works either
+ * way, so nothing fails; what a reader would take away is that one `typeof` predicate would do.
  */
 export function unreadableEntryVerdict(
   unreadable: readonly UnreadableRow[],

@@ -5,8 +5,11 @@ import {
   ControlEvidenceSchema,
   evidenceFromAccessReviewEvidence,
   evidenceFromDrReadiness,
+  drAxisEvidenceUnreadableFinding,
   drAxisUnevidencedFinding,
+  DR_AXIS_EVIDENCE_UNREADABLE_KIND,
   DR_AXIS_UNEVIDENCED_KIND,
+  DR_EVIDENCE_READ_UNKNOWN_FINDING,
   DR_EVIDENCE_SCOPE_UNKNOWN_FINDING,
   DR_VERDICT_UNEXPLAINED_FINDING,
   ENCRYPTION_SCOPE_ABSENT_FINDING,
@@ -110,7 +113,7 @@ describe("evidenceFromDrReadiness", () => {
   it("satisfied when ready and every axis carried a record", () => {
     const e = evidenceFromDrReadiness(
       "resilience.dr_readiness",
-      { ready: true, unevidencedAxes: [], counts: { totalIssues: 0 } },
+      { ready: true, unevidencedAxes: [], unreadableEvidenceAxes: [], counts: { totalIssues: 0 } },
       AT,
     );
     expect(e.satisfied).toBe(true);
@@ -131,6 +134,7 @@ describe("evidenceFromDrReadiness", () => {
       {
         ready: false,
         unevidencedAxes: ["drills", "runbooks", "backups", "replication"],
+        unreadableEvidenceAxes: [],
         counts: { totalIssues: 0 },
       },
       AT,
@@ -146,7 +150,12 @@ describe("evidenceFromDrReadiness", () => {
     // so a hand-edited or future row claiming readiness over an unevidenced axis buys nothing.
     const e = evidenceFromDrReadiness(
       "resilience.dr_readiness",
-      { ready: true, unevidencedAxes: ["backups"], counts: { totalIssues: 0 } },
+      {
+        ready: true,
+        unevidencedAxes: ["backups"],
+        unreadableEvidenceAxes: [],
+        counts: { totalIssues: 0 },
+      },
       AT,
     );
     expect(e.satisfied).toBe(false);
@@ -158,7 +167,12 @@ describe("evidenceFromDrReadiness", () => {
     // this one says the report cannot say. `null` is the gap, `[]` is the claim (ADR-0331).
     const e = evidenceFromDrReadiness(
       "resilience.dr_readiness",
-      { ready: true, unevidencedAxes: null, counts: { totalIssues: 0 } },
+      {
+        ready: true,
+        unevidencedAxes: null,
+        unreadableEvidenceAxes: [],
+        counts: { totalIssues: 0 },
+      },
       AT,
     );
     expect(e.satisfied).toBe(false);
@@ -173,6 +187,7 @@ describe("evidenceFromDrReadiness", () => {
       {
         ready: false,
         unevidencedAxes: ["backups"],
+        unreadableEvidenceAxes: [],
         counts: { totalIssues: 1, overdueDrills: 1 },
       },
       AT,
@@ -187,6 +202,7 @@ describe("evidenceFromDrReadiness", () => {
       {
         ready: false,
         unevidencedAxes: [],
+        unreadableEvidenceAxes: [],
         counts: { totalIssues: 2, expiredBackups: 1, failoverBreaches: 1 },
       },
       AT,
@@ -202,7 +218,12 @@ describe("evidenceFromDrReadiness", () => {
   it("does not open the findings with a zero issue count when only an axis is unevidenced", () => {
     const e = evidenceFromDrReadiness(
       "resilience.dr_readiness",
-      { ready: false, unevidencedAxes: ["drills"], counts: { totalIssues: 0 } },
+      {
+        ready: false,
+        unevidencedAxes: ["drills"],
+        unreadableEvidenceAxes: [],
+        counts: { totalIssues: 0 },
+      },
       AT,
     );
     expect(e.findings.some((f) => f.includes("0 DR readiness issue(s)"))).toBe(false);
@@ -219,6 +240,7 @@ describe("evidenceFromDrReadiness", () => {
       {
         ready: false,
         unevidencedAxes: [],
+        unreadableEvidenceAxes: [],
         counts: { totalIssues: 0, overdueDrills: 3, expiredBackups: 2 },
       },
       AT,
@@ -242,7 +264,12 @@ describe("evidenceFromDrReadiness", () => {
     // not one word about what they were.
     const e = evidenceFromDrReadiness(
       "resilience.dr_readiness",
-      { ready: false, unevidencedAxes: [], counts: { totalIssues: 3, replicationViolations: 3 } },
+      {
+        ready: false,
+        unevidencedAxes: [],
+        unreadableEvidenceAxes: [],
+        counts: { totalIssues: 3, replicationViolations: 3 },
+      },
       AT,
     );
     expect(e.findings).toEqual(["3 DR readiness issue(s)", "replication violations: 3"]);
@@ -255,7 +282,7 @@ describe("evidenceFromDrReadiness", () => {
     // in the function written to end that.
     const e = evidenceFromDrReadiness(
       "resilience.dr_readiness",
-      { ready: false, unevidencedAxes: [], counts: { totalIssues: 0 } },
+      { ready: false, unevidencedAxes: [], unreadableEvidenceAxes: [], counts: { totalIssues: 0 } },
       AT,
     );
     expect(e.satisfied).toBe(false);
@@ -272,11 +299,182 @@ describe("evidenceFromDrReadiness", () => {
   });
 
   it("the verdict_unexplained sentence names every condition that triggers it", () => {
-    // It used to name two of three and was therefore false about the row it was added for. The
-    // trigger is: no issue count, no component count, no unevidenced axis.
+    // It used to name two of three and was therefore false about the row it was added for, and
+    // ADR-0373's second axis gives the verdict a fourth way to be false — so the sentence gained a
+    // fourth clause in the same change. A finding that misdescribes its own trigger is worse than
+    // no finding. The trigger is: no issue count, no component count, no unevidenced axis, no
+    // unreadable evidence.
     expect(DR_VERDICT_UNEXPLAINED_FINDING).toContain("no issue count");
     expect(DR_VERDICT_UNEXPLAINED_FINDING).toContain("no component count");
     expect(DR_VERDICT_UNEXPLAINED_FINDING).toContain("no unevidenced axis");
+    expect(DR_VERDICT_UNEXPLAINED_FINDING).toContain("no unreadable evidence");
+  });
+});
+
+/**
+ * ADR-0373's own open question 3, closed.
+ *
+ * That increment stopped a stored row the contract refuses from throwing out of the readiness pass,
+ * so the pass now records a snapshot over the **readable subset** — and this control then read
+ * `satisfied` over it, with the refused row surfacing only in a `console.error`. A page of one
+ * readable drill beside one refused one produced `ready: true, totalIssues: 0, unevidencedAxes: []`
+ * and the summary "DR readiness: READY (0 issues)". That is ADR-0372's own finding in a new place:
+ * an absence of evidence is not evidence, and a figure computed over a scope that could not be
+ * fully read is a claim about a different set of rows.
+ */
+describe("evidenceFromDrReadiness over evidence that could not be fully read", () => {
+  it("is NOT satisfied when an axis's evidence was partly unreadable", () => {
+    const e = evidenceFromDrReadiness(
+      "resilience.dr_readiness",
+      {
+        // Exactly what the lifecycle records for a partial page: every axis evidenced, no issue
+        // found, and one axis whose stored rows did not all read. `ready` is `false` since this
+        // increment, but `satisfied` is derived from the sources and never from `ready`, so the
+        // guard holds for a hand-edited row claiming otherwise too (see the next case).
+        ready: false,
+        unevidencedAxes: [],
+        unreadableEvidenceAxes: ["drills"],
+        counts: { totalIssues: 0 },
+      },
+      AT,
+    );
+    expect(e.satisfied).toBe(false);
+    expect(e.findings).toEqual([drAxisEvidenceUnreadableFinding("drills")]);
+    expect(e.summary).toContain("could not be read");
+    expect(e.summary).toContain("unevidenced, not satisfied");
+    // Not the sibling's sentence: "no drills record was supplied" is false with a readable drill
+    // beside the refused one, and rendering it would put that falsehood into a SOC 2 pack.
+    expect(e.findings).not.toContain(drAxisUnevidencedFinding("drills"));
+    expect(e.summary).not.toContain("no DR record on");
+  });
+
+  it("is satisfied in the contrast where nothing was refused", () => {
+    // The control case for the one above: the same report with an empty list rather than a named
+    // axis is the signed claim that every axis's evidence read completely, and it certifies.
+    const e = evidenceFromDrReadiness(
+      "resilience.dr_readiness",
+      { ready: true, unevidencedAxes: [], unreadableEvidenceAxes: [], counts: { totalIssues: 0 } },
+      AT,
+    );
+    expect(e.satisfied).toBe(true);
+    expect(e.findings).toEqual([]);
+    expect(e.summary).toBe("DR readiness: READY (0 issues)");
+  });
+
+  it("cannot be satisfied by a stored ready:true that disagrees with its own unreadable list", () => {
+    const e = evidenceFromDrReadiness(
+      "resilience.dr_readiness",
+      {
+        ready: true,
+        unevidencedAxes: [],
+        unreadableEvidenceAxes: ["failovers"],
+        counts: { totalIssues: 0 },
+      },
+      AT,
+    );
+    expect(e.satisfied).toBe(false);
+    expect(e.findings).toEqual([drAxisEvidenceUnreadableFinding("failovers")]);
+  });
+
+  it("carries failovers, which the unevidenced list cannot name at all", () => {
+    // The axis that makes this a second field rather than a wider enum on the first: `failovers`
+    // is excluded from `DrEvidenceAxisSchema` by design, because an empty failover list is the
+    // healthy claim that nothing failed over. A refused failover row is a different fact and has
+    // to be sayable.
+    const e = evidenceFromDrReadiness(
+      "resilience.dr_readiness",
+      {
+        ready: false,
+        unevidencedAxes: [],
+        unreadableEvidenceAxes: ["failovers"],
+        counts: { totalIssues: 0 },
+      },
+      AT,
+    );
+    expect(e.findings[0]).toContain("failovers");
+    expect(e.satisfied).toBe(false);
+  });
+
+  it("says a report predating the check cannot evidence the control, in its own words", () => {
+    // `null` is the gap and `[]` is the claim (ADR-0331), and the sentence is its own rather than
+    // the unevidenced sibling's: *we cannot say whether anything was looked at* and *we cannot say
+    // whether what was looked at read completely* are two gaps a report can have one of.
+    const e = evidenceFromDrReadiness(
+      "resilience.dr_readiness",
+      {
+        ready: true,
+        unevidencedAxes: [],
+        unreadableEvidenceAxes: null,
+        counts: { totalIssues: 0 },
+      },
+      AT,
+    );
+    expect(e.satisfied).toBe(false);
+    expect(e.findings).toEqual([DR_EVIDENCE_READ_UNKNOWN_FINDING]);
+    expect(e.summary).toContain("predates the unreadable-row check");
+    expect(e.summary).not.toContain("predates the unevidenced-axis check");
+  });
+
+  it("refuses an omitted field the same way, because the compiler is not the fence here", () => {
+    // `DrReadinessLike` is a **structural** view, so a plain-JS caller or a `JSON.parse` row from a
+    // producer predating the field arrives as `undefined` with no compile error anywhere. Reading
+    // that as the empty claim is the fail-open spelling `scopeIsAbsent` exists to refuse one
+    // question over, so `undefined` is folded in with `null`.
+    const e = evidenceFromDrReadiness(
+      "resilience.dr_readiness",
+      JSON.parse(
+        '{"ready":true,"unevidencedAxes":[],"counts":{"totalIssues":0}}',
+      ) as Parameters<typeof evidenceFromDrReadiness>[1],
+      AT,
+    );
+    expect(e.satisfied).toBe(false);
+    expect(e.findings).toEqual([DR_EVIDENCE_READ_UNKNOWN_FINDING]);
+  });
+
+  it("reports both facts and leads with the unreadable one, which is the stronger claim", () => {
+    // Both can hold, and the ordering is the judgement: an unevidenced axis leaves every figure
+    // true about what it measured, while a refused row makes the figures themselves claims about a
+    // different row set than the one on disk.
+    const e = evidenceFromDrReadiness(
+      "resilience.dr_readiness",
+      {
+        ready: false,
+        unevidencedAxes: ["backups"],
+        unreadableEvidenceAxes: ["drills"],
+        counts: { totalIssues: 1, overdueDrills: 1 },
+      },
+      AT,
+    );
+    expect(e.findings[0]).toBe(drAxisEvidenceUnreadableFinding("drills"));
+    expect(e.findings).toContain(drAxisUnevidencedFinding("backups"));
+    // And a real issue beside them still survives, buried by neither.
+    expect(e.findings.some((f) => f.includes("overdue drills"))).toBe(true);
+    expect(e.summary).toContain("could not be read");
+  });
+
+  it("names the kind first, and a different kind from axis_unevidenced", () => {
+    // Deliberately **not** the shared-kind call `ACCESS_REVIEW_SCOPE_ABSENT_FINDING` made with its
+    // encryption sibling: those are two controls asking one question, while these two findings are
+    // about the same control and must be distinguishable in one findings list, since *no drill was
+    // recorded* and *a recorded drill cannot be read* have opposite remedies.
+    expect(
+      drAxisEvidenceUnreadableFinding("drills").startsWith(
+        `${DR_AXIS_EVIDENCE_UNREADABLE_KIND}: `,
+      ),
+    ).toBe(true);
+    expect(DR_EVIDENCE_READ_UNKNOWN_FINDING.startsWith("evidence_read_unknown: ")).toBe(true);
+    expect(DR_AXIS_EVIDENCE_UNREADABLE_KIND).not.toBe(DR_AXIS_UNEVIDENCED_KIND);
+    expect(DR_EVIDENCE_READ_UNKNOWN_FINDING).not.toBe(DR_EVIDENCE_SCOPE_UNKNOWN_FINDING);
+  });
+
+  it("names no value off the refused row, only the axis", () => {
+    // ADR-0310's rule, and ADR-0373's correction to ADR-0372: a finding about a row the contract
+    // refused may not carry the row's own values. The axis is the report's vocabulary, and the
+    // row's identity reaches the operator through the lifecycle's reporter instead.
+    const finding = drAxisEvidenceUnreadableFinding("drills");
+    expect(finding).toContain("drills");
+    expect(finding).toContain("row");
+    expect(finding.length).toBeLessThan(400);
   });
 });
 
@@ -304,6 +502,7 @@ describe("zero scope across every evidence adapter", () => {
       {
         ready: false,
         unevidencedAxes: ["drills", "runbooks", "backups", "replication"],
+        unreadableEvidenceAxes: [],
         counts: { totalIssues: 0 },
       },
       AT,

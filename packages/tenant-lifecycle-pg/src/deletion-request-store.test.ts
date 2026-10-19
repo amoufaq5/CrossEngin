@@ -560,6 +560,27 @@ describe("a sweep carries on past a row it cannot represent", () => {
     expect(reported[0]?.requestId).toBeNull();
   });
 
+  /**
+   * `readRequestRows` is `kernel-pg`'s `readRows` now rather than a third copy of its loop, and the
+   * only thing still local is the one-line rename of `identity` to `requestId`. These pin that the
+   * rename is behaviour-identical to the `requestIdOf` it replaced — the two were byte-identical
+   * predicates — so the delegation cannot have quietly changed what the three sweeps report.
+   *
+   * The primitive's own property, that a throw from the identity costs only its own row's handle,
+   * is held in `kernel-pg`'s test and deliberately not restated here: `textIdentity` cannot throw,
+   * so there is nothing for a store-level test to exercise, and one definition wants one test.
+   */
+  it("answers requestId null for a column holding something that is not a handle", async () => {
+    for (const raw of [42, "", null, {}, []]) {
+      const { reported, report } = collector();
+      const row = { ...unreadableCompletedRow(), request_id: raw };
+      const { conn } = fakePg([row]);
+      await new PostgresDeletionRequestStore(conn).completedWithTombstone(report);
+      expect(reported).toHaveLength(1);
+      expect(reported[0]?.requestId).toBeNull();
+    }
+  });
+
   it("reports nothing when every row reads", async () => {
     const { reported, report } = collector();
     const { conn } = fakePg([rowOf()]);

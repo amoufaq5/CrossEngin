@@ -737,11 +737,18 @@ describe("audit-log-store — a row the contract refuses", () => {
     expect(read.unreadable[0]?.identity).toBeNull();
   });
 
-  it("details the field path and the issue code", async () => {
+  it("details the column and the issue code, withholding the component below it", async () => {
+    // `actor.<withheld>` and not `actor.kind`, and the cost is deliberate: `kind` is a *declared*
+    // key of a `.strict()` schema and so safe to print, while a `z.record` component IS the stored
+    // key — and the two are byte-identical in `issue.path`, with no marker on the issue and no
+    // reference to the schema on the error. So the precise rule is not expressible without passing
+    // the schema, and `renderIssuePath` pays precision on declared nested keys to close the
+    // disclosure on record keys. The literal is written out rather than read from
+    // `WITHHELD_PATH_COMPONENT`, so that changing the constant fails here.
     const { conn, rows } = fakeAuditDb();
     rows.push(...threeRowsWithMiddleRefused({ actor: { ...BAD_KIND_ACTOR } }));
     const read = await new PostgresAuditEmitter(conn).listAnchoredForScope(TENANT_A);
-    expect(read.unreadable[0]?.detail).toBe("actor.kind: invalid_enum_value");
+    expect(read.unreadable[0]?.detail).toBe("actor.<withheld>: invalid_enum_value");
   });
 
   it("details no value from the row, though the raw error carries one", async () => {
@@ -761,7 +768,7 @@ describe("audit-log-store — a row the contract refuses", () => {
     const read = await new PostgresAuditEmitter(conn).listAnchoredForScope(TENANT_A);
     const detail = read.unreadable[0]?.detail ?? "";
     expect(detail).not.toContain(BAD_ACTOR_KIND);
-    expect(detail).toContain("actor.kind");
+    expect(detail).toContain("actor.");
   });
 
   it("details no key name either, where zod's own message quotes the extra key", async () => {

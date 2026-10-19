@@ -320,7 +320,9 @@ describe("PostgresDrFailoverStore.listRecent", () => {
     );
     await store.listRecent(null, seen.report, 25);
     const detail = seen.rows[0]?.detail ?? "";
-    expect(detail).toContain("record.status");
+    // `record.<withheld>`, not `record.status` — see the same assertion in `drill-store.test.ts`
+    // for why the declared key is dropped along with a `z.record`'s stored one.
+    expect(detail).toContain("record.<withheld>");
     expect(detail).toContain("invalid_enum_value");
     expect(detail).not.toContain(FORBIDDEN_STATUS);
   });

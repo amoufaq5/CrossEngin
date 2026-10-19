@@ -141,7 +141,18 @@ describe("evidence sources", () => {
 
   it("drReadinessSource maps the latest snapshot", async () => {
     const src = drReadinessSource(
-      { latest: async () => ({ report: { ready: true, counts: { totalIssues: 0 }, unevidencedAxes: [] } }) },
+      {
+        latest: async () => ({
+          report: {
+            ready: true,
+            counts: { totalIssues: 0 },
+            // Both axis lists are `[]` rather than omitted, for the reason the fields are required:
+            // an absent one would certify this control by omission (ADR-0372, ADR-0373).
+            unevidencedAxes: [],
+            unreadableEvidenceAxes: [],
+          },
+        }),
+      },
       null,
     );
     const [ev] = await src.collect("soc2_type2", AT);
@@ -484,7 +495,18 @@ describe("buildCertificationLifecycle", () => {
     const captured: { sql: string; params: readonly unknown[] | undefined }[] = [];
     const conn = fakeConn(captured);
     const drSource = drReadinessSource(
-      { latest: async () => ({ report: { ready: true, counts: { totalIssues: 0 }, unevidencedAxes: [] } }) },
+      {
+        latest: async () => ({
+          report: {
+            ready: true,
+            counts: { totalIssues: 0 },
+            // Both axis lists are `[]` rather than omitted, for the reason the fields are required:
+            // an absent one would certify this control by omission (ADR-0372, ADR-0373).
+            unevidencedAxes: [],
+            unreadableEvidenceAxes: [],
+          },
+        }),
+      },
       null,
     );
     const arSource = accessReviewSource({

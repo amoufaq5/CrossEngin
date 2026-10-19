@@ -42,6 +42,28 @@ export interface DrReadinessLike {
    * refused.
    */
   readonly unevidencedAxes: readonly string[] | null;
+  /**
+   * Which of the report's axes carried at least one evidence row its reader could not represent,
+   * `null` when it cannot say.
+   *
+   * A different fact from `unevidencedAxes` and not expressible by it, which is why this is a
+   * second field rather than a wider list: that one means *this axis carried no record at all* and
+   * `drAxisUnevidencedFinding` renders it verbatim as `no <axis> record was supplied, so nothing on
+   * that axis was verified`, which is false the moment one readable row sits beside the refused one
+   * — and it cannot name `failovers` at all, since an empty failover list is a claim and not an
+   * absence. Before ADR-0373 a refused row threw out of the readiness pass, so no snapshot existed
+   * to read; now the pass completes over the readable subset, and without this field this control
+   * reads `satisfied` over figures computed from fewer rows than the table holds.
+   *
+   * **Required, not optional**, for `unevidencedAxes`' reason and to keep one convention in one
+   * interface: two adjacent fields answering the same three-valued question with different
+   * optionality is the drift this file's own `scopeIsAbsent` comment is about. The requirement is
+   * the compiler's half only — these are structural views, so a caller the compiler never sees
+   * passes `undefined`, which `axisClaimFindings` reads as the same "cannot say" as `null` and
+   * refuses on. Fail-closed either way; required is what makes a construction site *choose*
+   * between `[]` (the claim that every axis read completely) and `null` (no claim).
+   */
+  readonly unreadableEvidenceAxes: readonly string[] | null;
   readonly counts: {
     readonly totalIssues: number;
     readonly overdueDrills?: number;
@@ -145,6 +167,40 @@ export function drAxisUnevidencedFinding(axis: string): string {
 }
 
 /**
+ * The findings a DR readiness report carries when part of its evidence could not be read.
+ *
+ * Named and kind-first for `ENCRYPTION_SCOPE_ABSENT_FINDING`'s reasons, and a **different kind**
+ * from `axis_unevidenced` rather than a reuse of it, which is the opposite call from
+ * `ACCESS_REVIEW_SCOPE_ABSENT_FINDING` sharing `scope_absent` with its encryption sibling. That
+ * sharing is right where two controls ask one question — *this control was asked over an empty
+ * scope* — and wrong here, where the two findings are about the same control and must be
+ * distinguishable in one findings list: *no drill was recorded* and *a recorded drill cannot be
+ * read* have opposite remedies (go drill; go fix the row), and a reader filtering on one kind must
+ * not collect the other.
+ */
+export const DR_AXIS_EVIDENCE_UNREADABLE_KIND = "axis_evidence_unreadable";
+
+export function drAxisEvidenceUnreadableFinding(axis: string): string {
+  return (
+    `${DR_AXIS_EVIDENCE_UNREADABLE_KIND}: at least one stored ${axis} row could not be read, so ` +
+    "every figure in this report was computed over fewer rows than the table holds — a verdict " +
+    "over the readable subset is a verdict about a different set of rows"
+  );
+}
+
+/**
+ * The finding a report predating the unreadable-row check carries.
+ *
+ * `DR_EVIDENCE_SCOPE_UNKNOWN_FINDING`'s sibling, and distinct from it for the same reason the two
+ * axis findings are distinct: *we cannot say whether anything was looked at* and *we cannot say
+ * whether what was looked at read completely* are two gaps, and a report can have either without
+ * the other. Three-valued on this field means `null` must refuse the claim, not be read as the
+ * empty one (ADR-0331, ADR-0371's absent anchor provenance).
+ */
+export const DR_EVIDENCE_READ_UNKNOWN_FINDING =
+  "evidence_read_unknown: this DR readiness report predates the unreadable-row check, so it cannot say whether its evidence read completely — and a report that cannot say whether its own figures cover the stored rows does not evidence this control";
+
+/**
  * The report declares itself not ready for a reason this reader cannot itemize.
  *
  * Unreachable from any producer in this workspace — `assessDrReadiness` sets `ready` to exactly
@@ -154,14 +210,15 @@ export function drAxisUnevidencedFinding(axis: string): string {
  * with an empty findings list: a claim with no evidence, in the function written to end that.
  * Said rather than assumed away (ADR-0371's `anchor_unverified`).
  *
- * The sentence names **all three** of the things that have to be absent for it to fire, because it
+ * The sentence names **all four** of the things that have to be absent for it to fire, because it
  * used to name two and was therefore false about the very row it was added for: with the
  * itemization gated on the stored total, `{totalIssues: 0, overdueDrills: 3, expiredBackups: 2}`
  * surfaced neither of its two component counts and this finding then asserted the report carried
- * none. A finding that misdescribes its own trigger is worse than no finding.
+ * none. A finding that misdescribes its own trigger is worse than no finding — which is why the
+ * fourth clause was added in the same change that gave the verdict a fourth way to be false.
  */
 export const DR_VERDICT_UNEXPLAINED_FINDING =
-  "verdict_unexplained: this report declares itself not ready while carrying no issue count, no component count and no unevidenced axis, so the reason is one this reader cannot itemize";
+  "verdict_unexplained: this report declares itself not ready while carrying no issue count, no component count, no unevidenced axis and no unreadable evidence, so the reason is one this reader cannot itemize";
 
 /**
  * Whether a scope figure says that **something was in scope**, failing closed on anything it cannot
@@ -179,6 +236,31 @@ export const DR_VERDICT_UNEXPLAINED_FINDING =
  */
 function scopeIsAbsent(count: number): boolean {
   return !(count > 0);
+}
+
+/**
+ * The same question for a **three-valued axis list**: which findings does this claim carry?
+ *
+ * `scopeIsAbsent` is one spelling for the two *count*-shaped questions in this file (encryption's
+ * `total`, access review's `totalItemsAcrossCampaigns`); this is one spelling for the two
+ * *list*-shaped ones, which arrived one per increment on the same adapter — `unevidencedAxes`
+ * (ADR-0372) and `unreadableEvidenceAxes` (ADR-0373). They are the same three states with the same
+ * reading: `null`/absent is a report that cannot say and carries the unknown finding, `[]` is the
+ * claim and carries none, and a non-empty list carries one finding per axis. Extracted rather than
+ * spelled twice because the half this run keeps finding broken is the half that was copied — a pair
+ * written out twice is a pair where one side eventually reads `[]` for absent.
+ *
+ * `undefined` is folded in with `null` on purpose, and it is the whole of the runtime fence: these
+ * are structural views, so a plain-JS caller or a `JSON.parse` row from a producer predating the
+ * field arrives as `undefined`, and anything but an explicit list must deny (this repo's
+ * fail-closed rule, and `scopeIsAbsent`'s own argument one function up).
+ */
+function axisClaimFindings(
+  axes: readonly string[] | null | undefined,
+  unknownFinding: string,
+  perAxis: (axis: string) => string,
+): readonly string[] {
+  return axes === null || axes === undefined ? [unknownFinding] : axes.map(perAxis);
 }
 
 export function evidenceFromEncryptionCoverage(
@@ -263,10 +345,32 @@ export function evidenceFromDrReadiness(
   // nothing at all, on every deployment rather than a misconfigured one: three of the four
   // evidence axes have no durable source, and `meta.backup_records` has no writer anywhere.
   const unevidenced = report.unevidencedAxes;
-  const absence =
-    unevidenced === null
-      ? [DR_EVIDENCE_SCOPE_UNKNOWN_FINDING]
-      : unevidenced.map((axis) => drAxisUnevidencedFinding(axis));
+  const unreadable = report.unreadableEvidenceAxes;
+  const unevidencedFindings = axisClaimFindings(
+    unevidenced,
+    DR_EVIDENCE_SCOPE_UNKNOWN_FINDING,
+    drAxisUnevidencedFinding,
+  );
+  // The second member of ADR-0373's class, and the gap that ADR declared in its own open question
+  // 3. A readiness pass that met a stored row its contract refuses no longer throws — it records a
+  // snapshot over the **readable subset** — so `ready: true, totalIssues: 0, unevidencedAxes: []`
+  // became reachable for an estate whose drill history this binary could not fully read, and this
+  // control signed it `satisfied` with "DR readiness: READY (0 issues)". That is the same shape as
+  // the four zero-scope adapters above: a figure computed over a scope nobody could see, read as a
+  // measurement. The difference is only where the scope went missing — there the list was empty,
+  // here it was short — and `unevidencedAxes` could not say so, because "no drills record was
+  // supplied" is false with one readable drill beside the refused one and cannot name `failovers`
+  // at all.
+  const unreadableFindings = axisClaimFindings(
+    unreadable,
+    DR_EVIDENCE_READ_UNKNOWN_FINDING,
+    drAxisEvidenceUnreadableFinding,
+  );
+  // Unreadable leads, which is the one ordering judgement here. An unevidenced axis leaves every
+  // figure in the report *true about what it measured*; a refused row makes the figures themselves
+  // claims about a different row set than the one on disk (ADR-0373's own sentence), so it is the
+  // stronger statement about whether the report can be read at all.
+  const absence = [...unreadableFindings, ...unevidencedFindings];
   // A `ready: false` that neither the counts nor the axes explain would otherwise be
   // `satisfied: false` with nothing said: see `DR_VERDICT_UNEXPLAINED_FINDING`.
   if (!report.ready && findings.length === 0 && absence.length === 0) {
@@ -282,27 +386,66 @@ export function evidenceFromDrReadiness(
   return ControlEvidenceSchema.parse({
     controlId,
     sourceKind: "dr_readiness",
-    summary:
-      unevidenced === null
-        ? "this DR readiness report predates the unevidenced-axis check and cannot say which axes carried a record: this control is unevidenced, not satisfied"
-        : unevidenced.length > 0
-          ? `no DR record on ${unevidenced.join(", ")}: this control is unevidenced, not satisfied`
-          : satisfied
-            ? "DR readiness: READY (0 issues)"
-            : // Never the bare `NOT READY (0 issue(s))` pair, which is self-contradictory and is
-              // exactly what a row whose total disagrees with its own components used to read. Each
-              // arm says one true thing: the stored total where it is positive, the disagreement
-              // where the components outrun it, and the unexplained verdict where neither exists.
-              c.totalIssues > 0
-              ? `DR readiness: NOT READY (${c.totalIssues.toString()} issue(s))`
-              : components.length > 0
-                ? `DR readiness: NOT READY (this row reports 0 total issues and disagrees with the ${components.length.toString()} component count(s) itemized in its findings)`
-                : "DR readiness: NOT READY (this report itemizes no issue and names no unevidenced axis)",
+    summary: drReadinessSummary({
+      unevidenced,
+      unreadable,
+      satisfied,
+      totalIssues: c.totalIssues,
+      componentCount: components.length,
+    }),
     satisfied,
     findings,
     observedAt,
     detailRef: null,
   });
+}
+
+/**
+ * The one-line summary, as early returns rather than the nested ternary this used to be.
+ *
+ * It was four arms, and ADR-0373's second axis takes it to six; at that depth the indentation stops
+ * carrying the precedence and the comment on each arm stops being readable, which matters here
+ * because **the ordering is the content**. Each arm says exactly one true thing, and the findings
+ * list is where a reader gets every fact that holds at once.
+ */
+function drReadinessSummary(input: {
+  readonly unevidenced: readonly string[] | null;
+  readonly unreadable: readonly string[] | null | undefined;
+  readonly satisfied: boolean;
+  readonly totalIssues: number;
+  readonly componentCount: number;
+}): string {
+  // The two "cannot say" arms lead, because a report that cannot say whether anything was looked
+  // at, or whether what was looked at read completely, is not a measurement to summarise. The
+  // unevidenced one is first of the two for being the wider gap.
+  if (input.unevidenced === null) {
+    return "this DR readiness report predates the unevidenced-axis check and cannot say which axes carried a record: this control is unevidenced, not satisfied";
+  }
+  if (input.unreadable === null || input.unreadable === undefined) {
+    return "this DR readiness report predates the unreadable-row check and cannot say whether its evidence read completely: this control is unevidenced, not satisfied";
+  }
+  // Then the unreadable list **before** the unevidenced one, which is the one ordering judgement
+  // here: a short page makes every figure in the report a claim about a different row set, where an
+  // absent axis leaves the figures true about what they measured.
+  if (input.unreadable.length > 0) {
+    return `part of the DR evidence on ${input.unreadable.join(", ")} could not be read, so this report's figures cover fewer rows than the table holds: this control is unevidenced, not satisfied`;
+  }
+  if (input.unevidenced.length > 0) {
+    return `no DR record on ${input.unevidenced.join(", ")}: this control is unevidenced, not satisfied`;
+  }
+  if (input.satisfied) return "DR readiness: READY (0 issues)";
+  // Never the bare `NOT READY (0 issue(s))` pair, which is self-contradictory and is exactly what a
+  // row whose total disagrees with its own components used to read. Each arm says one true thing:
+  // the stored total where it is positive, the disagreement where the components outrun it, and the
+  // unexplained verdict where neither exists — whose sentence names **all four** of the things that
+  // have to be absent, for `DR_VERDICT_UNEXPLAINED_FINDING`'s reason.
+  if (input.totalIssues > 0) {
+    return `DR readiness: NOT READY (${input.totalIssues.toString()} issue(s))`;
+  }
+  if (input.componentCount > 0) {
+    return `DR readiness: NOT READY (this row reports 0 total issues and disagrees with the ${input.componentCount.toString()} component count(s) itemized in its findings)`;
+  }
+  return "DR readiness: NOT READY (this report itemizes no issue, names no unevidenced axis and reports no unreadable evidence)";
 }
 
 export function evidenceFromForensicChain(

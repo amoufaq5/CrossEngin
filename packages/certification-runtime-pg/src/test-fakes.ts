@@ -40,12 +40,19 @@ export function compliantEvidence(at = FIXTURE_TIME): ControlEvidence[] {
     ),
     evidenceFromDrReadiness(
       "resilience.dr_readiness",
-      // `[]` and never omitted: it is the explicit claim that every evidence axis carried a
-      // record, which is what makes this control satisfied for the right reason. An absent field
-      // defaulting to `[]` would make it satisfied by omission, which is the defect the required
-      // field exists to refuse — and `unevidencedAxes: null` here would make this fixture, whose
-      // whole job is a certifiable set, uncertifiable.
-      { ready: true, unevidencedAxes: [], counts: { totalIssues: 0 } },
+      // `[]` on both axis lists, and never omitted: each is the explicit claim that every evidence
+      // axis carried a record and that every record it carried could be read, which together are
+      // what make this control satisfied for the right reason. An absent field defaulting to `[]`
+      // would make it satisfied by omission, which is the defect the required fields exist to
+      // refuse — and `null` on either would make this fixture, whose whole job is a certifiable
+      // set, uncertifiable. The two are separate because the remedies are opposite: nobody drilled,
+      // against a drill was recorded and cannot be read (ADR-0373).
+      {
+        ready: true,
+        unevidencedAxes: [],
+        unreadableEvidenceAxes: [],
+        counts: { totalIssues: 0 },
+      },
       at,
     ),
   ];

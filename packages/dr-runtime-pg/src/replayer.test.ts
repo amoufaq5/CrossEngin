@@ -509,7 +509,8 @@ describe("a row the contract refuses is reported as drift, not thrown", () => {
     expect(issues).toHaveLength(1);
     expect(issues[0]?.kind).toBe("unparseable_record");
     expect(issues[0]?.executionId).toBe("drl_00000002");
-    expect(issues[0]?.detail).toContain("record.outcome");
+    // `record.<withheld>`: the column survives the render and the component under it does not.
+    expect(issues[0]?.detail).toContain("record.<withheld>");
   });
 
   it("still verifies every other row on the page", async () => {
