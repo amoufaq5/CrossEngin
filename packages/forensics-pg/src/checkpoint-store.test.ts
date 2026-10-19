@@ -6,7 +6,11 @@ import {
   type CheckpointProvenance,
 } from "@crossengin/forensics";
 
-import { PostgresChainCheckpointStore, rowToCheckpoint } from "./checkpoint-store.js";
+import {
+  CheckpointRowUnreadable,
+  PostgresChainCheckpointStore,
+  rowToCheckpoint,
+} from "./checkpoint-store.js";
 import { fakeChainPg } from "./test-fakes.js";
 import type { PgConnection } from "@crossengin/kernel-pg";
 
@@ -70,7 +74,8 @@ describe("PostgresChainCheckpointStore", () => {
     expect(await store.getBySequence(TENANT_A, 99)).toBeNull();
 
     const recent = await store.listRecent(TENANT_A, 2);
-    expect(recent.map((c) => c.sequenceNumber)).toEqual([7, 3]);
+    expect(recent.records.map((c) => c.sequenceNumber)).toEqual([7, 3]);
+    expect(recent.unreadable).toEqual([]);
   });
 
   it("is append-only — re-recording the same sequence is a no-op", async () => {
@@ -216,7 +221,7 @@ describe("PostgresChainCheckpointStore provenance", () => {
 
     expect((await store.latest(TENANT_A))?.provenance).toBe(provenance);
     expect((await store.getBySequence(TENANT_A, 6))?.provenance).toBe(provenance);
-    expect((await store.listRecent(TENANT_A))[0]?.provenance).toBe(provenance);
+    expect((await store.listRecent(TENANT_A)).records[0]?.provenance).toBe(provenance);
     expect(checkpointAnchorsBoundedProof((await store.latest(TENANT_A))?.provenance)).toBe(
       checkpointAnchorsBoundedProof(provenance),
     );
@@ -272,8 +277,8 @@ describe("PostgresChainCheckpointStore scope handling", () => {
     expect((await store.latest(TENANT_A))?.sequenceNumber).toBe(3);
     expect((await store.latest(null))?.sequenceNumber).toBe(900);
     expect(await store.getBySequence(TENANT_A, 900)).toBeNull();
-    expect(await store.listRecent(TENANT_A)).toHaveLength(1);
-    expect(await store.listRecent(null)).toHaveLength(1);
+    expect((await store.listRecent(TENANT_A)).records).toHaveLength(1);
+    expect((await store.listRecent(null)).records).toHaveLength(1);
   });
 
   it("binds every read's scope, and sets the write elevation only for a platform write", async () => {
@@ -308,5 +313,151 @@ describe("PostgresChainCheckpointStore scope handling", () => {
       expect(q.sql).toMatch(/tenant_id = \$\d/);
       expect(q.params).toContain(TENANT_A);
     }
+  });
+});
+
+/**
+ * Rewrites a stored checkpoint row on its way back out, so the store meets a row its contract
+ * refuses while `record` still wrote a valid one — which is what makes this a tamper rather than a
+ * fixture. Keyed on `checkpointed_by` appearing in the SELECT list, which `READ_COLUMNS` has.
+ *
+ * This is the **third** copy of `chain-log-store.test.ts`' `patchedReadConn` shape, and ADR-0373's
+ * own open question already names the second: it belongs in `test-fakes.ts` for the reason
+ * `scopeFilter` was hoisted. Kept local here because that module is not this increment's to move,
+ * and the duplication is worth recording rather than hiding.
+ */
+function patchedCheckpointConn(
+  inner: PgConnection,
+  ...patches: readonly [number, Record<string, unknown>][]
+): PgConnection {
+  const bySequence = new Map(patches);
+  const wrap = (c: PgConnection): PgConnection => ({
+    query: (async (sql: string, params?: readonly unknown[]) => {
+      const res = await c.query(sql, params);
+      if (!sql.includes("SELECT") || !sql.includes("checkpointed_by")) return res;
+      const rows = res.rows.map((r) => {
+        const row = { ...r } as Record<string, unknown>;
+        const patch = bySequence.get(Number(row["sequence_number"]));
+        return patch === undefined ? row : { ...row, ...patch };
+      });
+      return { rows, rowCount: rows.length };
+    }) as PgConnection["query"],
+    transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) =>
+      inner.transaction((tx) => fn(wrap(tx)))) as PgConnection["transaction"],
+    withAdvisoryLock: c.withAdvisoryLock,
+    close: c.close,
+  });
+  return wrap(inner);
+}
+
+/** `sequences` real checkpoints written through a clean connection, read back through a patched one. */
+async function checkpointsReadThrough(
+  sequences: readonly number[],
+  ...patches: readonly [number, Record<string, unknown>][]
+): Promise<PostgresChainCheckpointStore> {
+  const conn = fakeChainPg();
+  const store = new PostgresChainCheckpointStore(conn);
+  for (const s of sequences) await store.record(TENANT_A, checkpoint(s));
+  return new PostgresChainCheckpointStore(patchedCheckpointConn(conn, ...patches));
+}
+
+/**
+ * A stored anchor the contract refuses — ADR-0374.
+ *
+ * The two single-row reads throw and the page read does not, which is ADR-0373's rule rather than
+ * this store's taste: a caller asking about one row must not be served past it, while a page that
+ * throws takes every other row's finding with it.
+ */
+describe("a stored checkpoint row the contract refuses", () => {
+  // Both columns, because `external_anchor_reference` was the sibling in the same state rather than
+  // the one anybody was pointed at: it is `z.string().min(1).optional()`, so `''` is refused exactly
+  // as a blanked `checkpointed_by` is while NULL is the legitimate absent-anchor claim.
+  it.each([
+    ["checkpointed_by", { checkpointed_by: "" }, "checkpointedBy"],
+    ["external_anchor_reference", { external_anchor_reference: "" }, "externalAnchorReference"],
+  ])("makes latest() throw CheckpointRowUnreadable naming %s", async (_col, patch, field) => {
+    const store = await checkpointsReadThrough([5], [5, patch]);
+
+    const err = await store.latest(TENANT_A).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(CheckpointRowUnreadable);
+    const unreadable = err as CheckpointRowUnreadable;
+    // The identity is the row's business key within its scope, and the scope is on the error — so
+    // between them a remedy has the `WHERE` clause it needs.
+    expect(unreadable.row.identity).toBe("5");
+    expect(unreadable.scope).toBe(TENANT_A);
+    // `unreadableDetail`'s shape: the field path and the issue code, and no value from the row.
+    expect(unreadable.row.detail).toBe(`${field}: too_small`);
+  });
+
+  // The whole reason this is a typed throw rather than `null`: `null` means *no checkpoint for this
+  // scope*, which `CHAIN_FULL_REASONS` describes as healing on the next scheduler pass — and this
+  // cannot heal, because `record` is `ON CONFLICT … DO NOTHING`, so a pass anchoring at the same
+  // tail is a no-op and the refused row stays (verified live, `INSERT 0 0`).
+  it("does not collapse a refused row into the absent-checkpoint answer", async () => {
+    const empty = new PostgresChainCheckpointStore(fakeChainPg());
+    expect(await empty.latest(TENANT_A)).toBeNull();
+
+    const refused = await checkpointsReadThrough([5], [5, { checkpointed_by: "" }]);
+    await expect(refused.latest(TENANT_A)).rejects.toBeInstanceOf(CheckpointRowUnreadable);
+  });
+
+  it("makes getBySequence() throw the same refusal, so the two single-row reads agree", async () => {
+    const store = await checkpointsReadThrough([5], [5, { checkpointed_by: "" }]);
+    await expect(store.getBySequence(TENANT_A, 5)).rejects.toBeInstanceOf(CheckpointRowUnreadable);
+    // A sequence no row holds is still the absent answer, not a refusal.
+    expect(await store.getBySequence(TENANT_A, 99)).toBeNull();
+  });
+
+  // The message reaches an `onError` log line, so it is held to the same rule as the detail: it may
+  // name the identity and the issue, and no other column's value. Before this it was a bare
+  // `ZodError`, whose `message` is the JSON of its issues — and an `invalid_enum_value` issue
+  // carries `received`, i.e. the stored value (ADR-0367's disclosure, ADR-0373's correction).
+  it("names the sequence and the issue in its message and no other stored value", async () => {
+    const store = await checkpointsReadThrough([5], [5, { checkpointed_by: "" }]);
+    const err = (await store.latest(TENANT_A).then(
+      () => null,
+      (e: unknown) => e,
+    )) as CheckpointRowUnreadable;
+
+    expect(err.message).toContain("sequence 5");
+    expect(err.message).toContain(TENANT_A);
+    expect(err.message).toContain("Fold from genesis");
+    // `checkpoint()`'s rootHash for sequence 5 — a column of the refused row, which must not travel.
+    expect(err.message).not.toContain(h(6));
+    expect(err.message).not.toContain("auditor");
+  });
+
+  it("returns the readable checkpoints and reports the refused one from listRecent", async () => {
+    const store = await checkpointsReadThrough([1, 3, 7], [3, { checkpointed_by: "" }]);
+
+    const read = await store.listRecent(TENANT_A);
+    expect(read.records.map((c) => c.sequenceNumber)).toEqual([7, 1]);
+    expect(read.unreadable).toEqual([{ identity: "3", detail: "checkpointedBy: too_small" }]);
+  });
+
+  // The sharpest case, and the one a `.map` can never answer: the refused row is the newest, so a
+  // caller reading only `.records` sees a history whose head is the row *before* the tamper and
+  // nothing says so. `latest()` is the read that refuses there; this one reports.
+  it("reports a refused row at the head of the history rather than shortening it silently", async () => {
+    const store = await checkpointsReadThrough([1, 3, 7], [7, { checkpointed_by: "" }]);
+
+    const read = await store.listRecent(TENANT_A);
+    expect(read.records.map((c) => c.sequenceNumber)).toEqual([3, 1]);
+    expect(read.unreadable.map((u) => u.identity)).toEqual(["7"]);
+  });
+
+  it("reports every refused row, not only the first", async () => {
+    const store = await checkpointsReadThrough(
+      [1, 3, 7],
+      [1, { checkpointed_by: "" }],
+      [7, { external_anchor_reference: "" }],
+    );
+
+    const read = await store.listRecent(TENANT_A);
+    expect(read.records.map((c) => c.sequenceNumber)).toEqual([3]);
+    expect(read.unreadable.map((u) => u.identity)).toEqual(["7", "1"]);
   });
 });

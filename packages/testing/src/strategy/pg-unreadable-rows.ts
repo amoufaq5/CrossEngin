@@ -2212,15 +2212,6 @@ export const UNREADABLE_ROW_SITES: readonly UnreadableRowDeclaration[] = Object.
       "PostgresTargetingRuleStore is declared callerless (ADR-0335 moved the defect rather than closing it), so the cost is latent.",
   },
   {
-    file: "packages/forensics-pg/src/checkpoint-store.ts",
-    scope: "listRecent",
-    conversion: "rowToCheckpoint",
-    reason: "unmigrated",
-    consequence:
-      "a refused checkpoint row makes the checkpoint history unreadable, which is the history a truncation check is witnessed by",
-    note: "The anchors a bounded chain verification trusts its prefix on (ADR-0371).",
-  },
-  {
     file: "packages/incident-response-runtime-pg/src/comms-store.ts",
     scope: "listForIncident",
     conversion: "rowToComms",

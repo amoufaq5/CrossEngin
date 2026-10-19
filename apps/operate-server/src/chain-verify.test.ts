@@ -9,6 +9,7 @@ import {
   type CheckpointProvenance,
 } from "@crossengin/forensics";
 import {
+  CheckpointRowUnreadable,
   PostgresChainCheckpointStore,
   PostgresChainLogStore,
   keyStoreChainSigner,
@@ -429,7 +430,56 @@ describe("verifyChainFromCheckpoint refuses an anchor it cannot trust", () => {
     expect(report.signatures.checked).toBe(5);
   });
 
-  it("keeps the two refusals apart, since only one of them is a finding", async () => {
+  it("folds from genesis when the anchor row is in a shape the contract refuses", async () => {
+    // The third declining reason, and the one that arrives as a **throw** rather than as a value:
+    // `latest()` parses, so a row this binary cannot read back reaches here as
+    // `CheckpointRowUnreadable` and used to take the whole pass with it. Folding is the right
+    // verification — an anchor that cannot be read cannot vouch for a prefix — and on its own it
+    // reads as a healthy full pass, which is why the refusal also has to reach the verdict
+    // (`IntegrityProofReport.anchorRowsRefused`).
+    const { store, fingerprint, publicKeyBase64 } = await seededChain(5);
+    const refusing = {
+      latest: async (): Promise<never> => {
+        throw new CheckpointRowUnreadable(TENANT, {
+          identity: "3",
+          detail: "checkpointedBy: too_small",
+        });
+      },
+    } as unknown as PostgresChainCheckpointStore;
+    const report = await verifyChainFromCheckpoint(
+      store,
+      fakeRegistry({ [fingerprint]: { publicKeyBase64 } }),
+      refusing,
+      TENANT,
+    );
+    expect(report.mode).toBe("full");
+    expect(report.fullBecause).toBe("anchor_unreadable");
+    expect(report.signatures.checked).toBe(5);
+    expect(report.checkpointSequence).toBeNull();
+    expect(report.ok).toBe(true);
+  });
+
+  it("propagates any other failure of the anchor read rather than folding over it", async () => {
+    // Only `CheckpointRowUnreadable` is caught. Anything else is a read that did not happen, and a
+    // fold claiming to replace it would assert a verification over a scope whose anchor state is
+    // unknown — the bounded path's own soundness condition, inverted.
+    const { store, fingerprint, publicKeyBase64 } = await seededChain(2);
+    const broken = {
+      latest: async (): Promise<never> => {
+        throw new Error("connection terminated unexpectedly");
+      },
+    } as unknown as PostgresChainCheckpointStore;
+    await expect(
+      verifyChainFromCheckpoint(
+        store,
+        fakeRegistry({ [fingerprint]: { publicKeyBase64 } }),
+        broken,
+        TENANT,
+      ),
+    ).rejects.toThrow("connection terminated unexpectedly");
+  });
+
+  it("keeps the three refusals apart, since only one of them is a finding", async () => {
     const stated = await anchoredChain("unverified");
     const absent = await anchoredChain();
     const reasonFor = async (c: Awaited<ReturnType<typeof anchoredChain>>): Promise<ChainFullReason | null> =>
@@ -512,7 +562,7 @@ describe("formatChainVerification", () => {
       expect(phrase).not.toBe("");
       expect(headers[i]).toContain(`[full: ${phrase}]`);
     });
-    // Distinct, so the four facts an operator must tell apart are told apart on the page too.
+    // Distinct, so the five facts an operator must tell apart are told apart on the page too.
     expect(new Set(headers).size).toBe(CHAIN_FULL_REASONS.length);
   });
 

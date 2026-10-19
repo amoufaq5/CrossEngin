@@ -480,12 +480,12 @@ export class IntegrityEscalator {
               auditId: t.auditId,
               verdict: t.verdict,
             })),
-            // `integrityVerdictFor` has five `compromised` branches and this row named two of them,
-            // so a paging sev1 driven by any of the other three asserted that the trail was
+            // `integrityVerdictFor` has six `compromised` branches and this row named two of them,
+            // so a paging sev1 driven by any of the other four asserted that the trail was
             // provably altered and then named nothing — the one shape an operator cannot act on,
             // which is the reason ADR-0373 gave for printing these in `formatIntegrityProof` and
             // `formatChainVerification` and then left this row alone. Every branch is named now,
-            // which is the only non-arbitrary stopping point: naming four would leave the oldest
+            // which is the only non-arbitrary stopping point: naming five would leave the oldest
             // cause of all (a broken or unsigned chain, ADR-0286) as the one that explains nothing.
             //
             // ADR-0373's objection to carrying the fact durably does not reach here, and the
@@ -502,16 +502,19 @@ export class IntegrityEscalator {
               brokenAt: report.chain.integrity.brokenAt,
               signaturesValid: report.chain.signatures.valid,
             },
-            // Two lists and not one, because the two are about different tables and different
-            // identity namespaces: one names a `meta.audit_log` id and the other a chain sequence,
-            // and merging them would hand an operator a list they cannot act on from. There is
-            // deliberately no third list for the chain *half*'s own refusals — in bounded mode
-            // those are a subset of the whole-chain read's and in full mode the same read, so it
-            // would be one fact under two names, and the fact that it fired arrives above as
+            // Three lists and not one, because each is about a different table and a different
+            // identity namespace — a chain sequence, a `meta.audit_log` id, and a checkpoint's
+            // `(scope, sequence)` — and merging them would hand an operator a list they cannot act
+            // on from. There is deliberately no *fourth* list for the chain *half*'s own refusals,
+            // and the contrast is what makes the third one earn its place: in bounded mode those
+            // are a subset of the whole-chain read's and in full mode the same read, so a list
+            // would be one fact under two names, where `checkpointRows` is a table neither of the
+            // other two reads. The fact that the chain half fired arrives above as
             // `integrityValid: false` with `signaturesValid: false`.
             unreadable: {
               chainRows: recordedRefusal(report.chainRowsRefused),
               auditRows: recordedRefusal(report.anchors?.unreadable ?? []),
+              checkpointRows: recordedRefusal(report.anchorRowsRefused),
             },
           },
           reason:

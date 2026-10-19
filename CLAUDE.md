@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 366 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 369 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 19,934 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 20,004 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -1756,6 +1756,49 @@ type errors.
   the contract change (the field must be `.optional()`, or arrive with a migration — ADR-0351's
   versioning rule one table over), and it is the increment's second open end.
 
+  ADR-0374 is the increment ADR-0373 made necessary, and the class is **the increment's own alarm,
+  cancelled by a write it does not fence**. That increment routed a blanked `actor_reference` on a
+  chain entry into the verdict as `compromised` with a paging `sev1` — and one `UPDATE` on a column
+  of a **different table** cancels it, because `proveScopeIntegrity` awaits `checkpoints.latest(scope)`
+  **twice** per pass with no `try`: once inside `verifyChainFromCheckpoint` and once directly, for the
+  truncation check. ADR-0373 gave that store a parse on read, which is the premise the whole increment
+  rests on, so a refused checkpoint row now reaches both `await`s as a thrown `ZodError` and the
+  hourly scheduler files `outcome: "error"` — no verdict row, no `onFinding`, no `escalate`, no page.
+  It is ADR-0373's own graded way (3) — *the tamper disabled the detector* — on a read it migrated and
+  a **table** it did not fence, and the direction is the dangerous one: the cheaper write buries the
+  finding about the dearer one.
+  Catching it in the chain half alone would have closed **nothing**, which is the measurement that
+  shaped the fix: on `fromCheckpoint: false` that half never calls `latest` at all, so the second,
+  direct call is still unguarded — and that is the call a deployment whose anchors cannot be trusted
+  reaches on *every* pass. So `anchor_unreadable` is a fifth `ChainFullReason` (fold from genesis,
+  naming the reason, catching **only** `CheckpointRowUnreadable`) **and**
+  `IntegrityProofReport.anchorRowsRefused` is a third refusal axis that `integrityVerdictFor` answers
+  `compromised` for — beside `tampered` and not beside `unanchored`, on ADR-0373's exact argument one
+  table across, and checked **before** `anchors === null` so the finding does not depend on whether
+  anything else in the scope happened to be anchored. **The fold alone is not sufficient**: a full
+  fold over a sound chain answers `ok: true`, so it reads as a healthy full verification.
+  Two things were sharper than the defect. **It is reachable by the tenant and not only by an owner** —
+  that table's isolation policy is `ALL`-scope with a NULL `WITH CHECK`, so its `USING` doubles as the
+  write check and a tenant-context session `UPDATE`s its own checkpoint (`UPDATE 1`, live as the
+  non-owner `serving` role) — and the census generalises past the finding: **78 `meta` tables are in
+  that state, 0 of them carry a `DELETE`-scoped policy, and a tenant-context non-owner deleted its own
+  checkpoint, its own 12 chain entries and its own 3 audit rows.** So **CLAUDE.md's own "`DELETE` is
+  reachable by no policy on any of the 32" is true of the *named arms* and false of the behaviour**,
+  which is corrected in the RLS bullet below; the empty-scope control is what makes that measurement
+  trustworthy, since the same statement for a scope holding nothing answers `DELETE 0` — ADR-0333's
+  silent zero, in the measurement that would otherwise have read as protection. Narrowing 78 isolation
+  arms is one decision over the whole catalog and is reported rather than taken.
+  And **the column nobody was pointed at was in the same state**: `external_anchor_reference` is
+  `z.string().min(1).optional()`, so `''` is refused by the contract exactly as a blanked
+  `checkpointed_by` is — measured, same throw, same verdict — and both are fenced in the same change
+  with `char_length(x) >= 1` and deliberately **no** upper bound, because both contracts declare no
+  maximum and a CHECK refusing what the contract permits is the same defect pointing the other way.
+  The migration exercised **both** of ADR-0363's arms on one cluster, and the other arm is the sharper
+  result: the two new CHECKs report `constraint_widening_unproven` with the `BEGIN`/`ALTER`/`COMMIT`
+  triple, while **ADR-0373's own `actor_reference` CHECK reports `constraint_violated_by_existing_rows`
+  with the violator `SELECT` alone** — because that cluster really holds the blanked row ADR-0373
+  measured, so the migration **found a tamper rather than merely preventing the next one**.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -1798,9 +1841,20 @@ increment. See **What's actually left** at the bottom for the current open ends.
   entry's `signingKeyFingerprint` resolves against, so a session able to both append to the trail and
   register a key could re-sign a rewritten chain and have it verify). **12** of them are mutable and
   get an `UPDATE` arm too; the other **17** are append-only, so a platform row there is
-  immutable-by-RLS once written. `DELETE` is reachable by no policy on any of the 32. The one
-  remaining member of the class is `meta.audit_integrity_verdicts`, whose hole is differently shaped —
-  see *What's actually left*.
+  immutable-by-RLS once written. **No `DELETE`-scoped policy exists on any of the 32 — and that is a
+  statement about the named arms, not about the behaviour** (ADR-0374). An `ALL`-scope isolation arm
+  with a NULL `WITH CHECK` has its `USING` serve as the `WITH CHECK`, so it admits a tenant-scoped
+  `UPDATE` **and `DELETE`** of that tenant's own rows. Measured live as the non-owner `serving` role:
+  **78** `meta` tables carry such an arm, **0** of them carry a `DELETE` policy, and a tenant-context
+  session deleted its own checkpoint (`DELETE 1`), its own 12 chain entries (`DELETE 12`) and its own
+  3 audit rows (`DELETE 3`) — rolled back. The empty-scope control is what makes that trustworthy: the
+  same statement for a scope holding nothing answers `DELETE 0`, byte-identical to a refusal
+  (ADR-0333's silent zero, in the measurement that would otherwise have read as protection). So what
+  the platform split buys is that a *platform-scope* row cannot be deleted, or (on the 17) updated; a
+  tenant's own rows are a different question, and narrowing 78 isolation arms is one decision over the
+  whole catalog — see *What's actually left*. The one
+  remaining member of the write-split class is `meta.audit_integrity_verdicts`, whose hole is
+  differently shaped — see *What's actually left*.
 - **Strict TypeScript.** No `any`. No `--no-verify`. Explicit return types on
   exported functions.
 
@@ -3754,6 +3808,17 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   about zero being a readable figure. One asymmetry is worth knowing: a verdict failing on this axis
   alone has `results.every(ok)` true, so a surface rendering `results` without reading `unreadable`
   reports a failure and names no cause — `formatChainVerification` names them for that reason.
+
+  **And a refused *anchor* is too** (ADR-0374). `PostgresChainCheckpointStore`'s three read paths go
+  through one private `readOne`, which parses and throws `CheckpointRowUnreadable` carrying the
+  refused row rather than answering `null` — `null` is *no checkpoint for this scope*, which heals on
+  the next scheduler pass, where a refused row **cannot** heal because `record` is
+  `ON CONFLICT … DO NOTHING` so it stays where it is (ADR-0331's claim-versus-gap, inside a
+  verification). `listRecent` answers `{records, unreadable}` instead, ADR-0373's **verifier** shape,
+  because a checkpoint history is read to be checked. The error type is what lets
+  `verifyChainFromCheckpoint` fold from genesis on this one cause and rethrow every other — anything
+  else from `latest` is a read that did not happen, and a fold claiming to replace it would assert a
+  verification over a scope whose anchor state is unknown.
 - **`access-reviews`** — periodic attestation campaigns (SOC 2 / ISO 27001 / HIPAA / PCI /
   GDPR / 21 CFR Part 11): campaigns, scoped items, decisions with attestation kinds and
   four-eyes, exceptions with per-reason duration caps, templates, sealed evidence with
@@ -5294,6 +5359,26 @@ violating row gets `constraint_violated_by_existing_rows` with the violator `SEL
 **the migration finding a tamper rather than merely preventing the next one**. Verified both ways on
 PG 16.13, with a clean re-plan and `drift` exit 0 afterwards.
 
+**Two more join them one table across, and the consequence there is a notch worse** (ADR-0374):
+`meta.forensic_chain_checkpoints.checkpointed_by` and `.external_anchor_reference`, the only two
+columns on that table that carried no CHECK, both `char_length(x) >= 1` and both with **no upper
+bound** for the three above's reason. Worse because a refused *entry* makes one entry unreadable and
+ADR-0373 routed it into the verdict, while a refused **anchor** makes `proveScopeIntegrity`'s two
+unguarded `checkpoints.latest(scope)` calls throw, so the hourly pass filed `outcome: "error"` and
+the blanking **cancelled a `compromised` verdict about a genuine chain tamper one table over**.
+Reachable by the tenant: that table's isolation arm is `ALL`-scope with a NULL `WITH CHECK`, so a
+tenant-context session may `UPDATE` its own checkpoint — `UPDATE 1`, live as the non-owner `serving`
+role. `external_anchor_reference` is nullable and the CHECK is correct over NULL **with no guard**,
+because a CHECK passes when its expression is NULL — so the absent anchor, which is the claim that
+column makes for every checkpoint not externally anchored, is admitted and only `''` is refused
+(ADR-0352 measured the `IS NULL OR` prefix redundant on 29 catalogued checks). Standing manual SQL,
+reported as `constraint_widening_unproven` with the `BEGIN`/`ALTER`/`COMMIT` triple — and the same
+plan on the same cluster reported ADR-0373's `actor_reference` as
+`constraint_violated_by_existing_rows` with the violator `SELECT` alone, because that cluster really
+held the blanked row: **both of ADR-0363's arms in one plan, the migration finding a tamper rather
+than only preventing the next one.** `meta-schema.test.ts` asserts the whole-table invariant —
+exactly four columns of that table may carry no CHECK, each fully constrained by its declared type.
+
 **Every column-level value-set CHECK declares which contract domain governs it** (ADR-0353), in
 `packages/testing/src/strategy/pg-value-set-domains.ts` rather than in the catalog — a ref is a
 string either way, since the kernel cannot import *all* of the packages it would name, so the
@@ -6168,6 +6253,32 @@ opened them.
   anchor check at the newest 500 rows (`ORDER BY occurred_at DESC`), so a refused audit row outside
   that window reaches no axis. Pre-existing, and worth saying now that `anchors.unreadable` is
   framed as *the* detector for an edited audit row.
+
+- **The alarm cannot be cancelled by a write on a third table, and what is left of it** (ADR-0374,
+  which ADR-0373 made necessary). A refused *checkpoint* row threw out of **both** of
+  `proveScopeIntegrity`'s unguarded `checkpoints.latest(scope)` calls, so the hourly pass filed
+  `outcome: "error"` and one `UPDATE` on a column of a different table — reachable by the tenant,
+  `UPDATE 1` live as a non-owner — cancelled the `compromised` verdict ADR-0373 had just produced
+  about a genuine chain tamper. Closed by `anchor_unreadable` (fold from genesis, catching only
+  `CheckpointRowUnreadable`), a third refusal axis `integrityVerdictFor` answers `compromised` for,
+  and two CHECKs; verified 15/15 live.
+  What remains, in order: **(1)** **78 `meta` tables carry an `ALL`-scope `*_tenant_isolation` policy
+  with a NULL `WITH CHECK`, 0 of them carry a `DELETE` policy, and a tenant-context non-owner deleted
+  its own checkpoint, its own 12 chain entries and its own 3 audit rows** — so a tenant can destroy
+  its own tamper-evident trail, and every argument in this file that reads "`DELETE` is reachable by
+  no policy" is about the *named arms*. Narrowing 78 arms from `ALL` to the three commands is one
+  decision over the whole catalog and would change what every tenant write path may do; the fix for
+  the trail specifically may be narrower (a `FORCE ROW LEVEL SECURITY` plus three arms on the four
+  forensic tables). **(2)** the two CHECKs are **standing manual SQL** on every existing deployment,
+  reported with their statements until run. **(3)** the remedy for a refused anchor reaches an
+  operator in the **log line only** — the identity and the field path, and no route to the row, which
+  is the diagnostics console (ADR-0364 Q6) again. **(4)** `anchorRowsRefused` is at most one row by
+  construction (`latest()` reads one), so it is a list for uniformity with its two siblings rather
+  than because it can hold two; if `listRecent`'s refusals ever reach a verdict, the three axes want
+  one shape. **(5)** the general form of the two CHECKs is register P2.12b — a contract field's
+  refinement against its column's CHECK, which no workspace rule compares (ADR-0362 established that
+  none compares a contract *field* to a catalog *column*), over 505 TEXT and 159 JSONB columns in the
+  same unconstrained state.
 
 - **Every money figure is read over the whole set, and what is left of it** (ADR-0367,
   user-directed). Thirteen capped reads drain their cursor to a declared ceiling now, and the
@@ -8089,6 +8200,13 @@ by it**.
    re-folds from genesis every pass, and `includePlatform` defaults to true over a chain that holds
    only escalation rows. At 152 µs of signature CPU per entry that is cheap on a short chain and is
    15.2 s per pass at 100k.
+   **And ADR-0374 is a third answer to the same question, which is why the two flags are still not
+   defaulted on**: a refused checkpoint row threw out of *both* of `proveScopeIntegrity`'s
+   `latest(scope)` calls, so `--integrity-proof-config` on its own filed `outcome: "error"` once an
+   hour for ever — a flag that is on and whose finding reaches nobody, which is strictly worse than
+   one that is off, because an operator reads the first as covered. So the per-flag question has a
+   third clause: *does it serve what it mounts*, *is what it records a claim*, and **does its own
+   failure mode reach anybody**. All three now hold for this pair.
    **The remaining nine have now been asked both questions, and the answer refutes this entry's own
    framing: only 3 are a default decision.** *Default on* — `--tenant-status-gate` (`meta.tenants`
    carries zero policies and no `rls` in `META_TABLES`, so the directory read works for any role, and
@@ -8314,7 +8432,7 @@ three make the rest honest, cheap or verifiable.
    P2 item 14's third clause, from the other end.)
 3. **No CI, no git hook, no smoke, e2e, load or migration test** — while `strategy/ci.ts` models
    triggers, budgets and a topological sort with no reader. No `.github/workflows`, no
-   `core.hooksPath`, so the twelve rules and 19,934 tests run only when a human types `pnpm -r test`,
+   `core.hooksPath`, so the twelve rules and 20,004 tests run only when a human types `pnpm -r test`,
    and this file's instruction never to use `--no-verify` describes a guardrail that does not
    exist. `operate-web` has **zero tests** against 15 pages and 34 unfenced `fetch` sites — the
    serialized-body boundary that shipped a broken console button for an hour (ADR-0335).
@@ -8561,7 +8679,11 @@ land with or before it.
     established that none compares a contract *field* to a catalog *column*, and this is that
     question's other half. It would also not retire the read-side fix, because a CHECK added to a
     populated table is reported rather than planned when the rows violate it (ADR-0363), so a
-    deployment already holding a refused row still needs the read to behave.
+    deployment already holding a refused row still needs the read to behave. **ADR-0374 added two
+    more members and they are the second instance of its selection rule**: the two unconstrained
+    columns of `meta.forensic_chain_checkpoints` were fenced because their unreadability defeats a
+    detector — so the five CHECKs this class has gained were each chosen by *what the refusal
+    disables*, not by surveying the columns, and the general rule is still unwritten.
 13. **Four contracts admit or assert something structurally false**, each in a subsystem whose job
     is to be checkable: a **late GDPR 72-hour breach notification is unrepresentable** (the
     refinement and the CHECK both refuse `publishedAt` past the deadline, so
@@ -8793,7 +8915,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 368 records; 289 Accepted, 79 Proposed (the
+title or status change cannot drift. 369 records; 290 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

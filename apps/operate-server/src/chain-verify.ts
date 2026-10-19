@@ -1,6 +1,11 @@
 import { PostgresKeyRegistry } from "@crossengin/crypto-pg";
-import { checkpointAnchorsBoundedProof, verifyChainIntegrity } from "@crossengin/forensics";
 import {
+  checkpointAnchorsBoundedProof,
+  verifyChainIntegrity,
+  type ChainCheckpoint,
+} from "@crossengin/forensics";
+import {
+  CheckpointRowUnreadable,
   unreadableEntryVerdict,
   verifyChainSignatures,
   verifyChainSuffix,
@@ -53,15 +58,16 @@ export function verifyChainSignaturesAgainstRegistry(
 }
 
 /**
- * Why a report folded from genesis. `mode: "full"` alone cannot say, and the four facts it conflates
+ * Why a report folded from genesis. `mode: "full"` alone cannot say, and the five facts it conflates
  * have different remedies: a caller that asked for a full fold has nothing to fix, a scope with no
- * checkpoint heals on the next scheduler pass, and an anchor the bounded path *declined* is a
- * finding.
+ * checkpoint heals on the next scheduler pass, and the three ways an anchor can fail to answer for
+ * its prefix are each a finding.
  *
- * **Neither declining reason can come from `CheckpointScheduler`**, the workspace's only checkpoint
- * writer: it derives the provenance from the verification that cleared the anchor, so it writes only
- * `verified_full`/`verified_suffix`, and on a refused verification it writes no row at all. That is
- * deliberate rather than an omission — the store is append-only
+ * **None of the three declining reasons can come from `CheckpointScheduler`**, the workspace's only
+ * checkpoint writer: it derives the provenance from the verification that cleared the anchor, so it
+ * writes only `verified_full`/`verified_suffix`; on a refused verification it writes no row at all;
+ * and `record` begins `ChainCheckpointSchema.parse`, so no row it writes can be one this binary
+ * cannot read back. That is deliberate rather than an omission — the store is append-only
  * (`ON CONFLICT (tenant_id, sequence_number) DO NOTHING` over an `INSERT`-arm-only platform table,
  * ADR-0332), so an `unverified` row at the tail would hold that sequence against the later good
  * anchor and turn a transient refusal into a permanent full fold whose only remedy is waiting for
@@ -72,17 +78,29 @@ export function verifyChainSignaturesAgainstRegistry(
  * `anchor_provenance_absent` is a row whose columns do not cover the question because an older
  * binary wrote it. The two stay apart for ADR-0331's reason: the first is somebody's claim about the
  * prefix, the second is a gap, and only a claim is a finding.
+ *
+ * `anchor_unreadable` is the third and is **not** a gap: the row exists and this binary's own
+ * contract refuses it, so it was written out of band or edited since — which, measured live as a
+ * non-owner, a tenant-context session can do to its own checkpoint, because that table's isolation
+ * policy is `ALL`-scope and its `USING` doubles as its `WITH CHECK` (ADR-0374). It is distinct from
+ * `no_checkpoint` for the reason `CheckpointRowUnreadable` refuses to answer `null`: that one heals
+ * on the next pass and this one cannot, since `DO NOTHING` leaves the refused row in place. Folding
+ * from genesis is the right answer here for ADR-0371's own reason — an anchor that cannot be trusted
+ * is not an anchor — and it is **not sufficient**, because the fold alone would make the pass read
+ * as a healthy full verification. The refusal reaches the verdict by
+ * `IntegrityProofReport.anchorRowsRefused`.
  */
 export const CHAIN_FULL_REASONS = [
   "requested",
   "no_checkpoint",
   "anchor_unverified",
   "anchor_provenance_absent",
+  "anchor_unreadable",
 ] as const;
 export type ChainFullReason = (typeof CHAIN_FULL_REASONS)[number];
 
 /**
- * What each reason prints. A total map so a fifth reason is a compile error here rather than one
+ * What each reason prints. A total map so a sixth reason is a compile error here rather than one
  * that renders as nothing — which is what `Record<ChainFullReason, string>` buys and the whole of
  * it: a *missing* key will not compile, and an **empty** one compiles, renders `[full: ]` and is
  * caught only by the test asserting each phrase is non-empty. The type cannot say it; the comment
@@ -93,6 +111,7 @@ export const CHAIN_FULL_REASON_PHRASES: Record<ChainFullReason, string> = {
   no_checkpoint: "no checkpoint for this scope",
   anchor_unverified: "anchor records no verified prefix",
   anchor_provenance_absent: "anchor predates provenance",
+  anchor_unreadable: "anchor is stored in a shape the contract refuses",
 };
 
 export interface ChainVerificationReport {
@@ -186,7 +205,26 @@ export async function verifyChainFromCheckpoint(
   checkpoints: PostgresChainCheckpointStore,
   tenantId: string | null,
 ): Promise<ChainVerificationReport> {
-  const checkpoint = await checkpoints.latest(tenantId);
+  // The anchor read has three outcomes and this is the one that used to leave the pass with none.
+  // `latest` throws `CheckpointRowUnreadable` for a stored row the contract refuses, and that throw
+  // escaped `proveScopeIntegrity` — so the hourly pass filed `outcome: "error"`, which means no
+  // verdict row, no `onFinding`, no `escalate` and no page, on a scope whose chain may hold the very
+  // tamper the pass exists to find. Measured live as the non-owner `serving` role: a tenant-context
+  // `UPDATE … SET checkpointed_by = ''` on its own checkpoint is `UPDATE 1`, and it cancelled an
+  // already-`compromised` verdict driven by a blanked `actor_reference` on a chain entry.
+  //
+  // Caught here rather than inside the store, because the store's throw is correct (ADR-0373: a
+  // single-row read must not serve its caller past the row it was asked about) and it is *this*
+  // caller that has a sound answer to fall back on. Only this error is caught: anything else from
+  // `latest` is a read that did not happen, and a fold claiming to replace it would assert a
+  // verification over a scope whose anchor state is unknown.
+  let checkpoint: ChainCheckpoint | null;
+  try {
+    checkpoint = await checkpoints.latest(tenantId);
+  } catch (err) {
+    if (!(err instanceof CheckpointRowUnreadable)) throw err;
+    return foldFromGenesis(reader, registry, tenantId, "anchor_unreadable");
+  }
   if (checkpoint === null) {
     return foldFromGenesis(reader, registry, tenantId, "no_checkpoint");
   }

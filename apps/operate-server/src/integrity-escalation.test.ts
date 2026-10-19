@@ -82,6 +82,7 @@ function report(over: Partial<IntegrityProofReport> = {}): IntegrityProofReport 
     chain,
     anchors,
     chainRowsRefused: [],
+    anchorRowsRefused: [],
     truncation,
     ...over,
   };
@@ -335,11 +336,11 @@ describe("IntegrityEscalator — failure handling", () => {
 /**
  * The anchored row has to say **why**.
  *
- * `integrityVerdictFor` has five `compromised` branches and this row named two of them, so a
- * paging sev1 driven by any of the other three asserted that the trail was provably altered and
+ * `integrityVerdictFor` has six `compromised` branches and this row named two of them, so a
+ * paging sev1 driven by any of the other four asserted that the trail was provably altered and
  * then named nothing — which is the one shape an operator cannot act on, and is the reason
- * ADR-0373 gave for printing them in `formatIntegrityProof`. One test per branch, so a sixth cause
- * arriving with no key is a failure here rather than a 03:00 page that explains nothing.
+ * ADR-0373 gave for printing them in `formatIntegrityProof`. One test per branch, so a seventh
+ * cause arriving with no key is a failure here rather than a 03:00 page that explains nothing.
  */
 describe("IntegrityEscalator — the audit row names the cause", () => {
   const cleanAnchors = (over: Partial<AuditAnchorReport> = {}): AuditAnchorReport => ({
@@ -358,6 +359,10 @@ describe("IntegrityEscalator — the audit row names the cause", () => {
     detail: "operation: too_small",
   };
   const refusedChainRow: UnreadableRow = { identity: "2", detail: "kind: invalid_enum_value" };
+  const refusedCheckpointRow: UnreadableRow = {
+    identity: "3",
+    detail: "checkpointedBy: too_small",
+  };
 
   const auditedAfter = async (over: Partial<IntegrityProofReport>): Promise<unknown> => {
     const { audit, emitted } = fakeAudit();
@@ -395,6 +400,27 @@ describe("IntegrityEscalator — the audit row names the cause", () => {
       chain: { ok: true },
       unreadable: {
         chainRows: { count: 1, identities: [refusedChainRow.identity] },
+        auditRows: { count: 0, identities: [] },
+      },
+    });
+  });
+
+  it("names the refused checkpoint that drove the verdict", async () => {
+    // The third refusal axis and a third table, which is why it is a third list rather than a
+    // merge: a checkpoint's identity is `(scope, sequence)`, so putting it beside a chain sequence
+    // and a `meta.audit_log` id would hand an operator a list they cannot act on from. It is also
+    // the axis that fires with everything else clean — a refused anchor leaves `chain.ok` true,
+    // `truncated` false and nothing tampered, so before this it was a page that named nothing.
+    expect(
+      await auditedAfter({ anchors: cleanAnchors(), anchorRowsRefused: [refusedCheckpointRow] }),
+    ).toMatchObject({
+      verdict: "compromised",
+      truncated: false,
+      tampered: [],
+      chain: { ok: true },
+      unreadable: {
+        checkpointRows: { count: 1, identities: [refusedCheckpointRow.identity] },
+        chainRows: { count: 0, identities: [] },
         auditRows: { count: 0, identities: [] },
       },
     });
@@ -447,6 +473,7 @@ describe("IntegrityEscalator — the audit row names the cause", () => {
       unreadable: {
         chainRows: { count: 0, identities: [] },
         auditRows: { count: 0, identities: [] },
+        checkpointRows: { count: 0, identities: [] },
       },
     });
   });

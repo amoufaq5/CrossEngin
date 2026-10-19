@@ -36,6 +36,7 @@ import {
   META_EVENTS,
   META_EXTENSION_PACKS,
   META_FAILOVER_RECORDS,
+  META_FORENSIC_CHAIN_CHECKPOINTS,
   META_FORENSIC_CHAIN_ENTRIES,
   META_FORENSIC_EVIDENCE,
   META_FEATURE_FLAGS,
@@ -1738,6 +1739,42 @@ describe("table column shapes", () => {
       .filter((c) => c.check === undefined)
       .map((c) => c.name);
     expect(uncovered).toEqual(["id", "tenant_id", "recorded_at", "created_at"]);
+  });
+
+  it("META_FORENSIC_CHAIN_CHECKPOINTS leaves no column of an anchor uncheckable", () => {
+    const col = (n: string) => META_FORENSIC_CHAIN_CHECKPOINTS.columns.find((c) => c.name === n);
+    // ADR-0374, and the sibling of the entries table above with the consequence one notch worse.
+    // There a refused row makes an *entry* unreadable and ADR-0373 routed it into the verdict as
+    // `compromised`; here a refused row makes the **anchor** unreadable, and `proveScopeIntegrity`
+    // awaits `checkpoints.latest(scope)` twice with no `try`, so the hourly pass filed
+    // `outcome: "error"` — no verdict, no finding, no stored row, no escalation, no page. Measured
+    // live as a non-owner: this table's isolation arm is `ALL`-scope, so a tenant-context `UPDATE`
+    // of its own checkpoint cancelled a `compromised` verdict about its own chain.
+    expect(col("checkpointed_by")?.check).toBe("char_length(checkpointed_by) >= 1");
+    // The sibling column, which was in the same state and is the one nobody was pointed at:
+    // `externalAnchorReference` is `z.string().min(1).optional()`, so `''` is refused by the
+    // contract exactly as a blanked `checkpointed_by` is. Nullable, and the CHECK is correct over
+    // NULL with no guard, because a CHECK passes when its expression is NULL — so the absent
+    // anchor, which is the claim this column makes for every checkpoint that is not externally
+    // anchored, is admitted and only `''` is refused.
+    expect(col("external_anchor_reference")?.check).toBe(
+      "char_length(external_anchor_reference) >= 1",
+    );
+    // No upper bound on either, for the entries table's reason: both contracts are
+    // `z.string().min(1)` with no maximum, and a CHECK refusing what the contract permits is the
+    // same defect pointing the other way.
+    expect(col("checkpointed_by")?.check).not.toContain("BETWEEN");
+    expect(col("external_anchor_reference")?.check).not.toContain("BETWEEN");
+    // The whole-table invariant, so an eleventh column added without a CHECK fails here rather
+    // than being discovered when an hourly proof stops producing a verdict. The four exempt ones
+    // are each fully constrained by their declared type: `id` and `created_at` are UUID and
+    // TIMESTAMPTZ with defaults, `checkpointed_at` is the TIMESTAMPTZ that `Iso8601` parses to, and
+    // `tenant_id` is the scope rather than a field of `ChainCheckpointSchema` at all — nullable,
+    // with NULL meaning platform (ADR-0331).
+    const uncovered = META_FORENSIC_CHAIN_CHECKPOINTS.columns
+      .filter((c) => c.check === undefined)
+      .map((c) => c.name);
+    expect(uncovered).toEqual(["id", "tenant_id", "checkpointed_at", "created_at"]);
   });
 
   it("META_GDPR_DELETION_REQUESTS outlives the verifier and names its proof", () => {

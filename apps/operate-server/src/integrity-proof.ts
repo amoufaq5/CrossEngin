@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import type { PostgresKeyRegistry } from "@crossengin/crypto-pg";
 import {
+  CheckpointRowUnreadable,
   PostgresChainCheckpointStore,
   PostgresChainLogStore,
   type ChainSigner,
@@ -159,6 +160,26 @@ export interface IntegrityProofReport {
    * them would hand an operator a list they cannot act on from.
    */
   readonly chainRowsRefused: readonly UnreadableRow[];
+  /**
+   * The scope's stored checkpoint, where the contract refuses it. Required, and `[]` is the claim
+   * that the anchor read was made and answered.
+   *
+   * A **third** table's refusals, and the axis is separate from the two above for the reason they
+   * are separate from each other: this one names a row in `meta.forensic_chain_checkpoints`, and
+   * its remedy is a different row from any chain entry or audit row an operator would be sent to.
+   * Naming the table is the whole value of the separation, since the identity is a sequence number
+   * either way and a merged list would say which position without saying which table.
+   *
+   * It is at most one row by construction — `latest` and the truncation check each read one — so
+   * this is a list for the shape's sake and not because a page is expected.
+   *
+   * What makes it load-bearing rather than decorative: `verifyChainFromCheckpoint` answers a
+   * refused anchor with a fold from genesis, which is the correct *verification* and, alone, reads
+   * as a healthy full pass. The fold is why `chain.ok` cannot carry this, and ADR-0373's own reason
+   * `chainRowsRefused` exists is why nothing else can: the fact has to reach the verdict by an axis
+   * that pages.
+   */
+  readonly anchorRowsRefused: readonly UnreadableRow[];
 }
 
 /**
@@ -216,8 +237,25 @@ export async function proveScopeIntegrity(
     ? await verifyChainFromCheckpoint(deps.logStore, deps.registry, deps.checkpoints, scope)
     : await verifyChainFull(deps.logStore, deps.registry, scope);
 
-  // Neither verification path notices a chain that has been cut short, so ask separately.
-  const checkpoint = await deps.checkpoints.latest(scope);
+  // Neither verification path notices a chain that has been cut short, so ask separately — and this
+  // is the **second** unguarded `latest` of the pass, which is why catching it in the chain half
+  // alone would have closed nothing: on `fromCheckpoint: false` the chain half never calls `latest`
+  // at all, so a refused anchor reached here and threw out of the whole pass. Measured live, both
+  // modes, before and after: `outcome: "error"` with `onError` the only callback, against
+  // `outcome: "proved"` with the verdict `compromised` and all four callbacks firing.
+  //
+  // A refused anchor leaves the truncation check **unanswerable** rather than negative, and the two
+  // must not render alike: `checkpointSequence: null` with the refusal on its own axis is what lets
+  // the formatter say which, since "no checkpoint yet — run the checkpoint scheduler" is the remedy
+  // that cannot work here (`record` is `ON CONFLICT … DO NOTHING`, so the refused row stays).
+  const anchorRowsRefused: UnreadableRow[] = [];
+  let checkpoint: Awaited<ReturnType<PostgresChainCheckpointStore["latest"]>> = null;
+  try {
+    checkpoint = await deps.checkpoints.latest(scope);
+  } catch (err) {
+    if (!(err instanceof CheckpointRowUnreadable)) throw err;
+    anchorRowsRefused.push(err.row);
+  }
   const tail = await deps.logStore.tail(scope);
   const truncation: ChainTruncationCheck = {
     checkpointSequence: checkpoint?.sequenceNumber ?? null,
@@ -244,12 +282,19 @@ export async function proveScopeIntegrity(
 
   return {
     scope,
-    verdict: integrityVerdictFor(chain, anchors, truncation, chainRead.unreadable),
+    verdict: integrityVerdictFor(
+      chain,
+      anchors,
+      truncation,
+      chainRead.unreadable,
+      anchorRowsRefused,
+    ),
     verifiedAt: deps.now().toISOString(),
     chain,
     anchors,
     truncation,
     chainRowsRefused: chainRead.unreadable,
+    anchorRowsRefused,
   };
 }
 
@@ -262,6 +307,7 @@ export function integrityVerdictFor(
   anchors: AuditAnchorReport | null,
   truncation: ChainTruncationCheck,
   chainRowsRefused: readonly UnreadableRow[],
+  anchorRowsRefused: readonly UnreadableRow[],
 ): IntegrityVerdict {
   // Checked first: a truncated chain still passes every link and signature check, so nothing
   // else in the report would reveal it.
@@ -276,6 +322,17 @@ export function integrityVerdictFor(
   // read *now* is either a row rewritten since, or one the anchoring verification was wrong about —
   // both findings, and neither softer than a broken link.
   if (chainRowsRefused.length > 0) return "compromised";
+  // The same judgement one table across, and it needs no separate argument because
+  // `PostgresChainCheckpointStore.record` begins with `ChainCheckpointSchema.parse`: no checkpoint
+  // this binary writes can be one it cannot read back, so a refused anchor was edited or written
+  // out of band exactly as a refused entry was. It is checked **before** `anchors === null`
+  // deliberately — a scope with no audit rows still has a checkpoint, and returning `verified`
+  // there would make the finding depend on whether anything else happened to be anchored.
+  //
+  // `verifyChainFromCheckpoint` already answers a refused anchor by folding from genesis, which is
+  // the correct *verification* and, on its own, reads as a healthy full pass. That is why the fold
+  // is not sufficient: the refusal is also a finding, and this is the axis that pages for it.
+  if (anchorRowsRefused.length > 0) return "compromised";
   if (anchors === null) return "verified";
   if (anchors.tampered.length > 0) return "compromised";
   // Beside `tampered` and not beside `unanchored`, which is the one judgement in this function
@@ -482,10 +539,16 @@ function isEmptyScope(report: IntegrityProofReport): boolean {
  * only ever turn a skip into a proof, which is the direction this function must fail in; an axis
  * omitted on the strength of what a read one layer down happens to do today is this defect again
  * the day that read starts parsing.
+ *
+ * `anchorRowsRefused` is the member of that set which genuinely fires here, and it is the sharpest
+ * one: a refused anchor leaves `checkpointSequence` null, so `truncated` is **false** and the
+ * truncation half says nothing — meaning an empty chain, no audit rows and one unreadable
+ * checkpoint satisfied all of `isEmptyScope`'s other conjuncts and had the report discarded.
  */
 function readEveryRowFound(report: IntegrityProofReport): boolean {
   return (
     report.chainRowsRefused.length === 0 &&
+    report.anchorRowsRefused.length === 0 &&
     report.chain.signatures.unreadable.length === 0 &&
     (report.anchors === null || report.anchors.unreadable.length === 0)
   );
@@ -527,8 +590,24 @@ export function formatIntegrityProof(report: IntegrityProofReport): string {
         ` but the chain ends at ${String(report.truncation.tailSequence)}`,
     );
   } else if (report.truncation.checkpointSequence === null) {
-    // Worth saying out loud: without a checkpoint the truncation check cannot run at all.
-    lines.push("  truncation: not checkable (no checkpoint yet — run the checkpoint scheduler)");
+    // Two reasons the check cannot run, and they are not interchangeable. A refused anchor also
+    // leaves `checkpointSequence` null, so the pre-ADR-0373 sentence was applied to it — and for
+    // that case both halves of it are false: there **is** a checkpoint, and the remedy cannot work,
+    // because `record` is `ON CONFLICT (tenant_id, sequence_number) DO NOTHING`, so running the
+    // scheduler leaves the unreadable row exactly where it is (ADR-0334 — a remedy that cannot work
+    // is worse than naming none). The refusal is named on its own line below; this one keeps its
+    // original wording for the case it was written for.
+    lines.push(
+      report.anchorRowsRefused.length > 0
+        ? "  truncation: not checkable (the latest checkpoint cannot be read — see below)"
+        : "  truncation: not checkable (no checkpoint yet — run the checkpoint scheduler)",
+    );
+  }
+  // Beside the chain and anchor refusals rather than inside the `anchors !== null` block, because
+  // this axis is answered on every pass: the checkpoint read happens before the audit rows are
+  // looked at, so a scope with no anchored rows at all still reports its refused anchor.
+  for (const u of report.anchorRowsRefused) {
+    lines.push(`  unreadable checkpoint ${u.identity ?? "<unidentified>"} (${u.detail})`);
   }
   if (report.anchors !== null) {
     lines.push(

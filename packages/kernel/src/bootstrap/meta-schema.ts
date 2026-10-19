@@ -11360,8 +11360,50 @@ export const META_FORENSIC_CHAIN_CHECKPOINTS: TableDefinition = {
     { name: "sequence_number", type: "BIGINT", notNull: true, check: "sequence_number >= 0" },
     { name: "root_hash", type: "CHAR(64)", notNull: true, check: "root_hash ~ '^[0-9a-f]{64}$'" },
     { name: "checkpointed_at", type: "TIMESTAMPTZ", notNull: true },
-    { name: "checkpointed_by", type: "TEXT", notNull: true },
-    { name: "external_anchor_reference", type: "TEXT" },
+    /**
+     * Non-empty, matching `ChainCheckpointSchema`'s `z.string().min(1)` and no more (ADR-0374).
+     *
+     * This and `external_anchor_reference` below were the only two columns on this table carrying no
+     * CHECK, and the consequence is one notch worse than the two ADR-0373 closed on
+     * `forensic_chain_entries`: there a refused row makes an *entry* unreadable, and that increment
+     * routed it into the verdict as `compromised`. Here a refused row makes the **anchor** unreadable,
+     * and `proveScopeIntegrity` awaits `checkpoints.latest(scope)` twice with no `try` — once inside
+     * `verifyChainFromCheckpoint` and once for the truncation check — so `''` stored made the hourly
+     * pass file `outcome: "error"`: no verdict, no `onFinding`, no stored row, no escalation, no page.
+     * **The tamper disabled the detector**, which is ADR-0373's graded way (3) on a read that
+     * increment did not route.
+     *
+     * Reachable by the tenant and not only by an owner: this table's isolation policy is `ALL`-scope,
+     * so its `USING` doubles as its `WITH CHECK` and a tenant-context session may `UPDATE` its own
+     * checkpoint. Verified live as the non-owner `serving` role — `UPDATE 1`, and the hourly pass
+     * went from `compromised` + escalation to a single log line, so the blanking **cancelled the
+     * alarm about a genuine chain tamper one table over**. The CHECK is the fence, because the RLS
+     * arm cannot be narrowed here without a decision spanning the 23 tables in the same state (see
+     * ADR-0374's reported finding).
+     *
+     * `char_length(...) >= 1` is this catalog's spelling for the predicate, with the upper bound left
+     * off, because the contract declares no maximum and a CHECK refusing what the contract permits is
+     * the same defect pointing the other way (ADR-0373's rule, inherited).
+     */
+    { name: "checkpointed_by", type: "TEXT", notNull: true, check: "char_length(checkpointed_by) >= 1" },
+    /**
+     * `checkpointed_by`'s reason, for the column that was the **sibling in the same state** rather
+     * than the one anybody was pointed at (ADR-0374).
+     *
+     * `ChainCheckpointSchema.externalAnchorReference` is `z.string().min(1).optional()`, and
+     * `rowToCheckpoint` maps NULL to `undefined` and anything else through `String(...)` — so `''`
+     * reaches the parse as the empty string and is refused exactly as a blanked `checkpointed_by` is.
+     * Measured live: both blanked columns throw the same `ZodError` out of `latest()` and out of
+     * `listRecent()`, and the resulting pass is indistinguishable.
+     *
+     * Nullable, and the CHECK is correct over NULL without a guard: a CHECK passes when its
+     * expression is NULL, so `char_length(NULL) >= 1` admits the absent anchor — which is the
+     * **claim** this column makes for every checkpoint that is not externally anchored — and refuses
+     * only the empty string, which is the one value the contract cannot represent. Writing
+     * `external_anchor_reference IS NULL OR char_length(...) >= 1` would be equivalent as a
+     * constraint and redundant (ADR-0352 measured that prefix redundant on 29 catalogued checks).
+     */
+    { name: "external_anchor_reference", type: "TEXT", check: "char_length(external_anchor_reference) >= 1" },
     {
       name: "algorithm",
       type: "TEXT",

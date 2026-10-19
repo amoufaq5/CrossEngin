@@ -117,12 +117,13 @@ function fullReportFor(report: IntegrityProofReportLike): IntegrityProofReport {
             unreadable: [],
           },
     truncation: report.truncation,
-    // The mirror omits it because the verdict payload does not commit to it, which is the parity
-    // check's whole subject: a refused chain row reaches the stored record through `verdict` and
-    // not through a count of its own (ADR-0371's rule, and the trap that ADR reverted a field out
-    // of — four places would have to move together or the stored report stops being byte-identical
-    // to the committed payload).
+    // The mirror omits both because the verdict payload does not commit to either, which is the
+    // parity check's whole subject: a refused chain row or a refused checkpoint reaches the stored
+    // record through `verdict` and not through a count of its own (ADR-0371's rule, and the trap
+    // that ADR reverted a field out of — four places would have to move together or the stored
+    // report stops being byte-identical to the committed payload).
     chainRowsRefused: [],
+    anchorRowsRefused: [],
   };
 }
 
