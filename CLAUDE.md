@@ -7475,7 +7475,8 @@ by it**.
    rejected in ADR-0357 (it would refuse every deployment there is, and the hatch disarms the
    sharper row check beside it).
 3. **The shipped compose mounts no background subsystem, so nearly everything built since Phase 3
-   is off.** Measured against the committed tree: the `api` command passes **15** flags, not the six
+   is off.** Measured against the committed tree: the `api` command passes **18 distinct** flags
+   (19 occurrences — `--ai-design-role` twice), not the six
    on record, and `--platform-user-routes` is among them — ADR-0358 added it (with a `deploy/README.md`
    note that the page had told readers to POST to a route the stack did not serve), so that clause of
    this entry was **false**, and so is any claim that the operator provisioning path is unreachable on
@@ -7486,15 +7487,19 @@ by it**.
    `--rate-limit-policy`, `--read-state-routes`, `--preference-routes`. So the request path is
    configured and nothing *recurs*: no job fires, no timer fires, no notification is delivered, no
    audit row is anchored, no integrity proof runs. One increment, and the only question is which
-   flags a reference deployment should default to. (ADR-0364 added a **16th**,
-   `--credential-admin-role`, which is a request-path flag and moves nothing here — but it is the
-   second time in two increments that a flag this entry would have had to name arrived with the
-   feature that needed it, which is the argument for the entry being about *defaults* rather than
-   about a count.) **Measuring this item is what found ADR-0370**: of the flags listed above,
-   `--notification-template-routes` turned out to mount a surface whose five status transitions
-   *all* raised at the database, so "which flags should a reference deployment default on" cannot be
-   answered without first asking whether each one serves what it mounts. That is the honest shape of
-   the remaining work here — a flag-by-flag measurement, not a list to paste into `command:`.
+   flags a reference deployment should default to. **This entry's own count has gone stale three
+   times in three increments** — 15 when it was written, a 16th from ADR-0364
+   (`--credential-admin-role`), and two more from ADR-0368 (`--require-design-review`,
+   `--design-review-role`) — every one a request-path flag that arrived with the feature needing it
+   and moved nothing here, which is the argument for the entry being about *defaults* rather than
+   about a count. Do not carry the figure; measure it.
+   **Measuring this item is what found ADR-0370**, and not from the list above:
+   `--notification-template-routes` is a *candidate* for the reference set rather than one of the
+   absent background flags, and it turned out to mount a surface whose five status transitions **all
+   raised at the database** and escaped as unclassified 500s. So "which flags should a reference
+   deployment default on" cannot be answered without first asking, per flag, whether it serves what
+   it mounts. That is the honest shape of the remaining work here — a flag-by-flag measurement with
+   a live boot behind each verdict, not a list to paste into `command:`.
 4. **An Article 17 request naming one data subject erases the whole tenant.** `subjectIdentifier`
    is required on the submit body and the stored record, `DeletionRunnerOptions.run` has no field
    that could carry it, and `node.ts` calls `deleteTenantAtomically` with
