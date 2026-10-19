@@ -255,7 +255,8 @@ export class PostgresAccessReviewEvidenceReader
     const scope = scopeFilter(tenantId, 2);
     const row = await withTenantContext(this.conn, tenantId, async (tx) => {
       const result = await tx.query<Record<string, unknown>>(
-        `SELECT framework, status, sealed_sha256, completion_rate, strong_attestation_rate, control_mappings
+        `SELECT framework, status, sealed_sha256, total_items_across_campaigns,
+                completion_rate, strong_attestation_rate, control_mappings
          FROM ${this.schema}.access_review_evidence
          WHERE framework = $1
            AND ${scope.sql}
@@ -277,6 +278,16 @@ export class PostgresAccessReviewEvidenceReader
         // `NUMERIC` arrives from node-postgres as a **string** (ADR-0331), so these two have always
         // needed the coercion; what changed is that a non-finite column now refuses rather than
         // becoming `0`, which would have read as a 0% completion rate.
+        // The column has always existed and this reader never projected it, so the adapter had no
+        // way to tell a pack that reviewed 12 items at 100% from one that reviewed none at 100% —
+        // `completionRate` is 1 over a zero divisor as a division guard, not as a measurement
+        // (ADR-0372). `Number` with an explicit non-finite refusal rather than `?? 0`, because 0 is
+        // the value that means `scope_absent` and defaulting an unreadable column to it would
+        // assert the finding rather than report that the column could not be read.
+        totalItemsAcrossCampaigns: requireCount(
+          row["total_items_across_campaigns"],
+          "total_items_across_campaigns",
+        ),
         completionRate: requireRate(row["completion_rate"], "completion_rate"),
         strongAttestationRate: requireRate(
           row["strong_attestation_rate"],
@@ -520,6 +531,30 @@ function toStringArray(value: unknown): string[] {
  * input: a value nobody can read is not evidence of a deficient review, and the throw reaches
  * `onSourceError` where the row id can be chased.
  */
+/**
+ * A non-negative integer column, refused rather than defaulted — `requireRate`'s rule for a count.
+ *
+ * Separate from `requireRate` because the two have different domains and the same hole: a rate is
+ * bounded 0..1 and a count is not, but for both, `0` is a *meaningful* value (a 0% review, an empty
+ * scope) so `?? 0` on an unreadable column asserts a finding instead of reporting that nothing could
+ * be read. Here that matters more than it does for the rate, because `0` is precisely what makes the
+ * control `scope_absent` (ADR-0372).
+ */
+function requireCount(value: unknown, column: string): number {
+  const n =
+    value === null || value === undefined || value === ""
+      ? Number.NaN
+      : typeof value === "number"
+        ? value
+        : Number(value);
+  if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) {
+    throw new Error(
+      `meta.access_review_evidence.${column} is not a non-negative integer: ${JSON.stringify(value)}`,
+    );
+  }
+  return n;
+}
+
 function requireRate(value: unknown, column: string): number {
   // `Number(null)` is `0` and `Number("")` is `0`, so a finiteness check alone is exactly the hole
   // the old `?? 0` was: both would have read as a 0% completion rate rather than as unreadable.

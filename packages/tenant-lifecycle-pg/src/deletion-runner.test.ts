@@ -1,5 +1,7 @@
 import {
   CONSERVATIVE_DELETION_CAPABILITIES,
+  DELETION_REQUEST_STATUSES,
+  type DeletionRequestStatus,
   type GdprDeletionRequest,
 } from "@crossengin/tenant-lifecycle";
 import { describe, expect, it } from "vitest";
@@ -12,7 +14,11 @@ import {
   type DeletionRunnerOptions,
 } from "./deletion-runner.js";
 import { DeletionPipelineAborted, type DeleteTenantOutcome } from "./deletion-pipeline.js";
-import type { PostgresDeletionRequestStore } from "./deletion-request-store.js";
+import {
+  DeletionRequestCommittedUnreadable,
+  type PostgresDeletionRequestStore,
+  type UnreadableRequestRow,
+} from "./deletion-request-store.js";
 
 const TENANT = "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8";
 const REQ = "dreq_abcdefgh1234";
@@ -92,6 +98,7 @@ interface Harness {
   readonly transitions: Array<{ to: string; fields: Record<string, unknown> }>;
   readonly runs: Array<Record<string, unknown>>;
   readonly reported: DeletionRunResult[];
+  readonly unreadable: UnreadableRequestRow[];
 }
 
 function harness(
@@ -100,32 +107,59 @@ function harness(
     readonly outcome?: DeleteTenantOutcome;
     readonly runThrows?: unknown;
     readonly completeThrows?: boolean;
+    /**
+     * The targets whose `transition` commits and cannot read the row back.
+     *
+     * A set rather than a `completeUnreadable` boolean, which is what it was and which is why three
+     * of the four call sites went untested: the store raises this for **every** `to`, so a fake that
+     * can only model one target can only ever exercise one site.
+     */
+    readonly unreadableOn?: readonly DeletionRequestStatus[];
     readonly due?: readonly GdprDeletionRequest[];
+    /** Rows the store's own page could not represent, reported rather than returned. */
+    readonly dueUnreadable?: readonly UnreadableRequestRow[];
   } = {},
   over: Partial<DeletionRunnerOptions> = {},
 ): Harness {
   const transitions: Array<{ to: string; fields: Record<string, unknown> }> = [];
   const runs: Array<Record<string, unknown>> = [];
   const reported: DeletionRunResult[] = [];
+  const unreadable: UnreadableRequestRow[] = [];
   const store = {
     transition: async (
-      _id: string,
+      id: string,
       to: string,
       fields: Record<string, unknown>,
     ): Promise<GdprDeletionRequest | null> => {
       transitions.push({ to, fields });
       if (to === "in_progress" && behaviour.claims === false) return null;
+      if ((behaviour.unreadableOn ?? []).includes(to as DeletionRequestStatus)) {
+        // What the real store raises: the UPDATE committed, and the row it returned cannot be
+        // represented. The fake has to model *which* of the two it is, because that is the whole
+        // distinction the runner is being asked to make — and it has to be able to model it at any
+        // target, because the store's throw is a property of the method rather than of one `to`.
+        throw new DeletionRequestCommittedUnreadable(
+          id,
+          to as DeletionRequestStatus,
+          "the stored row cannot be represented",
+        );
+      }
       if (to === "completed" && behaviour.completeThrows === true) {
         throw new Error("completed write failed");
       }
       return requestOf({ status: to as GdprDeletionRequest["status"] });
     },
-    dueForExecution: async (): Promise<readonly GdprDeletionRequest[]> =>
-      behaviour.due ?? [requestOf()],
+    dueForExecution: async (
+      onUnreadable: (row: UnreadableRequestRow) => void,
+    ): Promise<readonly GdprDeletionRequest[]> => {
+      for (const row of behaviour.dueUnreadable ?? []) onUnreadable(row);
+      return behaviour.due ?? [requestOf()];
+    },
   } as unknown as PostgresDeletionRequestStore;
 
   const runner = new DeletionRunner({
     store,
+    onUnreadableRequest: (row) => unreadable.push(row),
     run: async (input): Promise<DeleteTenantOutcome> => {
       runs.push({ ...input });
       if (behaviour.runThrows !== undefined) throw behaviour.runThrows;
@@ -141,7 +175,7 @@ function harness(
     onRun: (r) => reported.push(r),
     ...over,
   });
-  return { runner, transitions, runs, reported };
+  return { runner, transitions, runs, reported, unreadable };
 }
 
 describe("construction", () => {
@@ -157,6 +191,7 @@ describe("construction", () => {
           executedBy: "same",
           approvedBy: "same",
           newTombstoneId: () => TOMB,
+          onUnreadableRequest: () => undefined,
         }),
     ).toThrow(/four-eyes/);
   });
@@ -200,6 +235,7 @@ describe("runOne", () => {
       executedBy: "a",
       approvedBy: "b",
       newTombstoneId: () => TOMB,
+      onUnreadableRequest: () => undefined,
     });
     await runner.runOne(requestOf());
     expect(order).toEqual(["transition:in_progress", "pipeline", "transition:completed"]);
@@ -280,6 +316,112 @@ describe("runOne", () => {
     expect(needsReconciliation(result.outcome)).toBe(true);
   });
 
+  it("reports completed when the status write committed and its read-back cannot be represented", async () => {
+    const h = harness({ unreadableOn: ["completed"] });
+    const result = await h.runner.runOne(requestOf());
+    // The write committed, so `completed` is true of it. Reporting `completed_unrecorded` — whose
+    // own definition is "the `completed` write did not" — claims the opposite, and sends a human to
+    // re-drive an Article 17 erasure that has already destroyed the data.
+    expect(result.outcome).toBe("completed");
+    expect(result.tombstoneId).toBe(TOMB);
+    // And the condition is not silent: `detail` is non-null here where an ordinary completion's is
+    // null, and it names the status that committed plus the parse failure.
+    expect(result.detail).toContain("recorded 'completed'");
+    expect(result.detail).toContain("cannot be read back");
+    expect(result.detail).toContain("tombstone is anchored");
+    // Nothing to reconcile: the row is in the status it names and the tombstone exists.
+    expect(needsReconciliation(result.outcome)).toBe(false);
+  });
+
+  it("does not start the pipeline when the claim committed and its row cannot be read back", async () => {
+    // The claim site, which was unhandled: the row committed `in_progress`, the throw propagated out
+    // of `runOne`, and the deletion never ran. `not_claimed` would be the false reading — the claim
+    // succeeded — and proceeding on it would drive a destructive pipeline through a record the
+    // contract refuses.
+    const h = harness({ unreadableOn: ["in_progress"] });
+    const result = await h.runner.runOne(requestOf());
+    expect(result.outcome).toBe("aborted");
+    expect(result.tombstoneId).toBeNull();
+    expect(result.detail).toContain("recorded 'in_progress'");
+    expect(result.detail).toContain("the deletion was not started");
+    // The pipeline was not called at all, which is the behaviour and not just the label.
+    expect(h.runs).toEqual([]);
+    // Left `in_progress` for `reconcileStranded`, which walks exactly that status.
+    expect(needsReconciliation(result.outcome)).toBe(true);
+  });
+
+  it("reports rejected when the pipeline's rollback was recorded and the row cannot be read back", async () => {
+    const h = harness({ runThrows: new DeletionPipelineAborted([]), unreadableOn: ["rejected"] });
+    const result = await h.runner.runOne(requestOf());
+    // The request *is* terminal and the tenant provably untouched, so `rejected` is true of it and
+    // `aborted` would send a human to reconcile a deletion that was correctly refused.
+    expect(result.outcome).toBe("rejected");
+    expect(result.detail).toContain("recorded 'rejected'");
+    expect(result.detail).toContain("the pipeline rolled back");
+    expect(needsReconciliation(result.outcome)).toBe(false);
+  });
+
+  it("reports rejected when a refusal was recorded and the row cannot be read back", async () => {
+    const h = harness({
+      outcome: { ok: false, refusals: [{ stage: "assemble", reason: "scope_empty", detail: "none" }] },
+      unreadableOn: ["rejected"],
+    });
+    const result = await h.runner.runOne(requestOf());
+    expect(result.outcome).toBe("rejected");
+    expect(result.detail).toContain("the pipeline refused (assemble/scope_empty)");
+  });
+
+  it("does not take the rest of the due page with it — the shape this increment fixes for reads", async () => {
+    // The live consequence of the two unhandled `rejected` sites: the throw escaped `runOne`, out of
+    // `runDue`, into the scheduler's catch, so the request was terminal, `onRun` never saw it and
+    // every other due request was dropped. One bad row taking the page, in the run loop.
+    const second = requestOf({ id: "dreq_secondone123" });
+    const h = harness({
+      runThrows: new DeletionPipelineAborted([]),
+      unreadableOn: ["rejected"],
+      due: [requestOf(), second],
+    });
+    const results = await h.runner.runDue();
+    expect(results.map((r) => r.requestId)).toEqual([REQ, "dreq_secondone123"]);
+    expect(results.map((r) => r.outcome)).toEqual(["rejected", "rejected"]);
+    // And every one of them reached `onRun`, which is what a scheduler reports from.
+    expect(h.reported).toHaveLength(2);
+  });
+
+  it("maps every committed status to an outcome, so a sixth status cannot inherit one", async () => {
+    // The map is total over `DELETION_REQUEST_STATUSES`, and the three this runner never writes
+    // answer `aborted` rather than leaving a hole where a total map exists to prevent one. Exercised
+    // through the two targets `runOne` writes that are reachable here, because the map's reachable
+    // entries are what a test can drive — the rest is pinned by the compiler.
+    expect(DELETION_REQUEST_STATUSES).toContain("deferred");
+    for (const [to, expected] of [
+      ["in_progress", "aborted"],
+      ["completed", "completed"],
+    ] as const) {
+      const h = harness({ unreadableOn: [to] });
+      const result = await h.runner.runOne(requestOf());
+      expect(result.outcome, to).toBe(expected);
+    }
+  });
+
+  it("keeps completed_unrecorded for a status write that really did not land", async () => {
+    // The two paths must stay distinguishable in both directions, or narrowing one just moves the
+    // wrong answer. This one is a connection lost at commit time: the request still reads
+    // `in_progress` and a human has to look at it.
+    const h = harness({ completeThrows: true });
+    const result = await h.runner.runOne(requestOf());
+    expect(result.outcome).toBe("completed_unrecorded");
+    expect(result.detail).toBe("completed write failed");
+    expect(needsReconciliation(result.outcome)).toBe(true);
+  });
+
+  it("leaves detail null on an ordinary completion, so a non-null one is the signal", async () => {
+    const h = harness();
+    const result = await h.runner.runOne(requestOf());
+    expect(result.outcome).toBe("completed");
+    expect(result.detail).toBeNull();
+  });
+
   it("reports every run through onRun", async () => {
     const h = harness();
     await h.runner.runOne(requestOf());
@@ -336,6 +478,29 @@ describe("runDue", () => {
     const h = harness({ claims: false, due: [requestOf(), requestOf({ id: "dreq_two12345678" })] });
     const results = await h.runner.runDue();
     expect(results.map((r) => r.outcome)).toEqual(["not_claimed", "not_claimed"]);
+  });
+
+  it("forwards its reporter to the store, and runs the rest of the page", async () => {
+    const h = harness({
+      dueUnreadable: [{ requestId: "dreq_bad123456789", detail: "status 'verified' requires verifiedBy" }],
+      due: [requestOf({ id: "dreq_good12345678" })],
+    });
+    const results = await h.runner.runDue();
+    // The required reporter is what stops the row being dropped in silence: the request stays
+    // `verified`, so every later `dueForExecution` reads it and drops it again while its Article
+    // 12(3) deadline runs — a deletion that never happens and is never reported.
+    expect(h.unreadable).toEqual([
+      { requestId: "dreq_bad123456789", detail: "status 'verified' requires verifiedBy" },
+    ]);
+    // Not turned into a result: `runOne` is handed a parsed request, so there is nothing to claim.
+    expect(results.map((r) => r.requestId)).toEqual(["dreq_good12345678"]);
+    expect(results.map((r) => r.outcome)).toEqual(["completed"]);
+  });
+
+  it("reports nothing when every due row reads", async () => {
+    const h = harness();
+    await h.runner.runDue();
+    expect(h.unreadable).toEqual([]);
   });
 });
 

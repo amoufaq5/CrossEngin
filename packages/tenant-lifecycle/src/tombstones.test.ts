@@ -21,6 +21,7 @@ import {
   readDeclaredAbsences,
   readRecordStorage,
   readRetentionClaim,
+  readUnerasedSubsystems,
   tombstoneAge,
   tombstoneChainFor,
   tombstonesByKind,
@@ -805,6 +806,141 @@ describe("readDeclaredAbsences", () => {
     if (reading.declarationState === "covered_by_proof") {
       expect(reading.absentSubsystems).toEqual(["backups", "caches", "object_storage"]);
       expect(reading.declaration).toEqual(DECLARATION);
+    }
+  });
+
+  it("leaves a present_not_erased subsystem to its sibling reader", () => {
+    // Not a gap in this reading: `present_not_erased` is a subsystem the deployment **has**, so
+    // listing it here would report a deployment's backups as something it lacks — the false claim the
+    // fourth disposition exists to replace, computed from a proof rather than declared into one.
+    const reading = readDeclaredAbsences({
+      ...base,
+      proofVersion: "v2",
+      capabilityDeclaration: { ...DECLARATION, backups: "present_not_erased" },
+    });
+    expect(reading.declarationState).toBe("covered_by_proof");
+    if (reading.declarationState === "covered_by_proof") {
+      expect(reading.absentSubsystems).toEqual(["caches", "object_storage"]);
+      expect(reading.absentSubsystems).not.toContain("backups");
+    }
+  });
+});
+
+describe("readUnerasedSubsystems", () => {
+  const base: TombstoneRecord = {
+    id: "tomb_abc12345abc12345",
+    kind: "tenant_deletion",
+    tenantId: "t-1",
+    deletedAt: "2026-05-14T10:00:00Z",
+    executedBy: "u-executor",
+    approvedBy: "u-approver",
+    proofVersion: "v2",
+    scope: {
+      schemas: ["tenant_t1"],
+      tables: ["tenant_t1.users"],
+      objectStorageBuckets: [],
+      backupGenerations: [],
+      searchIndexes: [],
+      cacheKeys: [],
+      rowCount: 100,
+      storageBytes: 1000,
+      fileCount: 0,
+    },
+    contentManifestSha256: SHA,
+    proofSha256: SHA,
+    anchors: [
+      { kind: "internal_audit_log", reference: "audit-1", anchoredAt: "2026-05-14T10:00:00Z" },
+    ],
+    invalidationOfPriorTombstoneId: null,
+    capabilityDeclaration: DECLARATION,
+  };
+
+  it("names what this deployment has and did not erase — the fact a DPO has to state", () => {
+    const reading = readUnerasedSubsystems({
+      ...base,
+      capabilityDeclaration: {
+        ...DECLARATION,
+        backups: "present_not_erased",
+        search_indexes: "present_not_erased",
+      },
+    });
+    expect(reading.declarationState).toBe("covered_by_proof");
+    if (reading.declarationState === "covered_by_proof") {
+      // Sorted, like its sibling, so a caller need not sort it.
+      expect(reading.unerasedSubsystems).toEqual(["backups", "search_indexes"]);
+    }
+  });
+
+  it("is an exact complement of readDeclaredAbsences over one stored declaration", () => {
+    // The two readings exist because *we have none* and *we have it and did not erase it* lead to
+    // opposite actions. A single "did not attest" list would hand both the same sentence (ADR-0331).
+    const record = {
+      ...base,
+      capabilityDeclaration: { ...DECLARATION, backups: "present_not_erased" as const },
+    };
+    const absence = readDeclaredAbsences(record);
+    const unerased = readUnerasedSubsystems(record);
+    if (absence.declarationState !== "covered_by_proof") throw new Error("expected coverage");
+    if (unerased.declarationState !== "covered_by_proof") throw new Error("expected coverage");
+    expect(unerased.unerasedSubsystems).toEqual(["backups"]);
+    expect(absence.absentSubsystems).toEqual(["caches", "object_storage"]);
+    const overlap = unerased.unerasedSubsystems.filter((s) => absence.absentSubsystems.includes(s));
+    expect(overlap).toEqual([]);
+    // Both arms carry the whole declaration, so a caller re-filtering for a disposition neither
+    // reader names has it — which is what made this the *second* reader rather than the only one.
+    expect(unerased.declaration).toEqual(absence.declaration);
+  });
+
+  it("distinguishes a signed 'nothing was left behind' from 'unknown'", () => {
+    const reading = readUnerasedSubsystems({
+      ...base,
+      capabilityDeclaration: CONSERVATIVE_DELETION_CAPABILITIES,
+    });
+    expect(reading.declarationState).toBe("covered_by_proof");
+    if (reading.declarationState === "covered_by_proof") {
+      expect(reading.unerasedSubsystems).toEqual([]);
+    }
+  });
+
+  it("answers 'unknown', never 'none', for a v1 record and carries no list", () => {
+    const reading = readUnerasedSubsystems({
+      ...base,
+      proofVersion: "v1",
+      capabilityDeclaration: undefined,
+    });
+    expect(reading.declarationState).toBe("unknown_not_in_proof");
+    // Inherited from its sibling deliberately: no empty array for a caller to read as "nothing was
+    // left behind" on a proof whose bytes say nothing about any declaration.
+    expect(reading).not.toHaveProperty("unerasedSubsystems");
+    if (reading.declarationState === "unknown_not_in_proof") {
+      expect(reading.reason).toBe("v1_proof");
+    }
+  });
+
+  it("refuses to read a declaration off a record labelled v2 without one", () => {
+    const reading = readUnerasedSubsystems({ ...base, capabilityDeclaration: undefined });
+    expect(reading.declarationState).toBe("unknown_not_in_proof");
+    if (reading.declarationState === "unknown_not_in_proof") {
+      expect(reading.reason).toBe("declaration_missing");
+    }
+  });
+
+  it("reads the declaration off every version whose bytes cover one", () => {
+    // The near-miss ADR-0331 avoided and ADR-0351 reproduced one version later, asked of the new
+    // reader: both go through one `declarationCoverage`, so a version added to the coverage map
+    // reaches both and a literal comparison in either is not available.
+    for (const proofVersion of DECLARATION_BEARING_PROOF_VERSIONS) {
+      const reading = readUnerasedSubsystems({
+        ...base,
+        proofVersion,
+        capabilityDeclaration: { ...DECLARATION, backups: "present_not_erased" },
+        retainedObligations: [],
+        recordStorage: RECORD_STORAGE,
+      });
+      expect(reading.declarationState, proofVersion).toBe("covered_by_proof");
+      if (reading.declarationState === "covered_by_proof") {
+        expect(reading.unerasedSubsystems, proofVersion).toEqual(["backups"]);
+      }
     }
   });
 });

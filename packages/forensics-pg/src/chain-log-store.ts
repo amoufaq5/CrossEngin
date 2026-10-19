@@ -3,6 +3,7 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 import {
   GENESIS_HASH,
   buildChainEntry,
+  checkpointAnchorsBoundedProof,
   verifyChainIntegrity,
   type ChainCheckpoint,
   type ChainedLogEntry,
@@ -36,6 +37,29 @@ const READ_COLUMNS = `sequence_number, kind, recorded_at, actor_reference, paylo
 
 export interface PostgresChainLogStoreOptions {
   readonly schema?: string;
+}
+
+/**
+ * A bounded verification was asked for against an anchor nothing vouched for.
+ *
+ * An `Error` and not a `ChainSuffixVerdict`, for the reason stated at `verifyFromCheckpoint`: a
+ * verdict says something about the **chain**, and this says the verification could not be performed.
+ * The message names the provenance it got — including the word `absent`, which is the state every
+ * checkpoint written before ADR-0371 is in and is a different fact from a row that states
+ * `unverified`.
+ */
+export class ChainAnchorNotVerified extends Error {
+  constructor(
+    readonly sequenceNumber: number,
+    readonly provenance: ChainCheckpoint["provenance"],
+  ) {
+    super(
+      `cannot bound a verification on the checkpoint at sequence ${sequenceNumber.toString()}: ` +
+        `its provenance is ${provenance ?? "absent"}, so nothing vouched for the prefix it anchors. ` +
+        `Fold from genesis instead, or verify and re-anchor that scope first.`,
+    );
+    this.name = "ChainAnchorNotVerified";
+  }
 }
 
 /**
@@ -105,11 +129,43 @@ export class PostgresChainLogReader {
   /**
    * O(suffix) integrity check: loads only the entries strictly after the checkpoint (the checkpoint's own
    * entry is the anchor, at `checkpoint.rootHash`) and folds them forward via `verifyChainSuffix`.
+   *
+   * **Refuses an anchor whose provenance does not admit a bounded proof**, which is ADR-0371's
+   * defect through a second door. That increment made the bounded arm of
+   * `verifyChainFromCheckpoint` reachable only behind `checkpointAnchorsBoundedProof`, and this
+   * method was the other bounded-verify entry point: it took a caller-supplied `ChainCheckpoint` of
+   * **any** provenance, handed the suffix to `verifyChainSuffix` and consulted `provenance`
+   * nowhere — and `verifyChainSuffix` answers `{valid: true}` over an empty suffix, so a stale
+   * anchor over a forged prefix read as verified having examined nothing. Found by auditing
+   * ADR-0371 rather than by using it.
+   *
+   * It **throws** rather than answering `{valid: false}`, and the distinction is ADR-0371's own
+   * refused-versus-error split one layer down: a `false` verdict says *this chain did not verify*
+   * and names where it broke, while the truth here is that the verification could not be performed
+   * — which asserts nothing about the chain. Returning `valid: false` would report a tamper for a
+   * configuration problem, and `reason` is the field a reader would then have to disambiguate from
+   * a real `sequence gap`.
+   *
+   * A **backstop** rather than the gate: `verifyChainFromCheckpoint` adjudicates before it reaches
+   * any reader, so nothing in the serving binary can meet this refusal — `dischargeAbac`'s shape,
+   * and ADR-0369's `sessionScope` throw kept as a backstop the live path can no longer reach. What
+   * makes it worth having is that this class is the auditor-facing reader `runVerifyChain` and
+   * `chain-verify.ts` both construct, so the method sits in the serving process one call away from
+   * reintroducing exactly the unsoundness ADR-0371 closed — and **no workspace rule covers it**,
+   * because `pg-unreachable-stores.ts` asks which exported *class* has no caller and not which
+   * *method* (the gap CLAUDE.md already records for `PostgresDataKeyStore.destroy`).
+   *
+   * Not deleted, though it is callerless outside its own tests: the fold is the primitive and the
+   * fold is sound. What was wrong is that the name claimed an adjudication the body did not
+   * perform, so deleting it would send the next auditor to re-implement it — ungated.
    */
   async verifyFromCheckpoint(
     tenantId: string | null,
     checkpoint: ChainCheckpoint,
   ): Promise<ChainSuffixVerdict> {
+    if (!checkpointAnchorsBoundedProof(checkpoint.provenance)) {
+      throw new ChainAnchorNotVerified(checkpoint.sequenceNumber, checkpoint.provenance);
+    }
     const fromSequence = checkpoint.sequenceNumber + 1;
     const entries = await this.loadFrom(tenantId, fromSequence);
     return verifyChainSuffix(entries, { fromSequence, priorRootHash: checkpoint.rootHash });

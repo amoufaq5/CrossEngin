@@ -2636,12 +2636,22 @@ Options:
   --deletion-stranded-after-ms <n>  How long a request must sit in_progress before an ABSENCE of
                        evidence is read as "never committed" (>=60000, default 3600000). A tombstone
                        naming the request is conclusive at any age; an absence never is
-  --deletion-capabilities <file>  JSON: one of "erases" | "retains" | "absent" for every one of the
-                       six deletion subsystems. REQUIRED by the deletion routes and the runner,
-                       because every default is wrong: "absent" signs an Article 17 proof that is
-                       silent about a place the tenant's data may still be, and that silence is the
-                       defect ADR-0317 was written for. It replaced a field read from the request
-                       BODY with [] as its default, so a remote caller chose the proof's reach
+  --deletion-capabilities <file>  JSON: one of "erases" | "retains" | "absent" |
+                       "present_not_erased" for every one of the six deletion subsystems. REQUIRED
+                       by the deletion routes and the runner, because every default is wrong:
+                       "absent" signs an Article 17 proof that is silent about a place the tenant's
+                       data may still be, and that silence is the defect ADR-0317 was written for.
+                       It replaced a field read from the request BODY with [] as its default, so a
+                       remote caller chose the proof's reach.
+                       "present_not_erased" is what a deployment holding BACKUPS should declare.
+                       The other three forced it to lie: "erases" and "retains" keep the subsystem
+                       in scope and nothing in this binary can attest for backups, so every
+                       deletion refuses; "absent" is the only runnable value and it says "this
+                       deployment does not take backups" inside a cryptographic proof. The fourth
+                       leaves the attester requirement WITHOUT claiming the subsystem is not there,
+                       which is ADR-0317 inverted rather than an instance of it: it is a positive
+                       signed statement that the data is still held. Its horizon — "we hold it for
+                       35 days" — is deliberately not expressible yet; see the boot line
   --deletion-escalation-config <file>  JSON ({severity?, category?, declaredBy?, alertPolicy}) —
                        declares an incident and pages when a deletion proof does not verify or two
                        tombstones name one request. These are the findings the forensic chain

@@ -1,11 +1,17 @@
 import {
+  isCompletedLate,
   tombstoneMatchesAttestations,
   verifyTombstoneHashes,
+  type DeletionRequestStatus,
   type GdprDeletionRequest,
 } from "@crossengin/tenant-lifecycle";
 
 import { isAnchoredByChain } from "./deletion-pipeline.js";
-import type { PostgresDeletionRequestStore } from "./deletion-request-store.js";
+import { DeletionRequestCommittedUnreadable } from "./deletion-request-store.js";
+import type {
+  PostgresDeletionRequestStore,
+  UnreadableRowReporter,
+} from "./deletion-request-store.js";
 import {
   TOMBSTONE_SCAN_MAX_LIMIT,
   type PostgresTombstoneStore,
@@ -208,6 +214,58 @@ export interface ReconciliationResult {
   readonly detail: string | null;
 }
 
+/**
+ * One completed request that finished after its Article 12(3) deadline.
+ *
+ * Both instants, because the breach **is** the pair and a reader asked to trust a boolean cannot
+ * put it in a letter to a regulator; `lateByMs` beside them so the figure has one spelling rather
+ * than being re-derived at every surface that shows it. `tombstoneId` is the proof the erasure was
+ * carried out, which is the other half of the sentence: *it was done, and it was done late*.
+ *
+ * Deliberately **not** an `EvidenceAudit`. That type's fields are all about whether the *proof*
+ * stands up (`present`, `digestMatches`, `check`), and a late-but-verifying completion answers "fine"
+ * to every one of them — so folding it in would make a finding whose every field says nothing is
+ * wrong. Worse, mechanically: every `auditCompleted` finding reaches
+ * `DeletionEvidenceEscalator.onAuditFinding` through the scheduler, which declares a paging **sev1**
+ * for a detected tamper (ADR-0324). A deadline breach is a standing compliance fact, not a tamper,
+ * and in this repository the grade *is* the route — so it would page the tamper rotation for
+ * something no page can fix.
+ */
+export interface DeadlineBreach {
+  readonly requestId: string;
+  readonly tenantId: string;
+  readonly deadlineAt: string;
+  readonly completedAt: string;
+  readonly lateByMs: number;
+  readonly tombstoneId: string | null;
+}
+
+/**
+ * What a sweep does with a completed request that finished late.
+ *
+ * **Required**, on `onUnreadableRequest`'s rule and for the same measured reason: `isCompletedLate`
+ * is the predicate that answers for an Article 12(3) breach after the fact, and before this it had
+ * **zero** non-test readers in the workspace — three hits for the name, all inside
+ * `gdpr-deletion.ts`, two of them doc mentions and one the declaration. So the claim that a breach
+ * is "representable, therefore readable, therefore reportable" stopped at the second comma, and it
+ * was the third callerless Article 12(3) predicate beside `isOverdue` and `daysUntilDeadline`. An
+ * optional reporter defaulting to "drop it silently" would leave it that way for every deployment
+ * that did not opt in, which is the defect restated as a default (ADR-0364's addendum, ADR-0371's
+ * `onRefused`).
+ */
+export type DeadlineBreachReporter = (breach: DeadlineBreach) => void;
+
+/**
+ * Appends a note to a verdict's detail, keeping `null` for "nothing to say".
+ *
+ * `null` rather than an empty string on both sides, because `ReconciliationResult.detail` is
+ * `string | null` and an empty string there would read as a detail that exists and says nothing.
+ */
+function withNote(detail: string | null, note: string | null): string | null {
+  if (note === null) return detail;
+  return detail === null ? note : `${detail}; ${note}`;
+}
+
 export interface ReconcilerOptions {
   readonly requests: PostgresDeletionRequestStore;
   readonly tombstones: PostgresTombstoneStore;
@@ -216,6 +274,31 @@ export interface ReconcilerOptions {
    * retiring the row, and reconciliation is the only thing that will ever notice.
    */
   readonly retire?: (tenantId: string) => Promise<boolean>;
+  /**
+   * What to do with a request row the contract cannot represent.
+   *
+   * **Required**, and this is the surface the requirement matters most on. Both sweeps here read a
+   * page and walk it, so one refused row used to throw out of the store's own `.map()` and stop
+   * every *other* row being examined — `auditCompleted` returning nothing was then
+   * indistinguishable from `auditCompleted` finding nothing, which is the whole claim this class
+   * exists to make. An unreadable row is itself a finding of the same family: a completed Article 17
+   * erasure whose request record has stopped being readable.
+   *
+   * Not folded into the returned findings, because `EvidenceAudit` and `ReconciliationResult` both
+   * require a `requestId` and a `tenantId` and a row the contract refused supplies neither
+   * trustworthily — ADR-0371's `onRefused` shape, for its reason.
+   */
+  readonly onUnreadableRequest: UnreadableRowReporter;
+  /**
+   * What to do with a completed request that finished after its Article 12(3) deadline.
+   *
+   * Emitted from `auditCompleted`'s walk, which is already iterating exactly the completed requests
+   * this classifies — so the fact costs no second page read, and the two pages cannot disagree about
+   * which requests were examined. Deliberately not emitted from `DeletionRunner` at the moment of
+   * completion as well: that would be a second producer of one fact, and this sweep covers every
+   * completion including the one just written.
+   */
+  readonly onDeadlineBreach: DeadlineBreachReporter;
   readonly strandedAfterMs?: number;
   readonly clock?: () => Date;
   readonly onReconciled?: (result: ReconciliationResult) => void;
@@ -360,13 +443,55 @@ export class DeletionReconciler {
       return this.report(await this.applyCompleted(request, assessed, only));
     }
     if (assessed.verdict === "never_committed" && opts.applyNeverCommitted === true) {
-      await this.opts.requests.transition(request.id, "rejected", {
+      const note = await this.applyStatus(request.id, "rejected", {
         at: this.now().toISOString(),
         rejectedReason: `reconciled: ${assessed.detail ?? "no tombstone"}`.slice(0, 500),
       });
-      return this.report({ ...assessed, applied: true });
+      return this.report({ ...assessed, applied: true, detail: withNote(assessed.detail, note) });
     }
     return this.report(assessed);
+  }
+
+  /**
+   * One status write, with the committed-but-unreadable case lifted out — `DeletionRunner.move`'s
+   * shape, in the other class that writes these rows.
+   *
+   * The two `transition` calls here were as unguarded as the runner's three, and this one is the
+   * worse pair. `transition` raises `DeletionRequestCommittedUnreadable` for every `to`, so:
+   *
+   *   - out of `applyCompleted` the throw escaped `reconcileOne` and `reconcileStranded`, **dropping
+   *     the rest of the stranded page** — the same "one bad row takes the page" shape the list read
+   *     was fixed for — and it escaped *between* the committed `completed` write and
+   *     `retireQuietly`, so the repair happened, the tenant row was never retired, nothing recorded
+   *     that the request had been resolved, and the next sweep could not see it either, because
+   *     `stranded` walks `in_progress` and the row now reads `completed`. A repair that ran and left
+   *     no trace of having run.
+   *   - out of the `never_committed` arm the same, for an operator-authorised act.
+   *
+   * It returns the **note** rather than a verdict, because the verdict is already settled by the
+   * evidence and the write committing does not change it: `applied` is `true` either way, which is
+   * the fact the row establishes. So the condition lands in `detail`, which is where this type
+   * carries everything an operator has to read and act on.
+   */
+  private async applyStatus(
+    requestId: string,
+    to: DeletionRequestStatus,
+    fields: {
+      readonly at: string;
+      readonly tombstoneId?: string;
+      readonly completionSha256?: string;
+      readonly rejectedReason?: string;
+    },
+  ): Promise<string | null> {
+    try {
+      await this.opts.requests.transition(requestId, to, fields);
+      return null;
+    } catch (err) {
+      if (!(err instanceof DeletionRequestCommittedUnreadable)) throw err;
+      return (
+        `recorded '${err.committedStatus}'; the request row cannot be read back: ${err.parseMessage}`
+      );
+    }
   }
 
   private async applyCompleted(
@@ -374,7 +499,7 @@ export class DeletionReconciler {
     assessed: ReconciliationResult,
     evidence: StoredTombstone,
   ): Promise<ReconciliationResult> {
-    await this.opts.requests.transition(request.id, "completed", {
+    const note = await this.applyStatus(request.id, "completed", {
       at: this.now().toISOString(),
       // Both off the tombstone itself, never recomputed: the digest a completed request commits to
       // has to be the one the stored proof carries, or the join ADR-0321 added is a lie.
@@ -382,9 +507,17 @@ export class DeletionReconciler {
       completionSha256: evidence.record.proofSha256,
     });
     // A run that died after the commit may also have died before retiring the row, and nothing else
-    // will ever notice — the deletion is not in any queue any more.
+    // will ever notice — the deletion is not in any queue any more. It runs whether or not the
+    // status write's row could be read back, and that ordering is the whole of why `applyStatus`
+    // returns a note instead of throwing: the `completed` write committed, so the retire is still
+    // owed, and the throw used to land exactly between the two.
     const retired = this.opts.retire === undefined ? null : await this.retireQuietly(request.tenantId);
-    return { ...assessed, applied: true, tenantRetired: retired };
+    return {
+      ...assessed,
+      applied: true,
+      tenantRetired: retired,
+      detail: withNote(assessed.detail, note),
+    };
   }
 
   private async retireQuietly(tenantId: string): Promise<boolean | null> {
@@ -407,7 +540,11 @@ export class DeletionReconciler {
    * `too_recent`, which writes nothing.
    */
   async reconcileStranded(limit = 25): Promise<readonly ReconciliationResult[]> {
-    const stranded = await this.opts.requests.stranded(this.now().toISOString(), limit);
+    const stranded = await this.opts.requests.stranded(
+      this.now().toISOString(),
+      this.opts.onUnreadableRequest,
+      limit,
+    );
     const results: ReconciliationResult[] = [];
     for (const request of stranded) {
       results.push(await this.reconcileOne(request));
@@ -425,12 +562,47 @@ export class DeletionReconciler {
    *
    * Returns **only** the findings. A listing of every completed request grows without bound and says
    * nothing; "which completed deletions can no longer be proven" is a page an operator can act on.
+   *
+   * A row the contract cannot represent goes to `onUnreadableRequest` and the walk continues, where
+   * before it threw out of the store's `.map()` and ended the audit. That mattered more than one lost
+   * row: this method's answer is *the absence of findings*, so a throw and a clean audit were the
+   * same observation — a claim of "every completed deletion still verifies" that nothing had checked.
+   *
+   * A request that finished **after its Article 12(3) deadline** goes to `onDeadlineBreach` and is
+   * not a finding, because the two questions are independent and only one of them is about the proof:
+   * a completion can be late and perfectly evidenced. This is also the only reader `isCompletedLate`
+   * has, so the predicate's claim — that a breach the schema used to refuse outright is now
+   * representable, therefore readable, therefore reportable — is true for the first time here.
    */
   async auditCompleted(limit = 100): Promise<readonly EvidenceAudit[]> {
-    const completed = await this.opts.requests.completedWithTombstone(limit);
+    const completed = await this.opts.requests.completedWithTombstone(
+      this.opts.onUnreadableRequest,
+      limit,
+    );
     const findings: EvidenceAudit[] = [];
     for (const request of completed) {
       const named = request.tombstoneId;
+      const completedAt = request.completedAt;
+      if (completedAt !== null && isCompletedLate(request)) {
+        this.opts.onDeadlineBreach({
+          requestId: request.id,
+          tenantId: request.tenantId,
+          deadlineAt: request.deadlineAt,
+          completedAt,
+          lateByMs: new Date(completedAt).getTime() - new Date(request.deadlineAt).getTime(),
+          tombstoneId: named,
+        });
+      }
+      // **First in the loop body**, so no later `continue` can skip it — and the last of them is
+      // taken by every healthy request, which is the ordinary late completion. A deadline breach is
+      // independent of whether the proof stands up: a completion can be late and perfectly
+      // evidenced, and that case is the one the reading exists for.
+      //
+      // The `!== null` is the narrowing `GdprDeletionRequest.completedAt` requires and not a second
+      // spelling of the predicate: `isCompletedLate` already answers `false` for a `completed`
+      // request that states no completion time, because a boolean cannot say "the record does not
+      // say when it finished" and `true` would assert a breach from a record that gives no time at
+      // all.
       if (named === null) continue; // The contract forbids it; the store would have refused the row.
       const stored = await this.opts.tombstones.read(named);
       if (stored === null) {

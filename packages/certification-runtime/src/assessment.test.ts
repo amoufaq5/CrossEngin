@@ -19,6 +19,9 @@ function fullyCompliantEvidence(): ControlEvidence[] {
         framework: "soc2_type2",
         status: "sealed",
         sealedSha256: "a".repeat(64),
+        // Positive and never 0, for the reason this fixture exists: a pack covering no item
+        // certifies nothing, so a 0 here would make this "fully compliant" set uncertifiable.
+        totalItemsAcrossCampaigns: 50,
         completionRate: 1,
         strongAttestationRate: 1,
         controlMappings: ["CC6.1"],
@@ -37,7 +40,7 @@ function fullyCompliantEvidence(): ControlEvidence[] {
     ),
     evidenceFromDrReadiness(
       "resilience.dr_readiness",
-      { ready: true, counts: { totalIssues: 0 } },
+      { ready: true, unevidencedAxes: [], counts: { totalIssues: 0 } },
       AT,
     ),
   ];
@@ -84,7 +87,7 @@ describe("assessControl", () => {
   it("ignores evidence whose sourceKind does not match the control", () => {
     const wrong = evidenceFromDrReadiness(
       "data.encryption_at_rest",
-      { ready: true, counts: { totalIssues: 0 } },
+      { ready: true, unevidencedAxes: [], counts: { totalIssues: 0 } },
       AT,
     );
     expect(assessControl(enc, "soc2_type2", [wrong]).status).toBe("not_assessed");

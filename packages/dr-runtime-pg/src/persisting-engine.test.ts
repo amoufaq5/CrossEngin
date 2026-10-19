@@ -163,13 +163,19 @@ describe("buildPersistentDrRuntime.assess", () => {
     const capture: Captured[] = [];
     const rt = build(capture);
     const report = await rt.assess({});
-    expect(report.ready).toBe(true);
+    // An empty estate is not ready since the unevidenced-axis check — it carried no record on four
+    // of them — so `ready: true` here was asserting that defect through the persisting engine.
+    expect(report.ready).toBe(false);
+    expect(report.unevidencedAxes).toEqual(["drills", "runbooks", "backups", "replication"]);
     const row = inserts(capture).find((c) =>
       c.sql.includes("dr_readiness_snapshots"),
     );
     expect(row).toBeDefined();
     expect(row?.params?.[1]).toBe(TENANT);
-    expect(row?.params?.[2]).toBe(true);
+    expect(row?.params?.[2]).toBe(false);
+    // The projected column reaches the row through the persisting engine too, which is the one
+    // round trip neither the record test nor the store test covers on its own.
+    expect(row?.params?.[11]).toEqual(["drills", "runbooks", "backups", "replication"]);
   });
 
   it("persists a not-ready snapshot with the breach count", async () => {

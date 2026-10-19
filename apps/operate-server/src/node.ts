@@ -85,6 +85,7 @@ import {
   sweepDanglingLinksForTenants,
   type MultiTenantSweepReport,
 } from "./link-sweep.js";
+import { formatUnevidencedAxes } from "@crossengin/dr-runtime";
 import { DrReplayer, PostgresDrDrillStore, PostgresDrFailoverStore } from "@crossengin/dr-runtime-pg";
 import {
   PostgresSloEnforcementActionStore,
@@ -285,7 +286,10 @@ import {
 import {
   DeletionCapabilitiesSchema,
   TENANT_LIFECYCLE_STATES,
+  absentSubsystemsFor,
   blocksReads,
+  requiredSubsystemsFor,
+  unerasedSubsystemsFor,
   type DeletionCapabilities,
   type TenantLifecycleState,
 } from "@crossengin/tenant-lifecycle";
@@ -1531,6 +1535,43 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     deletionCapabilities = DeletionCapabilitiesSchema.parse(
       JSON.parse(await readFile(options.deletionCapabilities, "utf8")) as unknown,
     );
+    // What the declaration *means*, said once at boot — because until now nothing read it. The three
+    // readers (`requiredSubsystemsFor`, `absentSubsystemsFor`, `unerasedSubsystemsFor`) had zero
+    // callers anywhere outside `assembleTombstone`, so an operator's only route to discovering what
+    // they had declared was a deletion refusing, or a signed proof that said something they had not
+    // meant. A vocabulary with no surface is this run's most-found shape, and adding a fourth
+    // disposition without one would have reproduced it in the increment that names it.
+    //
+    // It reports and never refuses, and the reason is the whole point of the fourth disposition:
+    // nothing here can tell a *true* `absent` from a false one. Whether this deployment takes
+    // backups is a fact about the deployment that no code in this process can observe — which is
+    // precisely why the operator has to declare it, and why refusing one of the four values would
+    // refuse a deployment for which it is correct.
+    const required = requiredSubsystemsFor(deletionCapabilities);
+    const unerased = unerasedSubsystemsFor(deletionCapabilities);
+    const absent = absentSubsystemsFor(deletionCapabilities);
+    const phrase = (label: string, names: readonly string[]): string =>
+      `${names.length.toString()} ${label}${names.length === 0 ? "" : ` (${names.join(", ")})`}`;
+    console.info(
+      `[deletion] capabilities: ${phrase("must attest", required)}, ` +
+        `${phrase("held and not erased", unerased)}, ${phrase("declared absent", absent)}`,
+    );
+    // The one sentence that is actionable, and it is aimed at the value a real deployment is most
+    // likely to have got wrong. `absent` on `backups` is a signed assertion that this deployment
+    // holds no backup of the tenant's data; for essentially every production install that is false,
+    // and before `present_not_erased` existed it was the only value that let a deletion run at all.
+    // Named rather than refused, because a deployment that genuinely keeps no backup is entitled to
+    // declare it — and `backups` specifically rather than a loop over the absent list, because the
+    // other three are subsystems this binary does not implement, so `absent` is honest for them
+    // (ADR-0351's reason a count of zero can be the claim).
+    if (deletionCapabilities.backups === "absent") {
+      console.warn(
+        "[deletion] capabilities: backups=absent signs an Article 17 proof asserting this " +
+          "deployment holds no backup of the tenant's data. A deployment that does take backups " +
+          "should declare backups=present_not_erased, which leaves the attester requirement " +
+          "without claiming the subsystem is not there.",
+      );
+    }
   }
   // ADR-0352. Whether this database admits the values the catalog declares — every catalogued CHECK
   // rather than the one column ADR-0351 probed, which was never special.
@@ -2171,6 +2212,21 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
               tombstones: new PostgresTombstoneStore(reqConn, auditChainProducer, schemaOpt),
               retire: async (tenantId) =>
                 (await new PostgresTenantStore(reqConn).setStatus(tenantId, "deleted")) !== null,
+              // A row the contract refused is a finding, not a row to drop: it is a completed or
+              // in-flight Article 17 erasure whose request record has stopped being readable, and
+              // `auditCompleted` returning nothing must not be indistinguishable from
+              // `auditCompleted` finding nothing (ADR-0371's `onRefused` shape).
+              onUnreadableRequest: (row) =>
+                console.error(
+                  `[deletion] request row unreadable (${row.requestId ?? "id unreadable"}): ${row.detail}`,
+                ),
+              // A completed-but-late request is a standing Article 12(3) breach. Reporting it is
+              // the point of making the lateness representable (ADR-0372): before this the row
+              // could not be read at all, so this is the first surface the breach can appear on.
+              onDeadlineBreach: (b) =>
+                console.error(
+                  `[deletion] request ${b.requestId} completed ${Math.round(b.lateByMs / 86_400_000).toString()}d past its Article 12(3) deadline (${b.deadlineAt} -> ${b.completedAt}); tombstone ${b.tombstoneId ?? "(none)"}`,
+                ),
               ...(options.deletionStrandedAfterMs !== null
                 ? { strandedAfterMs: options.deletionStrandedAfterMs }
                 : {}),
@@ -2178,6 +2234,12 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       extraRouteList.push(
         ...buildDeletionRequestRoutes({
           store: requestStore,
+          // The same reporter one indentation out: the route's audience is the operator reading
+          // `GET .../stranded`, where an unreadable row is the most interesting finding on the page.
+          onUnreadableRequest: (row) =>
+            console.error(
+              `[deletion] request row unreadable (${row.requestId ?? "id unreadable"}): ${row.detail}`,
+            ),
           principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
           submitRoles: new Set(options.deletionRequestSubmitRoles),
           verifyRoles: new Set(options.deletionRequestVerifyRoles),
@@ -3129,8 +3191,36 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       console.warn("[dr] --dr-readiness-config requires a Postgres store (--store pg); skipping");
     } else {
       drReadiness = buildDrReadinessLifecycle(conn, await loadDrReadinessConfig(options.drReadinessConfig), {
-        onReport: (r) =>
-          console.info(`[dr] readiness ready=${r.ready.toString()} issues=${r.counts.totalIssues.toString()}`),
+        // The axes are on this line because without them an operator meets `ready=false issues=0`
+        // with nothing explaining the pair — which is the exact rendering `formatDrReadiness`'
+        // own comment says must not be met unexplained, and this log line is the deployed
+        // binary's ONLY DR-readiness surface (no route serves a snapshot). Reporting the verdict
+        // and withholding its reason would have left the increment's whole new fact reachable by
+        // no deployment, which is the shape it exists to close.
+        onReport: (r) => {
+          console.info(
+            `[dr] readiness ready=${r.ready.toString()} issues=${r.counts.totalIssues.toString()}` +
+              ` unevidenced=${formatUnevidencedAxes(r.unevidencedAxes)}`,
+          );
+          // Named separately, and only when there is something to name, because the remedy is the
+          // operator's and is not guessable: three of the four axes are hand-typed
+          // `--dr-readiness-config` fields each carrying `.default([])`, so a config of `{"input":{}}`
+          // meets a permanent `ready=false` with no indication of which fields to fill. `drills` is
+          // the exception — it is read from the drill store, so an empty list there means nobody
+          // drilled rather than nobody declared.
+          const axes = r.unevidencedAxes;
+          if (axes !== null && axes.length > 0) {
+            const declarable = axes.filter((a) => a !== "drills");
+            console.warn(
+              `[dr] readiness: no record on ${axes.join(", ")}, so this control is unevidenced ` +
+                `rather than satisfied` +
+                (declarable.length > 0
+                  ? ` — supply ${declarable.join(", ")} in --dr-readiness-config`
+                  : "") +
+                (axes.includes("drills") ? "; drills come from the drill store, not the config" : ""),
+            );
+          }
+        },
         onError: (err) => console.error("[dr] readiness error", err),
       });
     }
@@ -3867,6 +3957,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         store: requests,
         executedBy,
         approvedBy,
+        onUnreadableRequest: (row) =>
+          console.error(
+            `[deletion] request row unreadable (${row.requestId ?? "id unreadable"}): ${row.detail}`,
+          ),
         newTombstoneId: () => newTombstoneId(randomUUID()),
         capabilities: runnerCapabilities,
         run: async (input) => {
@@ -3973,6 +4067,17 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           requests,
           tombstones,
           retire: async (tenantId) => (await tenantStore.setStatus(tenantId, "deleted")) !== null,
+          onUnreadableRequest: (row) =>
+            console.error(
+              `[deletion] request row unreadable (${row.requestId ?? "id unreadable"}): ${row.detail}`,
+            ),
+          // A completed-but-late request is a standing Article 12(3) breach. Reporting it is the
+          // point of making the lateness representable (ADR-0372): before this the row could not
+          // be read at all, so this is the first surface the breach can appear on.
+          onDeadlineBreach: (b) =>
+            console.error(
+              `[deletion] request ${b.requestId} completed ${Math.round(b.lateByMs / 86_400_000).toString()}d past its Article 12(3) deadline (${b.deadlineAt} -> ${b.completedAt}); tombstone ${b.tombstoneId ?? "(none)"}`,
+            ),
           ...(options.deletionStrandedAfterMs !== null
             ? { strandedAfterMs: options.deletionStrandedAfterMs }
             : {}),

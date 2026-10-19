@@ -138,11 +138,75 @@ export const SUBSYSTEM_DISPOSITIONS = [
   "erases",
   /** This deployment has it and is lawfully obliged to keep it, so it must attest too. */
   "retains",
-  /** This deployment does not have this subsystem at all. The only disposition that leaves scope. */
+  /** This deployment does not have this subsystem at all. */
   "absent",
+  /**
+   * This deployment **has** this subsystem, it holds the tenant's data, and this deletion did not
+   * erase it.
+   *
+   * It exists because the other three forced a false claim. Nothing in this repository erases a
+   * backup generation, an object-storage bucket, a search index or a cache key — those four
+   * subsystems have **zero producers**: each appears only in this module's own vocabulary and in the
+   * signed-declaration shape beside it, and `ATTESTERS` in the deletion pipeline has exactly two
+   * keys. So a real deployment, which does take Postgres backups, had three options and all three
+   * were wrong:
+   *
+   *   - `erases` keeps it in scope, nothing can attest, and **every deletion refuses**.
+   *   - `retains` keeps it in scope too, so it also refuses — and it additionally asserts a *lawful
+   *     retention obligation*, which a backup generation is not.
+   *   - `absent` is the only one that lets the deletion run, and it says **"this deployment does not
+   *     have backups"**, inside a cryptographic proof.
+   *
+   * So the only disposition that let an Article 17 deletion complete required signing a statement
+   * that is false for essentially every production install.
+   *
+   * This one leaves the **attester** requirement — because nothing can attest, and demanding an
+   * attestation nothing can produce is what made the other two unusable — and it is emphatically
+   * **not silence**. That distinction is the whole justification, and it is the opposite of
+   * ADR-0317's defect rather than an instance of it: `absent` leaves scope on the ground that the
+   * subsystem *is not there*, while this makes a **positive signed statement that the tenant's data
+   * is still there and this deletion did not reach it**. ADR-0317 refused a subsystem whose silence
+   * read as "nothing to delete"; this says "something to delete, not deleted", which is the one
+   * thing neither silence nor `absent` could express.
+   *
+   * **Compatibility.** The declaration travels inside the signed
+   * `crossengin.tombstone.content.v2`+ bytes, but the **shape** is unchanged — still exactly one
+   * disposition per subsystem, still six keys — so every stored proof composes byte-identical
+   * content and hashes and verifies exactly as before. **No new content tag is needed**, which is
+   * why this is not a `v5`. What does change is *forward* compatibility in one direction only: an
+   * older binary's three-member `z.enum` refuses a newer proof carrying this value, which is a
+   * read-side refusal of a well-formed record rather than a silent misreading. A `reason` or
+   * `horizon` field beside the disposition — the obvious next want, since "we hold it for 35 days"
+   * is the fact an operator has — **would** change the shape and so would need
+   * `crossengin.tombstone.content.v5`. That is the follow-up and deliberately not this.
+   */
+  "present_not_erased",
 ] as const;
 export type SubsystemDisposition = (typeof SUBSYSTEM_DISPOSITIONS)[number];
 export const SubsystemDispositionSchema = z.enum(SUBSYSTEM_DISPOSITIONS);
+
+/**
+ * Whether a disposition obliges its subsystem to attest.
+ *
+ * A **total map** rather than a comparison inside `requiredSubsystemsFor`, because the predicate
+ * used to be `!== "absent"` and widening a `!==` is how a fifth disposition would silently inherit
+ * "must attest" — the loud half of this module's failure mode, but still a default applied to a
+ * question nobody asked. Written down, a fifth member fails `typecheck` at the one place that
+ * decides. (ADR-0329's `SCOPE_BEARING_OUTCOMES` and ADR-0334's `WORKFLOW_WORKER_NEEDS_DEFINITIONS`
+ * are the idiom.)
+ *
+ * `absent` and `present_not_erased` both answer `false` and for **different reasons**, which is why
+ * they are two values and not one: the first has nothing to attest about, the second has something
+ * to attest about and nothing that can attest it. The difference is not visible here — it is in
+ * `absentSubsystemsFor` and `unerasedSubsystemsFor`, which read them apart.
+ */
+export const DISPOSITION_REQUIRES_ATTESTATION: Readonly<Record<SubsystemDisposition, boolean>> =
+  Object.freeze({
+    erases: true,
+    retains: true,
+    absent: false,
+    present_not_erased: false,
+  });
 
 /**
  * Written out one key per subsystem rather than as a `z.record` over the enum, because zod 3's record
@@ -170,38 +234,91 @@ const CAPABILITY_SHAPE = {
  * the subsystem. Treating it as out of scope would reproduce the original defect with a lawful
  * excuse: the data is still there, and the proof would not say so.
  */
+/**
+ * The subsystems the deletion pipeline erases and attests **itself**, with the fact that makes any
+ * self-exempting disposition a configuration error rather than a deployment shape.
+ *
+ * Total over `DELETION_SUBSYSTEMS` with `null` for the four nothing performs, so a seventh subsystem
+ * has to answer this question instead of inheriting "not performed" from an absent key — zod 3's
+ * record validates the keys it is *given*, which is this module's own defect and the reason
+ * `CAPABILITY_SHAPE` is written out longhand too.
+ *
+ * The clauses are data rather than four copied `addIssue` blocks because the refusal is a 2 × 2:
+ * two performed subsystems against two self-exempting dispositions. Copied blocks are how the
+ * second disposition would reach one subsystem and not the other.
+ *
+ * **Exported so it can be pinned, not so it can be read as authority.** This is a *second*
+ * hand-written spelling of a fact `deletion-pipeline.ts` derives structurally — its
+ * `PIPELINE_PERFORMED_SUBSYSTEMS` is `Object.keys(ATTESTERS)`, so a subsystem the pipeline erases
+ * cannot be missing from it, because without an attester it has no attestation either. That
+ * derivation is the better one and stays the authority. This map cannot share it: the pipeline is in
+ * `@crossengin/tenant-lifecycle-pg`, which imports this package, so a runtime import back is a
+ * cycle. So the restatement is forced, and the only fence available across that edge is a test on
+ * the side that *may* import both — `deletion-pipeline.test.ts` asserts the non-null keys here equal
+ * `PIPELINE_PERFORMED_SUBSYSTEMS`. Same relationship `pg-column-coverage.ts` has to `META_TABLES`
+ * and `manifest-event-names.ts` has to the kernel's grammar: a second spelling that cannot be
+ * eliminated, pinned by reading the other side rather than trusted. The reason it is a `null`-valued
+ * total map and not a two-member array is `DISPOSITION_REQUIRES_ATTESTATION`'s: a seventh subsystem
+ * must answer the question instead of inheriting "not performed" from an absent key.
+ */
+export const PIPELINE_ERASES_UNCONDITIONALLY: Readonly<Record<DeletionSubsystem, string | null>> =
+  Object.freeze({
+    // ADR-0314 and ADR-0319.
+    tenant_schema:
+      "every deployment has one and the deletion pipeline erases and attests it unconditionally",
+    // ADR-0329: 112 of the catalog's tables carry a `tenant_id` and `eraseSharedTablesWithin`
+    // reaches them on every deletion.
+    shared_tables:
+      "the platform's own tenant-scoped tables always exist and the deletion pipeline erases and" +
+      " attests them unconditionally",
+    object_storage: null,
+    backups: null,
+    search_indexes: null,
+    caches: null,
+  });
+
+/**
+ * What each disposition would claim about a subsystem the pipeline erases anyway, or `null` if it
+ * claims nothing that contradicts a performed erasure.
+ *
+ * Total over the dispositions for `DISPOSITION_REQUIRES_ATTESTATION`'s reason. `erases` and
+ * `retains` answer `null` from opposite directions and both are admissible: `erases` is exactly what
+ * the pipeline does, and `retains` keeps the subsystem in scope and obliged to speak, so a later
+ * obligation over part of it is a claim the proof can carry rather than a contradiction.
+ *
+ * **Exported because `deletion-pipeline.ts` has to ask the same question and was asking a narrower
+ * one.** Its input-stage check was `capabilities[subsystem] !== "absent"`, written when `absent` was
+ * the only self-exempting disposition — so `present_not_erased`, added beside it, passed that check
+ * and the refusal moved from the `input` stage to `assemble`, where this schema re-parses the
+ * declaration and refuses it anyway. Not a hole, and precisely the kind of half-widened predicate a
+ * total map exists to stop: the map *was* the answer and was module-private, so the pipeline had
+ * nothing to read and restated a comparison instead.
+ */
+export const SELF_EXEMPTION_BY_DISPOSITION: Readonly<Record<SubsystemDisposition, string | null>> =
+  Object.freeze({
+    erases: null,
+    retains: null,
+    absent: "it claims this deployment does not have the subsystem",
+    present_not_erased: "it claims this deletion leaves the subsystem's data in place",
+  });
+
 export const DeletionCapabilitiesSchema = z
   .object(CAPABILITY_SHAPE)
   .strict()
   .superRefine((v, ctx) => {
-    if (v.tenant_schema === "absent") {
-      // Every deployment has one (ADR-0314) and the pipeline erases and attests it unconditionally
-      // (ADR-0319), so a declaration saying otherwise is a configuration error, not a deployment
-      // shape. Refusing it here means the contradiction is caught at boot rather than by a tombstone
-      // that omits the one subsystem the deletion definitely touched.
+    // The refusal belongs **here** and not only in the pipeline, which is where it was first
+    // enforced: a disposition the pipeline will reject is one a deployment should learn about at
+    // boot, from the flag that declares it, rather than from the first tenant deletion it tries.
+    for (const subsystem of DELETION_SUBSYSTEMS) {
+      const performedBecause = PIPELINE_ERASES_UNCONDITIONALLY[subsystem];
+      if (performedBecause === null) continue;
+      const disposition = v[subsystem];
+      const exemption = SELF_EXEMPTION_BY_DISPOSITION[disposition];
+      if (exemption === null) continue;
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: ["tenant_schema"],
-        message:
-          "tenant_schema cannot be 'absent': every deployment has one and the deletion pipeline" +
-          " erases and attests it unconditionally",
-      });
-    }
-    if (v.shared_tables === "absent") {
-      // ADR-0329 made this the second performed subsystem, and the rule is `tenant_schema`'s for
-      // the same reason: every deployment has a `meta` schema, 112 of its tables carry a
-      // `tenant_id`, and `eraseSharedTablesWithin` erases and attests them unconditionally. A
-      // declaration calling it absent is a configuration error, not a deployment shape.
-      //
-      // The refusal belongs **here** and not only in the pipeline, which is where it was first
-      // enforced: a disposition the pipeline will reject is one a deployment should learn about at
-      // boot, from the flag that declares it, rather than from the first tenant deletion it tries.
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["shared_tables"],
-        message:
-          "shared_tables cannot be 'absent': the platform's own tenant-scoped tables always exist" +
-          " and the deletion pipeline erases and attests them unconditionally",
+        path: [subsystem],
+        message: `${subsystem} cannot be '${disposition}': ${exemption}, but ${performedBecause}`,
       });
     }
   });
@@ -223,6 +340,15 @@ export type DeletionCapabilities = z.infer<typeof DeletionCapabilitiesSchema>;
  *     tenant's data still is. Nobody meets it, and the proof is anchored before anyone could.
  *
  * A proof takes the loud failure every time. The quiet one is the defect.
+ *
+ * `present_not_erased` is deliberately **not** here either, and the reason is the same rule read on
+ * a third option rather than an oversight: it is a *claim*. Putting it on the four unperformed
+ * subsystems would let this declaration run a deletion, and it would do so by asserting that this
+ * deployment **has** object storage, backups, search indexes and caches holding the tenant's data —
+ * which for a deployment that has none of them is a false statement in the other direction. What
+ * makes this constant conservative is that it refuses rather than claims, so the only disposition it
+ * can hold is the one whose wrongness is loud. A deployment that genuinely holds backups says so
+ * itself; a starting point cannot say it on their behalf.
  */
 export const CONSERVATIVE_DELETION_CAPABILITIES: DeletionCapabilities = Object.freeze({
   tenant_schema: "erases",
@@ -246,24 +372,59 @@ export const CONSERVATIVE_DELETION_CAPABILITIES: DeletionCapabilities = Object.f
  * `shared_tables` destroys most of what it holds and keeps a statutory remainder, and which tables
  * fall on which side is a property of the catalog rather than of the deployment. The declaration
  * says the subsystem is *in scope and must speak*; the attestation says what it did.
+ *
+ * `present_not_erased` also leaves the list, and it is the one disposition that does so **without**
+ * claiming the subsystem is not there. Read through `DISPOSITION_REQUIRES_ATTESTATION` rather than
+ * compared against `"absent"`, so the two reasons for not obliging an attestation stay two reasons.
  */
 export function requiredSubsystemsFor(
   capabilities: DeletionCapabilities,
 ): readonly DeletionSubsystem[] {
-  return DELETION_SUBSYSTEMS.filter((s) => capabilities[s] !== "absent");
+  return DELETION_SUBSYSTEMS.filter((s) => DISPOSITION_REQUIRES_ATTESTATION[capabilities[s]]);
 }
 
 /**
- * The subsystems this deployment declared it does not have.
+ * The subsystems this deployment declared it **does not have**.
  *
  * Carried out of the assembly so a reader of the result can tell "this deployment has no object
  * storage" from "nobody asked about object storage" — the two states ADR-0317's refusal is about,
  * which look identical in a scope that merely omits them.
+ *
+ * It asks for `"absent"` exactly and so deliberately **excludes** `present_not_erased`, which is a
+ * subsystem the deployment does have. Widening this to "everything that did not attest" would put
+ * the two back into one answer and undo the distinction the fourth disposition exists to draw —
+ * reporting a deployment's backups as a subsystem it lacks, which is the false claim all over again
+ * and this time computed rather than declared.
  */
 export function absentSubsystemsFor(
   capabilities: DeletionCapabilities,
 ): readonly DeletionSubsystem[] {
   return DELETION_SUBSYSTEMS.filter((s) => capabilities[s] === "absent");
+}
+
+/**
+ * The subsystems this deployment **has** and this deletion did not erase.
+ *
+ * Beside `absentSubsystemsFor` and never merged into it, because a reader needs both and the two
+ * answers lead to opposite actions. *We have none* closes the question: there is nothing to erase
+ * and nothing will ever be. *We have it and did not erase it* leaves the tenant's data in place,
+ * which is the fact a data-protection officer answering an Article 17 request has to state, the
+ * horizon an operator has to bound, and the gap an engineer has to close. A single list of
+ * "subsystems that did not attest" would hand all three the same sentence for two facts whose only
+ * similarity is that nobody attested (ADR-0331).
+ *
+ * **Both** readings are available from a stored proof, since the declaration is inside the signed
+ * bytes, and they are two named readers there for the reason they are two named functions here:
+ * `readDeclaredAbsences` answers for the `absent` half and `readUnerasedSubsystems` for this one.
+ * Until the second existed this comment argued at length that a reader needs both and then offered
+ * one — the stored-proof side had `absentSubsystems` computed and the unerased half reachable only
+ * by re-filtering the raw declaration the `covered_by_proof` arm hands back. That is the side an
+ * Article 17 response is written from months later, so it is the side the distinction mattered on.
+ */
+export function unerasedSubsystemsFor(
+  capabilities: DeletionCapabilities,
+): readonly DeletionSubsystem[] {
+  return DELETION_SUBSYSTEMS.filter((s) => capabilities[s] === "present_not_erased");
 }
 
 export const ATTESTATION_OUTCOMES = [

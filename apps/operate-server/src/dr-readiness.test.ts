@@ -74,9 +74,16 @@ describe("buildDrReadinessLifecycle", () => {
     const captured: string[] = [];
     const lifecycle = buildDrReadinessLifecycle(fakeConn(captured), parseDrReadinessConfig({ input: {} }));
     const report = await lifecycle.assessOnce();
-    // No executions + no declared infra ⇒ ready, zero issues.
-    expect(report.ready).toBe(true);
+    // This assertion used to read `expect(report.ready).toBe(true)` under the comment "No
+    // executions + no declared infra ⇒ ready, zero issues" — the defect pinned as a feature, in
+    // the test of the one lifecycle that produces these snapshots. `{"input":{}}` is the config a
+    // deployment writes when it has declared nothing, and every count is derived by *filtering* a
+    // supplied list, so zero issues is what an unexamined estate produces rather than a healthy
+    // one. `totalIssues` is still 0 and still correct: it counts issues found in evidence that
+    // exists, and the unevidenced axes are the separate fact beside it.
+    expect(report.ready).toBe(false);
     expect(report.counts.totalIssues).toBe(0);
+    expect(report.unevidencedAxes).toEqual(["drills", "runbooks", "backups", "replication"]);
     // It read the two execution streams and wrote a readiness snapshot row.
     expect(captured.some((s) => s.includes("dr_failover_executions"))).toBe(true);
     expect(captured.some((s) => s.includes("dr_drill_executions"))).toBe(true);

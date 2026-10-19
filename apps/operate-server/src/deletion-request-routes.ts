@@ -193,8 +193,18 @@ export interface DeletionRequestStoreLike {
       readonly rejectedReason?: string;
     },
   ): Promise<DeletionRequestLike | null>;
-  /** Requests left `in_progress` since before `olderThan` (ADR-0322). */
-  stranded(olderThan: string, limit?: number): Promise<readonly DeletionRequestLike[]>;
+  /**
+   * Requests left `in_progress` since before `olderThan` (ADR-0322).
+   *
+   * `onUnreadable` is required and precedes `limit`, mirroring the store: a sweep that drops a row
+   * the contract refused is indistinguishable from a sweep that found nothing, and the row it would
+   * drop is a completed Article 17 erasure whose request record has stopped being readable.
+   */
+  stranded(
+    olderThan: string,
+    onUnreadable: (row: { readonly requestId: string | null; readonly detail: string }) => void,
+    limit?: number,
+  ): Promise<readonly DeletionRequestLike[]>;
 }
 
 export const DELETION_REQUEST_SUBMITTED_OPERATION = "platform.deletion_request_submitted";
@@ -222,6 +232,19 @@ export type DeletionRequestRecorder = (event: DeletionRequestEvent) => Promise<v
 
 export interface DeletionRequestRoutesContext {
   readonly store: DeletionRequestStoreLike;
+  /**
+   * What this route does with a stranded row the contract refused.
+   *
+   * **Required**, for the reason the store's own reporter is: a default that drops the row silently
+   * is the defect restated as a default. This route's audience is an operator reading
+   * `GET .../stranded` to find requests a failed run left behind, so a row that cannot be
+   * represented is the most interesting kind of finding on that page and the one a silent drop
+   * would hide.
+   */
+  readonly onUnreadableRequest: (row: {
+    readonly requestId: string | null;
+    readonly detail: string;
+  }) => void;
   readonly principalRoles: (principal: ResolvedPrincipal | null) => PrincipalRoles;
   /** Roles permitted to submit a request. Fail-closed: empty ⇒ nobody. */
   readonly submitRoles: ReadonlySet<string>;
@@ -776,12 +799,34 @@ function buildStrandedHandler(ctx: DeletionRequestRoutesContext): Handler {
     }
     const now = (ctx.clock ?? ((): Date => new Date()))();
     let stranded: readonly DeletionRequestLike[];
+    // Collected for the RESPONSE as well as reported to the deployment, and the two are different
+    // audiences rather than a duplication. The reporter is where a standing condition belongs; this
+    // body is read by the one caller who can act on it, and this route's whole purpose is to find
+    // the requests a failed run left behind — so a row the contract refused is the most interesting
+    // kind on the page and a silently-short list would hide exactly it. Before the store stopped
+    // throwing per row the page was not short, it was a 503; now it would be short and look
+    // complete, which is the worse of the two (ADR-0345's rule that a withheld row must leave the
+    // response able to say so).
+    const unreadable: Array<{ requestId: string | null; detail: string }> = [];
     try {
-      stranded = await ctx.store.stranded(now.toISOString(), 50);
+      stranded = await ctx.store.stranded(
+        now.toISOString(),
+        (row) => {
+          unreadable.push({ ...row });
+          ctx.onUnreadableRequest(row);
+        },
+        50,
+      );
     } catch {
+      // Now reachable only for a failure of the read ITSELF — the connection, the policy, the
+      // elevation — because a single unrepresentable row no longer escapes the store's own mapping.
+      // The sentence changed with the cause: it used to say "a stored deletion request could not be
+      // read", which was true when one bad row threw out of `.map()` and is the wrong diagnosis for
+      // what reaches this catch today. "Do not treat this as an absence" is the half that survives
+      // and is the half that matters, since the caller is deciding whether anything is stranded.
       return json(503, {
         error: "requests_unreadable",
-        detail: "a stored deletion request could not be read; do not treat this as an absence",
+        detail: "the stranded listing could not be read; do not treat this as an absence",
       });
     }
     // The verdict per row, writing nothing: a list is for looking at. Applying is the POST.
@@ -801,10 +846,16 @@ function buildStrandedHandler(ctx: DeletionRequestRoutesContext): Handler {
       operation: DELETION_REQUESTS_STRANDED_READ_OPERATION,
       status: assessed.length === 0 ? "none" : "stranded",
       tombstoneId: null,
-      detail: `${assessed.length.toString()} stranded`,
+      detail:
+        unreadable.length === 0
+          ? `${assessed.length.toString()} stranded`
+          : `${assessed.length.toString()} stranded, ${unreadable.length.toString()} unreadable`,
       at: now.toISOString(),
     });
-    return json(200, { data: assessed });
+    // `unreadable` is always present and `[]` is the claim that every row in the window could be
+    // represented — never omitted, because an absent field reads as "none" and is indistinguishable
+    // from "nobody looked", which is this increment's own subject (ADR-0331).
+    return json(200, { data: assessed, unreadable });
   };
 }
 

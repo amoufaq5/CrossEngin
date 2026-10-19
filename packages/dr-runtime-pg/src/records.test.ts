@@ -6,7 +6,7 @@ import {
   type DrillRecord,
   type FailoverRecord,
 } from "@crossengin/dr";
-import { assessDrReadiness } from "@crossengin/dr-runtime";
+import { assessDrReadiness, DrReadinessReportSchema } from "@crossengin/dr-runtime";
 import {
   DrDrillExecutionRecordSchema,
   DrFailoverExecutionRecordSchema,
@@ -196,11 +196,44 @@ describe("readinessSnapshotRecordFrom", () => {
     });
     expect(DrReadinessSnapshotRecordSchema.safeParse(rec).success).toBe(true);
     expect(rec.snapshotId).toMatch(/^drr_[a-z0-9]{4,40}$/);
-    expect(rec.ready).toBe(true);
+    // An empty estate is not ready since the unevidenced-axis check, so `ready: true` here was
+    // asserting that defect from the projection side.
+    expect(rec.ready).toBe(false);
     expect(rec.totalIssues).toBe(0);
     expect(rec.overdueDrills).toBe(0);
     expect(rec.failoverBreaches).toBe(0);
     expect(rec.generatedAt).toBe(NOW);
+  });
+
+  it("derives unevidencedAxes from the report rather than accepting one", () => {
+    // The seven counts' own rule one column over: the projection and the `report` JSONB in the
+    // same row cannot disagree about which axes carried nothing, because there is one source.
+    const report = assessDrReadiness({});
+    const rec = readinessSnapshotRecordFrom(report, { tenantId: TENANT, generatedAt: NOW });
+    expect(rec.unevidencedAxes).toEqual(report.unevidencedAxes);
+    expect(rec.unevidencedAxes).toEqual(["drills", "runbooks", "backups", "replication"]);
+  });
+
+  it("projects null for a report that predates the check, never []", () => {
+    const stored: Record<string, unknown> = { ...assessDrReadiness({}) };
+    delete stored["unevidencedAxes"];
+    const rec = readinessSnapshotRecordFrom(DrReadinessReportSchema.parse(stored), {
+      tenantId: TENANT,
+      generatedAt: NOW,
+    });
+    expect(rec.unevidencedAxes).toBeNull();
+  });
+
+  it("refuses a record whose projected axis this binary does not recognise", () => {
+    // Typed by `DrEvidenceAxisSchema` rather than `z.string()`, so the projection and the JSONB
+    // beside it share one vocabulary (ADR-0371: refuse rather than coerce).
+    const rec = readinessSnapshotRecordFrom(assessDrReadiness({}), {
+      tenantId: TENANT,
+      generatedAt: NOW,
+    });
+    expect(
+      DrReadinessSnapshotRecordSchema.safeParse({ ...rec, unevidencedAxes: ["restores"] }).success,
+    ).toBe(false);
   });
 
   it("reflects a not-ready report with a breach count", () => {

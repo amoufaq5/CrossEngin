@@ -178,16 +178,23 @@ export const GdprDeletionRequestSchema = z
           message: "completed status requires completionSha256 (cryptographic proof)",
         });
       }
-      if (v.completedAt !== null) {
-        const completedMs = new Date(v.completedAt).getTime();
-        if (completedMs > deadlineMs) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ["completedAt"],
-            message: "completion missed Article 12(3) deadline",
-          });
-        }
-      }
+      // There is deliberately **no** refusal for `completedAt > deadlineAt`, and the absence is the
+      // decision rather than an omission: a late completion is a fact that happened. Nothing in this
+      // system prevents one — how long erasing a large tenant takes is not something a schema can
+      // refuse — so the refusal that used to be here never prevented the breach. It only made the
+      // record of it unreadable. A contract that refuses to represent a fact that happened does not
+      // prevent the fact; it destroys the evidence.
+      //
+      // Measured, because the consequence was worse than an unwritable row.
+      // `PostgresDeletionRequestStore.transition` runs its `UPDATE … RETURNING` inside
+      // `conn.transaction`, which **commits**, and parses the returned row only afterwards. So for a
+      // deletion that finished past its deadline: the tenant's data was destroyed, the tombstone was
+      // written and anchored, the row was committed `completed` — and the call threw. `read()` then
+      // threw for that row for ever, and `completedWithTombstone()` threw inside its own `.map()`, so
+      // one late deletion stopped the reconciler auditing every *other* completed request.
+      //
+      // The breach is representable, therefore readable, therefore reportable: `isCompletedLate` is
+      // what answers for it, and `isOverdue`'s doc comment names it as the other half of the pair.
     }
     if (v.status === "rejected") {
       if (v.rejectedAt === null) {
@@ -250,12 +257,48 @@ export const GdprDeletionRequestSchema = z
   });
 export type GdprDeletionRequest = z.infer<typeof GdprDeletionRequestSchema>;
 
+/**
+ * Whether this request is **still running** past its Article 12(3) deadline.
+ *
+ * `completed` and `rejected` answer `false` because neither is still running — and for `completed`
+ * that is emphatically not the same statement as "it was answered on time". `isCompletedLate` is the
+ * companion that answers for that case, and the two are total over the statuses that can breach the
+ * deadline: this one for a request that has not finished, that one for a request that has. The pair
+ * is why this function's `false` for `completed` is honest rather than silent; on its own it was the
+ * only reading available, and it looks identical to compliance.
+ *
+ * `rejected` is the one terminal status neither reports, which is right: a refused request was
+ * answered rather than answered late, and `rejectedReason` carries why.
+ */
 export function isOverdue(
   request: GdprDeletionRequest,
   now: Date = new Date(),
 ): boolean {
   if (request.status === "completed" || request.status === "rejected") return false;
   return now.getTime() > new Date(request.deadlineAt).getTime();
+}
+
+/**
+ * Whether this request **finished** after its Article 12(3) deadline — the breach, after the fact.
+ *
+ * The schema used to refuse such a record outright; the comment in `GdprDeletionRequestSchema`'s
+ * `completed` branch says what that cost and why it is gone. This is the reading that replaces it.
+ *
+ * It takes **no clock**, where `isOverdue` and `daysUntilDeadline` both do, and the asymmetry is the
+ * decision rather than an oversight: both operands are stored on the record, so the answer is a
+ * property of the request itself and not of when anyone asks. A `now` parameter would be unread at
+ * best, and at worst would invite a reader to make a settled historical fact drift with the clock.
+ *
+ * Strictly `>`, matching the deadline's own meaning: completing exactly at it is on time.
+ *
+ * A `completed` request carrying no `completedAt` answers `false`. The schema refuses that pairing,
+ * so it is unreachable past validation — and a boolean cannot say "the record does not state when it
+ * finished", while answering `true` would assert a breach from a record that gives no completion
+ * time at all. That is the opposite false claim, and the one a regulator would be shown.
+ */
+export function isCompletedLate(request: GdprDeletionRequest): boolean {
+  if (request.status !== "completed" || request.completedAt === null) return false;
+  return new Date(request.completedAt).getTime() > new Date(request.deadlineAt).getTime();
 }
 
 export function daysUntilDeadline(

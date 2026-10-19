@@ -83,6 +83,30 @@ export const REQUEST_REFUSALS = [
 ] as const;
 export type RequestRefusal = (typeof REQUEST_REFUSALS)[number];
 
+/**
+ * A refusal: **this call left no row of its own in the database**, and the caller holds no request.
+ *
+ * The invariant used to be stated as a *position* — "every member is raised before any `INSERT` or
+ * `UPDATE` is issued" — and that was false in the method directly above the one this class pairs
+ * with. `submit` issues its `INSERT` and then reads the row back, so `not_found` and
+ * `contract_violated` are both raised past a statement. They are still refusals, because the claim
+ * that matters is about *state* and not about ordering, and each is true of its own case:
+ *
+ *   - `contract_violated` — the `INSERT` matched `ON CONFLICT (request_id) DO NOTHING`, so it wrote
+ *     nothing, and the row that was already there is one the contract cannot represent.
+ *   - `not_found` from `submit` — the row the `INSERT` wrote, or the row that blocked it, is gone by
+ *     the read-back. Something removed it in between. Nothing this call wrote survives, so there is
+ *     nothing to hand back and nothing to undo, and `submit` is idempotent on `request_id` so the
+ *     caller's remedy is to submit again. It is **not** the "nothing was ever written" claim the
+ *     three pre-statement members make, which is why it is named here rather than left to be
+ *     generalised from them.
+ *
+ * It is deliberately *not* the vehicle for a committed write whose read-back cannot be represented —
+ * `DeletionRequestCommittedUnreadable` is, and the whole point of a second class is that the two
+ * state opposite things about whether a row this call wrote is now in the database. Handing a bare
+ * `ZodError` to a caller, which is what `submit` did for a stored row the contract refuses, states
+ * neither.
+ */
 export class DeletionRequestRefused extends Error {
   readonly refusal: RequestRefusal;
 
@@ -91,6 +115,120 @@ export class DeletionRequestRefused extends Error {
     this.name = "DeletionRequestRefused";
     this.refusal = refusal;
   }
+}
+
+/**
+ * The `UPDATE` **committed** and the row it returned cannot be represented.
+ *
+ * The name and the message both lead with the commit, because that is the entire information the
+ * caller needs and the one thing a bare `ZodError` cannot carry. `transition` opens a transaction,
+ * runs the guarded `UPDATE … RETURNING`, and the transaction **commits** — only then does
+ * `rowToDeletionRequest` run on the returned row. A throw from that parse is therefore not a failed
+ * write. It is a successful one this binary cannot read back, and `DeletionRunner` reported it as
+ * `completed_unrecorded`, whose own definition reads "the `completed` write did not" — which was
+ * false about the row and false in the direction that invites a human to re-drive a deletion that
+ * has already happened.
+ *
+ * The rule: **a read-back that cannot be represented must not be reported as a write that did not
+ * happen.** The two have opposite remedies — a failed write is re-driven, a committed one must not
+ * be — so a caller that cannot tell them apart cannot act on either.
+ *
+ * Carrying `committedStatus` and not the row: the status is the one fact the `UPDATE` establishes
+ * independently of anything the row reads as, since it is the value this call bound and the
+ * predicate it committed under. Every column of a row the contract refused is of unestablished
+ * trustworthiness, and handing one back invites a caller to act on it.
+ *
+ * `submit` raises it too, and only when its own `INSERT` reported a row — `committedStatus` is then
+ * `"submitted"`, the literal that statement bound. When the `INSERT` matched `ON CONFLICT … DO
+ * NOTHING` this call committed nothing, so the unreadable row it found belongs to an earlier one and
+ * the honest answer is `DeletionRequestRefused("contract_violated")`. Claiming a commit this call
+ * did not make would be the same wrong direction as the defect, reflected: a caller must not be told
+ * not to retry a write that never landed.
+ */
+export class DeletionRequestCommittedUnreadable extends Error {
+  readonly requestId: string;
+  /** The status the `UPDATE` committed — true of the row whatever the row reads as. */
+  readonly committedStatus: DeletionRequestStatus;
+  /** Why the contract could not represent the returned row. */
+  readonly parseMessage: string;
+
+  constructor(requestId: string, committedStatus: DeletionRequestStatus, parseMessage: string) {
+    super(
+      `deletion request ${requestId} committed status '${committedStatus}' and its read-back ` +
+        `cannot be represented: ${parseMessage}`,
+    );
+    this.name = "DeletionRequestCommittedUnreadable";
+    this.requestId = requestId;
+    this.committedStatus = committedStatus;
+    this.parseMessage = parseMessage;
+  }
+}
+
+/**
+ * One row a sweep could not represent.
+ *
+ * Two fields and no more. `requestId` is the row's business key, so it is what a `WHERE` clause
+ * needs and the only handle a remedy can name; `detail` is the cause. Every *other* column of a row
+ * the contract refused is of unestablished trustworthiness — reporting a `tenant_id` read off such a
+ * row invites an operator to scope a manual fix by a value that may be the reason it was refused —
+ * which is ADR-0310's rule about what a finding's notice may carry, one surface over.
+ *
+ * `requestId` is `string | null` because the column itself may be what is wrong, and `null` says
+ * *the row does not name one* rather than inventing a handle (ADR-0331).
+ */
+export interface UnreadableRequestRow {
+  readonly requestId: string | null;
+  readonly detail: string;
+}
+
+/**
+ * What a sweep does with a row it cannot represent.
+ *
+ * **Required** at every list method, never optional with a default: a reporter defaulting to "drop
+ * it silently" is the defect restated as a default (ADR-0364's addendum, ADR-0371's `onRefused`),
+ * and the row this would drop is a completed Article 17 erasure whose request record has stopped
+ * being readable. Required also means the compiler names every call site when a list method is
+ * added, where a constructor-level reporter would let a new method inherit one nobody chose — and
+ * the three methods have three different audiences (a scheduler, an HTTP route, an audit sweep),
+ * which one callback on the store would merge.
+ */
+export type UnreadableRowReporter = (row: UnreadableRequestRow) => void;
+
+/** Best-effort handle for a row the contract refused. The column may be the reason it was refused. */
+function requestIdOf(row: Record<string, unknown>): string | null {
+  const raw = row["request_id"];
+  return typeof raw === "string" && raw.length > 0 ? raw : null;
+}
+
+/**
+ * A page into requests: every row that can be represented, and a report for every row that cannot.
+ *
+ * One rule, in one place, for all three list methods: **a sweep reports an unrepresentable row and
+ * carries on; it does not take the other rows with it.** Before this, `result.rows.map(…)` meant one
+ * row the contract refused threw out of the whole page, so a single hand-edited or
+ * newer-binary-written row stopped `DeletionReconciler.auditCompleted` auditing every *other*
+ * completed request — the sweep went silent in exactly the way an absence of findings is read as a
+ * clean result. ADR-0289's rule (a parse failure is a finding, not an exception) and ADR-0327's (a
+ * sweep that found a bad record has even less standing to act than one that found none).
+ *
+ * `read()` deliberately does **not** take this path; see its own comment for why.
+ */
+function readRequestRows(
+  rows: readonly Record<string, unknown>[],
+  onUnreadable: UnreadableRowReporter,
+): readonly GdprDeletionRequest[] {
+  const out: GdprDeletionRequest[] = [];
+  for (const row of rows) {
+    try {
+      out.push(rowToDeletionRequest(row));
+    } catch (err) {
+      onUnreadable({
+        requestId: requestIdOf(row),
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return out;
 }
 
 function isoOf(value: unknown): string {
@@ -122,9 +260,16 @@ function jsonArray(value: unknown): readonly unknown[] {
 /**
  * One row into a request, re-parsed through the contract.
  *
- * Throws on a row the contract cannot represent, which is deliberate: the new `tombstoneId` rule
- * means a `completed` row naming no tombstone is now a contract violation, and that is exactly the
- * shape of row a hand-edit would leave. A shorter answer would hide it.
+ * Throws on a row the contract cannot represent, which is deliberate: the `tombstoneId` rule means a
+ * `completed` row naming no tombstone is a contract violation, and that is exactly the shape of row a
+ * hand-edit would leave. A shorter answer would hide it.
+ *
+ * The throw is the *detector* and never the policy, and every caller answers it differently on
+ * purpose — `read` propagates, `readRequestRows` reports and carries on, `transition` re-throws as
+ * `DeletionRequestCommittedUnreadable` because by then the write has committed, and `submit` picks
+ * between those last two on whether its own `INSERT` reported a row. Each says why at its own site,
+ * and there is deliberately no count here: this comment said "its three callers" while `submit` was
+ * the fourth and was answering with a bare `ZodError`.
  */
 export function rowToDeletionRequest(row: Record<string, unknown>): GdprDeletionRequest {
   const candidate: Record<string, unknown> = {
@@ -222,9 +367,9 @@ export class PostgresDeletionRequestStore {
     // which is what hid it: they elevate through `app.platform_audit`, so an operator could list
     // requests and never create one. Observed live; `set_config` is transaction-local, so without
     // the wrapping transaction it would be discarded before the INSERT it was set for.
-    await this.conn.transaction(async (tx) => {
+    const inserted = await this.conn.transaction(async (tx) => {
       await tx.query(SET_TENANT_CONTEXT_SQL, [candidate.tenantId]);
-      await tx.query(
+      return tx.query(
         `INSERT INTO ${this.table} (request_id, tenant_id, subject_identifier, legal_basis, status,
          submitted_at, submitted_by, deadline_at, retention_obligations, retained_data_categories, notes)
        VALUES ($1, $2::uuid, $3, $4, $5, $6::timestamptz, $7, $8::timestamptz, $9::jsonb, $10::jsonb, $11)
@@ -244,23 +389,82 @@ export class PostgresDeletionRequestStore {
         ],
       );
     });
-    const stored = await this.read(candidate.id);
-    if (stored === null) {
-      throw new DeletionRequestRefused("not_found", `request ${candidate.id} vanished after insert`);
+    // `ON CONFLICT … DO NOTHING` makes the row count the one thing that says whether *this* call
+    // wrote anything, and that is what decides which of the two classes an unreadable read-back is.
+    // Without it the two cases are indistinguishable from here and the previous answer — a bare
+    // `ZodError` out of `read` — was neither of them.
+    const wrote = inserted.rowCount > 0;
+    const row = await this.readRow(candidate.id);
+    if (row === undefined) {
+      // Past a committed `INSERT`, which the old message said in so many words ("vanished after
+      // insert") inside a class whose doc claimed every member was raised before one. It stays a
+      // refusal and the class now says why: whatever this call wrote is gone, so there is nothing to
+      // hand back, nothing to undo, and `submit` is idempotent on `request_id` — the caller submits
+      // again. It is not the "nothing was ever written" claim the pre-statement members make.
+      throw new DeletionRequestRefused(
+        "not_found",
+        `request ${candidate.id} is absent from ${this.table} immediately after its insert` +
+          `${wrote ? " committed" : " was skipped by ON CONFLICT"}; something removed it in between`,
+      );
     }
-    return stored;
+    try {
+      return rowToDeletionRequest(row);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      // The whole of finding 3, and the split is the row count. Our `INSERT` landed, so a read-back
+      // the contract cannot represent is a committed write this binary cannot read — never a
+      // refusal, which would tell the caller to retry a row that exists.
+      if (wrote) {
+        throw new DeletionRequestCommittedUnreadable(candidate.id, "submitted", detail);
+      }
+      // Our `INSERT` wrote nothing, so the unreadable row belongs to an earlier submission and this
+      // call changed nothing at all — a refusal, and the first producer `contract_violated` has ever
+      // had. Reusing it rather than adding a member: the vocabulary already named this exact fact
+      // and the member's own test called it unproduced.
+      throw new DeletionRequestRefused(
+        "contract_violated",
+        `request ${candidate.id} already exists and the stored row cannot be represented, so this` +
+          ` submission wrote nothing and there is no request to return: ${detail}`,
+      );
+    }
   }
 
-  async read(requestId: string): Promise<GdprDeletionRequest | null> {
+  /**
+   * The stored row for one request, unparsed, elevated the way every read here is.
+   *
+   * Split out so there is exactly one spelling of this `SELECT` and the **parse** is the caller's.
+   * `read` propagates a parse failure, `submit` has to tell its two cases apart, and a shared
+   * already-parsed helper could serve only one of them — which is how `submit` came to hand a raw
+   * `ZodError` to an HTTP route.
+   */
+  private async readRow(requestId: string): Promise<Record<string, unknown> | undefined> {
     return this.conn.transaction(async (tx) => {
       await tx.query("SELECT set_config('app.platform_audit', 'on', true)");
       const result = await tx.query<Record<string, unknown>>(
         `SELECT ${REQUEST_COLUMNS.join(", ")} FROM ${this.table} WHERE request_id = $1`,
         [requestId],
       );
-      const row = result.rows[0];
-      return row === undefined ? null : rowToDeletionRequest(row);
+      return result.rows[0];
     });
+  }
+
+  /**
+   * One named request, or `null` if there is no such row.
+   *
+   * This is the one read that keeps **throwing** on a row it cannot represent, and the axis is
+   * ADR-0345's: *who named the record*. A caller here named one, so a parse failure takes no other
+   * row's answer with it, and the two outcomes it could be collapsed into are both worse. `null`
+   * means *nobody ever held this id* — answering it for a row that exists and cannot be read is the
+   * fail-open direction and would tell a data subject their erasure request does not exist
+   * (ADR-0331). Dropping it from a list is the sweep's answer and is wrong for a singular read,
+   * because there is nothing to carry on with.
+   *
+   * `transition` also reads through here, and must: the status guard it binds comes from
+   * `current.status`, so a transition on a row the contract cannot represent has nothing to assert.
+   */
+  async read(requestId: string): Promise<GdprDeletionRequest | null> {
+    const row = await this.readRow(requestId);
+    return row === undefined ? null : rowToDeletionRequest(row);
   }
 
   /**
@@ -268,8 +472,14 @@ export class PostgresDeletionRequestStore {
    *
    * Ordered by deadline rather than submission because Article 12(3) is what the platform is late
    * against, and a request submitted later can be due sooner if it was verified sooner.
+   *
+   * `onUnreadable` precedes `limit` because it is required and `limit` keeps its default — a
+   * required parameter cannot follow an optional one, and the order is what the requirement costs.
    */
-  async dueForExecution(limit = 10): Promise<readonly GdprDeletionRequest[]> {
+  async dueForExecution(
+    onUnreadable: UnreadableRowReporter,
+    limit = 10,
+  ): Promise<readonly GdprDeletionRequest[]> {
     return this.conn.transaction(async (tx) => {
       await tx.query("SELECT set_config('app.platform_audit', 'on', true)");
       const result = await tx.query<Record<string, unknown>>(
@@ -277,7 +487,7 @@ export class PostgresDeletionRequestStore {
           WHERE status = 'verified' ORDER BY deadline_at, request_id LIMIT $1`,
         [Math.max(1, Math.min(100, Math.trunc(limit)))],
       );
-      return result.rows.map((row) => rowToDeletionRequest(row));
+      return readRequestRows(result.rows, onUnreadable);
     });
   }
 
@@ -288,7 +498,11 @@ export class PostgresDeletionRequestStore {
    * seen again by anything (ADR-0321's open question, ADR-0322's answer). Ordered oldest first,
    * because the oldest is the one whose absence of evidence is most certainly conclusive.
    */
-  async stranded(olderThan: string, limit = 50): Promise<readonly GdprDeletionRequest[]> {
+  async stranded(
+    olderThan: string,
+    onUnreadable: UnreadableRowReporter,
+    limit = 50,
+  ): Promise<readonly GdprDeletionRequest[]> {
     return this.conn.transaction(async (tx) => {
       await tx.query("SELECT set_config('app.platform_audit', 'on', true)");
       const result = await tx.query<Record<string, unknown>>(
@@ -297,7 +511,7 @@ export class PostgresDeletionRequestStore {
           ORDER BY in_progress_at, request_id LIMIT $2`,
         [olderThan, Math.max(1, Math.min(200, Math.trunc(limit)))],
       );
-      return result.rows.map((row) => rowToDeletionRequest(row));
+      return readRequestRows(result.rows, onUnreadable);
     });
   }
 
@@ -307,8 +521,16 @@ export class PostgresDeletionRequestStore {
    * Every completed request names one, because the contract requires it and `rowToDeletionRequest`
    * refuses a row that does not; the predicate is belt-and-braces against a row written before that
    * rule existed.
+   *
+   * This is the method the sweep rule matters most for, and the reason is what the page feeds: the
+   * audit of the platform's standing claim that an Article 17 erasure was carried out and can be
+   * evidenced. One refused row used to throw out of the `.map()` and stop every other claim being
+   * checked, which is a silence indistinguishable from a clean audit.
    */
-  async completedWithTombstone(limit = 100): Promise<readonly GdprDeletionRequest[]> {
+  async completedWithTombstone(
+    onUnreadable: UnreadableRowReporter,
+    limit = 100,
+  ): Promise<readonly GdprDeletionRequest[]> {
     return this.conn.transaction(async (tx) => {
       await tx.query("SELECT set_config('app.platform_audit', 'on', true)");
       const result = await tx.query<Record<string, unknown>>(
@@ -317,7 +539,7 @@ export class PostgresDeletionRequestStore {
           ORDER BY completed_at DESC, request_id LIMIT $1`,
         [Math.max(1, Math.min(500, Math.trunc(limit)))],
       );
-      return result.rows.map((row) => rowToDeletionRequest(row));
+      return readRequestRows(result.rows, onUnreadable);
     });
   }
 
@@ -403,6 +625,40 @@ export class PostgresDeletionRequestStore {
     const row = result.rows[0];
     // Null means another worker moved it between the read and the write. The caller treats that as
     // "not mine", never as an error.
-    return row === undefined ? null : rowToDeletionRequest(row);
+    if (row === undefined) return null;
+    // The parse is on the far side of the commit **by choice**, and the choice is the thing to know.
+    // An earlier version of this comment said nothing could move it to the near side; that is false,
+    // and a false impossibility invites the "fix" that reinstates the defect. `conn.transaction`
+    // issues `BEGIN`, runs this callback and `ROLLBACK`s in its `catch`, so parsing inside the
+    // callback would undo the `UPDATE` and make a refusal honest — measured in `kernel-pg`'s
+    // `node-pg.ts`, not reasoned.
+    //
+    // It is not done because of what rolling back would discard, and that argument is **per `to`**:
+    //
+    //   - `completed` is the one that must not. By the time this runs the tenant's data is destroyed
+    //     and the tombstone is anchored (ADR-0320), so discarding the status write would throw away
+    //     the record of a deletion that happened and strand the request `in_progress` — a wrong
+    //     answer in place of an awkward one.
+    //   - `rejected`, `in_progress`, `verified` and `deferred` could roll back: nothing irreversible
+    //     has happened at any of them. They do not, because this method's job is to say *what it
+    //     committed*, and a store that kept some status writes and discarded others by target would
+    //     be a second policy about the request's lifecycle sitting underneath the one the runner
+    //     already owns — which maps each committed status to the outcome true of it
+    //     (`OUTCOME_OF_COMMITTED_STATUS`). One policy, in the caller that has the context.
+    //
+    // So the rule here is about what a failure is allowed to *say* — **a read-back that cannot be
+    // represented must not be reported as a write that did not happen.** Both facts are true at once
+    // and only one of them is recoverable by re-driving, so a caller handed a bare `ZodError` picks
+    // the wrong one: `DeletionRunner` reported `completed_unrecorded`, whose definition is "the
+    // `completed` write did not", about a transaction that had committed.
+    try {
+      return rowToDeletionRequest(row);
+    } catch (err) {
+      throw new DeletionRequestCommittedUnreadable(
+        requestId,
+        to,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
   }
 }

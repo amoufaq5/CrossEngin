@@ -5,11 +5,14 @@ import {
   ATTESTATION_OUTCOMES,
   CONSERVATIVE_DELETION_CAPABILITIES,
   DELETION_SUBSYSTEMS,
+  DISPOSITION_REQUIRES_ATTESTATION,
   DeletionAttestationSchema,
   DeletionCapabilitiesSchema,
   EMPTY_DELETION_SCOPE,
+  PIPELINE_ERASES_UNCONDITIONALLY,
   RETENTION_BEARING_OUTCOMES,
   SCOPE_BEARING_OUTCOMES,
+  SELF_EXEMPTION_BY_DISPOSITION,
   SUBSYSTEM_DISPOSITIONS,
   SUBSYSTEM_SCOPE_FIELDS,
   absentSubsystemsFor,
@@ -19,6 +22,7 @@ import {
   requiredSubsystemsFor,
   retainedObligations,
   tombstoneMatchesAttestations,
+  unerasedSubsystemsFor,
   type AssemblyRefusalReason,
   type DeletionAttestation,
   type DeletionCapabilities,
@@ -38,9 +42,11 @@ import {
 } from "./tombstone-proof.js";
 import {
   asCapabilityDeclaration,
+  asDeletionCapabilities,
   readDeclaredAbsences,
   readRecordStorage,
   readRetentionClaim,
+  readUnerasedSubsystems,
   type TombstoneAnchor,
   type TombstoneRecordStorageDeclaration,
 } from "./tombstones.js";
@@ -105,15 +111,31 @@ describe("the vocabulary", () => {
     expect(owners).toEqual(["tenant_schema"]);
   });
 
-  it("declares four outcomes, three dispositions and fifteen refusal reasons", () => {
+  it("declares four outcomes, four dispositions and fifteen refusal reasons", () => {
     expect([...ATTESTATION_OUTCOMES]).toEqual([
       "erased",
       "nothing_to_erase",
       "retained",
       "erased_and_retained",
     ]);
-    expect([...SUBSYSTEM_DISPOSITIONS]).toEqual(["erases", "retains", "absent"]);
+    expect([...SUBSYSTEM_DISPOSITIONS]).toEqual([
+      "erases",
+      "retains",
+      "absent",
+      "present_not_erased",
+    ]);
     expect(ASSEMBLY_REFUSAL_REASONS).toHaveLength(15);
+  });
+
+  it("answers the attestation question for every disposition", () => {
+    // A total map rather than a `!== "absent"`, so a fifth disposition fails `typecheck` at the one
+    // place that decides instead of inheriting "must attest" from a widened comparison.
+    for (const disposition of SUBSYSTEM_DISPOSITIONS) {
+      expect(typeof DISPOSITION_REQUIRES_ATTESTATION[disposition], disposition).toBe("boolean");
+    }
+    expect(
+      SUBSYSTEM_DISPOSITIONS.filter((d) => !DISPOSITION_REQUIRES_ATTESTATION[d]),
+    ).toEqual(["absent", "present_not_erased"]);
   });
 
   it("names every refusal reason once", () => {
@@ -254,6 +276,46 @@ describe("DeletionCapabilitiesSchema", () => {
       ).toBe(true);
     }
   });
+
+  it("refuses present_not_erased for both performed subsystems, for its own reason", () => {
+    // A different contradiction from `absent`'s and so a different sentence: `absent` says the
+    // deployment does not have the subsystem, this says the deletion leaves its data in place. Both
+    // are refused because the pipeline erases these two unconditionally, and a deployment meeting
+    // one refusal must not be handed the other one's remedy.
+    for (const subsystem of ["tenant_schema", "shared_tables"] as const) {
+      const r = DeletionCapabilitiesSchema.safeParse(caps({ [subsystem]: "present_not_erased" }));
+      expect(r.success, subsystem).toBe(false);
+      if (r.success) continue;
+      const message = r.error.issues[0]?.message ?? "";
+      expect(message, subsystem).toContain("leaves the subsystem's data in place");
+      expect(message, subsystem).not.toContain("does not have the subsystem");
+    }
+  });
+
+  it("accepts present_not_erased for every subsystem the pipeline does not perform", () => {
+    // The four with no attester are exactly the ones this disposition exists for.
+    for (const subsystem of DELETION_SUBSYSTEMS.filter(
+      (s) => s !== "tenant_schema" && s !== "shared_tables",
+    )) {
+      expect(
+        DeletionCapabilitiesSchema.safeParse(caps({ [subsystem]: "present_not_erased" })).success,
+        subsystem,
+      ).toBe(true);
+    }
+  });
+
+  it("refuses both self-exempting dispositions on both performed subsystems", () => {
+    // The refusal is a 2 × 2 and used to be two copied blocks that each named one disposition. This
+    // is the cell a third copied block would have missed.
+    for (const subsystem of ["tenant_schema", "shared_tables"] as const) {
+      for (const disposition of ["absent", "present_not_erased"] as const) {
+        expect(
+          DeletionCapabilitiesSchema.safeParse(caps({ [subsystem]: disposition })).success,
+          `${subsystem}=${disposition}`,
+        ).toBe(false);
+      }
+    }
+  });
 });
 
 describe("requiredSubsystemsFor", () => {
@@ -289,6 +351,189 @@ describe("requiredSubsystemsFor", () => {
       [...DELETION_SUBSYSTEMS].sort(),
     );
     expect(absentSubsystemsFor(declaration)).toEqual(["backups"]);
+  });
+
+  it("drops present_not_erased, because nothing can attest for it", () => {
+    const required = requiredSubsystemsFor(caps({ backups: "present_not_erased" }));
+    expect(required).not.toContain("backups");
+    expect(required).toEqual(DELETION_SUBSYSTEMS.filter((s) => s !== "backups"));
+  });
+
+  it("is the shape a real deployment wants: two required, backups named as unerased", () => {
+    // The whole point of the fourth disposition. Before it this deployment's only runnable
+    // declaration said `backups: "absent"` — "this deployment does not take backups" — inside a
+    // cryptographic proof.
+    const declaration = caps({
+      object_storage: "absent",
+      backups: "present_not_erased",
+      search_indexes: "absent",
+      caches: "absent",
+    });
+    expect(requiredSubsystemsFor(declaration)).toEqual(["tenant_schema", "shared_tables"]);
+    expect(unerasedSubsystemsFor(declaration)).toEqual(["backups"]);
+    expect(absentSubsystemsFor(declaration)).toEqual([
+      "object_storage",
+      "search_indexes",
+      "caches",
+    ]);
+  });
+});
+
+describe("absentSubsystemsFor / unerasedSubsystemsFor", () => {
+  it("reads the two reasons for not attesting apart", () => {
+    // *We have none* and *we have it and did not erase it* lead to opposite actions, so a single
+    // "did not attest" list would hand both the same sentence (ADR-0331). Reporting a deployment's
+    // backups as a subsystem it lacks is the false claim all over again, computed rather than
+    // declared.
+    const declaration = caps({ object_storage: "absent", backups: "present_not_erased" });
+    expect(absentSubsystemsFor(declaration)).toEqual(["object_storage"]);
+    expect(absentSubsystemsFor(declaration)).not.toContain("backups");
+    expect(unerasedSubsystemsFor(declaration)).toEqual(["backups"]);
+    expect(unerasedSubsystemsFor(declaration)).not.toContain("object_storage");
+  });
+
+  it("the three readers partition every subsystem exactly once", () => {
+    const declaration = caps({
+      shared_tables: "retains",
+      object_storage: "absent",
+      backups: "present_not_erased",
+      search_indexes: "absent",
+      caches: "present_not_erased",
+    });
+    const all = [
+      ...requiredSubsystemsFor(declaration),
+      ...absentSubsystemsFor(declaration),
+      ...unerasedSubsystemsFor(declaration),
+    ];
+    expect([...all].sort()).toEqual([...DELETION_SUBSYSTEMS].sort());
+    expect(new Set(all).size).toBe(DELETION_SUBSYSTEMS.length);
+  });
+
+  it("names nothing unerased for the conservative declaration", () => {
+    expect(unerasedSubsystemsFor(CONSERVATIVE_DELETION_CAPABILITIES)).toEqual([]);
+  });
+});
+
+describe("the two readings of a stored declaration", () => {
+  /** A real v4 record, so the readings are read off signed bytes rather than off a literal. */
+  function recordWith(capabilities: DeletionCapabilities): ReturnType<typeof assembleTombstone> {
+    return assembleTombstone(declaredInputOf(capabilities));
+  }
+
+  it("agree with the capabilities-side functions, which is the only fence across the cycle", () => {
+    // `tombstones.ts` cannot import `unerasedSubsystemsFor` — `tombstone-assembly.ts` imports it, so
+    // a runtime import back is a cycle — so its `declaredAs` filter is a forced second spelling of
+    // this one. This test is the only place that may import both, which makes it the fence.
+    const capabilities = caps({
+      object_storage: "absent",
+      backups: "present_not_erased",
+      search_indexes: "absent",
+      caches: "present_not_erased",
+    });
+    const out = recordWith(capabilities);
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const absence = readDeclaredAbsences(out.record);
+    const unerased = readUnerasedSubsystems(out.record);
+    expect(absence.declarationState).toBe("covered_by_proof");
+    expect(unerased.declarationState).toBe("covered_by_proof");
+    if (absence.declarationState !== "covered_by_proof") return;
+    if (unerased.declarationState !== "covered_by_proof") return;
+    expect([...absence.absentSubsystems].sort()).toEqual([...absentSubsystemsFor(capabilities)].sort());
+    expect([...unerased.unerasedSubsystems].sort()).toEqual(
+      [...unerasedSubsystemsFor(capabilities)].sort(),
+    );
+    // The fourth disposition's whole point: the two lists are disjoint and neither claims the other's
+    // subsystems. Reporting a deployment's backups as a subsystem it lacks is the false claim all
+    // over again, computed from a proof rather than declared into one.
+    expect(absence.absentSubsystems).not.toContain("backups");
+    expect(unerased.unerasedSubsystems).not.toContain("object_storage");
+  });
+
+  it("partition the stored declaration exactly once, as the capabilities readers do", () => {
+    // The partition test one level over, on the artifact rather than on the configuration — which is
+    // the side an Article 17 response is written from, and the side that had one reading.
+    const capabilities = caps({
+      shared_tables: "retains",
+      object_storage: "absent",
+      backups: "present_not_erased",
+      search_indexes: "absent",
+      caches: "present_not_erased",
+    });
+    const out = recordWith(capabilities);
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const absence = readDeclaredAbsences(out.record);
+    const unerased = readUnerasedSubsystems(out.record);
+    if (absence.declarationState !== "covered_by_proof") return;
+    if (unerased.declarationState !== "covered_by_proof") return;
+    const all = [
+      ...requiredSubsystemsFor(asDeletionCapabilities(absence.declaration)),
+      ...absence.absentSubsystems,
+      ...unerased.unerasedSubsystems,
+    ];
+    expect([...all].sort()).toEqual([...DELETION_SUBSYSTEMS].sort());
+    expect(new Set(all).size).toBe(DELETION_SUBSYSTEMS.length);
+  });
+
+  it("both answer 'unknown' from the same coverage step, so neither can drift", () => {
+    // One `declarationCoverage` behind both, because the near-miss ADR-0331 had to avoid — a literal
+    // `!== "v2"` reporting a v3 proof as carrying no declaration — would otherwise be available
+    // twice, and the second reader is new enough to have inherited it.
+    const out = recordWith(PERFORMED_ONLY);
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const v1Shaped = { ...out.record, proofVersion: "v1" as const, capabilityDeclaration: undefined };
+    expect(readDeclaredAbsences(v1Shaped)).toEqual({
+      declarationState: "unknown_not_in_proof",
+      reason: "v1_proof",
+    });
+    expect(readUnerasedSubsystems(v1Shaped)).toEqual({
+      declarationState: "unknown_not_in_proof",
+      reason: "v1_proof",
+    });
+    // No empty list on either unknown arm: there is nothing for a caller to read as "nothing was
+    // left behind" on a proof whose bytes say nothing about any declaration.
+    expect(readUnerasedSubsystems(v1Shaped)).not.toHaveProperty("unerasedSubsystems");
+  });
+});
+
+describe("PIPELINE_ERASES_UNCONDITIONALLY / SELF_EXEMPTION_BY_DISPOSITION", () => {
+  it("are total over their enums, so a seventh subsystem or a fifth disposition must answer", () => {
+    expect(Object.keys(PIPELINE_ERASES_UNCONDITIONALLY).sort()).toEqual([...DELETION_SUBSYSTEMS].sort());
+    expect(Object.keys(SELF_EXEMPTION_BY_DISPOSITION).sort()).toEqual([...SUBSYSTEM_DISPOSITIONS].sort());
+  });
+
+  it("name the two self-exempting dispositions and no others", () => {
+    // `erases` and `retains` answer `null` from opposite directions and both are admissible: one is
+    // what the pipeline does, the other keeps the subsystem in scope and obliged to speak.
+    const exempting = SUBSYSTEM_DISPOSITIONS.filter(
+      (d) => SELF_EXEMPTION_BY_DISPOSITION[d] !== null,
+    );
+    expect([...exempting].sort()).toEqual(["absent", "present_not_erased"]);
+  });
+
+  it("refuse both self-exempting dispositions on both performed subsystems — the 2 × 2", () => {
+    // Copied `addIssue` blocks are how the second disposition would reach one subsystem and not the
+    // other, which is the half-widened predicate this pair exists to make impossible.
+    const performed = DELETION_SUBSYSTEMS.filter((s) => PIPELINE_ERASES_UNCONDITIONALLY[s] !== null);
+    expect([...performed].sort()).toEqual(["shared_tables", "tenant_schema"]);
+    for (const subsystem of performed) {
+      for (const disposition of ["absent", "present_not_erased"] as const) {
+        const result = DeletionCapabilitiesSchema.safeParse(caps({ [subsystem]: disposition }));
+        expect(result.success, `${subsystem}=${disposition}`).toBe(false);
+        if (result.success) continue;
+        expect(result.error.issues[0]?.path, `${subsystem}=${disposition}`).toEqual([subsystem]);
+        // The refusal's message is composed from both maps, so the sentence a deployment reads and
+        // the pipeline's own input-stage refusal cannot disagree about what the disposition claims.
+        expect(result.error.issues[0]?.message).toContain(
+          SELF_EXEMPTION_BY_DISPOSITION[disposition] ?? "",
+        );
+        expect(result.error.issues[0]?.message).toContain(
+          PIPELINE_ERASES_UNCONDITIONALLY[subsystem] ?? "",
+        );
+      }
+    }
   });
 });
 
@@ -570,6 +815,32 @@ describe("assembleTombstone, with scope derived from a declaration", () => {
     // rather than five nobody asked about.
     expect(absentSubsystemsFor(out.declaration ?? PERFORMED_ONLY)).toHaveLength(4);
     expect(tombstoneMatchesAttestations(out.record, [attest()])).toBe(true);
+  });
+
+  it("assembles for a deployment that holds backups and did not erase them", () => {
+    // The declaration a real install wants and could not make. Every alternative was wrong: `erases`
+    // and `retains` keep `backups` in scope and nothing can attest, so the deletion refuses; `absent`
+    // runs and signs "this deployment does not take backups".
+    const declaration = caps({
+      object_storage: "absent",
+      backups: "present_not_erased",
+      search_indexes: "absent",
+      caches: "absent",
+    });
+    const out = assembleTombstone(declaredInputOf(declaration));
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(verifyTombstoneHashes(out.record)).toEqual({ contentManifestOk: true, proofOk: true });
+    expect(out.record.capabilityDeclaration?.backups).toBe("present_not_erased");
+
+    // It is in the signed bytes and it is **not** read as an absence: a stored proof says the
+    // tenant's data is still in the backups, which is the statement neither silence nor `absent`
+    // could make.
+    const reading = readDeclaredAbsences(out.record);
+    expect(reading.declarationState).toBe("covered_by_proof");
+    if (reading.declarationState !== "covered_by_proof") return;
+    expect(reading.absentSubsystems).not.toContain("backups");
+    expect(reading.absentSubsystems).toEqual(["caches", "object_storage", "search_indexes"]);
   });
 
   it("puts the declaration, the retention claim and the record storage in the bytes as a v4 proof", () => {

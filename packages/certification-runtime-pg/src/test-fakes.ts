@@ -19,6 +19,9 @@ export function compliantEvidence(at = FIXTURE_TIME): ControlEvidence[] {
         framework: "soc2_type2",
         status: "sealed",
         sealedSha256: "b".repeat(64),
+        // Non-zero for the reason the DR literal below carries `unevidencedAxes: []`: this set's
+        // whole job is to be fully certifiable, so it must be satisfied for the RIGHT reason.
+        totalItemsAcrossCampaigns: 12,
         completionRate: 1,
         strongAttestationRate: 1,
         controlMappings: ["CC6.1"],
@@ -37,7 +40,12 @@ export function compliantEvidence(at = FIXTURE_TIME): ControlEvidence[] {
     ),
     evidenceFromDrReadiness(
       "resilience.dr_readiness",
-      { ready: true, counts: { totalIssues: 0 } },
+      // `[]` and never omitted: it is the explicit claim that every evidence axis carried a
+      // record, which is what makes this control satisfied for the right reason. An absent field
+      // defaulting to `[]` would make it satisfied by omission, which is the defect the required
+      // field exists to refuse — and `unevidencedAxes: null` here would make this fixture, whose
+      // whole job is a certifiable set, uncertifiable.
+      { ready: true, unevidencedAxes: [], counts: { totalIssues: 0 } },
       at,
     ),
   ];

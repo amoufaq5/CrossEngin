@@ -1,5 +1,6 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
 import {
+  SELF_EXEMPTION_BY_DISPOSITION,
   assembleTombstone,
   type ActionTrigger,
   type AssemblyRefusal,
@@ -130,6 +131,15 @@ type SchemaErasure = Awaited<ReturnType<SchemaEraserWithin>>;
  * attestation either. The two cannot drift apart, which is the property a second hand-written list
  * does not have — and is the lesson of `needsAuditEmitter` (ADR-0327), where a flag was missing from
  * both copies of itself and the per-flag test over the list could not see it.
+ *
+ * There **is** such a second list, and it is not here: `PIPELINE_ERASES_UNCONDITIONALLY` in
+ * `@crossengin/tenant-lifecycle` spells the same fact so `DeletionCapabilitiesSchema` can refuse a
+ * self-exempting declaration at parse time, where a deployment meets it at boot rather than at its
+ * first tenant deletion. It cannot read this derivation — that package is the one this imports, so a
+ * runtime import back is a cycle — so the only fence across the edge is a test on *this* side, and
+ * `deletion-pipeline.test.ts` asserts its non-null keys equal `PIPELINE_PERFORMED_SUBSYSTEMS`. Same
+ * relationship `pg-column-coverage.ts` has to `META_TABLES`: a second spelling that cannot be
+ * eliminated, pinned by reading the other side rather than trusted to stay in step.
  */
 const ATTESTERS = {
   tenant_schema: tenantSchemaAttestation,
@@ -179,9 +189,12 @@ export interface DeleteTenantInput {
    * the deadline is computed from the deployment rather than accepted from the body, and so is this.
    *
    * Every subsystem in `PIPELINE_PERFORMED_SUBSYSTEMS` must be declared `erases` or `retains` here.
-   * `absent` is refused rather than honoured, because the pipeline erases those subsystems whatever
-   * the declaration says, and a proof silent about a place it just destroyed data is ADR-0317's
-   * defect with a configuration file in front of it.
+   * The two **self-exempting** dispositions are refused rather than honoured — `absent` claims the
+   * deployment does not have the subsystem, `present_not_erased` claims this deletion left its data
+   * in place — because the pipeline erases those subsystems whatever the declaration says, and a
+   * proof silent about a place it just destroyed data is ADR-0317's defect with a configuration file
+   * in front of it. Which dispositions those are is `SELF_EXEMPTION_BY_DISPOSITION`'s answer and not
+   * a list here; see `inputRefusals`.
    */
   readonly capabilities: DeletionCapabilities;
   /**
@@ -358,6 +371,14 @@ function eraseRefusals(
  *
  * Both refusals are the caller claiming something about a subsystem this pipeline performs itself, and
  * answering them here rather than mid-transaction means they cost nothing and destroy nothing.
+ *
+ * That second clause is the whole value and was measurably untrue for one disposition: a
+ * `present_not_erased` declaration on a performed subsystem slipped a `!== "absent"` check here and
+ * was refused downstream by `assembleTombstone`, which raises inside the transaction — 200
+ * statements, the tenant's tables under `ACCESS EXCLUSIVE` and a full `count(*)`, then a rollback.
+ * So the predicate reads `SELF_EXEMPTION_BY_DISPOSITION`, which is the contracts package's own total
+ * map over the dispositions, and a fifth disposition has to answer there instead of inheriting an
+ * answer from a comparison written here.
  */
 function inputRefusals(input: DeleteTenantInput): readonly PipelineRefusal[] {
   const out: PipelineRefusal[] = [];
@@ -380,13 +401,32 @@ function inputRefusals(input: DeleteTenantInput): readonly PipelineRefusal[] {
     });
   }
   for (const subsystem of PIPELINE_PERFORMED_SUBSYSTEMS) {
-    if (input.capabilities[subsystem] !== "absent") continue;
+    // Read from the contracts map rather than compared against `"absent"`, which is what this was
+    // and what made it half a check. `absent` was the only self-exempting disposition when it was
+    // written; `present_not_erased` was added beside it and inherited "fine" from a `!==`, so the
+    // declaration reached `assembleTombstone`, which re-parses it and refused `capabilities_invalid`
+    // — **as a throw, after both erasures had run**. Measured on the pipeline's own fake: 200
+    // statements, `ACCESS EXCLUSIVE` on the tenant's tables and a full `count(*)`, then a rollback,
+    // for a configuration error decidable before the transaction opened. The atomicity held and
+    // nothing was destroyed, so this was never a hole — but it is the exact opposite of what the
+    // paragraph above this function claims, and the map was the answer all along and was private.
+    const selfExemption = SELF_EXEMPTION_BY_DISPOSITION[input.capabilities[subsystem]];
+    if (selfExemption === null) continue;
     out.push({
       stage: "input",
-      reason: "performed_subsystem_absent",
+      // One reason for both dispositions, and the name widened to cover them. Two reasons would
+      // claim a distinction the *remedy* does not make — `erases` or `retains` is the answer to
+      // either — which is ADR-0346's argument for `not_for_this_request`, and the `detail` already
+      // names the disposition and the claim it makes verbatim. The old name was
+      // `performed_subsystem_absent`, false of half the cases it now fires on: a refusal whose name
+      // is wrong about the case in front of you is ADR-0334's hazard. Cheap to rename, measured:
+      // `PipelineRefusal.reason` is a free `string` with no enum, no CHECK and no persistence, and
+      // `detailOf` in the runner renders `stage/reason` generically.
+      reason: "performed_subsystem_self_exempted",
       detail:
-        `${subsystem} is declared absent in this deployment and this pipeline erases it anyway;` +
-        " declare it 'erases' (or 'retains') so the proof covers what the deletion destroys",
+        `${subsystem} is declared '${input.capabilities[subsystem]}' in this deployment and` +
+        ` ${selfExemption}, but this pipeline erases it anyway; declare it 'erases' (or 'retains')` +
+        " so the proof covers what the deletion destroys",
     });
   }
   return out;

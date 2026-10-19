@@ -27,6 +27,9 @@ function compliantEvidence(framework = "soc2_type2"): ControlEvidence[] {
         framework: framework as "soc2_type2",
         status: "sealed",
         sealedSha256: "b".repeat(64),
+        // Positive and never 0, for the reason this fixture exists: a pack covering no item
+        // certifies nothing, so a 0 here would make this compliant set uncertifiable.
+        totalItemsAcrossCampaigns: 50,
         completionRate: 1,
         strongAttestationRate: 1,
         controlMappings: ["CC6.1"],
@@ -45,7 +48,7 @@ function compliantEvidence(framework = "soc2_type2"): ControlEvidence[] {
     ),
     evidenceFromDrReadiness(
       "resilience.dr_readiness",
-      { ready: true, counts: { totalIssues: 0 } },
+      { ready: true, unevidencedAxes: [], counts: { totalIssues: 0 } },
       AT,
     ),
   ];

@@ -12,6 +12,7 @@ import {
   type FailoverRecord,
 } from "@crossengin/dr";
 import {
+  DrEvidenceAxisSchema,
   DrReadinessReportSchema,
   type DrReadinessReport,
 } from "@crossengin/dr-runtime";
@@ -100,6 +101,20 @@ export const DrReadinessSnapshotRecordSchema = z
     replicationViolations: z.number().int().nonnegative(),
     failoverBreaches: z.number().int().nonnegative(),
     drillBreaches: z.number().int().nonnegative(),
+    /**
+     * `null` is a row written before this check existed; `[]` is the claim that every axis carried
+     * a record. **No default here**, unlike the report's own field: every producer of this record
+     * supplies it — `readinessSnapshotRecordFrom` derives it and `rowToRecord` reads the column by
+     * name — so an omission is a caller that forgot, and a write is the direction to fail closed
+     * in. The report inside the same row is defaulted instead, because a stored JSONB written
+     * before this increment genuinely carries no such key.
+     *
+     * Typed by `DrEvidenceAxisSchema` rather than `z.string()`, so the projected column and the
+     * `report` JSONB beside it share one vocabulary and a stored axis this binary does not
+     * recognise is refused rather than coerced (ADR-0371) — a looser projection would let the
+     * row's two copies of one fact disagree about what is admissible.
+     */
+    unevidencedAxes: z.array(DrEvidenceAxisSchema).nullable(),
     report: DrReadinessReportSchema,
     generatedAt: Iso8601,
   })
@@ -190,6 +205,10 @@ export function readinessSnapshotRecordFrom(
     replicationViolations: report.counts.replicationViolations,
     failoverBreaches: report.counts.failoverBreaches,
     drillBreaches: report.counts.drillBreaches,
+    // Derived from the report and never accepted from the caller, which is the seven counts' own
+    // rule one column over: the projection and the `report` JSONB in the same row cannot then
+    // disagree about which axes carried nothing.
+    unevidencedAxes: report.unevidencedAxes,
     report,
     generatedAt: opts.generatedAt,
   });

@@ -605,8 +605,8 @@ export const STORELESS_TABLES: readonly StorelessDeclaration[] = Object.freeze([
     reason: "unwritten_table",
     owner: "dr",
     consequence:
-      "No backup is recorded, so `assessDrReadiness` scores replication lag and drill recency with nothing to say about whether a restorable backup exists.",
-    note: "dr-runtime-pg writes failovers, drills and readiness snapshots.",
+      "No backup is recorded, so no deployment can evidence that a restorable backup exists — and `assessDrReadiness` therefore reports `backups` among its unevidenced axes on every pass, which is what keeps the certification control unevidenced rather than satisfied.",
+    note: "dr-runtime-pg writes failovers, drills and readiness snapshots. This consequence used to read '…scores replication lag and drill recency with nothing to say about whether a restorable backup exists', which was true and understated the direction that mattered: until ADR-0372 the absence did not merely leave the report silent, it made `ready: true` and `satisfied: true` with the summary 'DR readiness: READY (0 issues)', because every count is derived by filtering a supplied list so an empty one contributes no issues. The fence named the gap and the gap was a falsely-true control. The three remaining unevidenced axes are hand-typed `--dr-readiness-config` fields; this one is the only one of the four whose honest source is a table, which is why it is declared here and the others are not.",
   },
   {
     table: "meta.compliance_attestations",

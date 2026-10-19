@@ -1,11 +1,14 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
+import { assertBindArity } from "@crossengin/testing";
 import { describe, expect, it } from "vitest";
 
 import {
+  DeletionRequestCommittedUnreadable,
   DeletionRequestRefused,
   PostgresDeletionRequestStore,
   REQUEST_COLUMNS,
   rowToDeletionRequest,
+  type UnreadableRequestRow,
 } from "./deletion-request-store.js";
 import { SET_TENANT_CONTEXT_SQL } from "./tenant-context.js";
 
@@ -42,22 +45,107 @@ function rowOf(over: Record<string, unknown> = {}): Record<string, unknown> {
   };
 }
 
+/**
+ * A `completed` row that names its tombstone and no digest — the shape `completedWithTombstone`'s
+ * own predicate admits and the contract refuses ("completed status requires completionSha256").
+ *
+ * Reachable rather than contrived, and measured against the catalog: `meta.gdpr_deletion_requests`
+ * carries **no cross-column CHECK of any kind**, so `completion_sha256` is a nullable column that
+ * nothing pairs with `status`. A hand-edit, a restore, or a partial write leaves exactly this.
+ *
+ * Deliberately **not** a *late* completion, which is what the live defect was: slice 2a made a row
+ * whose `completed_at` is past its `deadline_at` parse, so a late row would now pass for the new
+ * reason instead of exercising the carry-on rule — a test that cannot fail. And deliberately not an
+ * out-of-enum `legal_basis` either, which reads like the obvious "newer binary" shape and is
+ * **unreachable**: that column's CHECK names all six values, so such a row is refused `23514` by the
+ * database long before the contract sees it (ADR-0352's class).
+ */
+function unreadableCompletedRow(requestId = "dreq_unreadable01"): Record<string, unknown> {
+  return rowOf({
+    request_id: requestId,
+    status: "completed",
+    in_progress_at: "2026-10-03T00:00:00.000Z",
+    completed_at: "2026-10-03T01:00:00.000Z",
+    completion_sha256: null,
+    tombstone_id: TOMB,
+  });
+}
+
+/**
+ * The same shape for a row whose status is not `completed`: a `verified`/`in_progress` request with
+ * no `verification_method`, which the contract requires for both and the column leaves nullable.
+ */
+function unreadableRow(
+  status: "verified" | "in_progress",
+  requestId = "dreq_unreadable01",
+): Record<string, unknown> {
+  return rowOf({
+    request_id: requestId,
+    status,
+    verification_method: null,
+    ...(status === "in_progress" ? { in_progress_at: "2026-10-03T00:00:00.000Z" } : {}),
+  });
+}
+
+/** A valid submission, so a test that varies the *stored* row is visibly varying only that. */
+const SUBMIT = {
+  requestId: REQ,
+  tenantId: TENANT,
+  subjectIdentifier: "subject@example.test",
+  legalBasis: "article_17_right_to_erasure" as const,
+  submittedBy: "subject@example.test",
+  submittedAt: "2026-10-01T00:00:00.000Z",
+  deadlineAt: "2026-10-28T00:00:00.000Z",
+};
+
+/** Collects what a sweep reports, so a test can assert the page *and* the report. */
+function collector(): { reported: UnreadableRequestRow[]; report: (r: UnreadableRequestRow) => void } {
+  const reported: UnreadableRequestRow[] = [];
+  return { reported, report: (r) => reported.push(r) };
+}
+
 interface Fake {
   readonly conn: PgConnection;
   readonly calls: { sql: string; params: readonly unknown[] }[];
   readonly sql: () => string[];
 }
 
-function fakePg(rows: readonly Record<string, unknown>[] = [rowOf()], updateRows = rows): Fake {
+/**
+ * How many rows the `INSERT` reports, which the fake has to model because `submit` now reads it.
+ *
+ * `ON CONFLICT (request_id) DO NOTHING` makes that count the only thing saying whether *this* call
+ * wrote anything, and it is what decides which of the two error classes an unreadable read-back is.
+ * The fake used to let the `INSERT` fall through to a `{rows: [], rowCount: 0}` default — so it
+ * answered "you wrote nothing" for every submission, including the ordinary one, which is the
+ * "a fake that silently ignores a column is worse than no fake" lesson one field over (ADR-0333).
+ * 1 is the default because an ordinary submission inserts.
+ */
+type InsertOutcome = 0 | 1;
+
+function fakePg(
+  rows: readonly Record<string, unknown>[] = [rowOf()],
+  updateRows = rows,
+  insertRowCount: InsertOutcome = 1,
+): Fake {
   const calls: { sql: string; params: readonly unknown[] }[] = [];
   const conn: PgConnection = {
     query: (async (sql: string, params?: readonly unknown[]) => {
+      // The one thing interpreting the SQL cannot answer: whether the statement and its parameter
+      // array agree about how many parameters there are. Postgres decides that in the bind step,
+      // before the planner, so a fake that serves rows from a model of the table is otherwise
+      // answering statements no real server would accept (ADR-0370).
+      assertBindArity(sql, params);
       calls.push({ sql, params: params ?? [] });
       if (sql.startsWith("UPDATE")) return { rows: updateRows, rowCount: updateRows.length };
+      if (sql.startsWith("INSERT INTO")) return { rows: [], rowCount: insertRowCount };
       if (sql.includes("SELECT request_id") || sql.includes("FROM meta.gdpr_deletion_requests")) {
         return { rows, rowCount: rows.length };
       }
-      return { rows: [], rowCount: 0 };
+      // The scope and elevation GUCs, and nothing else. A fallback that answered `{rows: []}` for an
+      // unrecognised statement is how a shape change makes every assertion about what a statement
+      // *found* pass vacuously — ADR-0350's rule, applied to this fake.
+      if (sql.includes("set_config(")) return { rows: [], rowCount: 0 };
+      throw new Error(`fake has no model for this statement: ${sql.slice(0, 80)}`);
     }) as PgConnection["query"],
     transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) => {
       calls.push({ sql: "BEGIN", params: [] });
@@ -231,6 +319,60 @@ describe("submit", () => {
       .catch((e: unknown) => e);
     expect((err as DeletionRequestRefused).refusal).toBe("invalid_tenant_id");
   });
+
+  it("reports an unreadable read-back after its own INSERT as committed, not as a refusal", async () => {
+    // The class the increment names, in the method immediately above the one it fixed. `submit`'s
+    // `INSERT` committed, so its read-back failing the contract is a successful write this binary
+    // cannot read — and the old answer was a bare `ZodError`, which is neither of the two classes
+    // whose whole purpose is to say which side of the commit the caller is on.
+    const { conn } = fakePg([unreadableCompletedRow(REQ)], [unreadableCompletedRow(REQ)], 1);
+    const err = await new PostgresDeletionRequestStore(conn).submit(SUBMIT).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DeletionRequestCommittedUnreadable);
+    expect(err).not.toBeInstanceOf(DeletionRequestRefused);
+    const committed = err as DeletionRequestCommittedUnreadable;
+    expect(committed.requestId).toBe(REQ);
+    // The literal the `INSERT` bound, which is true of the row whatever the row reads as.
+    expect(committed.committedStatus).toBe("submitted");
+    expect(committed.parseMessage).toMatch(/completionSha256/);
+  });
+
+  it("refuses contract_violated when ON CONFLICT skipped the insert — this call wrote nothing", async () => {
+    // The other side of the split, and the first producer `contract_violated` has ever had. Claiming
+    // a commit this call did not make is the defect reflected: a caller must not be told not to
+    // retry a write that never landed.
+    const { conn } = fakePg([unreadableCompletedRow(REQ)], [unreadableCompletedRow(REQ)], 0);
+    const err = await new PostgresDeletionRequestStore(conn).submit(SUBMIT).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DeletionRequestRefused);
+    expect(err).not.toBeInstanceOf(DeletionRequestCommittedUnreadable);
+    expect((err as DeletionRequestRefused).refusal).toBe("contract_violated");
+    expect((err as Error).message).toMatch(/wrote nothing/);
+  });
+
+  it("keeps not_found for a row that is gone by the read-back, and says the insert happened", async () => {
+    const { conn } = fakePg([], [], 1);
+    const err = await new PostgresDeletionRequestStore(conn).submit(SUBMIT).catch((e: unknown) => e);
+    expect((err as DeletionRequestRefused).refusal).toBe("not_found");
+    // The message admits the commit rather than implying nothing was written, which is what the
+    // class doc now says of this one member.
+    expect((err as Error).message).toMatch(/insert committed/);
+  });
+
+  it("issues one SELECT spelling for its read-back, elevated like every other read here", async () => {
+    // `readRow` is the single `SELECT`, so `read` and `submit` cannot come to disagree about which
+    // columns or which elevation the read-back uses — which is how `submit` ended up with a parse
+    // it could not discriminate.
+    const { conn, calls } = fakePg([rowOf({ status: "submitted", verified_at: null, verified_by: null })]);
+    await new PostgresDeletionRequestStore(conn).submit(SUBMIT);
+    const selects = calls.filter((c) => c.sql.startsWith("SELECT request_id"));
+    expect(selects).toHaveLength(1);
+    expect(selects[0]?.sql).toContain(REQUEST_COLUMNS.join(", "));
+    const insertAt = calls.findIndex((c) => c.sql.startsWith("INSERT INTO"));
+    const selectAt = calls.findIndex((c) => c.sql.startsWith("SELECT request_id"));
+    expect(selectAt).toBeGreaterThan(insertAt);
+    // Its own transaction, so the elevation the read needs is not set in the one carrying the write:
+    // the platform arm is `SELECT`-scoped (ADR-0332) and must not sit beside an `INSERT`.
+    expect(calls.filter((c) => c.sql === "COMMIT")).toHaveLength(2);
+  });
 });
 
 describe("read and dueForExecution", () => {
@@ -242,7 +384,7 @@ describe("read and dueForExecution", () => {
 
   it("orders due requests by deadline, not submission", async () => {
     const { conn, calls } = fakePg();
-    await new PostgresDeletionRequestStore(conn).dueForExecution();
+    await new PostgresDeletionRequestStore(conn).dueForExecution(collector().report);
     const select = calls.find((c) => c.sql.includes("ORDER BY"));
     // Article 12(3) is what the platform is late against, and a request submitted later can be due
     // sooner if it was verified sooner.
@@ -252,7 +394,11 @@ describe("read and dueForExecution", () => {
 
   it("finds the requests a run stranded, oldest first", async () => {
     const { conn, calls } = fakePg([rowOf({ status: "in_progress", in_progress_at: "2026-10-03T12:00:00.000Z" })]);
-    await new PostgresDeletionRequestStore(conn).stranded("2026-10-03T13:00:00.000Z", 5);
+    await new PostgresDeletionRequestStore(conn).stranded(
+      "2026-10-03T13:00:00.000Z",
+      collector().report,
+      5,
+    );
     const select = calls.find((c) => c.sql.includes("in_progress_at <"));
     // dueForExecution only looks at `verified`, so without this nothing ever sees these again.
     expect(select?.sql).toContain("status = 'in_progress'");
@@ -271,7 +417,7 @@ describe("read and dueForExecution", () => {
         tombstone_id: TOMB,
       }),
     ]);
-    await new PostgresDeletionRequestStore(conn).completedWithTombstone(9);
+    await new PostgresDeletionRequestStore(conn).completedWithTombstone(collector().report, 9);
     const select = calls.find((c) => c.sql.includes("status = 'completed'"));
     expect(select?.sql).toContain("tombstone_id IS NOT NULL");
     expect(select?.sql).toContain("ORDER BY completed_at DESC, request_id");
@@ -281,10 +427,174 @@ describe("read and dueForExecution", () => {
   it("clamps the limit into a sane band", async () => {
     const { conn, calls } = fakePg();
     const store = new PostgresDeletionRequestStore(conn);
-    await store.dueForExecution(0);
-    await store.dueForExecution(10_000);
+    await store.dueForExecution(collector().report, 0);
+    await store.dueForExecution(collector().report, 10_000);
     const limits = calls.filter((c) => c.sql.includes("LIMIT")).map((c) => c.params[0]);
     expect(limits).toEqual([1, 100]);
+  });
+});
+
+describe("a late completion round-trips", () => {
+  it("reads back a deletion that finished past its Article 12(3) deadline", () => {
+    // Slice 2a's change, observed from the store — and the proof the live cause of Part A is gone.
+    // The schema used to refuse this row outright, so the tenant's data was destroyed, the
+    // tombstone was written and anchored, the `completed` row committed, and *this* call threw.
+    const parsed = rowToDeletionRequest(
+      rowOf({
+        status: "completed",
+        in_progress_at: "2026-10-03T00:00:00.000Z",
+        // Past `deadline_at`, which the fixture sets to 2026-10-28.
+        completed_at: "2026-11-15T00:00:00.000Z",
+        completion_sha256: SHA,
+        tombstone_id: TOMB,
+      }),
+    );
+    expect(parsed.completedAt).toBe("2026-11-15T00:00:00.000Z");
+    expect(parsed.status).toBe("completed");
+    // A vacuity floor, because this test's whole subject is the *relation* between two fixture
+    // dates: edit either one the wrong way and the row stops being a late completion while every
+    // assertion above still passes. The mutation that would refute this test lives in
+    // `@crossengin/tenant-lifecycle`'s schema, so this is what can be fenced from here.
+    expect(new Date(parsed.completedAt ?? 0).getTime()).toBeGreaterThan(
+      new Date(parsed.deadlineAt).getTime(),
+    );
+  });
+});
+
+describe("a sweep carries on past a row it cannot represent", () => {
+  it("returns the other rows and reports the unreadable one", async () => {
+    const { reported, report } = collector();
+    const { conn } = fakePg([
+      unreadableCompletedRow("dreq_bad123456789"),
+      rowOf({
+        request_id: "dreq_good12345678",
+        status: "completed",
+        in_progress_at: "2026-10-03T00:00:00.000Z",
+        completed_at: "2026-10-03T01:00:00.000Z",
+        completion_sha256: SHA,
+        tombstone_id: TOMB,
+      }),
+    ]);
+    const page = await new PostgresDeletionRequestStore(conn).completedWithTombstone(report);
+    // Before this the `.map()` threw out of the whole page, so one refused row stopped
+    // `auditCompleted` examining every *other* completed request — and the audit's answer is the
+    // *absence* of findings, so a throw and a clean audit were the same observation.
+    expect(page.map((r) => r.id)).toEqual(["dreq_good12345678"]);
+    expect(reported).toEqual([
+      { requestId: "dreq_bad123456789", detail: expect.stringContaining("completionSha256") },
+    ]);
+  });
+
+  it("reports the unreadable row first when it is first, so order is the page's not the report's", async () => {
+    // The bad row is in the middle here. If the helper short-circuited, the third row would be lost
+    // silently — which is the carry-on rule failing in the direction a count would not show.
+    const { reported, report } = collector();
+    const good = (id: string): Record<string, unknown> =>
+      rowOf({
+        request_id: id,
+        status: "completed",
+        in_progress_at: "2026-10-03T00:00:00.000Z",
+        completed_at: "2026-10-03T01:00:00.000Z",
+        completion_sha256: SHA,
+        tombstone_id: TOMB,
+      });
+    const { conn } = fakePg([
+      good("dreq_one12345678"),
+      unreadableCompletedRow("dreq_bad123456789"),
+      good("dreq_two12345678"),
+    ]);
+    const page = await new PostgresDeletionRequestStore(conn).completedWithTombstone(report);
+    expect(page.map((r) => r.id)).toEqual(["dreq_one12345678", "dreq_two12345678"]);
+    expect(reported.map((r) => r.requestId)).toEqual(["dreq_bad123456789"]);
+  });
+
+  it("carries on in dueForExecution, where the dropped row is a deletion that will never run", async () => {
+    const { reported, report } = collector();
+    const { conn } = fakePg([
+      unreadableRow("verified", "dreq_bad123456789"),
+      rowOf({ request_id: "dreq_good12345678" }),
+    ]);
+    const page = await new PostgresDeletionRequestStore(conn).dueForExecution(report);
+    expect(page.map((r) => r.id)).toEqual(["dreq_good12345678"]);
+    expect(reported.map((r) => r.requestId)).toEqual(["dreq_bad123456789"]);
+    expect(reported[0]?.detail).toContain("verificationMethod");
+  });
+
+  it("carries on in stranded", async () => {
+    const { reported, report } = collector();
+    const { conn } = fakePg([
+      unreadableRow("in_progress", "dreq_bad123456789"),
+      rowOf({
+        request_id: "dreq_good12345678",
+        status: "in_progress",
+        in_progress_at: "2026-10-03T00:00:00.000Z",
+      }),
+    ]);
+    const page = await new PostgresDeletionRequestStore(conn).stranded(
+      "2026-10-03T13:00:00.000Z",
+      report,
+    );
+    expect(page.map((r) => r.id)).toEqual(["dreq_good12345678"]);
+    expect(reported).toHaveLength(1);
+  });
+
+  it("reports the row's own id and nothing else off a row the contract refused", async () => {
+    // Two fields and no more. Every other column of a refused row is of unestablished
+    // trustworthiness, so handing back a `tenant_id` read off one invites an operator to scope a
+    // manual fix by a value that may be the reason it was refused.
+    const { reported, report } = collector();
+    const { conn } = fakePg([unreadableCompletedRow("dreq_bad123456789")]);
+    await new PostgresDeletionRequestStore(conn).completedWithTombstone(report);
+    expect(Object.keys(reported[0] ?? {}).sort()).toEqual(["detail", "requestId"]);
+  });
+
+  it("answers requestId null when the row does not name one, rather than inventing a handle", async () => {
+    const { reported, report } = collector();
+    const row = unreadableCompletedRow();
+    delete row["request_id"];
+    const { conn } = fakePg([row]);
+    const page = await new PostgresDeletionRequestStore(conn).completedWithTombstone(report);
+    expect(page).toEqual([]);
+    // `null` says the row does not name one (ADR-0331), where `"undefined"` would be a handle no
+    // `WHERE` clause can use and that reads like a value.
+    expect(reported[0]?.requestId).toBeNull();
+  });
+
+  it("reports nothing when every row reads", async () => {
+    const { reported, report } = collector();
+    const { conn } = fakePg([rowOf()]);
+    const page = await new PostgresDeletionRequestStore(conn).dueForExecution(report);
+    expect(page).toHaveLength(1);
+    expect(reported).toEqual([]);
+  });
+});
+
+describe("read is the one that still throws", () => {
+  it("throws rather than answering null for a row it cannot represent", async () => {
+    // ADR-0345's axis: *who named the record*. This caller named one, so a failure takes no other
+    // row's answer with it — while `null` means *nobody ever held this id*, and answering it here
+    // would tell a data subject their erasure request does not exist (ADR-0331).
+    const { conn } = fakePg([unreadableCompletedRow()]);
+    await expect(new PostgresDeletionRequestStore(conn).read(REQ)).rejects.toThrow(
+      /completionSha256/,
+    );
+  });
+
+  it("still answers null for a row that is genuinely not there", async () => {
+    const { conn } = fakePg([]);
+    expect(await new PostgresDeletionRequestStore(conn).read(REQ)).toBeNull();
+  });
+
+  it("refuses a transition on a row it cannot represent, before issuing the UPDATE", async () => {
+    // `transition` reads through `read()` and must: the status guard it binds comes from
+    // `current.status`, so a transition on an unrepresentable row has nothing to assert.
+    const { conn, sql } = fakePg([unreadableRow("verified")]);
+    await expect(
+      new PostgresDeletionRequestStore(conn).transition(REQ, "in_progress", {
+        at: "2026-10-03T00:00:00.000Z",
+      }),
+    ).rejects.toThrow(/verificationMethod/);
+    expect(sql().some((s) => s.startsWith("UPDATE"))).toBe(false);
   });
 });
 
@@ -363,6 +673,49 @@ describe("transition", () => {
     const update = calls.find((c) => c.sql.startsWith("UPDATE"));
     expect(update?.sql).toContain("tombstone_id =");
     expect(update?.sql).toContain("completion_sha256 =");
+  });
+
+  it("reports a committed write whose read-back cannot be represented, and says it committed", async () => {
+    // The defect, and the whole of Part A: the `UPDATE … RETURNING` runs inside
+    // `conn.transaction`, which **commits**, and `rowToDeletionRequest` runs only afterwards. So a
+    // throw from that parse is a *successful* write this binary cannot read back — and a bare
+    // `ZodError` cannot say so, which is how `DeletionRunner` came to report `completed_unrecorded`
+    // ("the `completed` write did not") about a transaction that had committed.
+    const { conn } = fakePg(
+      [rowOf({ status: "in_progress", in_progress_at: "2026-10-03T00:00:00.000Z" })],
+      [unreadableCompletedRow()],
+    );
+    const err = await new PostgresDeletionRequestStore(conn)
+      .transition(REQ, "completed", {
+        at: "2026-10-03T01:00:00.000Z",
+        tombstoneId: TOMB,
+        completionSha256: SHA,
+      })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DeletionRequestCommittedUnreadable);
+    const committed = err as DeletionRequestCommittedUnreadable;
+    // The name and the message are the information, not merely decoration: this is what a caller
+    // reads to decide whether to re-drive an Article 17 erasure.
+    expect(committed.name).toBe("DeletionRequestCommittedUnreadable");
+    expect(committed.message).toContain("committed status 'completed'");
+    expect(committed.requestId).toBe(REQ);
+    // The status the UPDATE bound, which is true of the row whatever the row reads as.
+    expect(committed.committedStatus).toBe("completed");
+    expect(committed.parseMessage).toContain("completionSha256");
+  });
+
+  it("is not a DeletionRequestRefused, because a refusal means nothing was written", async () => {
+    // Every member of REQUEST_REFUSALS is raised before any statement is issued. Reusing that class
+    // — or its unproduced `contract_violated` member — would make the two indistinguishable, and
+    // they state opposite things about whether the tenant's data is gone.
+    const { conn } = fakePg(
+      [rowOf({ status: "in_progress", in_progress_at: "2026-10-03T00:00:00.000Z" })],
+      [unreadableCompletedRow()],
+    );
+    const err = await new PostgresDeletionRequestStore(conn)
+      .transition(REQ, "completed", { at: "2026-10-03T01:00:00.000Z", tombstoneId: TOMB })
+      .catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(DeletionRequestRefused);
   });
 
   it("stamps only the timestamp its target status implies", async () => {

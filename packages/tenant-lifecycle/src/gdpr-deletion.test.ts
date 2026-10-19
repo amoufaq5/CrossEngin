@@ -7,6 +7,7 @@ import {
   canTransitionDeletionRequest,
   daysUntilDeadline,
   hasRetainedData,
+  isCompletedLate,
   isOverdue,
   type GdprDeletionRequest,
 } from "./gdpr-deletion.js";
@@ -132,13 +133,35 @@ describe("GdprDeletionRequestSchema", () => {
     ).toThrow(/completionSha256/);
   });
 
-  it("rejects completion after deadline", () => {
+  it("accepts a completion after the deadline, because the breach is a fact that happened", () => {
+    // The schema used to refuse this, which prevented no breach and made the record of one
+    // unreadable: the pg store commits the `completed` row and parses it afterwards, so a late
+    // deletion destroyed the data, wrote the tombstone, committed the row, and then threw for ever.
+    const parsed = GdprDeletionRequestSchema.parse({
+      ...base,
+      completedAt: "2026-07-01T00:00:00Z",
+    });
+    expect(parsed.completedAt).toBe("2026-07-01T00:00:00Z");
+    expect(isCompletedLate(parsed)).toBe(true);
+  });
+
+  it("still enforces every other completed-status rule on a late completion", () => {
+    // Representable is not unvalidated: dropping the deadline refusal must not have widened the
+    // branch it lived in.
     expect(() =>
       GdprDeletionRequestSchema.parse({
         ...base,
         completedAt: "2026-07-01T00:00:00Z",
+        completionSha256: null,
       }),
-    ).toThrow(/missed Article 12\(3\) deadline/);
+    ).toThrow(/completionSha256/);
+    expect(() =>
+      GdprDeletionRequestSchema.parse({
+        ...base,
+        completedAt: "2026-07-01T00:00:00Z",
+        tombstoneId: null,
+      }),
+    ).toThrow(/must name the tombstone/);
   });
 
   it("rejects verified without verifiedBy", () => {
@@ -239,6 +262,55 @@ describe("helpers", () => {
         new Date("2026-06-15T00:00:00Z"),
       ),
     ).toBe(false);
+  });
+
+  const completed = (completedAt: string | null): GdprDeletionRequest => ({
+    ...base,
+    status: "completed",
+    completedAt,
+    completionSha256: SHA,
+    tombstoneId: "tomb_aaaabbbbccccdddd",
+  });
+
+  it("isCompletedLate true when the deletion finished past the deadline", () => {
+    expect(isCompletedLate(completed("2026-06-15T00:00:00Z"))).toBe(true);
+  });
+
+  it("isCompletedLate false when the deletion finished before the deadline", () => {
+    expect(isCompletedLate(completed("2026-05-20T00:00:00Z"))).toBe(false);
+  });
+
+  it("isCompletedLate false exactly at the deadline", () => {
+    // `>`, not `>=`: the deadline is the last moment that is on time.
+    expect(isCompletedLate(completed("2026-05-31T00:00:00Z"))).toBe(false);
+    expect(isCompletedLate(completed("2026-05-31T00:00:01Z"))).toBe(true);
+  });
+
+  it("isCompletedLate answers only for completed, whatever the clock says", () => {
+    // A `deferred` request sitting past its deadline is `isOverdue`'s finding, not this one's.
+    // Reporting it here would attribute a breach to a completion that has not happened.
+    for (const status of ["submitted", "verified", "in_progress", "rejected", "deferred"] as const) {
+      expect(isCompletedLate({ ...completed("2026-06-15T00:00:00Z"), status })).toBe(false);
+    }
+  });
+
+  it("isCompletedLate false for a completed request that states no completion time", () => {
+    // Unreachable past `GdprDeletionRequestSchema`, which requires `completedAt` on `completed`.
+    // A boolean cannot say "the record does not state when it finished", and `true` would assert a
+    // breach from a record carrying no completion time at all.
+    expect(isCompletedLate(completed(null))).toBe(false);
+  });
+
+  it("isOverdue and isCompletedLate are total over a deadline breach", () => {
+    // The pair is the whole point. `isOverdue` answers `false` for every completed request, so on
+    // its own a late completion read exactly like a compliant one.
+    const late = completed("2026-06-15T00:00:00Z");
+    expect(isOverdue(late, new Date("2026-07-01T00:00:00Z"))).toBe(false);
+    expect(isCompletedLate(late)).toBe(true);
+
+    const onTime = completed("2026-05-20T00:00:00Z");
+    expect(isOverdue(onTime, new Date("2026-07-01T00:00:00Z"))).toBe(false);
+    expect(isCompletedLate(onTime)).toBe(false);
   });
 
   it("daysUntilDeadline counts down", () => {

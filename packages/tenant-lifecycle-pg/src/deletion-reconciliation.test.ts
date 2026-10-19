@@ -2,6 +2,7 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 import {
   assembleTombstone,
   type DeletionAttestation,
+  type DeletionRequestStatus,
   type GdprDeletionRequest,
   type TombstoneRecordStorageDeclaration,
 } from "@crossengin/tenant-lifecycle";
@@ -19,10 +20,16 @@ import {
   needsOperator,
   tombstoneStanding,
   verifyStoredEvidence,
+  type DeadlineBreach,
   type ReconciliationResult,
   type ReconcilerOptions,
 } from "./deletion-reconciliation.js";
-import { PostgresDeletionRequestStore, REQUEST_COLUMNS } from "./deletion-request-store.js";
+import {
+  DeletionRequestCommittedUnreadable,
+  PostgresDeletionRequestStore,
+  REQUEST_COLUMNS,
+  type UnreadableRequestRow,
+} from "./deletion-request-store.js";
 import {
   PostgresTombstoneStore,
   TOMBSTONE_COLUMNS,
@@ -280,6 +287,8 @@ interface Harness {
   readonly scanCalls: Array<{ limit: number; afterTombstoneId: string | null | undefined }>;
   readonly requestReads: string[];
   readonly reported: ReconciliationResult[];
+  readonly unreadable: UnreadableRequestRow[];
+  readonly breaches: DeadlineBreach[];
 }
 
 function harness(
@@ -293,6 +302,17 @@ function harness(
     readonly scan?: readonly StoredTombstone[];
     /** Which request ids `requests.read` finds. Absent means every one asked for. */
     readonly knownRequestIds?: readonly string[];
+    /** Rows the store's own page could not represent, reported rather than returned. */
+    readonly strandedUnreadable?: readonly UnreadableRequestRow[];
+    readonly completedUnreadable?: readonly UnreadableRequestRow[];
+    /**
+     * The targets whose `transition` commits and cannot read the row back.
+     *
+     * The store raises `DeletionRequestCommittedUnreadable` for every `to`, so the fake has to be
+     * able to model it at any target: both of this class's write sites were as unguarded as the
+     * runner's, and a fake that could only model one target could only ever exercise one of them.
+     */
+    readonly unreadableOn?: readonly DeletionRequestStatus[];
   } = {},
   over: Partial<ReconcilerOptions> = {},
 ): Harness {
@@ -303,6 +323,8 @@ function harness(
   const scanCalls: Array<{ limit: number; afterTombstoneId: string | null | undefined }> = [];
   const requestReads: string[] = [];
   const reported: ReconciliationResult[] = [];
+  const unreadable: UnreadableRequestRow[] = [];
+  const breaches: DeadlineBreach[] = [];
   const requests = {
     transition: async (
       id: string,
@@ -310,6 +332,13 @@ function harness(
       fields: Record<string, unknown>,
     ): Promise<GdprDeletionRequest | null> => {
       transitions.push({ id, to, fields: { ...fields } });
+      if ((behaviour.unreadableOn ?? []).includes(to as DeletionRequestStatus)) {
+        throw new DeletionRequestCommittedUnreadable(
+          id,
+          to as DeletionRequestStatus,
+          "the stored row cannot be represented",
+        );
+      }
       return requestOf({ status: to as GdprDeletionRequest["status"] });
     },
     read: async (id: string): Promise<GdprDeletionRequest | null> => {
@@ -318,15 +347,24 @@ function harness(
       if (known !== undefined && !known.includes(id)) return null;
       return requestOf({ id });
     },
+    // Both sweeps take their reporter *before* the optional limit: it is required, and a required
+    // parameter cannot follow an optional one. The fake calls it so a test can assert that an
+    // unrepresentable row is reported and the rest of the page still walked.
     stranded: async (
       olderThan: string,
+      onUnreadable: (row: UnreadableRequestRow) => void,
       limit?: number,
     ): Promise<readonly GdprDeletionRequest[]> => {
       strandedCalls.push({ olderThan, limit });
+      for (const row of behaviour.strandedUnreadable ?? []) onUnreadable(row);
       return behaviour.stranded ?? [requestOf()];
     },
-    completedWithTombstone: async (limit?: number): Promise<readonly GdprDeletionRequest[]> => {
+    completedWithTombstone: async (
+      onUnreadable: (row: UnreadableRequestRow) => void,
+      limit?: number,
+    ): Promise<readonly GdprDeletionRequest[]> => {
       completedCalls.push(limit);
+      for (const row of behaviour.completedUnreadable ?? []) onUnreadable(row);
       return behaviour.completed ?? [];
     },
   } as unknown as PostgresDeletionRequestStore;
@@ -360,6 +398,8 @@ function harness(
     },
     clock: () => new Date(NOW),
     onReconciled: (r) => reported.push(r),
+    onUnreadableRequest: (row) => unreadable.push(row),
+    onDeadlineBreach: (b) => breaches.push(b),
     ...over,
   });
   return {
@@ -371,6 +411,8 @@ function harness(
     scanCalls,
     requestReads,
     reported,
+    unreadable,
+    breaches,
   };
 }
 
@@ -489,6 +531,50 @@ describe("reconcileOne", () => {
     expect(result.tenantRetired).toBe(true);
   });
 
+  it("still retires the row when the completed write committed and cannot be read back", async () => {
+    // The sharpest of the six unguarded write sites. The throw used to escape *between* the
+    // committed `completed` write and the retire, so the repair ran, the tenant row stayed live,
+    // nothing recorded that the request had been resolved, and no later sweep could see it either —
+    // `stranded` walks `in_progress` and the row now reads `completed`.
+    const h = harness({ evidence: [tombstoneOf()], unreadableOn: ["completed"] });
+    const result = await h.reconciler.reconcileOne(requestOf());
+    expect(result.applied).toBe(true);
+    expect(h.retired).toEqual([TENANT]);
+    expect(result.tenantRetired).toBe(true);
+    // The verdict is unchanged — the evidence settled it and the write committing does not move it —
+    // so the condition lands in `detail`, which is what an operator reads.
+    expect(result.verdict).toBe("completed_by_evidence");
+    expect(result.detail).toContain("recorded 'completed'");
+    expect(result.detail).toContain("cannot be read back");
+    // And it reached `onReconciled`, which a propagating throw skipped.
+    expect(h.reported).toHaveLength(1);
+  });
+
+  it("still reports an authorised never_committed whose write cannot be read back", async () => {
+    const h = harness({ evidence: [], unreadableOn: ["rejected"] });
+    const result = await h.reconciler.reconcileOne(requestOf(), { applyNeverCommitted: true });
+    expect(result.verdict).toBe("never_committed");
+    expect(result.applied).toBe(true);
+    expect(result.detail).toContain("recorded 'rejected'");
+    // The original verdict detail survives beside the note rather than being replaced by it.
+    expect(result.detail).toContain("no tombstone names this request");
+  });
+
+  it("does not take the rest of the stranded page with it", async () => {
+    // `reconcileStranded` loops `reconcileOne`, so the propagating throw dropped every other
+    // stranded request — the same shape as the runner's and as the list read's.
+    const second = requestOf({ id: "dreq_secondone123" });
+    const h = harness({
+      evidence: [tombstoneOf()],
+      stranded: [requestOf(), second],
+      unreadableOn: ["completed"],
+    });
+    const results = await h.reconciler.reconcileStranded();
+    expect(results.map((r) => r.requestId)).toEqual([REQ, "dreq_secondone123"]);
+    expect(results.every((r) => r.applied)).toBe(true);
+    expect(h.retired).toEqual([TENANT, TENANT]);
+  });
+
   it("still records the completion when retiring the row fails", async () => {
     const h = harness({ evidence: [tombstoneOf()], retireThrows: true });
     const result = await h.reconciler.reconcileOne(requestOf());
@@ -555,6 +641,20 @@ describe("reconcileStranded", () => {
     // The window governs the inference from absence, not the listing: a committed deletion whose
     // status write failed is conclusive immediately, and that is the case worth fixing promptly.
     expect(h.strandedCalls[0]?.olderThan).toBe(NOW);
+  });
+
+  it("reconciles the rest of the page past a row the contract cannot represent", async () => {
+    const h = harness({
+      evidence: [tombstoneOf()],
+      strandedUnreadable: [
+        { requestId: "dreq_bad123456789", detail: "in_progress status requires inProgressAt" },
+      ],
+    });
+    const results = await h.reconciler.reconcileStranded();
+    // One refused row used to end the whole pass, which is the same silence `reconcileStranded`
+    // exists to break: a stranded request is only ever seen again by this method.
+    expect(results).toHaveLength(1);
+    expect(h.unreadable.map((r) => r.requestId)).toEqual(["dreq_bad123456789"]);
   });
 
   it("applies the conclusive verdict and leaves the inference alone", async () => {
@@ -762,6 +862,42 @@ describe("auditCompleted", () => {
     const h = harness({ completed: [COMPLETED], evidence: [tombstoneOf()] });
     // Findings only: a listing of every completed request grows without bound and says nothing.
     expect(await h.reconciler.auditCompleted()).toEqual([]);
+    expect(h.unreadable).toEqual([]);
+  });
+
+  it("still audits the rest of the page past a row the contract cannot represent", async () => {
+    // The whole of Part B, at the surface it matters most on. The store used to `.map()` the page,
+    // so one refused row threw out of the whole thing and *this* method stopped examining every
+    // other completed request — and because its answer is the **absence** of findings, a throw and
+    // a clean audit were the same observation: a claim that every completed deletion still verifies,
+    // which nothing had checked.
+    const h = harness({
+      completed: [COMPLETED],
+      // Not returned by the page, so a reconciler that only read the returned rows would see a
+      // clean audit; the reporter is the only place this row exists.
+      completedUnreadable: [
+        { requestId: "dreq_bad123456789", detail: "completed status requires completionSha256" },
+      ],
+      storedMissing: true,
+    });
+    const findings = await h.reconciler.auditCompleted();
+    expect(findings).toHaveLength(1);
+    expect(findings[0]?.requestId).toBe(COMPLETED.id);
+    expect(h.unreadable).toEqual([
+      { requestId: "dreq_bad123456789", detail: "completed status requires completionSha256" },
+    ]);
+  });
+
+  it("keeps the unreadable row out of the findings, which require a trustworthy id", async () => {
+    // Not folded into `EvidenceAudit`: that shape requires a requestId, a tenantId and a
+    // tombstoneId, and a row the contract refused supplies none of them trustworthily. Inventing
+    // them is the claim-with-no-evidence this surface exists to refuse.
+    const h = harness({
+      completed: [],
+      completedUnreadable: [{ requestId: null, detail: "verifiedBy" }],
+    });
+    expect(await h.reconciler.auditCompleted()).toEqual([]);
+    expect(h.unreadable).toHaveLength(1);
   });
 
   it("finds a request whose tombstone is gone", async () => {
@@ -796,6 +932,62 @@ describe("auditCompleted", () => {
     const h = harness({ completed: [] });
     await h.reconciler.auditCompleted(7);
     expect(h.completedCalls).toEqual([7]);
+  });
+
+  /** A completion two days past its Article 12(3) deadline, otherwise perfectly evidenced. */
+  const LATE = requestOf({
+    status: "completed",
+    completedAt: "2026-10-30T00:00:00.000Z",
+    completionSha256: PROOF,
+    tombstoneId: TOMB,
+  });
+
+  it("reports a completion past its Article 12(3) deadline, and not as a finding", async () => {
+    // `isCompletedLate`'s first reader. Before this the predicate had zero non-test callers, so the
+    // breach the schema stopped refusing was representable, readable and reported by nothing.
+    const h = harness({ completed: [LATE], evidence: [tombstoneOf()] });
+    const findings = await h.reconciler.auditCompleted();
+    // Not an `EvidenceAudit`: this proof stands up, so every field of a finding would say nothing is
+    // wrong — and every finding reaches the escalator, which pages a sev1 for a tamper.
+    expect(findings).toEqual([]);
+    expect(h.breaches).toHaveLength(1);
+    expect(h.breaches[0]).toEqual({
+      requestId: LATE.id,
+      tenantId: TENANT,
+      deadlineAt: "2026-10-28T00:00:00.000Z",
+      completedAt: "2026-10-30T00:00:00.000Z",
+      lateByMs: 2 * 86_400_000,
+      tombstoneId: TOMB,
+    });
+  });
+
+  it("says nothing about a completion that met its deadline", async () => {
+    const h = harness({ completed: [COMPLETED], evidence: [tombstoneOf()] });
+    await h.reconciler.auditCompleted();
+    expect(h.breaches).toEqual([]);
+  });
+
+  it("reports the breach even when the proof is also broken, because neither answer is the other", async () => {
+    // The reason the emit is first in the loop body: the two questions are independent, and the
+    // `continue` for a missing tombstone is taken before any finding is pushed.
+    const h = harness({ completed: [LATE], storedMissing: true });
+    const findings = await h.reconciler.auditCompleted();
+    expect(findings).toHaveLength(1);
+    expect(findings[0]?.present).toBe(false);
+    expect(h.breaches).toHaveLength(1);
+    expect(h.breaches[0]?.requestId).toBe(LATE.id);
+  });
+
+  it("says nothing for a completed request that states no completion time", async () => {
+    // The schema refuses that pairing, so it is unreachable past validation — and a boolean cannot
+    // say "the record does not state when it finished", while `true` would assert a breach from a
+    // record that gives no time at all.
+    const h = harness({
+      completed: [requestOf({ ...LATE, completedAt: null })],
+      evidence: [tombstoneOf()],
+    });
+    await h.reconciler.auditCompleted();
+    expect(h.breaches).toEqual([]);
   });
 });
 
@@ -1204,6 +1396,10 @@ describe("auditTombstones writes nothing", () => {
         requests: new PostgresDeletionRequestStore(pg),
         tombstones: new PostgresTombstoneStore(pg, ANCHORER),
         clock: () => new Date(NOW),
+        // This harness exists to prove the sweep writes nothing, so a reported row has nowhere to
+        // go here — and it must not be a *write*, which is exactly what the assertion below checks.
+        onUnreadableRequest: () => undefined,
+        onDeadlineBreach: () => undefined,
       }),
       sql: () => sql,
     };

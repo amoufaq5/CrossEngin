@@ -1,5 +1,7 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
 import {
+  PIPELINE_ERASES_UNCONDITIONALLY,
+  SELF_EXEMPTION_BY_DISPOSITION,
   readRecordStorage,
   verifyTombstoneHashes,
   type DeletionAttestation,
@@ -334,6 +336,68 @@ describe("deleteTenantAtomically", () => {
     expect(h.calls).toEqual([]);
   });
 
+  it("refuses a declaration that calls a performed subsystem present_not_erased, at the input stage", async () => {
+    // The half-widened predicate. This check was `capabilities[subsystem] !== "absent"`, written
+    // when `absent` was the only self-exempting disposition — so the fourth one passed it and the
+    // refusal moved to `assemble`, where the assembler re-parses the declaration and refuses it for
+    // the same reason. Never a hole, and a stage regression is not nothing: the input stage is
+    // settled before the transaction opens, so a refusal there costs no statement and no lock, and
+    // `inputRefusals`' own doc claims both.
+    const h = harness({}, { sharedRows: SHARED_ROWS });
+    const out = await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({ capabilities: { ...CAPABILITIES, tenant_schema: "present_not_erased" } }),
+    );
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusals.map((r) => r.stage)).toEqual(["input"]);
+    expect(out.refusals.map((r) => r.reason)).toEqual(["performed_subsystem_self_exempted"]);
+    // The claim clause comes from the contracts map, so this sentence and the schema's parse issue
+    // cannot disagree about what the disposition asserts.
+    expect(out.refusals[0]?.detail).toContain(
+      SELF_EXEMPTION_BY_DISPOSITION.present_not_erased ?? "",
+    );
+    expect(h.calls).toEqual([]);
+  });
+
+  it("settles the whole 2 × 2 at the input stage, so neither half can be the wired one", async () => {
+    // Two performed subsystems against two self-exempting dispositions. The defect was one cell of
+    // four reaching a different stage, so asserting a cell is what let three pass for one.
+    for (const subsystem of PIPELINE_PERFORMED_SUBSYSTEMS) {
+      for (const disposition of ["absent", "present_not_erased"] as const) {
+        const h = harness({}, { sharedRows: SHARED_ROWS });
+        const out = await deleteTenantAtomically(
+          h.conn,
+          h.store,
+          h.erase,
+          inputOf({ capabilities: { ...CAPABILITIES, [subsystem]: disposition } }),
+        );
+        const label = `${subsystem}=${disposition}`;
+        expect(out.ok, label).toBe(false);
+        if (out.ok) continue;
+        expect(out.refusals.map((r) => r.stage), label).toEqual(["input"]);
+        expect(out.refusals.map((r) => r.reason), label).toEqual([
+          "performed_subsystem_self_exempted",
+        ]);
+        // Nothing ran: the whole claim `inputRefusals` makes about itself.
+        expect(h.calls, label).toEqual([]);
+      }
+    }
+  });
+
+  it("names the performed subsystems the same way the contracts package does", () => {
+    // The fence across the cycle: `PIPELINE_ERASES_UNCONDITIONALLY` is a second hand-written spelling
+    // of this derivation, in the package the pipeline imports, so it cannot read the derivation and
+    // nothing but a test on this side can compare them. Same relationship `pg-column-coverage.ts`
+    // has to `META_TABLES` (ADR-0333).
+    const declaredPerformed = Object.entries(PIPELINE_ERASES_UNCONDITIONALLY)
+      .filter(([, because]) => because !== null)
+      .map(([subsystem]) => subsystem);
+    expect([...declaredPerformed].sort()).toEqual([...PIPELINE_PERFORMED_SUBSYSTEMS].sort());
+  });
+
   it("refuses a declaration that calls a performed subsystem absent", async () => {
     const h = harness({}, { sharedRows: SHARED_ROWS });
     const out = await deleteTenantAtomically(
@@ -349,7 +413,7 @@ describe("deleteTenantAtomically", () => {
     expect(out.refusals).toEqual([
       {
         stage: "input",
-        reason: "performed_subsystem_absent",
+        reason: "performed_subsystem_self_exempted",
         detail: expect.stringContaining("shared_tables") as unknown as string,
       },
     ]);

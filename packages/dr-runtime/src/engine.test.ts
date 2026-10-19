@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { DEFAULT_DR_TIERS } from "@crossengin/dr";
+import { BackupRecordSchema, DEFAULT_DR_TIERS } from "@crossengin/dr";
 import { CountingIdGenerator, FixedClock } from "./clock.js";
 import {
   DrReadinessScheduler,
@@ -75,8 +75,27 @@ describe("DrRuntime", () => {
 
   it("assess defaults now to the runtime clock", () => {
     const runtime = makeRuntime();
-    const report = runtime.assess({});
-    expect(report.ready).toBe(true);
+    // Dated so the verdict separates the two clocks: this backup expires *after* the runtime's
+    // fixed 2026-01-01 and *before* any wall clock a test run can see, so `expiredBackups: 0` is
+    // reachable only if `now` came from the injected clock. `ready` stood in for this before and
+    // could not test it — it read `true` for an empty estate whatever the date, which is the
+    // defect `unevidencedAxes` closes, so the assertion was pinning that rather than the clock.
+    const backup = BackupRecordSchema.parse({
+      id: "bk-engine",
+      policyId: "pol-1",
+      kind: "full",
+      startedAt: "2025-12-01T00:00:00.000Z",
+      completedAt: "2025-12-01T00:10:00.000Z",
+      status: "verified",
+      sizeBytes: 1024,
+      sha256: "a".repeat(64),
+      storageRegion: "us-east",
+      verifiedAt: "2025-12-01T01:00:00.000Z",
+      verifiedBy: "sre",
+      expiresAt: "2026-03-01T00:00:00.000Z",
+    });
+    const report = runtime.assess({ backups: [backup] });
+    expect(report.counts.expiredBackups).toBe(0);
   });
 });
 

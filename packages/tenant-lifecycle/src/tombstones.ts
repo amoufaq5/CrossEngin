@@ -283,8 +283,22 @@ export type TombstoneRecordStorageDeclaration = z.infer<
  * imports this module, so a runtime import back would be a cycle. `asCapabilityDeclaration` and
  * `asDeletionCapabilities` below pin the restatement in both directions — a subsystem or a disposition
  * added, removed or renamed over there fails `typecheck` here rather than drifting into a proof.
+ *
+ * That pin has fired once and is worth recording, because it is the only thing standing between this
+ * file and a silent half-change. `present_not_erased` was added to `SUBSYSTEM_DISPOSITIONS` and
+ * `asCapabilityDeclaration`'s identity return stopped compiling — which is exactly right: without
+ * this line widened, `requiredSubsystemsFor` would have honoured the fourth disposition while
+ * `TombstoneCapabilityDeclarationSchema.strict()` refused the declaration carrying it, so the
+ * assembler would have answered `record_invalid` for the one declaration the member exists to make
+ * expressible. A capability built and unreachable, in the module whose job is to notice that.
+ *
+ * Widening the member set does **not** move a content tag. The declaration's shape is unchanged —
+ * one disposition per subsystem, six keys — so every stored proof composes byte-identical content
+ * and verifies exactly as before, and `crossengin.tombstone.content.v2`/`v3`/`v4` all keep their
+ * meaning. A `reason` or `horizon` field beside the disposition would change the shape and would
+ * need a `v5`; see `SUBSYSTEM_DISPOSITIONS`' own comment for that argument.
  */
-const DispositionSchema = z.enum(["erases", "retains", "absent"]);
+const DispositionSchema = z.enum(["erases", "retains", "absent", "present_not_erased"]);
 
 const CAPABILITY_DECLARATION_SHAPE = {
   tenant_schema: DispositionSchema,
@@ -310,9 +324,27 @@ export type TombstoneCapabilityDeclaration = z.infer<
 export type DeclaredSubsystem = keyof TombstoneCapabilityDeclaration;
 
 const DECLARED_SUBSYSTEMS: readonly DeclaredSubsystem[] = Object.freeze(
-  // Sorted so a reading's `absentSubsystems` is deterministic without the caller sorting it.
+  // Sorted so a reading's subsystem list is deterministic without the caller sorting it.
   (Object.keys(CAPABILITY_DECLARATION_SHAPE) as DeclaredSubsystem[]).sort(),
 );
+
+/**
+ * Which subsystems a stored declaration gives one disposition.
+ *
+ * One filter for both declaration readers, so the two cannot come to disagree about how a
+ * disposition is matched — the shape of defect `readDeclaredAbsences` itself had when it compared
+ * `proofVersion !== "v2"` literally. The *predicate* is still a second spelling of
+ * `absentSubsystemsFor`/`unerasedSubsystemsFor` in `tombstone-assembly.ts`, which is forced for
+ * `DispositionSchema`'s reason — that module imports this one, so a runtime import back is a cycle —
+ * and pinned the same way: `tombstone-assembly.test.ts` may import both and asserts each reading
+ * equals its capabilities-side function.
+ */
+function declaredAs(
+  declaration: TombstoneCapabilityDeclaration,
+  disposition: z.infer<typeof DispositionSchema>,
+): readonly DeclaredSubsystem[] {
+  return DECLARED_SUBSYSTEMS.filter((s) => declaration[s] === disposition);
+}
 
 /** What a deployment declared, as the thing a proof may commit to. Half of the drift pin. */
 export function asCapabilityDeclaration(
@@ -610,6 +642,11 @@ export function tombstoneChainFor(
  * array for a caller to mistake for "none absent". "We have no object storage" and "nobody asked" are
  * the two facts ADR-0317 is about, and the whole point of the v2 bytes is that a reader can tell them
  * apart.
+ *
+ * It filters on `"absent"` **exactly**, so a `present_not_erased` subsystem — one this deployment
+ * has and this deletion did not reach — does not appear here. That is not a gap: it is
+ * `readUnerasedSubsystems`' answer, beside this one for the reason `absentSubsystemsFor` and
+ * `unerasedSubsystemsFor` are two functions.
  */
 export type DeclaredAbsenceReading =
   | {
@@ -628,22 +665,81 @@ export type DeclaredAbsenceReading =
       readonly reason: "v1_proof" | "declaration_missing";
     };
 
-export function readDeclaredAbsences(record: TombstoneRecord): DeclaredAbsenceReading {
-  const declaration = record.capabilityDeclaration;
+/**
+ * Whether a record's bytes carry a capability declaration at all — the step both declaration
+ * readers share, so neither can answer it differently from the other.
+ */
+type DeclarationCoverage =
+  | { readonly covered: true; readonly declaration: TombstoneCapabilityDeclaration }
+  | { readonly covered: false; readonly reason: "v1_proof" | "declaration_missing" };
+
+function declarationCoverage(record: TombstoneRecord): DeclarationCoverage {
   // Asked of the membership list and never of the string, because v3 carries the declaration too
   // (ADR-0331). A literal `!== "v2"` here would have reported every v3 proof as having no declaration
   // in its bytes, which is the self-downgrading misreading the explicit version field exists to stop
   // — arrived at by the verifier rather than by a tamper.
   if (!proofVersionCoversDeclaration(record.proofVersion)) {
-    return { declarationState: "unknown_not_in_proof", reason: "v1_proof" };
+    return { covered: false, reason: "v1_proof" };
   }
-  if (declaration === undefined) {
-    return { declarationState: "unknown_not_in_proof", reason: "declaration_missing" };
+  const declaration = record.capabilityDeclaration;
+  if (declaration === undefined) return { covered: false, reason: "declaration_missing" };
+  return { covered: true, declaration };
+}
+
+export function readDeclaredAbsences(record: TombstoneRecord): DeclaredAbsenceReading {
+  const coverage = declarationCoverage(record);
+  if (!coverage.covered) {
+    return { declarationState: "unknown_not_in_proof", reason: coverage.reason };
   }
   return {
     declarationState: "covered_by_proof",
-    absentSubsystems: DECLARED_SUBSYSTEMS.filter((s) => declaration[s] === "absent"),
-    declaration,
+    absentSubsystems: declaredAs(coverage.declaration, "absent"),
+    declaration: coverage.declaration,
+  };
+}
+
+/**
+ * What a stored tombstone says about the subsystems its deployment **has** and this deletion did not
+ * erase.
+ *
+ * A **sibling** of `readDeclaredAbsences` and never a field on it, which is the same decision
+ * `absentSubsystemsFor` and `unerasedSubsystemsFor` make one module over and for the same reason: a
+ * reader needs both and the two lead to opposite actions. *We have none* closes the question; *we
+ * have it and did not erase it* leaves the tenant's data in place, which is what a data-protection
+ * officer answering an Article 17 request has to state and what an engineer has to close. Folding
+ * the second into a reading named for absences would also make that name false — `present_not_erased`
+ * is not an absence, and the whole point of the fourth disposition is that it is not.
+ *
+ * Until this existed the symmetry held only on the capabilities side. A stored proof's
+ * `covered_by_proof` arm carried `absentSubsystems` computed and the unerased half reachable only by
+ * re-filtering the raw `declaration` it hands back — so the distinction was two named functions
+ * against a deployment's live configuration and one computed list plus a raw object against the
+ * signed bytes, which is the artifact that outlives the configuration by years.
+ *
+ * The two-state shape and the absent `unerasedSubsystems` on the unknown arm are
+ * `readDeclaredAbsences`' rule, inherited deliberately: there is no empty array for a caller to
+ * mistake for "nothing was left behind" on a proof whose bytes say nothing about any declaration.
+ */
+export type UnerasedSubsystemReading =
+  | {
+      readonly declarationState: "covered_by_proof";
+      readonly unerasedSubsystems: readonly DeclaredSubsystem[];
+      readonly declaration: TombstoneCapabilityDeclaration;
+    }
+  | {
+      readonly declarationState: "unknown_not_in_proof";
+      readonly reason: "v1_proof" | "declaration_missing";
+    };
+
+export function readUnerasedSubsystems(record: TombstoneRecord): UnerasedSubsystemReading {
+  const coverage = declarationCoverage(record);
+  if (!coverage.covered) {
+    return { declarationState: "unknown_not_in_proof", reason: coverage.reason };
+  }
+  return {
+    declarationState: "covered_by_proof",
+    unerasedSubsystems: declaredAs(coverage.declaration, "present_not_erased"),
+    declaration: coverage.declaration,
   };
 }
 

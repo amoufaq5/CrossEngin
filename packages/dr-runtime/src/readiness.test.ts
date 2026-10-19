@@ -11,7 +11,16 @@ import {
 import { CountingIdGenerator, FixedClock } from "./clock.js";
 import { DrillExecutor } from "./drills.js";
 import { FailoverExecutor } from "./failover.js";
-import { assessDrReadiness, formatDrReadiness } from "./readiness.js";
+import {
+  assessDrReadiness,
+  formatDrReadiness,
+  formatUnevidencedAxes,
+  DR_AXIS_EMPTY_MEANS,
+  DR_EVIDENCE_AXES,
+  DrEvidenceAxisSchema,
+  DrReadinessReportSchema,
+  type DrReadinessInput,
+} from "./readiness.js";
 
 const NOW = new Date("2026-06-01T00:00:00.000Z");
 const TIER1 = DEFAULT_DR_TIERS.tier_1_business_critical;
@@ -145,18 +154,39 @@ function healthyDrillFixture() {
   );
 }
 
+/**
+ * An estate that carried a record on every evidence axis, and **no failover at all**.
+ *
+ * The empty `failovers` is the point rather than an omission: it is the claim that nothing failed
+ * over, which is the healthy case, so this fixture is what proves the asymmetry in
+ * `DR_AXIS_EMPTY_MEANS` is the right way round. If `failovers` were treated as an evidence axis,
+ * every green estate would report a finding here.
+ */
+function fullyEvidenced(): DrReadinessInput {
+  return {
+    now: NOW,
+    drills: [healthyDrillFixture()],
+    runbooks: [FRESH_RUNBOOK],
+    backups: [VERIFIED_BACKUP],
+    replication: [{ record: HEALTHY_LAG, tier: "tier_1_business_critical" }],
+    failovers: [],
+  };
+}
+
 describe("assessDrReadiness", () => {
   it("reports ready with an all-green estate", () => {
-    const report = assessDrReadiness({
-      now: NOW,
-      drills: [healthyDrillFixture()],
-      runbooks: [FRESH_RUNBOOK],
-      backups: [VERIFIED_BACKUP],
-      replication: [{ record: HEALTHY_LAG, tier: "tier_1_business_critical" }],
-      failovers: [],
-    });
+    const report = assessDrReadiness(fullyEvidenced());
     expect(report.ready).toBe(true);
     expect(report.counts.totalIssues).toBe(0);
+    expect(report.unevidencedAxes).toEqual([]);
+  });
+
+  it("an empty failover list is the claim that nothing failed over, not an absence of evidence", () => {
+    // The asymmetry read backwards would make every healthy estate report a finding, so it is
+    // pinned from the map as well as from the report: `failovers` is the only `nothing_happened`.
+    expect(DR_AXIS_EMPTY_MEANS.failovers).toBe("nothing_happened");
+    expect(DR_EVIDENCE_AXES).not.toContain("failovers");
+    expect(assessDrReadiness({ ...fullyEvidenced(), failovers: [] }).unevidencedAxes).toEqual([]);
   });
 
   it("flags overdue drills", () => {
@@ -244,23 +274,158 @@ describe("assessDrReadiness", () => {
     expect(report.replicationViolations).toEqual(["us-east->us-west"]);
   });
 
-  it("treats an empty estate as ready", () => {
+  it("is NOT ready on an empty estate, and names every axis that carried no record", () => {
+    // The defect this closes, measured on the committed tree: `assessDrReadiness({now})` answered
+    // `ready: true, totalIssues: 0`, and `evidenceFromDrReadiness` turned that into
+    // `satisfied: true` with the summary "DR readiness: READY (0 issues)" — so a deployment that
+    // has recorded no backup, no drill and no runbook was certified DR-ready in a SOC 2 evidence
+    // pack. The cause is structural: every count is derived by *filtering* a supplied list, so an
+    // empty list contributes zero issues on every axis. Measured, this was every deployment and
+    // not a misconfiguration: of the four evidence axes only `drills` has a durable source, while
+    // `runbooks`, `backups` and `replication` are `--dr-readiness-config` fields that default to
+    // `[]`, and `meta.backup_records` has no store, no reader and no writer anywhere.
     const report = assessDrReadiness({ now: NOW });
-    expect(report.ready).toBe(true);
+    expect(report.ready).toBe(false);
+    expect(report.unevidencedAxes).toEqual(["drills", "runbooks", "backups", "replication"]);
+  });
+
+  it("leaves totalIssues at 0 on that empty estate, because an absence is not an issue", () => {
+    // A5, and load-bearing rather than tidy: `meta.dr_readiness_snapshots` projects the seven
+    // counts as their own INTEGER columns and a reader sums them, so folding an absence into the
+    // total would make the stored figure disagree with the columns beside it. `ready = false` with
+    // `totalIssues = 0` is exactly "nothing wrong was found because nothing was looked at".
+    const report = assessDrReadiness({ now: NOW });
+    expect(report.counts.totalIssues).toBe(0);
+    expect(report.ready).toBe(false);
+  });
+
+  it("narrows unevidencedAxes to the axes still missing when some are supplied", () => {
+    const report = assessDrReadiness({
+      now: NOW,
+      drills: [overdueDrillFixture()],
+      backups: [VERIFIED_BACKUP],
+    });
+    expect(report.unevidencedAxes).toEqual(["runbooks", "replication"]);
+    // A real issue and an unevidenced axis are independent facts and both survive.
+    expect(report.counts.overdueDrills).toBe(1);
+  });
+});
+
+describe("the evidence-axis map", () => {
+  it("is total over the five list inputs, with exactly one nothing_happened", () => {
+    expect(Object.keys(DR_AXIS_EMPTY_MEANS).sort()).toEqual([
+      "backups",
+      "drills",
+      "failovers",
+      "replication",
+      "runbooks",
+    ]);
+    const nothingHappened = Object.entries(DR_AXIS_EMPTY_MEANS)
+      .filter(([, meaning]) => meaning === "nothing_happened")
+      .map(([axis]) => axis);
+    expect(nothingHappened).toEqual(["failovers"]);
+  });
+
+  it("lists exactly the unevidenced axes, recomputed from the map and not from the list", () => {
+    // `satisfies readonly DrEvidenceAxis[]` is the compile-time half and refuses a member the map
+    // calls `nothing_happened`. This is the other half: an `unevidenced` axis *missing* from the
+    // tuple, which no type can catch, so the expectation is derived from the map here.
+    const expected = Object.entries(DR_AXIS_EMPTY_MEANS)
+      .filter(([, meaning]) => meaning === "unevidenced")
+      .map(([axis]) => axis);
+    expect([...DR_EVIDENCE_AXES].sort()).toEqual([...expected].sort());
+    for (const axis of DR_EVIDENCE_AXES) expect(DR_AXIS_EMPTY_MEANS[axis]).toBe("unevidenced");
+  });
+
+  it("is what the schema enumerates, so the two cannot drift", () => {
+    expect(DR_EVIDENCE_AXES.length).toBeGreaterThan(0);
+    expect([...DrEvidenceAxisSchema.options]).toEqual([...DR_EVIDENCE_AXES]);
+  });
+
+  it("refuses failovers and an unknown axis as an evidence axis", () => {
+    expect(DrEvidenceAxisSchema.safeParse("backups").success).toBe(true);
+    expect(DrEvidenceAxisSchema.safeParse("failovers").success).toBe(false);
+    expect(DrEvidenceAxisSchema.safeParse("restores").success).toBe(false);
+  });
+});
+
+describe("unevidencedAxes keeps absent apart from empty", () => {
+  it("parses a report stored before this check as null, never as []", () => {
+    // A stored `report` JSONB written before this increment carries no such key. A `[]` default
+    // would retro-assert "every axis carried a record" over every such row, which is the
+    // falsely-true direction; `null` asserts nothing. Measured: a bare `.nullable()` refuses the
+    // row `invalid_type: Required` instead, and the only reader propagates the throw.
+    const stored = { ...assessDrReadiness(fullyEvidenced()) };
+    const withoutKey: Record<string, unknown> = { ...stored };
+    delete withoutKey["unevidencedAxes"];
+    const parsed = DrReadinessReportSchema.parse(withoutKey);
+    expect(parsed.unevidencedAxes).toBeNull();
+    expect(parsed.unevidencedAxes).not.toEqual([]);
+  });
+
+  it("preserves an explicit [] as the claim it is", () => {
+    const parsed = DrReadinessReportSchema.parse({
+      ...assessDrReadiness(fullyEvidenced()),
+      unevidencedAxes: [],
+    });
+    expect(parsed.unevidencedAxes).toEqual([]);
+  });
+
+  it("refuses a stored axis this binary does not recognise rather than coercing it", () => {
+    // ADR-0371's rule: coercing an unknown value would read a *newer* claim as the gap that means
+    // "predates the column", laundering an unknown claim into a known one.
+    expect(
+      DrReadinessReportSchema.safeParse({
+        ...assessDrReadiness(fullyEvidenced()),
+        unevidencedAxes: ["restores"],
+      }).success,
+    ).toBe(false);
   });
 });
 
 describe("formatDrReadiness", () => {
-  it("summarizes a ready report", () => {
-    const text = formatDrReadiness(assessDrReadiness({ now: NOW }));
-    expect(text).toContain("READY");
+  it("summarizes a genuinely ready report", () => {
+    // The fixture is `fullyEvidenced()` and not `{now}`, because the old test here read
+    // `toContain("READY")` over an empty estate — and "NOT READY" contains "READY", so it would
+    // have gone on passing against the inverted verdict. `not.toContain("NOT READY")` is what
+    // makes the assertion about the verdict rather than about a substring.
+    const text = formatDrReadiness(assessDrReadiness(fullyEvidenced()));
+    expect(text).toContain("DR readiness: READY (0 issue(s))");
+    expect(text).not.toContain("NOT READY");
     expect(text).toContain("overdue drills:");
   });
 
   it("summarizes a not-ready report", () => {
     const text = formatDrReadiness(
-      assessDrReadiness({ now: NOW, drills: [overdueDrillFixture()] }),
+      assessDrReadiness({ ...fullyEvidenced(), drills: [overdueDrillFixture()] }),
     );
     expect(text).toContain("NOT READY");
+  });
+
+  it("names the unevidenced count on the headline and the axes below it", () => {
+    const text = formatDrReadiness(assessDrReadiness({ now: NOW }));
+    expect(text).toContain("DR readiness: NOT READY (0 issue(s), 4 axis(es) unevidenced)");
+    expect(text).toContain("unevidenced axes:       drills, runbooks, backups, replication");
+  });
+});
+
+describe("formatUnevidencedAxes", () => {
+  it("does not print null as none, which would restate the defect in the reporting line", () => {
+    expect(formatUnevidencedAxes(null)).toContain("predates the check");
+    expect(formatUnevidencedAxes(null)).not.toContain("none");
+  });
+
+  it("distinguishes the empty claim from a non-empty list", () => {
+    expect(formatUnevidencedAxes([])).toContain("none");
+    expect(formatUnevidencedAxes(["backups", "drills"])).toBe("backups, drills");
+  });
+
+  it("renders all three states differently", () => {
+    const rendered = [
+      formatUnevidencedAxes(null),
+      formatUnevidencedAxes([]),
+      formatUnevidencedAxes(["backups"]),
+    ];
+    expect(new Set(rendered).size).toBe(3);
   });
 });

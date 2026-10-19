@@ -140,7 +140,7 @@ describe("evidence sources", () => {
 
   it("drReadinessSource maps the latest snapshot", async () => {
     const src = drReadinessSource(
-      { latest: async () => ({ report: { ready: true, counts: { totalIssues: 0 } } }) },
+      { latest: async () => ({ report: { ready: true, counts: { totalIssues: 0 }, unevidencedAxes: [] } }) },
       null,
     );
     const [ev] = await src.collect("soc2_type2", AT);
@@ -186,6 +186,9 @@ describe("evidence sources", () => {
                 framework: fw,
                 status: "sealed",
                 sealedSha256: "a".repeat(64),
+                // Non-zero on purpose: this fixture's subject is a SATISFIED control, and `0` now
+                // reads as `scope_absent` — a pack that sealed over nothing reviewed.
+                totalItemsAcrossCampaigns: 12,
                 completionRate: 1,
                 strongAttestationRate: 1,
                 controlMappings: ["CC6.1"],
@@ -274,6 +277,9 @@ describe("PostgresAccessReviewEvidenceReader", () => {
     framework: "soc2_type2",
     status: "sealed",
     sealed_sha256: "f".repeat(64),
+    // INTEGER arrives as a number; non-zero, because 0 is what makes the control `scope_absent`
+    // (ADR-0372) and these tests' subject is the rate parsing rather than the scope guard.
+    total_items_across_campaigns: 12,
     // NUMERIC arrives as a string from node-postgres, which is what the live row looks like.
     completion_rate: "0.8333",
     strong_attestation_rate: "0.5000",
@@ -352,6 +358,19 @@ describe("PostgresAccessReviewEvidenceReader", () => {
     await expect(reader.latestSealed("soc2_type2")).rejects.toThrow(/completion_rate/);
   });
 
+  it("refuses an unreadable item count rather than reporting it as an empty scope", async () => {
+    // `0` is the value that makes this control `scope_absent` (ADR-0372), so defaulting an
+    // unreadable column to it would assert the finding instead of reporting that nothing could be
+    // read — the same hole `requireRate`'s own comment records for `?? 0`, one column across.
+    const reader = new PostgresAccessReviewEvidenceReader(
+      recordingConn([{ ...sealedRow, total_items_across_campaigns: null }], []),
+      TENANT,
+    );
+    await expect(reader.latestSealed("soc2_type2")).rejects.toThrow(
+      /total_items_across_campaigns/,
+    );
+  });
+
   it("rejects a schema identifier that is not a bare identifier", () => {
     expect(
       () => new PostgresAccessReviewEvidenceReader(recordingConn([], []), TENANT, "me ta"),
@@ -420,7 +439,7 @@ describe("buildCertificationLifecycle", () => {
     const captured: { sql: string; params: readonly unknown[] | undefined }[] = [];
     const conn = fakeConn(captured);
     const drSource = drReadinessSource(
-      { latest: async () => ({ report: { ready: true, counts: { totalIssues: 0 } } }) },
+      { latest: async () => ({ report: { ready: true, counts: { totalIssues: 0 }, unevidencedAxes: [] } }) },
       null,
     );
     const arSource = accessReviewSource({
@@ -430,6 +449,8 @@ describe("buildCertificationLifecycle", () => {
           framework: fw,
           status: "sealed",
           sealedSha256: "c".repeat(64),
+          // Non-zero: this lifecycle test asserts a sealed, certifiable report per framework.
+          totalItemsAcrossCampaigns: 12,
           completionRate: 1,
           strongAttestationRate: 1,
           controlMappings: ["X"],

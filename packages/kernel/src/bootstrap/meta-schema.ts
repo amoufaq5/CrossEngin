@@ -11073,6 +11073,22 @@ export const META_DR_READINESS_SNAPSHOTS: TableDefinition = {
     { name: "replication_violations", type: "INTEGER", notNull: true, default: "0", check: "replication_violations >= 0" },
     { name: "failover_breaches", type: "INTEGER", notNull: true, default: "0", check: "failover_breaches >= 0" },
     { name: "drill_breaches", type: "INTEGER", notNull: true, default: "0", check: "drill_breaches >= 0" },
+    // The axes this assessment had no evidence on, which is why `ready` is no longer
+    // `total_issues = 0`: every count above is derived by *filtering* a supplied list, so an empty
+    // list contributes zero issues and a deployment that recorded no backup, no drill and no
+    // runbook scored READY with nothing examined. The seven counts still sum to `total_issues` —
+    // this is a separate axis, not an eighth count — so `ready = false AND total_issues = 0` is
+    // exactly "nothing wrong was found because nothing was looked at", and this column says which.
+    //
+    // Nullable with no default, which is the claim-versus-nobody-looked distinction (ADR-0331,
+    // ADR-0371's `anchor_provenance_absent`): NULL means a row written before this check existed,
+    // `{}` is the signed claim that every axis carried evidence. Defaulting it to `{}` would
+    // retro-assert the second over every stored row, which is the falsely-true direction.
+    //
+    // No CHECK: an array-containment predicate is not a shape `check-admission.ts` can probe, and
+    // `DrReadinessReportSchema`'s own `z.enum` is the fence — the argument the `report` JSONB
+    // column beside it already rests on.
+    { name: "unevidenced_axes", type: "TEXT[]" },
     { name: "report", type: "JSONB", notNull: true },
     { name: "generated_at", type: "TIMESTAMPTZ", notNull: true },
   ],

@@ -11,7 +11,7 @@ const TABLE = "dr_readiness_snapshots";
 
 const COLUMNS = `snapshot_id, tenant_id, ready, total_issues, overdue_drills,
   stale_runbooks, expired_backups, unverified_backups, replication_violations,
-  failover_breaches, drill_breaches, report, generated_at`;
+  failover_breaches, drill_breaches, unevidenced_axes, report, generated_at`;
 
 export class PostgresDrReadinessStore {
   private readonly conn: PgConnection;
@@ -41,7 +41,7 @@ export class PostgresDrReadinessStore {
     await scopedWrite(this.conn, valid.tenantId, (tx) =>
       tx.query(
         `INSERT INTO ${SCHEMA}.${TABLE} (${COLUMNS})
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14)
          ON CONFLICT (snapshot_id) DO NOTHING`,
         [
           valid.snapshotId,
@@ -55,10 +55,13 @@ export class PostgresDrReadinessStore {
           valid.replicationViolations,
           valid.failoverBreaches,
           valid.drillBreaches,
+          // Bound as the array itself, so node-postgres renders the `TEXT[]` literal: a `null` here
+          // is a SQL NULL and an `[]` is an empty array, which is the whole three-valued point one
+          // layer down. `JSON.stringify` would make both of them strings a `TEXT[]` column refuses.
+          valid.unevidencedAxes,
           JSON.stringify(valid.report),
           valid.generatedAt,
         ],
-    
       ),
     );
   }
@@ -119,6 +122,19 @@ function asReport(value: unknown): unknown {
   return typeof value === "string" ? JSON.parse(value) : value;
 }
 
+/**
+ * A SQL NULL maps to `null` and **never** to `[]`.
+ *
+ * Collapsing them here would undo the distinction the column exists for one layer up: `null` is a
+ * row written before this check and `[]` is the claim that every axis carried a record, and reading
+ * the first as the second is the falsely-true direction. Everything else is handed to the schema
+ * unexamined — `asReport`'s treatment — so an axis this binary does not recognise is refused by
+ * `DrEvidenceAxisSchema` rather than coerced here (ADR-0371).
+ */
+function asAxes(value: unknown): unknown {
+  return value === null || value === undefined ? null : value;
+}
+
 function rowToRecord(
   row: Record<string, unknown>,
 ): DrReadinessSnapshotRecord {
@@ -134,6 +150,7 @@ function rowToRecord(
     replicationViolations: asInt(row["replication_violations"]),
     failoverBreaches: asInt(row["failover_breaches"]),
     drillBreaches: asInt(row["drill_breaches"]),
+    unevidencedAxes: asAxes(row["unevidenced_axes"]),
     report: asReport(row["report"]),
     generatedAt: asIso(row["generated_at"]),
   });

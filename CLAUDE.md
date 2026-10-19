@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 19,576 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 19,693 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -1645,6 +1645,53 @@ type errors.
   a link"* is **false in its mechanism**: editing an entry breaks no link, only the signature notices
   — this file's own recurring documentation class, in the comment justifying where the record of
   verification is kept.
+
+  ADR-0372 is the first increment produced by **measuring the register rather than reading it** — a
+  nine-cluster read-only audit re-derived every open item against the committed tree, refuted **nine
+  of its own verdicts**, and turned up three defects the register did not have. They read as
+  unrelated and are one class with two faces. *A claim with no evidence*: `assessDrReadiness({now})`
+  answered `ready: true, totalIssues: 0` and the certification control signed it `satisfied` with
+  the summary **"DR readiness: READY (0 issues)"**, because every count in that report is derived by
+  *filtering* a supplied list, so an empty list contributes zero issues on **every** axis — it was
+  never a backup guard, it was four vacuous axes. *A fact with no claim*: `GdprDeletionRequestSchema`
+  refused `completedAt > deadlineAt`, so a deletion finishing one second past its Article 12(3)
+  deadline destroyed the tenant's data, wrote the tombstone, **committed** the row `completed`, and
+  threw on the read-back — because **the parse sits on the far side of the commit**, which converts
+  *can this row be represented* into *did this write happen*. The runner then filed it
+  `completed_unrecorded`, which is false, and one such row stopped `auditCompleted` auditing every
+  other completed request. And `absent` was the only deletion disposition that let a deletion run,
+  which for any deployment that takes backups is a false statement inside a cryptographic proof.
+  **The rule was already written out forty lines above the function that broke it** —
+  `evidenceFromEncryptionCoverage`'s nine-line comment ends *"an absence of evidence is not
+  evidence"* and implements it — so ADR-0337 wrote the rule and applied it to the member it had
+  found. An adversarial pass then aimed that criticism at this increment and hit twice: a **fourth**
+  zero-scope adapter in the same file, `evidenceFromAccessReviewEvidence`, answering
+  `satisfied: true` with *"sealed at 100% completion"* over a pack covering **zero reviewed
+  items** — reachable from the shipped producer, where the DR one needs two flags no deployment
+  passes — and the increment **not building**, because making the unreadable-row reporter required
+  named four call sites in `node.ts` and none was answered, which is ADR-0307's conditional green
+  with both packages green in isolation. The fourth adapter's cause is `completionRate: 1` over a
+  zero divisor, so the guard went in the **adapter** and not the metric: changing the metric would
+  move every stored pack's sealed digest (ADR-0332 read the other way), and *the metric is right;
+  reading it as a measurement over an empty scope was wrong*. `forensic_chain` is the fourth of four
+  and is **not** in that state because it is guarded **at the source**, so the census is four
+  adapters with four answers rather than three fixes and a hole. ADR-0371's own defect also had a
+  **second door**, found by auditing that ADR rather than using it:
+  `PostgresChainLogReader.verifyFromCheckpoint` took a checkpoint of any provenance and handed the
+  suffix to a `verifyChainSuffix` that is `{valid: true}` over an empty list, and **all three of its
+  existing tests passed `provenance: "unverified"`** while one asserted the vacuous clearing as
+  correct. The most instructive thing in the increment is that count: **five separate tests asserted
+  the state it corrects**, including `dr-readiness.test.ts`'s *"No executions + no declared infra ⇒
+  ready, zero issues"* and `access-reviews`' *"compiles an empty finished campaign at 100%
+  completion"* — the defect named as the intended behaviour, twice, in the packages that own it.
+  Every part also had to be given a **reader**: `requiredSubsystemsFor`, `absentSubsystemsFor` and
+  `unerasedSubsystemsFor` had zero callers outside `assembleTombstone`, `formatDrReadiness` and
+  `formatUnevidencedAxes` had none outside their own test, and `isCompletedLate` would have been a
+  **third** callerless Article 12(3) predicate — so a boot line, a report line naming the axes *and
+  their remedy*, and a reader in `auditCompleted` are part of the increment rather than follow-ups,
+  since a computed fact reaching nobody is this run's most-found shape. Verified live as a non-owner
+  on PG 16.13: seven checks, the migration **1 planned step / 0 unreconciled on a populated table**
+  with a clean re-plan, and the three pre-upgrade rows reading **SQL NULL rather than `{}`**.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -5054,6 +5101,25 @@ migration rather than the DDL is the hard part (`UNIQUE NULLS NOT DISTINCT` is P
 of 14, and a partial unique index on `(sequence_number) WHERE tenant_id IS NULL` cannot be created
 while the duplicates every such deployment already holds are there).
 
+**`meta.dr_readiness_snapshots.unevidenced_axes` is why `ready` is no longer `total_issues = 0`**
+(ADR-0372). Every count on that table is derived by *filtering* a supplied list, so an empty list
+contributes zero issues and a deployment that recorded no backup, no drill and no runbook scored
+`READY (0 issues)` — with the certification control signing it `satisfied`. The seven counts still
+sum to `total_issues`, because each is projected as its own `INTEGER` column under a `>= 0` CHECK and
+a reader sums them: an unevidenced axis is a **separate axis and not an eighth count**, so
+`ready = false AND total_issues = 0` is exactly *"nothing wrong was found because nothing was looked
+at"* and this column says which. Nullable `TEXT[]` with **no default**, which is the
+claim-versus-nobody-looked distinction in the column itself (ADR-0331, ADR-0371's
+`anchor_provenance_absent`): NULL is a row written before the check existed, `{}` is the signed claim
+that every axis carried a record. Defaulting to `{}` would retro-assert the second over every stored
+row, which is the falsely-true direction. **No CHECK**, because an array-containment predicate is not
+a shape `check-admission.ts` can probe and `DrReadinessReportSchema`'s own `z.enum` is the fence —
+the argument the `report` JSONB column beside it already rests on; the column is also *derived* from
+`report.unevidencedAxes` and never accepted, the seven counts' own rule, so the two cannot disagree.
+The migration is free for ADR-0358's reason — measured on a populated table with the column dropped
+to reproduce an un-upgraded deployment: **1 planned step, 0 unreconciled, 1 executed, re-plan
+clean**, and the three pre-upgrade rows read SQL NULL rather than `{}`.
+
 **Every column-level value-set CHECK declares which contract domain governs it** (ADR-0353), in
 `packages/testing/src/strategy/pg-value-set-domains.ts` rather than in the catalog — a ref is a
 string either way, since the kernel cannot import *all* of the packages it would name, so the
@@ -7843,6 +7909,19 @@ by it**.
    `node.ts:1234` hardcodes `compliancePacks: []` into the marketplace `TenantContext`, so a catalog
    pack requiring `hipaa` is refused on a healthcare deployment that declares it. That one is a
    one-line fix and is the only part of this item that is.
+8b. ~~**A deployment with no backups is certified DR-ready**, and the rule against it is written out
+   twenty lines above the function that breaks it.~~ — **closed by ADR-0372**, and it was never a
+   live P0: an adversarial pass over the audit's own verdicts refuted that grade on the discipline
+   the same audit had applied one item earlier. `drReadinessSource` returns `[]` with no stored
+   snapshot, and neither `--dr-readiness-config` nor `--certification-config` is among the shipped
+   compose's 18 flags, so no deployment is certified DR-ready today. What the measurement found is
+   **wider than a backup guard**: every axis of `assessDrReadiness` was vacuous on empty input,
+   because each count is derived by *filtering* a supplied list — and `failovers` is the one axis
+   where empty is a *fact* (nothing failed over) rather than an absence, which is why the fix is a
+   total map over the five and not a check on one. A **fourth** adapter in the same file was worse
+   and is also closed: `evidenceFromAccessReviewEvidence` answered `satisfied: true` with *"sealed
+   at 100% completion"* over a pack covering **zero reviewed items**, reachable from the shipped
+   producer rather than from a hand-edited row.
 9. **No automated backup, no tested restore.** ~~and no healthcheck on `api` or `web`~~ — ADR-0357
    added the `api` healthcheck and made `web` wait on it. Backup is still prose only
    (`README:181`, a manual `pg_dump` with no cron, no retention, no restore drill) on a platform
@@ -7890,7 +7969,7 @@ three make the rest honest, cheap or verifiable.
    P2 item 14's third clause, from the other end.)
 3. **No CI, no git hook, no smoke, e2e, load or migration test** — while `strategy/ci.ts` models
    triggers, budgets and a topological sort with no reader. No `.github/workflows`, no
-   `core.hooksPath`, so the eleven rules and 19,576 tests run only when a human types `pnpm -r test`,
+   `core.hooksPath`, so the eleven rules and 19,693 tests run only when a human types `pnpm -r test`,
    and this file's instruction never to use `--no-verify` describes a guardrail that does not
    exist. `operate-web` has **zero tests** against 15 pages and 34 unfenced `fetch` sites — the
    serialized-body boundary that shipped a broken console button for an hour (ADR-0335).
@@ -8043,7 +8122,16 @@ land with or before it.
    transaction, so the rows survive **un-attributable**. Neither erased, nor declared retained with
    an obligation, nor listed in `examinedTables`. The decision is erase, cascade with the last
    membership, or declare retained with a reason.
-6. **The only deletion disposition that lets a deletion run signs a claim most deployments cannot
+6. ~~**The only deletion disposition that lets a deletion run signs a claim most deployments cannot
+   honestly make.**~~ — **closed by ADR-0372** with `present_not_erased`, the fourth disposition: it
+   leaves the attester requirement **without** claiming the subsystem is not there, which is
+   ADR-0317 inverted rather than an instance of it. The byte **shape** is unchanged, so no content
+   tag moves and every stored proof still verifies — measured by assembling the same tombstone
+   against a pristine `git archive HEAD` copy and the working tree side by side, identical digests,
+   with `tombstone-proof.test.ts`'s literal v1–v4 hex pins unmodified and all 135 passing. A
+   `reason`/`horizon` field **would** change the shape and needs `content.v5`, which is the
+   follow-up. The original text is kept because its reasoning is what the fix rests on:
+   **The only deletion disposition that lets a deletion run signs a claim most deployments cannot
    honestly make.** `ATTESTERS` has two keys; `object_storage`, `backups`, `search_indexes` and
    `caches` have no producer for any scope field, and `CONSERVATIVE_DELETION_CAPABILITIES` declares
    all six `erases`, so the exported starting point refuses every deletion. A real deployment does

@@ -123,6 +123,7 @@ interface Harness {
   readonly transitions: Array<{ to: string; fields: Record<string, unknown> }>;
   readonly reconciled: Array<{ id: string; applyNeverCommitted: boolean | undefined }>;
   readonly strandedCalls: string[];
+  readonly unreadableReports: Array<{ requestId: string | null; detail: string }>;
   readonly auditCalls: (number | undefined)[];
   readonly sweepCalls: Array<Record<string, unknown>>;
   readonly escalated: string[];
@@ -155,7 +156,9 @@ function harness(
   const sweepCalls: Array<Record<string, unknown>> = [];
   const escalated: string[] = [];
   const escalatedVerdicts: string[] = [];
+  const unreadableReports: Array<{ requestId: string | null; detail: string }> = [];
   const ctx: DeletionRequestRoutesContext = {
+    onUnreadableRequest: (row) => unreadableReports.push({ ...row }),
     store: {
       submit: async (input): Promise<DeletionRequestLike> => {
         submits.push({ ...input });
@@ -172,8 +175,12 @@ function harness(
         if (behaviour.transitionReturnsNull === true) return null;
         return requestOf({ status: to, verifiedAt: AT, verifiedBy: CALLER });
       },
-      stranded: async (olderThan): Promise<readonly DeletionRequestLike[]> => {
+      stranded: async (olderThan, onUnreadable): Promise<readonly DeletionRequestLike[]> => {
         strandedCalls.push(olderThan);
+        // Report one unreadable row on every sweep, so the route's wiring of its reporter is
+        // exercised rather than merely typechecked: a fake that accepts the callback and never
+        // calls it cannot tell a wired reporter from a dropped one.
+        onUnreadable({ requestId: "dr_unreadable", detail: "a stored row no longer parses" });
         if (behaviour.strandedThrows === true) throw new Error("a stored row no longer parses");
         return behaviour.stranded ?? [requestOf({ status: "in_progress", inProgressAt: AT })];
       },
@@ -225,6 +232,7 @@ function harness(
     transitions,
     reconciled,
     strandedCalls,
+    unreadableReports,
     auditCalls,
     sweepCalls,
     escalated,
@@ -668,6 +676,34 @@ describe("stranded", () => {
     expect(h.strandedCalls).toEqual([AT]);
   });
 
+  it("carries the unreadable rows in the response, not only to the log", async () => {
+    const h = harness();
+    const res = await call(h.ctx, STRANDED);
+    expect(res.status).toBe(200);
+    // The page is now SHORT where it used to be a 503, so the body has to be able to say so: this
+    // route's audience is an operator hunting the requests a failed run left behind, and a row the
+    // contract refused is the most interesting kind on the page.
+    expect((res.body as { unreadable: unknown }).unreadable).toEqual([
+      { requestId: "dr_unreadable", detail: "a stored row no longer parses" },
+    ]);
+    // And the audit row says how many, because "3 stranded" over a window that also held an
+    // unreadable row is a figure that reads as complete.
+    expect(h.events[0]?.detail).toContain("1 unreadable");
+  });
+
+  it("hands the store its own unreadable-row reporter rather than a dropped one", async () => {
+    const h = harness();
+    await call(h.ctx, STRANDED);
+    // The reporter is required on the context precisely so the compiler names every call site —
+    // and on the increment that made it required it named four in `node.ts` and none was answered,
+    // so per-package green covered a workspace that did not build (ADR-0307's conditional green).
+    // Typechecking proves the parameter is *passed*; only this proves the route passes the one the
+    // caller supplied, which is what a sweep's finding has to reach.
+    expect(h.unreadableReports).toEqual([
+      { requestId: "dr_unreadable", detail: "a stored row no longer parses" },
+    ]);
+  });
+
   it("503s when a stored request cannot be read", async () => {
     const h = harness({}, { strandedThrows: true });
     const res = await call(h.ctx, STRANDED);
@@ -892,7 +928,10 @@ describe("escalation from the routes (ADR-0324)", () => {
     await call(h.ctx, STRANDED);
     expect(h.events[0]?.operation).toBe("platform.deletion_requests_stranded_read");
     expect(h.events[0]?.tenantId).toBe(TENANT);
-    expect(h.events[0]?.detail).toBe("1 stranded");
+    // The harness's store reports one unrepresentable row on every sweep, so the recorded figure
+    // carries both counts. "1 stranded" alone would be the number an operator reads as the whole
+    // window, over a window that also held a row nothing could represent.
+    expect(h.events[0]?.detail).toBe("1 stranded, 1 unreadable");
   });
 
   it("refuses the stranded listing when the reader's tenant cannot be resolved", async () => {

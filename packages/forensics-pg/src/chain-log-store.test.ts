@@ -7,7 +7,12 @@ import {
   verifyChainIntegrity,
 } from "@crossengin/forensics";
 
-import { PostgresChainLogReader, PostgresChainLogStore, advisoryKeyFor } from "./chain-log-store.js";
+import {
+  ChainAnchorNotVerified,
+  PostgresChainLogReader,
+  PostgresChainLogStore,
+  advisoryKeyFor,
+} from "./chain-log-store.js";
 import { PostgresChainCheckpointStore } from "./checkpoint-store.js";
 import { keyStoreChainSigner } from "./signer.js";
 import { fakeChainPg } from "./test-fakes.js";
@@ -131,7 +136,7 @@ function tamperingConn(inner: PgConnection): PgConnection {
 }
 
 describe("PostgresChainLogStore checkpoint anchoring", () => {
-  it("createCheckpoint anchors at the tail and verifyFromCheckpoint clears the suffix", async () => {
+  it("createCheckpoint anchors at the tail, and a bounded verify refuses the hand-placed anchor", async () => {
     const { store } = await newStore();
     await append(store, TENANT_A, 0);
     await append(store, TENANT_A, 1);
@@ -151,7 +156,48 @@ describe("PostgresChainLogStore checkpoint anchoring", () => {
     await append(store, TENANT_A, 3);
     await append(store, TENANT_A, 4);
 
+    // The pair this test used to assert as one fact: it anchored, and then it VERIFIED from that
+    // anchor and reported the suffix clear. The second half was the defect — `unverified` says
+    // nothing vouched for the prefix, so a verdict bounded on it describes a chain nobody folded.
+    await expect(store.verifyFromCheckpoint(TENANT_A, cp)).rejects.toThrow(/provenance is unverified/);
+  });
+
+  it("verifyFromCheckpoint clears the suffix from an anchor something verified", async () => {
+    const { store } = await newStore();
+    await append(store, TENANT_A, 0);
+    await append(store, TENANT_A, 1);
+    const e2 = await append(store, TENANT_A, 2);
+
+    const cp = await store.createCheckpoint(TENANT_A, {
+      checkpointedBy: "scheduler",
+      checkpointedAt: AT,
+      provenance: "verified_full",
+    });
+    expect(cp.rootHash).toBe(e2.entryHash);
+
+    await append(store, TENANT_A, 3);
+    await append(store, TENANT_A, 4);
+
     expect(await store.verifyFromCheckpoint(TENANT_A, cp)).toEqual({ valid: true, brokenAt: null });
+  });
+
+  it("verifyFromCheckpoint refuses an anchor whose provenance is absent", async () => {
+    const { store } = await newStore();
+    await append(store, TENANT_A, 0);
+    const e1 = await append(store, TENANT_A, 1);
+
+    // The state every checkpoint written before ADR-0371 is in, and the one a `.nullable()` column
+    // hands back. Distinct from `unverified` — that row states nothing checked it, this one does not
+    // cover the question at all — so the message must name which, and both must refuse.
+    await expect(
+      store.verifyFromCheckpoint(TENANT_A, {
+        sequenceNumber: 1,
+        rootHash: e1.entryHash,
+        checkpointedAt: AT,
+        checkpointedBy: "an older binary",
+        algorithm: "sha256",
+      }),
+    ).rejects.toThrow(/provenance is absent/);
   });
 
   it("loadFrom returns only the entries at or after the given sequence", async () => {
@@ -242,7 +288,11 @@ describe("PostgresChainLogStore checkpoint anchoring", () => {
       // A hand-placed anchor has no verification behind it, and `provenance` is required so it has
       // to say so rather than leaving the field absent — which on a stored row means an older
       // binary wrote it (ADR-0331). This is `unverified`'s producer.
-      provenance: "unverified",
+      //
+      // `verified_full` here and not `unverified`: this test's subject is the FOLD, and a bounded
+      // verify now refuses an unvouched anchor before it reads a row, so under `unverified` the
+      // assertion below would never be reached.
+      provenance: "verified_full",
     });
     await append(store, TENANT_A, 2);
     await append(store, TENANT_A, 3);
@@ -290,7 +340,14 @@ describe("PostgresChainLogReader (signer-free)", () => {
       provenance: "unverified",
     });
     expect(cp.sequenceNumber).toBe(1);
-    expect(await reader.verifyFromCheckpoint(TENANT_A, cp)).toEqual({ valid: true, brokenAt: null });
+    // This assertion used to read `{valid: true, brokenAt: null}` — an EMPTY suffix over an anchor
+    // nothing vouched for, which is exactly the vacuous claim ADR-0371 closed in
+    // `verifyChainFromCheckpoint`, pinned here as a feature. `verifyChainSuffix([])` is valid by
+    // construction, so the whole verdict rested on the provenance this path never read.
+    await expect(reader.verifyFromCheckpoint(TENANT_A, cp)).rejects.toThrow(ChainAnchorNotVerified);
+    expect(
+      await reader.verifyFromCheckpoint(TENANT_A, { ...cp, provenance: "verified_suffix" }),
+    ).toEqual({ valid: true, brokenAt: null });
   });
 
   it("rejects a bad schema on the reader too", () => {
