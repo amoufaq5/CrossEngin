@@ -688,7 +688,10 @@ describe("the real workspace", () => {
       }
     }
     expect(byTarget.get("meta.tenants.id")).toBe(99);
-    expect(byTarget.get("meta.users.id")).toBe(97);
+    // 96 and not 97 since ADR-0370 dropped `notification_templates.approved_by`'s, which is this
+    // assertion doing its job rather than a figure to carry: the edit that removed the reference
+    // failed here, naming the count, before anything else in the sweep noticed.
+    expect(byTarget.get("meta.users.id")).toBe(96);
     expect(byTarget.get("meta.sso_providers.id")).toBe(4);
     expect(catalog.every((t) => t.columns.every((c) => c.type !== null))).toBe(true);
     // A column-level `unique` is how this catalog marks a row's own business key; a table-level

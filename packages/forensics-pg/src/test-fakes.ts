@@ -1,3 +1,4 @@
+import { assertBindArity } from "@crossengin/testing";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 
 const CHECKPOINTS = "forensic_chain_checkpoints";
@@ -49,6 +50,7 @@ export function fakeChainPg(): PgConnection {
       params?: readonly unknown[],
     ): Promise<PgQueryResult> => {
       const p = params ?? [];
+      assertBindArity(sql, p);
       if (sql.includes("app.platform_audit_write")) {
         platformWrite = true;
         return { rows: [], rowCount: 0 };

@@ -5713,7 +5713,37 @@ export const META_NOTIFICATION_TEMPLATES: TableDefinition = {
       notNull: true,
     },
     { name: "approved_at", type: "TIMESTAMPTZ" },
-    { name: "approved_by", type: "UUID", references: USER_FK },
+    {
+      /**
+       * TEXT and unreferenced, for the reasons `created_by` a few lines up already gives — and
+       * this column was missed when they were applied, which made the four-eyes rule that comment
+       * describes **raise** rather than run. ADR-0313 checks it as `created_by <> $actor`, and the
+       * measured consequence is one parameter bound into both columns of one `UPDATE`: the
+       * predicate pins `$5` to text and `approved_by = $5` then fails
+       * `42804 column "approved_by" is of type uuid but expression is of type text`. Every
+       * approval raised, on the surface whose whole purpose is approval.
+       *
+       * The types must agree because the two columns hold the same kind of value, which is the
+       * argument rather than the symmetry: a TEXT `created_by` admits a non-UUID actor such as
+       * `system:<slug>` (ADR-0302's provenance vocabulary), so a UUID `approved_by` cannot store
+       * what its sibling can, and casting the parameter instead would raise `22P02` on exactly
+       * those actors. Lossless to change, which is ADR-0335's reasoning for the sweep that missed
+       * it, and the precise claim is about the **values** rather than the rows: a template can be
+       * *created* — only its transitions raised — so a deployment that ever mounted these routes
+       * may hold draft rows, and `approved_by` is NULL in every one of them because no approval
+       * could ever commit. `uuid → text` over NULLs loses nothing. The reconciler still reports it
+       * rather than planning it, correctly: it counts rows and not non-NULL values, so an operator
+       * runs the one `ALTER` it prints (and `--allow-loosening` once, for the FK that blocks it).
+       *
+       * The other three tables carrying `approved_by UUID references USER_FK`
+       * (`ml_training_runs`, `chargeback_statements`, `rate_limit_exceptions`) are internally
+       * consistent — every actor column in each is UUID — so this is the only half-applied one.
+       * `pack_installations` is the latent member: `requested_by` is TEXT beside `installed_by`
+       * and `uninstalled_by` UUID, and nothing compares them yet.
+       */
+      name: "approved_by",
+      type: "TEXT",
+    },
     { name: "deprecated_at", type: "TIMESTAMPTZ" },
     { name: "superseded_by_template_id", type: "TEXT" },
   ],

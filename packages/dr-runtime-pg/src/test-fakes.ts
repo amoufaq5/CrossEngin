@@ -1,3 +1,4 @@
+import { assertBindArity } from "@crossengin/testing";
 import { vi } from "vitest";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 
@@ -44,6 +45,7 @@ export function mockConnection(
     query: vi.fn(async (sql: string, params?: readonly unknown[]) => {
       if (capture !== undefined) capture.push({ sql, params });
       if (opts.allowUnscopedWrites !== true) assertStatementIsScoped(sql);
+      assertBindArity(sql, params);
       return result;
     }) as PgConnection["query"],
     transaction: vi.fn(async <T>(fn: (tx: PgConnection) => Promise<T>) =>

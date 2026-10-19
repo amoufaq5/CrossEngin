@@ -1,3 +1,4 @@
+import { assertBindArity } from "@crossengin/testing";
 import {
   AccessReviewCampaignSchema,
   AccessReviewDecisionSchema,
@@ -81,6 +82,7 @@ export class FakeConn implements PgConnection {
   ): Promise<PgQueryResult<T>> {
     this.calls.push({ sql, params });
     if (this.opts.allowUnscopedWrites !== true) assertStatementIsScoped(sql);
+    assertBindArity(sql, params);
     return Promise.resolve(this.responder(sql, params) as PgQueryResult<T>);
   }
 

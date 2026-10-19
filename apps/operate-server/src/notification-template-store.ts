@@ -143,10 +143,19 @@ function transitionAssignments(
   to: TemplateStatus,
   nextParam: (value: unknown) => string,
   at: string,
+  actorId: string,
 ): readonly string[] {
   switch (to) {
     case "approved":
-      return [`approved_at = ${nextParam(at)}::timestamptz`, "approved_by = $5"];
+      // The actor is bound through `nextParam` like every other value, rather than named as a
+      // fixed `$5`. The fixed form is what broke all five transitions: the caller pushed the
+      // actor into `params` unconditionally while only this arm referenced it, so the other four
+      // supplied a parameter the statement does not mention — `08P01 bind message supplies 5
+      // parameters, but prepared statement "" requires 4` where the assignments are literal, and
+      // `42P18 could not determine data type of parameter $5` on `deprecated`, where the
+      // timestamp took `$6` and left `$5` referenced by nothing. Both are bind/analyze-time
+      // errors, so no input avoided either.
+      return [`approved_at = ${nextParam(at)}::timestamptz`, `approved_by = ${nextParam(actorId)}`];
     case "deprecated":
       return [`deprecated_at = ${nextParam(at)}::timestamptz`];
     case "draft":
@@ -334,19 +343,28 @@ export class PostgresNotificationTemplateStore {
       if (request.to === "approved" && template.createdBy === request.actorId) {
         return { kind: "four_eyes", authorId: template.createdBy };
       }
-      // $1..$5 are fixed so the statement reads the same for every target: tenant, template, the
-      // status being set, the status it must still have, and the actor.
-      const params: unknown[] = [tenantId, ntplId, request.to, template.status, request.actorId];
+      // $1..$4 are fixed — tenant, template, the status being set, the status it must still have
+      // — and **everything else is bound on demand**. The actor used to be a fixed `$5` on the
+      // claim that "the statement reads the same for every target", and it does not: only the
+      // approval arm mentions the actor, so the other four bound a parameter the statement never
+      // referenced and Postgres refused the bind. Reading the same is a property of the text, not
+      // of the parameter array, and buying it with an unreferenced parameter costs the statement.
+      const params: unknown[] = [tenantId, ntplId, request.to, template.status];
       const bind = (value: unknown): string => {
         params.push(value);
         return `$${params.length.toString()}`;
       };
       const assignments = [
         "status = $3",
-        ...transitionAssignments(request.to, bind, request.at),
+        ...transitionAssignments(request.to, bind, request.at, request.actorId),
       ];
       const conditions = ["tenant_id = $1", "ntpl_id = $2", "status = $4"];
-      if (request.to === "approved") conditions.push("created_by <> $5");
+      // Four-eyes as string inequality, which is what `created_by`'s own catalog comment says it
+      // is — and it is a SECOND binding of the actor rather than a reuse of the assignment's,
+      // deliberately: one parameter in both positions is what pinned its type to `text` and made
+      // `approved_by = $5` raise `42804` while that column was still UUID. Two bindings of one
+      // value cost nothing and cannot pin each other.
+      if (request.to === "approved") conditions.push(`created_by <> ${bind(request.actorId)}`);
       const updated = await tx.query(
         `UPDATE ${this.table} SET ${assignments.join(", ")}` +
           ` WHERE ${conditions.join(" AND ")} RETURNING ${SELECT_COLUMNS}`,

@@ -1,5 +1,6 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
-import type { NotificationTemplate } from "@crossengin/notifications";
+import type { NotificationTemplate, TemplateStatus } from "@crossengin/notifications";
+import { assertBindArity, bindArityMismatch } from "@crossengin/testing";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -108,6 +109,10 @@ function fakeTemplateDb(): FakeDb {
   ): Promise<{ rows: Record<string, unknown>[]; rowCount: number }> => {
     const p = params ?? [];
     captured.push({ sql, params: p });
+    // Postgres refuses in the bind step, before the planner, so no amount of SQL interpretation
+    // below reaches it — and all five status transitions were refused there while every test here
+    // passed (ADR-0370). Raise where the server would, not after modelling the row.
+    assertBindArity(sql, p);
     if (sql.includes("set_config")) {
       currentTenant = String(p[0]);
       return { rows: [], rowCount: 0 };
@@ -147,19 +152,30 @@ function fakeTemplateDb(): FakeDb {
         (r) => r["tenant_id"] === p[0] && r["ntpl_id"] === p[1] && r["status"] === p[3],
       );
       if (row === undefined) return { rows: [], rowCount: 0 };
-      if (sql.includes("created_by <> $5") && row["created_by"] === p[4]) {
+      // Resolve each placeholder rather than naming a position, which is the SELECT branch's own
+      // idiom and what this branch lacked: it matched the literals `$5` and `$6`, so it modelled
+      // one particular numbering of the assignments and silently stopped modelling anything when
+      // that numbering changed. A fake that reads positions the way Postgres does cannot drift
+      // with the statement it is handed.
+      const at = (column: string): number | null => {
+        const m = new RegExp(`\\b${column} = \\$(\\d+)`).exec(sql);
+        return m === null ? null : Number(m[1]) - 1;
+      };
+      const fourEyes = /created_by <> \$(\d+)/.exec(sql);
+      if (fourEyes !== null && row["created_by"] === p[Number(fourEyes[1]) - 1]) {
         return { rows: [], rowCount: 0 };
       }
       const next: Record<string, unknown> = { ...row, status: p[2] };
-      if (sql.includes("approved_at = $6")) {
-        next["approved_at"] = new Date(String(p[5]));
-        next["approved_by"] = p[4];
-      }
+      const approvedAt = at("approved_at");
+      const approvedBy = at("approved_by");
+      if (approvedAt !== null) next["approved_at"] = new Date(String(p[approvedAt]));
+      if (approvedBy !== null) next["approved_by"] = p[approvedBy];
       if (sql.includes("approved_at = NULL")) {
         next["approved_at"] = null;
         next["approved_by"] = null;
       }
-      if (sql.includes("deprecated_at = $6")) next["deprecated_at"] = new Date(String(p[5]));
+      const deprecatedAt = at("deprecated_at");
+      if (deprecatedAt !== null) next["deprecated_at"] = new Date(String(p[deprecatedAt]));
       rows.set(String(p[1]), next);
       return { rows: [next], rowCount: 1 };
     }
@@ -417,9 +433,63 @@ describe("PostgresNotificationTemplateStore.transition", () => {
     expect(outcome.template.approvedBy).toBe(APPROVER);
     expect(outcome.template.approvedAt).toBe("2026-09-02T00:00:00.000Z");
     const update = dataStatement(db, "UPDATE");
-    expect(update?.sql).toContain("approved_by = $5");
-    expect(update?.sql).toContain("created_by <> $5");
-    expect(update?.params[4]).toBe(APPROVER);
+    // This assertion used to read `toContain("approved_by = $5")` beside
+    // `toContain("created_by <> $5")` — it did not merely miss the defect, it **required** it.
+    // One parameter in both positions is what pinned `$5` to `text` through the predicate and made
+    // the assignment raise `42804` against a UUID column, so the only statement this test admitted
+    // was the one no server would run. What has to be true is that the actor reaches both
+    // positions and that the two are bound *separately*; which numbers they get is the store's
+    // business, so the positions are resolved rather than named.
+    const posOf = (fragment: string): number => {
+      const m = new RegExp(`${fragment} \\$(\\d+)`).exec(update?.sql ?? "");
+      expect(m).not.toBeNull();
+      return Number(m?.[1] ?? "0") - 1;
+    };
+    const assigned = posOf("approved_by =");
+    const compared = posOf("created_by <>");
+    expect(update?.params[assigned]).toBe(APPROVER);
+    expect(update?.params[compared]).toBe(APPROVER);
+    expect(assigned).not.toBe(compared);
+    // And the statement references exactly what it binds, which is the bind step the fake has no
+    // model of and the four other transitions failed.
+    expect(bindArityMismatch(update?.sql ?? "", update?.params)).toBeNull();
+  });
+
+  it("binds exactly the parameters it references, on every one of the five transitions", async () => {
+    // The regression this increment exists for: all five were refused in the bind step — three
+    // `08P01`, one `42P18`, one `42804` — while every test in this file passed. The arity half is
+    // asserted per transition here rather than only inside the fake, so the property is visible as
+    // a test with the five targets named and not only as a guard that happens to raise.
+    const walks: readonly { readonly from: TemplateStatus; readonly to: TemplateStatus }[] = [
+      { from: "draft", to: "in_review" },
+      { from: "in_review", to: "approved" },
+      { from: "in_review", to: "draft" },
+      { from: "approved", to: "deprecated" },
+      { from: "approved", to: "retired" },
+    ];
+    for (const walk of walks) {
+      const db = fakeTemplateDb();
+      // An `approved` row must already carry its stamp, or `templateFromRow` refuses the RETURNING
+      // row on the contract's own status↔field pairing before the arity is ever reached.
+      const stamp =
+        walk.from === "approved"
+          ? { approved_at: new Date("2026-09-01T00:00:00.000Z"), approved_by: APPROVER }
+          : {};
+      db.seed({ status: walk.from, created_by: AUTHOR, ...stamp });
+      const store = new PostgresNotificationTemplateStore(db.conn);
+      const outcome = await store.transition(TENANT_A, "ntpl_aaaaaaaa", {
+        to: walk.to,
+        actorId: APPROVER,
+        at: "2026-09-02T00:00:00.000Z",
+      });
+      expect(outcome.kind, `${walk.from} -> ${walk.to}`).toBe("transitioned");
+      const update = dataStatement(db, "UPDATE");
+      expect(update, `${walk.from} -> ${walk.to} issued no UPDATE`).not.toBeUndefined();
+      expect(
+        bindArityMismatch(update?.sql ?? "", update?.params),
+        `${walk.from} -> ${walk.to}`,
+      ).toBeNull();
+    }
   });
 
   it("refuses the author approving their own template, and issues no UPDATE at all", async () => {

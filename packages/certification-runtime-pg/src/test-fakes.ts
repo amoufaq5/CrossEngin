@@ -1,3 +1,4 @@
+import { assertBindArity } from "@crossengin/testing";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import {
   evidenceFromAccessReviewEvidence,
@@ -81,6 +82,7 @@ export function fakeCertificationPg(): PgConnection {
     params?: readonly unknown[],
   ): Promise<PgQueryResult> => {
     const p = params ?? [];
+    assertBindArity(sql, p);
     // `set_config(...)` is spelled as a `SELECT`, so it has to be answered before the read branch.
     if (sql.includes("set_config")) return { rows: [], rowCount: 0 };
     if (sql.includes("INSERT INTO")) {

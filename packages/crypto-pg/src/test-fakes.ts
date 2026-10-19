@@ -1,3 +1,4 @@
+import { assertBindArity } from "@crossengin/testing";
 import { PLATFORM_WRITE_GRANTS, type PgConnection, type PgQueryResult } from "@crossengin/kernel-pg";
 import { dataKeyWrapAad, wrapDataKey } from "@crossengin/crypto";
 
@@ -78,6 +79,7 @@ export function fakeCryptoKeysPg(options: FakeCryptoKeysOptions = {}): PgConnect
       params?: readonly unknown[],
     ): Promise<PgQueryResult> => {
       const p = params ?? [];
+      assertBindArity(sql, p);
 
       if (sql.includes(PLATFORM_WRITE_GRANTS.key)) {
         platformWrite = true;
@@ -362,6 +364,7 @@ export function fakeDataKeysPg(options: FakeDataKeysOptions = {}): FakeDataKeysP
       params?: readonly unknown[],
     ): Promise<PgQueryResult> => {
       const p = params ?? [];
+      assertBindArity(sql, p);
       captured.push({ sql, params, inTx });
 
       const supplied = options.answer?.(sql, p) ?? null;

@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 364 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 365 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 19,481 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 19,506 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -1501,6 +1501,43 @@ type errors.
   could not happen and a test reading `issues[0]` alone. The predicate is two composed functions
   now, one per reader.
 
+  ADR-0370 is the seventh user-directed increment and the class is **a statement refused before the
+  planner**. `--notification-template-routes` mounted five status transitions over
+  `meta.notification_templates` and **every one of them raised at the database and escaped as an
+  unclassified 500** — found while measuring which background subsystems the shipped compose should
+  default on (register P0.3), on a surface that has existed since ADR-0313 with 24 passing tests
+  over its store and 37 over its routes. Three Postgres errors from one cause plus one: `08P01 bind
+  message supplies 5 parameters, but prepared statement "" requires 4` on submit, reject and retire,
+  `42P18 could not determine data type of parameter $5` on deprecate, and
+  `42804 column "approved_by" is of type uuid but expression is of type text` on approve.
+  The first two are one cause and its comment states it: the parameter array was built with the
+  actor fixed at `$5` *"so the statement reads the same for every target"*, and the statement does
+  **not** — `transitionAssignments` is a `switch` whose `approved` arm was the only one mentioning
+  `$5`, so the other four bound a parameter their own statement never referenced. **Reading the same
+  is a property of the text, and buying it with an unreferenced parameter costs the statement.** The
+  third is a column: ADR-0335's actor sweep reached `created_by` and **missed `approved_by` two
+  lines down**, so ADR-0313's four-eyes predicate (`created_by <> $actor`) pinned `$5` to `text` and
+  the assignment into the still-UUID column raised. The rule's own target had been half-applied.
+  **Why nothing saw it** is the increment, and it is a sixth member of ADR-0333's class — see the
+  *Tests* convention. Three things were sharper than the defect. **The test required the defect**:
+  the approval test read `toContain("approved_by = $5")` beside `toContain("created_by <> $5")`, and
+  one parameter in both positions *is* the `42804` cause, so the only statement that assertion
+  admitted was the one no server would run. **The fake read positions by literal number**
+  (`sql.includes("approved_at = $6")`), so it modelled one numbering of the assignments and silently
+  stopped modelling anything when that numbering changed — while the `SELECT` branch immediately
+  below it already resolved placeholders with a regex and indexed `p[n-1]`: one file, two idioms,
+  and the brittle one was in the branch the defect was in. And **meta-schema invariant #4 has a
+  blind spot of exactly this shape**: `crossColumnTypeDisagreements` extracts comparisons between
+  two bare column identifiers *from CHECK expressions*, and measured, this table carries no table
+  constraint and no CHECK naming `created_by` — so the identical `uuid <> text` disagreement lived
+  in a store's `UPDATE` predicate with a bound parameter and was one layer out of that rule's sight.
+  The actor is bound **twice** in the approval statement deliberately, and the reason survives the
+  column fix: two bindings of one value cannot pin each other's type, where one binding in two
+  positions is precisely what raised. Live on PG 16.13 as a non-owner, all five transitions answer
+  200 where each answered 500, and the stored row reads
+  `created_by=…a001 | approved_by=…a002` — two distinct principals, which is the attribution the
+  surface exists for and had never once recorded.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -1905,7 +1942,14 @@ packages exist at only one layer, noted below where that is true.
   `resolvedClassifiedFields` in `@crossengin/kernel/ddl` is the one answer for "as the served table
   has them".
 - **`config`** — shared TypeScript / ESLint / Prettier config bases. No `src/`.
-- **`testing`** — the shared `vitestPreset`. One file.
+- **`testing`** — the shared `vitestPreset`, the eleven workspace rules under `strategy/`, and
+  `pg-bind-arity.ts`. That last one is deliberately **not** under `strategy/`: those rules read the
+  workspace from disk and answer one question per run, while `assertBindArity(sql, params)` is a
+  per-statement predicate a fake calls on the statement in front of it, and it needs the runtime
+  parameter array no static scan can have (ADR-0370). It answers the one thing a fake
+  `PgConnection` cannot learn by interpreting SQL — whether the statement references exactly
+  `{1..params.length}` — and it is the floor for all nine shared `test-fakes.ts` modules that fake
+  a connection.
 
 ### Serving a manifest (the Operate stack)
 
@@ -3673,7 +3717,14 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   approver (four-eyes at three layers, the store's `UPDATE` carrying `created_by <> $actor` as a
   predicate so a race cannot land one), and a separate grant for non-suppressible categories — which
   **refuses** unsafe authored content rather than storing it, because a template body reaches a browser
-  as markup and `z.string().url()` accepts `javascript:alert(1)` (ADR-0313);
+  as markup and `z.string().url()` accepts `javascript:alert(1)` (ADR-0313) — and whose five status
+  transitions **all raised at the database until ADR-0370**, escaping as unclassified 500s: the
+  parameter array fixed the actor at `$5` while only the approval arm referenced it, so four
+  transitions bound a parameter their statement never mentioned (`08P01`, `42P18`) and the fifth put
+  one parameter into both `approved_by` (then UUID) and `created_by` (TEXT), which pinned it to text
+  and raised `42804`. The actor is bound **on demand** and **twice** in the approval statement now —
+  two bindings of one value cannot pin each other's type — and the surface records the four-eyes
+  attribution it exists for (`created_by=…a001 | approved_by=…a002`) for the first time;
   the **read-only audit trail** (`--audit-read-routes`) whose reads are themselves recorded, where an
   unrecordable granted read is a 503 and a tenant naming another tenant is a 403 rather than a quietly
   narrowed query (ADR-0313); **job-run cancellation** (`POST /v1/meta/jobs/runs/{id}/cancel`, gated on the
@@ -4666,6 +4717,13 @@ Four invariants the test suite enforces:
    `published_at IS NOT NULL AND published_by IS NOT NULL` and would train people to add exemptions.
    Five comparisons today, with a vacuity guard asserting both four-eyes pairs are found and both
    sides of each are TEXT.
+   **Its blind spot is the same defect in a store's predicate, and it had a live member** (ADR-0370):
+   the rule extracts comparisons *from CHECK expressions*, and `META_NOTIFICATION_TEMPLATES` carries
+   no table constraint and no CHECK naming `created_by` — measured — so when ADR-0335's actor sweep
+   reached `created_by` and missed `approved_by` two lines down, the resulting `uuid <> text` lived
+   only in that store's `UPDATE` predicate and every approval raised `42804`. A rule over the
+   *operands a store compares* is the open end; `pg-column-bindings.ts` already derives which symbol
+   a parameter carries, so the operands are resolvable.
 
 **`TENANT_FK` is absent from the 16 `PLATFORM_RECORD_TABLES`** (ADR-0335), on the rule that *a table
 whose purpose is to outlive the tenant it describes cannot be a `CASCADE` child of that tenant's
@@ -5224,7 +5282,29 @@ isolated copy of the package instead, which is the better answer when more than 
   `unknown_unreadable`**: a test suite in which the feature being added could not work, passing.
   The fix is a `row_security_active` branch placed *first*, and the lesson is that a shape match
   must be specific to the statement and not merely true of it. So: **a fake that answers a
-  statement it could not really serve is a test asserting the wrong thing.** Reads stay exempt from
+  statement it could not really serve is a test asserting the wrong thing.**
+  **ADR-0370 adds a sixth, and it is the first where the boundary is *below* the SQL rather than
+  above it: a statement can be refused before the planner.** `08P01` (more parameters bound than
+  referenced) and `42P18` (a referenced position past the end of the array) are raised in the
+  **bind** step, so they are not questions about tables, columns, types or rows — the subjects of
+  every one of the eleven rules — and no amount of interpreting the SQL reaches them. The fake that
+  missed it is one of the better ones here: it models the table's RLS policy, holds rows in a `Map`
+  and answers reads from that model, and it served all five of
+  `meta.notification_templates`' status transitions while every one of them raised against a real
+  database. So `assertBindArity(sql, params)` lives in `packages/testing` and every shared
+  `test-fakes.ts` that fakes a `PgConnection` calls it — **both ways** on
+  `pg-record-retention.ts`' rule. Neither one-way half is sufficient and the real defect proves
+  both: "max referenced ≤ supplied" passes the entire `08P01` family (three transitions bound a
+  fifth parameter and referenced four), while "max referenced === supplied" misses the `42P18`
+  one, because `deprecate` referenced `{1,2,3,4,6}` of six supplied — the maximum agreed and `$5`
+  was referenced by nothing. Only set equality catches a hole in the middle.
+  Not under `strategy/`: the supplied count is `params.length` at runtime, built by a `push` loop in
+  the offending store itself, so a text scan would have to evaluate the array's construction —
+  ADR-0354's refused position-past-a-spread analysis for the same reason. Measured over the nine
+  adopters: **1,108 tests, zero further mismatches**, so the class has exactly one live member —
+  and **72 `*.test.ts` files build a fake `query` inline** rather than through their package's
+  shared module, which is the sweep this did not take.
+  Reads stay exempt from
   that tripwire on purpose — `classifyScopedWriteRefusal`'s diagnosing re-read is
   deliberately unscoped, because its whole question is whether the row sits in another
   scope and a scoped read could only answer "absent". A **writerless** table is also a
@@ -7410,7 +7490,11 @@ by it**.
    `--credential-admin-role`, which is a request-path flag and moves nothing here — but it is the
    second time in two increments that a flag this entry would have had to name arrived with the
    feature that needed it, which is the argument for the entry being about *defaults* rather than
-   about a count.)
+   about a count.) **Measuring this item is what found ADR-0370**: of the flags listed above,
+   `--notification-template-routes` turned out to mount a surface whose five status transitions
+   *all* raised at the database, so "which flags should a reference deployment default on" cannot be
+   answered without first asking whether each one serves what it mounts. That is the honest shape of
+   the remaining work here — a flag-by-flag measurement, not a list to paste into `command:`.
 4. **An Article 17 request naming one data subject erases the whole tenant.** `subjectIdentifier`
    is required on the submit body and the stored record, `DeletionRunnerOptions.run` has no field
    that could carry it, and `node.ts` calls `deleteTenantAtomically` with
@@ -7537,7 +7621,7 @@ three make the rest honest, cheap or verifiable.
    P2 item 14's third clause, from the other end.)
 3. **No CI, no git hook, no smoke, e2e, load or migration test** — while `strategy/ci.ts` models
    triggers, budgets and a topological sort with no reader. No `.github/workflows`, no
-   `core.hooksPath`, so the eleven rules and 19,481 tests run only when a human types `pnpm -r test`,
+   `core.hooksPath`, so the eleven rules and 19,506 tests run only when a human types `pnpm -r test`,
    and this file's instruction never to use `--no-verify` describes a guardrail that does not
    exist. `operate-web` has **zero tests** against 15 pages and 34 unfenced `fetch` sites — the
    serialized-body boundary that shipped a broken console button for an hour (ADR-0335).
@@ -7952,7 +8036,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 364 records; 285 Accepted, 79 Proposed (the
+title or status change cannot drift. 365 records; 286 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

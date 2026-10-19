@@ -1,3 +1,4 @@
+import { assertBindArity } from "@crossengin/testing";
 import type { PgConnection } from "@crossengin/kernel-pg";
 import {
   PackInstallationSchema,
@@ -18,6 +19,7 @@ export function fakePg(): { conn: PgConnection; rows: Map<string, InstallationRo
 
   const run = async (sql: string, params?: readonly unknown[]) => {
     const p = params ?? [];
+    assertBindArity(sql, p);
     if (sql.includes("set_config")) {
       tenantCtx = String(p[0]);
       return { rows: [], rowCount: 0 };
@@ -136,6 +138,7 @@ export function fakeVersionPg(): {
 
   const run = async (sql: string, params?: readonly unknown[]) => {
     const p = params ?? [];
+    assertBindArity(sql, p);
     calls.push({ sql, params: p });
     if (sql.includes("INSERT INTO")) {
       const row = {

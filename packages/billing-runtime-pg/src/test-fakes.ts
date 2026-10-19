@@ -1,3 +1,4 @@
+import { assertBindArity } from "@crossengin/testing";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 
 export interface CapturedQuery {
@@ -21,6 +22,7 @@ export function fakePg(rows: readonly Record<string, unknown>[][] = []): FakeCon
   const conn: PgConnection = {
     query: (async (sql: string, params: readonly unknown[] = []) => {
       calls.push({ sql, params });
+      assertBindArity(sql, params);
       if (/^\s*SELECT/i.test(sql) && !sql.includes("set_config")) {
         const next = rows[selectIndex] ?? [];
         selectIndex += 1;
