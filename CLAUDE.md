@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 20,004 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 20,034 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -4221,6 +4221,23 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   get no record — and `recordVerdict` defaults to **true**, so this is a default-on behaviour change
   rather than an opt-in. Verified live end to end: three ticks, three rows, anchored at consecutive
   chain sequences, served by the read route with `anchored: true`.
+  **`integrityVerdictFor` is implemented through `compromiseCauses` since ADR-0374's addendum**, so
+  the six conditions that answer `compromised` are an **enum** rather than six `return` statements:
+  `COMPROMISE_CAUSES` × `COMPROMISE_CAUSE_HOLDS` (a total map of predicates) × the escalation's
+  `COMPROMISE_CAUSE_PAYLOAD_KEY` (a total map naming the `after` key that explains each). The point
+  is the compile error — a seventh entry in the predicate map alone is `TS2353`, adding the enum
+  member to fix that is `TS2741` at the payload key and at both fence fixtures, so **a cause cannot
+  compile until the anchored row gains a key that explains it**. It replaced a test comment claiming
+  exactly that fence and providing none: a seventh branch with no key gave 83 of 83 passing.
+  The one gap no type sees is a bare `if (…) return "compromised"` in the body, which a **text
+  fence** over the function covers — and that fence caught a vacuity hazard on its first run, since
+  the prose two functions above quotes the same string, so the lazy fix is to write the expectation
+  down to 2 and check nothing. `chain_broken_or_unsigned` is deliberately **one cause for two
+  facts**, because splitting it would be a seventh condition and would leave `ok: false` with both
+  sub-flags set unrepresented; which half failed travels in the `chain` key. There is deliberately
+  **no** elementwise truth-table test against a re-derivation of the old `if` sequence — that is
+  ADR-0362's retired test verbatim, a rule compared against a derivation of itself — so the golden
+  is the 21 existing `integrityVerdictFor` call sites, written against the branches and untouched.
   **And `CheckpointScheduler` verifies before it anchors, which it did not** (ADR-0371):
   `verifyChainFromCheckpoint`'s own doc comment said *"trust in the anchor comes from the earlier
   verification that produced it"*, and this scheduler — the **only** checkpoint writer in the
@@ -5395,7 +5412,49 @@ plan on the same cluster reported ADR-0373's `actor_reference` as
 `constraint_violated_by_existing_rows` with the violator `SELECT` alone, because that cluster really
 held the blanked row: **both of ADR-0363's arms in one plan, the migration finding a tamper rather
 than only preventing the next one.** `meta-schema.test.ts` asserts the whole-table invariant —
-exactly four columns of that table may carry no CHECK, each fully constrained by its declared type.
+and that invariant was **false under its own predicate** when it was written, because the fourth
+exempt column was the attack's third door.
+
+**So two temporal CHECKs join them, and they are the catalog's first** (ADR-0374's addendum):
+`meta.forensic_chain_checkpoints.checkpointed_at` and
+`meta.forensic_chain_entries.recorded_at`, each
+`>= '0001-01-01 00:00:00+00 BC'::timestamptz AND < '10000-01-01T00:00:00Z'::timestamptz`. The second
+is the column **ADR-0373 exempted by name** on the table it was fencing, as *"the TIMESTAMPTZ that
+`Iso8601` parses to"* — false the same way: `TIMESTAMPTZ` admits two infinities and years to 294276,
+`z.string().datetime({offset: true})` admits none, and `recorded_at` is inside
+`canonicalEntryBytes`, so a tamper there is signature-breaking exactly as `actor_reference` is.
+`'infinity'` arrives from node-postgres as the **number** `Infinity`, so `asIso`'s `instanceof Date`
+is false and `String()` yields `"Infinity"`. Neither was a buried alarm — the read paths already
+grade it `compromised` — so what was missing is the **write fence**.
+Three things about the expression are measured and two of them refuse the obvious form. The lower
+bound is **1 BC and not 1 AD**, because `toISOString()` renders JS year 0 as
+`0000-01-01T00:00:00.000Z` and zod admits it, and JS year 0 is Postgres 1 BC — an AD bound refuses
+what the reader accepts, which is ADR-0373's no-upper-bound rule pointing the other way. The
+explicit **`+00` is load-bearing**: a bare literal folds in the *applying session's* `TimeZone`, so
+`'0001-01-01 BC'` under `Asia/Tokyo` folds to `+09:18:59 BC` — it **crosses the era boundary** and
+moves the bound 9h18m59s — where the offset-bearing form is epoch −62167219200 under UTC, Tokyo and
+Los Angeles alike; and the reconciler stays clean either way (`pg_get_constraintdef` renders at read
+time, so both sides render in one session and agree), which is exactly why simplifying it away would
+go unnoticed. There is deliberately no `isfinite()` — the range bounds refuse both infinities, so it
+could never fire — and no `extract(year from …)`, which Postgres *accepts* in a CHECK and which is
+**STABLE**, so the constraint would mean different things in the writing session and a later
+validation; `extract` does not raise on infinity either, it returns `Infinity`.
+The two migrate on **opposite arms of ADR-0363**: `recorded_at` has no violating row and gets the
+`BEGIN`/`ALTER`/`COMMIT` triple, while `checkpointed_at` reads
+`constraint_violated_by_existing_rows` with the violator `SELECT` alone, because the cluster held
+four rows at `infinity` — the migration finding a tamper, for the second time in that increment.
+Each table's exempt set is now `["id", "tenant_id", "created_at"]` and exempt for a **measured**
+reason rather than their declared type: `READ_COLUMNS` names neither `id` nor `created_at`, nothing
+in `forensics-pg` reads `created_at`, and neither schema has a field for it — so the rule is *a
+column is owed a CHECK iff a reader parses it against a contract narrower than its type*.
+The class is **444 TIMESTAMPTZ columns across the 146 tables with zero CHECKs between them** (and 0
+TIMESTAMP, DATE, TIME or TIMETZ columns), 165 distinct reads in 53 files parsing one against a
+contract that refuses infinity, 49 of them in 11 detector-subsystem files of which 8 are already
+`guarded_by_primitive`. The sharpest remainder is on neither table fenced there —
+`meta.audit_integrity_verdicts.verified_at`, whose `isoOf` helper is
+`new Date(String(value)).toISOString()`, so the same tamper is a bare `RangeError: Invalid time
+value` rather than a `ZodError`, in a `record_throwing` conversion with no wrapper, in the store that
+holds the verdicts.
 
 **Every column-level value-set CHECK declares which contract domain governs it** (ADR-0353), in
 `packages/testing/src/strategy/pg-value-set-domains.ts` rather than in the catalog — a ref is a
@@ -6313,11 +6372,40 @@ opened them.
   comment about which axes fire there without re-examining the other two conjuncts against the
   verdict function. The asymmetry is the sharp part: the **weaker** evidence (an anchor that cannot
   be read) was kept and the **stronger** (a proven total truncation, the thing ADR-0287 built the
-  check for) was thrown away, with zero callbacks. And **`checkpointed_at` is a third column
+  check for) was thrown away, with zero callbacks; only the *maximal* truncation was lost, since one
+  surviving entry makes `tailSequence` non-null and the first conjunct already fails. Closed one
+  level up — `isEmptyScope` asks the **verdict**, which is total over every condition, rather than a
+  conjunct list that must be revisited whenever a condition is added. `readEveryRowFound` stays, and
+  the reason first given for keeping it was **wrong**: nothing could reach it was false, since two
+  tests across three fixtures override a refusal axis on a fixture whose verdict stays `verified`
+  and deleting the call fails exactly those two. The honest statement is that it can no longer
+  change the answer *for a report `proveScopeIntegrity` builds* — `verdict` is a claim on the report
+  and `prove` is a **seam**, where the refusal lists are the content (ADR-0331 inside one
+  predicate), measured both ways: `unproven` cannot reach `skipped_empty` from the producer
+  (`checked` *is* `results.length`) and can from the seam.
+  **And the fence that was supposed to stop a seventh cause arriving unexplained fenced nothing** —
+  refuted by mutation, a seventh `compromised` branch with no payload key gave 83 of 83 passing,
+  because nothing enumerated the branches. ADR-0288's maintained list, and ADR-0351's *documented
+  the hazard and checked nothing*. So `COMPROMISE_CAUSES` is the six conditions,
+  `COMPROMISE_CAUSE_HOLDS` a total map of predicates over it, and **`integrityVerdictFor` is
+  implemented through `compromiseCauses`** — six `return "compromised"` became one, so the branch
+  list *is* the cause list. Measured: a seventh entry in the predicate map alone is `TS2353`, adding
+  the enum member to fix that gives `TS2741` at the payload key and both fence fixtures, and the one
+  gap no type can see — a bare `if (…) return "compromised"` in the body — typechecks clean and
+  fails a **text fence** over the function, which caught a vacuity hazard on its own first run
+  (the prose two functions above quotes the same string, so the lazy fix is to write the expectation
+  down to 2 and check nothing).
+  And **`checkpointed_at` is a third column
   carrying the same attack**: it is TIMESTAMPTZ with no CHECK, `'infinity'` is admitted as a
   non-owner, node-postgres hands it back as the **number** `Infinity`, and the mapper refuses it —
   so this increment's claim that "the two CHECKs make the write itself fail" was false, and the
-  whole-table invariant it added was false under its own predicate.
+  whole-table invariant it added was false under its own predicate. **ADR-0373 missed the same shape
+  on its own table, having exempted it by name**: `recorded_at` is inside `canonicalEntryBytes`, so
+  a tamper there is signature-breaking exactly as `actor_reference` is, and that ADR's test comment
+  called it *"the TIMESTAMPTZ that `Iso8601` parses to"*. Neither was a buried alarm, which lowers
+  the severity of both and is the correction this addendum owed itself: ADR-0373's read-path fix
+  covers the entries table and `readOne` catches **any** throw rather than only a `ZodError`, so the
+  **write fence** was missing on two tables and not the detector.
   What remains, in order: **(1)** **78 `meta` tables carry an `ALL`-scope `*_tenant_isolation` policy
   with a NULL `WITH CHECK`, 0 of them carry a `DELETE` policy, and a tenant-context non-owner deleted
   every row the **owner** can see in its scope, on 6 of 6 scopes measured, across all three
@@ -6332,10 +6420,30 @@ opened them.
   is the diagnostics console (ADR-0364 Q6) again. **(4)** `anchorRowsRefused` is at most one row by
   construction (`latest()` reads one), so it is a list for uniformity with its two siblings rather
   than because it can hold two; if `listRecent`'s refusals ever reach a verdict, the three axes want
-  one shape. **(5)** the general form of the two CHECKs is register P2.12b — a contract field's
+  one shape. **(5)** the general form of the CHECKs is register P2.12b — a contract field's
   refinement against its column's CHECK, which no workspace rule compares (ADR-0362 established that
-  none compares a contract *field* to a catalog *column*), over 505 TEXT and 159 JSONB columns in the
-  same unconstrained state.
+  none compares a contract *field* to a catalog *column*), over 505 TEXT, 159 JSONB and **444
+  TIMESTAMPTZ** columns in the same unconstrained state, the last of which had **zero** CHECKs
+  anywhere in the catalog before this increment. **(6)** **widen the detector so the scheduler can
+  anchor again** — `listRecent` already returns records beside refused rows, has zero non-test
+  callers, and ADR-0373's own doc comment on it predicts this consumer verbatim; measured at
+  4.09 µs/row, so a year of hourly passes is 36 ms to scan the whole history against the 15.2 s/pass
+  at 100k entries the refusal now makes permanent, with the ratio improving as the chain grows one
+  entry per audited request and the checkpoint table one row per pass. Blocked on `listRecent` being
+  `LIMIT $1` with no cursor and a default of 50, so at hourly cadence the refused row leaves the
+  window in ~2 days — ADR-0367's *a prefix is not the set*. **(7)** until then, **truncation
+  detection is dark for a scope whose anchor is withheld** (`checkpoint` stays null so `truncated` is
+  always false), which loses a dimension of the diagnosis and no alarm, and whose symmetry is the
+  argument for (6): pre-fix the burial accidentally *restored* truncation detection while destroying
+  the refusal finding, post-fix it is the reverse, and only the widened read gives both.
+  **(8)** `pg-record-reads.ts` blanks string bodies before matching, so a **bracket-access** read of
+  a catalogued column vanishes — neither column fenced here appears in its 66 reads, against ~1,270
+  such reads workspace-wide, 100 of them temporal. Conservative-only, wide, and a thirteenth-rule
+  finding rather than a fix. **(9)** the sharpest temporal member is on neither table fenced here:
+  `meta.audit_integrity_verdicts.verified_at`, whose helper turns the same tamper into a bare
+  `RangeError` rather than a `ZodError`, in a `record_throwing` conversion with no wrapper, in the
+  store that holds the verdicts — with `tombstone-store.deleted_at` and `report-store.generated_at`
+  beside it.
 
 - **Every money figure is read over the whole set, and what is left of it** (ADR-0367,
   user-directed). Thirteen capped reads drain their cursor to a declared ceiling now, and the
@@ -8489,7 +8597,7 @@ three make the rest honest, cheap or verifiable.
    P2 item 14's third clause, from the other end.)
 3. **No CI, no git hook, no smoke, e2e, load or migration test** — while `strategy/ci.ts` models
    triggers, budgets and a topological sort with no reader. No `.github/workflows`, no
-   `core.hooksPath`, so the twelve rules and 20,004 tests run only when a human types `pnpm -r test`,
+   `core.hooksPath`, so the twelve rules and 20,034 tests run only when a human types `pnpm -r test`,
    and this file's instruction never to use `--no-verify` describes a guardrail that does not
    exist. `operate-web` has **zero tests** against 15 pages and 34 unfenced `fetch` sites — the
    serialized-body boundary that shipped a broken console button for an hour (ADR-0335).
@@ -8736,11 +8844,15 @@ land with or before it.
     established that none compares a contract *field* to a catalog *column*, and this is that
     question's other half. It would also not retire the read-side fix, because a CHECK added to a
     populated table is reported rather than planned when the rows violate it (ADR-0363), so a
-    deployment already holding a refused row still needs the read to behave. **ADR-0374 added two
-    more members and they are the second instance of its selection rule**: the two unconstrained
-    columns of `meta.forensic_chain_checkpoints` were fenced because their unreadability defeats a
-    detector — so the five CHECKs this class has gained were each chosen by *what the refusal
-    disables*, not by surveying the columns, and the general rule is still unwritten.
+    deployment already holding a refused row still needs the read to behave. **ADR-0374 added four
+    more members across two tables and they are the second and third instances of its selection
+    rule** — each fenced because its unreadability defeats a detector, so the seven CHECKs this
+    class has gained were chosen by *what the refusal disables* rather than by surveying the
+    columns, and the general rule is still unwritten. The denominator also grew: **444 TIMESTAMPTZ
+    columns carried zero CHECKs between them** before that increment, which is a third population
+    beside the 505 TEXT and 159 JSONB, and the one where the type is *furthest* from the contract —
+    `TIMESTAMPTZ` admits two infinities and years to 294276 against `Iso8601`'s four digits, so the
+    gap is not a refinement anybody chose but the full width of the type.
 13. **Four contracts admit or assert something structurally false**, each in a subsystem whose job
     is to be checkable: a **late GDPR 72-hour breach notification is unrepresentable** (the
     refinement and the CHECK both refuse `publishedAt` past the deadline, so
