@@ -713,6 +713,126 @@ describe("IntegrityProofScheduler — emptiness is judged by the tail, not the s
 });
 
 /**
+ * `skipped_empty` is the one outcome that discards the report — the scheduler pushes it and
+ * `continue`s past `onPass`, `onFinding`, `record` and `escalate` — so a refused row must never
+ * land on it: a refused row is the finding (ADR-0373).
+ *
+ * Asserted as a **pair** on purpose, in both directions. A test that only checked the refusal
+ * reached the callbacks would be satisfied by a predicate that never skips anything, and that is
+ * not a safe degeneration — it would have every idle tenant accruing an hourly verdict about
+ * nothing, which is the behaviour the emptiness test exists for.
+ */
+describe("IntegrityProofScheduler — a refused row is not an empty scope", () => {
+  /** No chain entries and no checkpoint: the shape that used to be enough to discard the pass. */
+  const emptyChain = {
+    chain: chainOk({
+      signatures: {
+        valid: true,
+        checked: 0,
+        results: [],
+        unresolvedFingerprints: [],
+        unreadable: [],
+      },
+    }),
+    truncation: noTruncation({ checkpointSequence: null, tailSequence: null }),
+  };
+  const refusedAuditRow: UnreadableRow = {
+    identity: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    detail: "operation: too_small",
+  };
+
+  it("runs every callback and records a verdict when the only audit row was refused", async () => {
+    const empty = report({
+      ...emptyChain,
+      verdict: "compromised",
+      // `checked: 0` beside one refused row is the honest pair since ADR-0373 made that figure the
+      // rows *examined* — and it is exactly the pair the old predicate read as "there were no
+      // rows". Reproduced live as a non-owner: one audit row with a blanked `operation` for a scope
+      // with no chain entries computed `compromised`, and the scheduler discarded it.
+      anchors: anchors({ ok: false, checked: 0, verified: 0, unreadable: [refusedAuditRow] }),
+    });
+    const passed: IntegrityProofReport[] = [];
+    const findings: IntegrityProofReport[] = [];
+    const recorded: IntegrityProofReport[] = [];
+    const escalated: IntegrityProofReport[] = [];
+    const s = new IntegrityProofScheduler({
+      prove: async () => empty,
+      record: async (r) => {
+        recorded.push(r);
+        return 7;
+      },
+      escalate: async (r) => {
+        escalated.push(r);
+        return { kind: "opened", incidentId: "INC-2026-0001" };
+      },
+      scopes: () => [TENANT_A],
+      intervalMs: 1000,
+      onPass: (r) => passed.push(r),
+      onFinding: (r) => findings.push(r),
+    });
+    expect((await s.runOnce())[0]).toMatchObject({
+      scope: TENANT_A,
+      outcome: "proved",
+      recordedAt: 7,
+      escalation: { kind: "opened", incidentId: "INC-2026-0001" },
+    });
+    // Every axis the pass has: the line an operator reads, the finding hook, the durable verdict
+    // and the alarm. Before the fix this was `[0, 0, 0, 0]`.
+    expect([passed.length, findings.length, recorded.length, escalated.length]).toEqual([
+      1, 1, 1, 1,
+    ]);
+  });
+
+  it("still skips the same scope when nothing was refused", async () => {
+    const recorded: unknown[] = [];
+    const s = new IntegrityProofScheduler({
+      prove: async () => report({ ...emptyChain, anchors: anchors({ checked: 0, verified: 0 }) }),
+      record: async () => {
+        recorded.push(1);
+        return 0;
+      },
+      scopes: () => [TENANT_A],
+      intervalMs: 1000,
+    });
+    expect((await s.runOnce())[0]).toEqual({ scope: TENANT_A, outcome: "skipped_empty" });
+    expect(recorded).toEqual([]);
+  });
+
+  it("is not empty on either chain-side refusal axis either", async () => {
+    // Neither of these is reachable through `proveScopeIntegrity` as it stands — `tail()` reads the
+    // raw columns, so a chain holding any row answers a non-null `tailSequence` and fails the first
+    // conjunct long before this one. They are fenced anyway, because an axis dropped on the
+    // strength of what a read one layer down happens to do today is this defect again the day that
+    // read starts parsing, and the mistake would be silent in both cases.
+    const refused: UnreadableRow = { identity: "2", detail: "kind: invalid_enum_value" };
+    const outcomeFor = async (over: Partial<IntegrityProofReport>): Promise<string | undefined> => {
+      const s = new IntegrityProofScheduler({
+        prove: async () =>
+          report({ ...emptyChain, anchors: anchors({ checked: 0, verified: 0 }), ...over }),
+        scopes: () => [TENANT_A],
+        intervalMs: 1000,
+      });
+      return (await s.runOnce())[0]?.outcome;
+    };
+    expect(await outcomeFor({ chainRowsRefused: [refused] })).toBe("proved");
+    expect(
+      await outcomeFor({
+        chain: chainOk({
+          ok: false,
+          signatures: {
+            valid: false,
+            checked: 0,
+            results: [],
+            unresolvedFingerprints: [],
+            unreadable: [refused],
+          },
+        }),
+      }),
+    ).toBe("proved");
+  });
+});
+
+/**
  * `proveScopeIntegrity` over the platform scope (ADR-0331).
  *
  * This used to skip the anchor half for `scope === null` because `audit_log.tenant_id` was NOT NULL

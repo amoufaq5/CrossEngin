@@ -11,6 +11,7 @@ import {
   type IncidentDeclarationRequest,
   type IncidentDeclarer,
 } from "@crossengin/incident-response-runtime";
+import type { UnreadableRow } from "@crossengin/kernel-pg";
 import type { AlertChannelTarget } from "@crossengin/observability";
 import { planPageDirective, type PageDirective } from "@crossengin/observability-runtime";
 
@@ -93,6 +94,52 @@ export function integrityIncidentKey(scope: string | null): string {
 export interface IntegrityEscalationPlan {
   readonly incident: IncidentRecord;
   readonly page: PageDirective | null;
+}
+
+/**
+ * How many refused-row identities one escalation's audit row names.
+ *
+ * `anchors.unreadable` is bounded by `auditRowLimit`, which the store clamps at 500, but
+ * `chainRowsRefused` comes from a **whole-chain** read and is bounded only by the chain — so
+ * uncapped, a scope whose entries the contract refuses writes its entire chain into one JSONB
+ * column, inside the escalation path, at the moment the deployment is least able to afford it.
+ *
+ * The **count is the whole figure and the identities are the first of them**, so
+ * `count > identities.length` is how a reader sees the cap, with no flag to interpret (ADR-0367's
+ * rule that a bounded reading which says how far it looked is honest where silence is not).
+ *
+ * *First* means the first its own read returned, and the two reads are ordered oppositely — so this
+ * is one rule and not one ordering. `loadChain` is `sequence_number ASC`, so the chain names kept
+ * are the earliest, which is where ADR-0373's `brokenAt` points and so where a remedy starts;
+ * `listAnchoredForScope` is `occurred_at DESC, id DESC`, so the audit names kept are the most
+ * recent, which is the half of a trail an operator is asked about first. What matters either way is
+ * that the slice is **defined by the read** rather than chosen here, so two passes over unchanged
+ * rows name the same identities and the row can be compared across them.
+ */
+const MAX_RECORDED_UNREADABLE_IDENTITIES = 20;
+
+/**
+ * What an escalation's audit row may say about rows the reader refused: **how many, and which**.
+ *
+ * The identity is a business key, which is what a `WHERE` clause and a remedy need, and it is the
+ * one column of a refused row that is safe to carry — every other is of unestablished
+ * trustworthiness (ADR-0310). `detail` is deliberately **not** here, even though for a zod refusal
+ * it is only a field path and an issue code: `unreadableDetail`'s non-zod arm passes a mapper's own
+ * `Error.message` through on the stated ground that those messages name no row value, which is
+ * ADR-0373's own open question and exactly the convention ADR-0367 found failing in four of six
+ * refusal strings, one of them an id. A log line may carry it — `formatIntegrityProof` does — and a
+ * durable, anchored, chain-committed row may not.
+ */
+interface RecordedRefusal {
+  readonly count: number;
+  readonly identities: readonly (string | null)[];
+}
+
+function recordedRefusal(rows: readonly UnreadableRow[]): RecordedRefusal {
+  return {
+    count: rows.length,
+    identities: rows.slice(0, MAX_RECORDED_UNREADABLE_IDENTITIES).map((row) => row.identity),
+  };
 }
 
 // `planIntegrityEscalation` lived here: it built an incident record around an id the *caller* invented,
@@ -433,6 +480,39 @@ export class IntegrityEscalator {
               auditId: t.auditId,
               verdict: t.verdict,
             })),
+            // `integrityVerdictFor` has five `compromised` branches and this row named two of them,
+            // so a paging sev1 driven by any of the other three asserted that the trail was
+            // provably altered and then named nothing — the one shape an operator cannot act on,
+            // which is the reason ADR-0373 gave for printing these in `formatIntegrityProof` and
+            // `formatChainVerification` and then left this row alone. Every branch is named now,
+            // which is the only non-arbitrary stopping point: naming four would leave the oldest
+            // cause of all (a broken or unsigned chain, ADR-0286) as the one that explains nothing.
+            //
+            // ADR-0373's objection to carrying the fact durably does not reach here, and the
+            // distinction is the whole licence for this block: that objection is about
+            // `integrityVerdictPayload` / `StoredIntegrityReportSchema` / `canonicalStoredReport` /
+            // `storedReportFrom`, which must move together or the stored report stops being
+            // byte-identical to its committed payload — the trap ADR-0371 reverted a field out of.
+            // This is a free-form audit `after`, committed to the chain as *bytes it already
+            // carries* rather than as a digest over a fixed shape, so a key added here breaks no
+            // parity.
+            chain: {
+              ok: report.chain.ok,
+              integrityValid: report.chain.integrity.valid,
+              brokenAt: report.chain.integrity.brokenAt,
+              signaturesValid: report.chain.signatures.valid,
+            },
+            // Two lists and not one, because the two are about different tables and different
+            // identity namespaces: one names a `meta.audit_log` id and the other a chain sequence,
+            // and merging them would hand an operator a list they cannot act on from. There is
+            // deliberately no third list for the chain *half*'s own refusals — in bounded mode
+            // those are a subset of the whole-chain read's and in full mode the same read, so it
+            // would be one fact under two names, and the fact that it fired arrives above as
+            // `integrityValid: false` with `signaturesValid: false`.
+            unreadable: {
+              chainRows: recordedRefusal(report.chainRowsRefused),
+              auditRows: recordedRefusal(report.anchors?.unreadable ?? []),
+            },
           },
           reason:
             operation === INTEGRITY_INCIDENT_OPERATION

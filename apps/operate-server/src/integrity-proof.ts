@@ -441,14 +441,54 @@ export class IntegrityProofScheduler {
   }
 }
 
-/** Nothing to prove and nothing to record: no chain entries, and no audit rows claiming any. */
+/**
+ * Nothing to prove and nothing to record: no chain entries, no audit rows claiming any, and
+ * nothing this pass could not read.
+ *
+ * `skipped_empty` is not a quiet outcome, it is a **claim** — and it is the only outcome that
+ * discards the report. The scheduler pushes it and `continue`s past `onPass`, `onFinding`,
+ * `record` and `escalate`, so a verdict computed here reaches no callback, no durable row, no
+ * incident and not even `formatIntegrityProof`. What it claims is therefore *this pass found
+ * nothing to verify* — and a row the contract refused is something: it **is** the finding
+ * (ADR-0373), and it is already what `integrityVerdictFor` answers `compromised` for. A refused
+ * row is the one thing that must never land on this outcome, because this is the one outcome from
+ * which nothing escapes.
+ *
+ * It became reachable by the narrowest margin, in the increment that routed those rows rather than
+ * dropping them: ADR-0373 made `anchors.checked` the number of rows **examined**, so `checked ===
+ * 0` stopped meaning *there were no rows* and started coexisting with one refused row — and the
+ * clause below went on reading the new figure with the old meaning. Measured live as a non-owner:
+ * one `meta.audit_log` row with a blanked `operation`, for a scope holding no chain entries,
+ * computed `compromised` and the scheduler threw the report away.
+ */
 function isEmptyScope(report: IntegrityProofReport): boolean {
   // Keyed on the tail, NOT on how many signatures the chain half checked. In
   // `from_checkpoint` mode that count covers only the suffix after the checkpoint, so it is
   // legitimately 0 for a chain with plenty of entries once a checkpoint catches up to the tail
   // — and treating that as empty would silently stop proving the scope altogether.
   const chainEmpty = report.truncation.tailSequence === null;
-  return chainEmpty && (report.anchors === null || report.anchors.checked === 0);
+  const noAuditRows = report.anchors === null || report.anchors.checked === 0;
+  return chainEmpty && noAuditRows && readEveryRowFound(report);
+}
+
+/**
+ * Whether this pass could represent every row it read — the general statement `isEmptyScope`'s
+ * third conjunct needs, rather than a second emptiness test.
+ *
+ * Asked over **every** axis of the report that can carry a refusal, including the chain half's
+ * own, which cannot differ from `chainRowsRefused` as the code stands: `tail()` reads the raw
+ * columns, so a chain holding any row answers a non-null `tailSequence` and never reaches here at
+ * all. It is asked anyway because the two costs are not symmetric. An axis that can never fire can
+ * only ever turn a skip into a proof, which is the direction this function must fail in; an axis
+ * omitted on the strength of what a read one layer down happens to do today is this defect again
+ * the day that read starts parsing.
+ */
+function readEveryRowFound(report: IntegrityProofReport): boolean {
+  return (
+    report.chainRowsRefused.length === 0 &&
+    report.chain.signatures.unreadable.length === 0 &&
+    (report.anchors === null || report.anchors.unreadable.length === 0)
+  );
 }
 
 export function formatIntegrityProof(report: IntegrityProofReport): string {

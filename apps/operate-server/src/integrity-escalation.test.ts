@@ -5,6 +5,7 @@ import type {
   IncidentDeclarationRequest,
   IncidentDeclarer,
 } from "@crossengin/incident-response-runtime";
+import type { UnreadableRow } from "@crossengin/kernel-pg";
 import type { AlertPolicy } from "@crossengin/observability";
 import type { PageDirective } from "@crossengin/observability-runtime";
 import { describe, expect, it } from "vitest";
@@ -328,6 +329,159 @@ describe("IntegrityEscalator — failure handling", () => {
     const e = new IntegrityEscalator({ config: config(), now: () => new Date(AT) });
     const out = await e.observe(report({ scope: null, anchors: null }));
     expect(out.audited).toBe(false);
+  });
+});
+
+/**
+ * The anchored row has to say **why**.
+ *
+ * `integrityVerdictFor` has five `compromised` branches and this row named two of them, so a
+ * paging sev1 driven by any of the other three asserted that the trail was provably altered and
+ * then named nothing — which is the one shape an operator cannot act on, and is the reason
+ * ADR-0373 gave for printing them in `formatIntegrityProof`. One test per branch, so a sixth cause
+ * arriving with no key is a failure here rather than a 03:00 page that explains nothing.
+ */
+describe("IntegrityEscalator — the audit row names the cause", () => {
+  const cleanAnchors = (over: Partial<AuditAnchorReport> = {}): AuditAnchorReport => ({
+    tenantId: TENANT_A,
+    ok: true,
+    checked: 2,
+    verified: 2,
+    unanchored: 0,
+    tampered: [],
+    results: [],
+    unreadable: [],
+    ...over,
+  });
+  const refusedAuditRow: UnreadableRow = {
+    identity: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    detail: "operation: too_small",
+  };
+  const refusedChainRow: UnreadableRow = { identity: "2", detail: "kind: invalid_enum_value" };
+
+  const auditedAfter = async (over: Partial<IntegrityProofReport>): Promise<unknown> => {
+    const { audit, emitted } = fakeAudit();
+    const e = new IntegrityEscalator({ config: config(), audit, now: () => new Date(AT) });
+    await e.observe(report(over));
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]?.operation).toBe(INTEGRITY_INCIDENT_OPERATION);
+    return emitted[0]?.after;
+  };
+
+  it("names the refused audit row that drove the verdict", async () => {
+    // The whole defect: before this, these three keys read `truncated: false, tampered: []` and
+    // nothing else, for a sev1 whose only cause is the row named here.
+    expect(
+      await auditedAfter({ anchors: cleanAnchors({ ok: false, unreadable: [refusedAuditRow] }) }),
+    ).toMatchObject({
+      verdict: "compromised",
+      truncated: false,
+      tampered: [],
+      chain: { ok: true },
+      unreadable: {
+        auditRows: { count: 1, identities: [refusedAuditRow.identity] },
+        chainRows: { count: 0, identities: [] },
+      },
+    });
+  });
+
+  it("names the refused chain row that drove the verdict", async () => {
+    // The other refusal axis, and the one the bounded chain half cannot see: it comes from the
+    // whole-chain read the anchor half performs, so `chain.ok` is legitimately true beside it.
+    expect(
+      await auditedAfter({ anchors: cleanAnchors(), chainRowsRefused: [refusedChainRow] }),
+    ).toMatchObject({
+      verdict: "compromised",
+      chain: { ok: true },
+      unreadable: {
+        chainRows: { count: 1, identities: [refusedChainRow.identity] },
+        auditRows: { count: 0, identities: [] },
+      },
+    });
+  });
+
+  it("carries no detail from a refused row, only its identity", async () => {
+    // `unreadableDetail`'s non-zod arm passes a mapper's own `Error.message` through, on a
+    // convention nothing fences (ADR-0373's own open question), so the durable row must not carry
+    // it. Asserted over the serialized row rather than key by key, because a key added later would
+    // otherwise reintroduce it silently.
+    const after = await auditedAfter({
+      anchors: cleanAnchors({ ok: false, unreadable: [refusedAuditRow] }),
+      chainRowsRefused: [refusedChainRow],
+    });
+    expect(JSON.stringify(after)).not.toContain("too_small");
+    expect(JSON.stringify(after)).not.toContain("invalid_enum_value");
+    expect(JSON.stringify(after)).toContain(refusedAuditRow.identity);
+  });
+
+  it("bounds the identities it names and still reports the whole count", async () => {
+    // `chainRowsRefused` comes from a whole-chain read, so uncapped a scope whose entries the
+    // contract refuses writes its entire chain into one JSONB column inside the escalation path.
+    // The count is the full figure and the identities are the **first** of them, so
+    // `count > identities.length` is the cap with no flag to interpret, and the names kept are the
+    // ones ADR-0373's `brokenAt` points at.
+    const many: UnreadableRow[] = Array.from({ length: 25 }, (_, i) => ({
+      identity: `seq-${String(i)}`,
+      detail: "kind: invalid_enum_value",
+    }));
+    expect(
+      await auditedAfter({ anchors: cleanAnchors(), chainRowsRefused: many }),
+    ).toMatchObject({
+      unreadable: {
+        chainRows: {
+          count: 25,
+          identities: Array.from({ length: 20 }, (_, i) => `seq-${String(i)}`),
+        },
+      },
+    });
+  });
+
+  it("leaves a tamper-driven verdict reading exactly as it did", async () => {
+    // The negative control for the pair: the two causes that were already named must keep naming
+    // themselves, and the refusal axes must report zero rather than absence (ADR-0331 — a count of
+    // 0 is the claim that nothing was refused, where a missing key says nobody looked).
+    expect(await auditedAfter({})).toMatchObject({
+      verdict: "compromised",
+      truncated: false,
+      tampered: [{ auditId: tamperedResult.auditId, verdict: "hash_mismatch" }],
+      unreadable: {
+        chainRows: { count: 0, identities: [] },
+        auditRows: { count: 0, identities: [] },
+      },
+    });
+  });
+
+  it("names a truncated chain and a broken one, the two causes a refusal does not explain", async () => {
+    expect(
+      await auditedAfter({
+        anchors: cleanAnchors(),
+        truncation: { checkpointSequence: 9, tailSequence: 4, truncated: true },
+      }),
+    ).toMatchObject({ truncated: true });
+    // A broken or unsigned chain is ADR-0286's original `compromised` cause and was the one this
+    // row explained least: `truncated: false, tampered: []`, with nothing saying the fold failed.
+    expect(
+      await auditedAfter({
+        anchors: cleanAnchors(),
+        chain: {
+          tenantId: TENANT_A,
+          ok: false,
+          mode: "full",
+          fullBecause: "requested",
+          checkpointSequence: null,
+          integrity: { valid: false, brokenAt: 3 },
+          signatures: {
+            valid: true,
+            checked: 3,
+            results: [],
+            unresolvedFingerprints: [],
+            unreadable: [],
+          },
+        },
+      }),
+    ).toMatchObject({
+      chain: { ok: false, integrityValid: false, brokenAt: 3, signaturesValid: true },
+    });
   });
 });
 
