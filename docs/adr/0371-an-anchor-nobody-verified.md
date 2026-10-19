@@ -425,7 +425,7 @@ Refused in this increment on two grounds. The narrow one: an `UPDATE` arm on
 against it — so the schema change is the whole of the work and the immutability is what makes an
 anchor worth trusting in the first place. The broader one: a full fold is the *stronger* check, so
 the cost is a cost and not an unsoundness. Naming the condition is the cheap part and is in part 2;
-the mechanism is open question 3.
+the mechanism is open question 4.
 
 **I. Give the reason its own column on `meta.audit_integrity_verdicts`.** The table's own catalog
 comment argues for exactly this shape — *"without a column, 'which tenants still have unanchored
@@ -435,7 +435,7 @@ does not transfer: `chain_ok` is checkable *because* the report carries `chain.o
 covers it, so `storedReportMismatches` compares the column against the report. A `chain_full_because`
 column outside the digest would be editable with no digest broken and nothing to compare it to —
 `signaturesChecked`'s position again, in a table whose one property is checkability. Putting the
-reason inside the digest instead is the versioned decision of open question 2.
+reason inside the digest instead is the versioned decision of open question 3.
 
 ### Verified live after the fix, as a non-owner role, on the same cluster
 
@@ -748,6 +748,23 @@ number, and the correction is only worth a paragraph because it was measured rat
 recalculated: an attributed figure still goes stale, and the attribution makes it look current.
 
 ## Open questions
+
+**Three corrections to this list, from a measurement taken after it was written.** First, its own
+framing of urgency is inverted: **no shipped deployment runs the checkpointer at all** —
+`deploy/docker-compose.yml`'s `api` command has zero occurrences of `checkpoint`, and
+`--checkpoint-config`, `--integrity-proof-config` and `--audit-chain-config` appear only in
+`deploy/ORACLE.md`'s table of flags an operator is *not* passing. So Q1's unbounded platform growth,
+Q2's undurable refusal and Q4's permanent full folds are all **latent today and all go live in the
+same moment**, which is register P0.3's increment. Q1 and Q4 should therefore be sequenced as **P0.3
+blockers** rather than as follow-ups here, and that ordering is in neither document. Second, **Q6 and
+Q7 are one sequence, not two items**: both are blocked on the same missing primitive —
+`PostgresChainLogStore` exposes no keyed single-entry read, so Q7 cannot stop loading the whole chain
+for at most `auditRowLimit` lookups and Q6 cannot compare a stored verdict against the entry its
+`chainEntryHash` names. One `sequence_number = ANY($1)` method, the shape `loadFrom` already
+demonstrates, serves both, so Q7-then-Q6 is the order. Third, **Q10 is not an open question**: it
+records a decision with its reasoning and says in so many words that the behaviour is left as it is
+deliberately, which inflates this list to ten where nine carry work. It is better read as a pinned
+decision, and the residual worth tracking is in Q3 rather than there.
 
 1. **Nothing constrains one checkpoint per platform sequence, and the platform table grows without
    bound.** Part 6 fixed which row wins and deliberately not that there are several.

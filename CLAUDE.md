@@ -1917,7 +1917,16 @@ packages exist at only one layer, noted below where that is true.
   into statements. `apply` runs the plan, so an empty database gets the full bootstrap (the plan
   *is* `emitBootstrapSql` there, pinned by a test) and a migrated one gets only its deltas. Both
   `crossengin apply` and `crossengin-pg apply` take this path and both accept `--plan` to print it
-  without executing. The plan holds one invariant — **every step in it is expected to succeed** — so
+  without executing. The plan holds one invariant — **every step in it is expected to succeed** —
+  and there is **one unguarded exception nobody has named**: `create_index` is pushed with
+  `guarded: false`, while the sibling `add_unique_constraint` beside it is `guarded: true` and every
+  other data-dependent class (a type change, a `NOT NULL` tightening, a populated-table constraint)
+  is reported as `unreconciled` with the SQL handed over. So **any** declared unique index added to
+  `META_TABLES` later carries a latent `23505` against that invariant. There are already 6
+  `unique: true` indexes in the catalog, 3 of them partial, and all of them only ever landed on
+  fresh databases where the question could not arise — which is why it has never been seen, and is
+  the same shape as ADR-0360's reason the entity-store unique indexes run last, each in its own try.
+  Otherwise,
   anything whose outcome depends on existing data is reported as `unreconciled` with the SQL instead:
   a type change or a `NOT NULL` tightening on a populated table, a `NOT NULL` column with no default
   that has nothing to fill existing rows with, an undeclared index or policy, and anything that would
@@ -3942,9 +3951,18 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   (*the anchor references `meta.tenants`*) **no longer holds**: ADR-0335 removed `TENANT_FK` from
   `meta.audit_log` and from every other table in that path, and the catalog still carries a stale
   comment above that column claiming *"the foreign key stays"* one line above the inline comment
-  saying it was deliberately removed. So inverting the order is now *available*, and it is what
-  would close the write window between the confirm-absence pass and the commit; the ordering is
-  kept for now rather than defended. A failed retire is `tenantRetired: false` on a **200** rather
+  saying it was deliberately removed — and **two further comments cite the same vanished key**,
+  `tenant-deletion-routes.ts:33` (*"the tombstone's chain anchor references `meta.tenants`"*) and
+  `deletion-pipeline.ts:427` (*"because the audit record's `tenant_id` references it"*), measured
+  against the built catalog where `audit_log.tenant_id` and all seven platform-record tables carry
+  `references: null`. So inverting the order is *available* as far as the foreign keys go, and it is
+  what would close the write window between the confirm-absence pass and the commit — **but there is
+  a second constraint on it that nobody had named**, and it is the reason the ordering cannot simply
+  be swapped: the pipeline reads `fromState` from `meta.tenants` *inside* the transaction before its
+  first destructive statement, and retirement is `UPDATE … SET status = 'deleted'` rather than a
+  `DELETE`, so the row survives and retiring first makes `fromState` read `deleted` instead of the
+  real source state. Any inversion must capture `fromState` before the retire. The ordering is kept
+  for now rather than defended. A failed retire is `tenantRetired: false` on a **200** rather
   than an error that
   implies the deletion did not happen, and the body carries the tombstone receipt — digests, anchors,
   chain coordinates — since a bare "deleted" would be ADR-0317's defect in response form (ADR-0320);
@@ -5005,6 +5023,10 @@ not the cascade** (ADR-0349): `eraseSharedTablesWithin` reaches the row because 
 `tenant_id`, and the `ON DELETE CASCADE` has **never fired and cannot**, because nothing in the
 workspace ever deletes a `meta.tenants` row. Retirement is `UPDATE … SET status`. So the cascade is
 not a second fence; it is inert, and this file credited it with the erasure for two increments.
+**And it is not one table's quirk: 99 catalogued tables reference `meta.tenants` with
+`ON DELETE CASCADE` and not one of those cascades has ever fired**, for the same reason — so every
+argument anywhere in this file that rests on a tenant cascade is resting on a mechanism that has
+never run.
 The constraint is **not** inert, though, and that is its live consequence: a tenant with no
 `meta.tenants` row cannot have a data key at all, so `--column-key-mode envelope` answers every PHI
 read and write for an unprovisioned api-key tenant with `tenant_data_keys_tenant_id_fkey` — reported
@@ -6496,7 +6518,12 @@ opened them.
   nothing fences a **new** classified field being granted at all: the three rules check that a
   *declared* grant is coherent, not that one exists. A fourth rule — "a sensitive-classified field
   has a grant" — would refuse **zero** fields today and is the cheapest moment it will ever have,
-  which is exactly `pg-storeless-tables.ts`' argument one domain across. **(3)** `FieldPermission`
+  which is exactly `pg-storeless-tables.ts`' argument one domain across. That zero was later
+  confirmed **on the wider of the two legitimate denominators**, which is worth stating because this
+  file quotes only one: **46** is the count of distinct *source* declarations, while across the seven
+  **resolved** packs there are **173** sensitive-classified field *instances* — core's fields
+  reappear in all seven through `meta.extends` — and all 173 carry a `FieldPermission` entry with
+  none ungranted. **(3)** `FieldPermission`
   has no `delete` arm and no per-transition arm, so *"this field may not be changed while the record
   is `posted`"* remains a write **guard** question and not a grant one; the two vocabularies do not
   meet. **(4)** `field_create` is unreachable in practice — a `create`-arm `abac` key is refused at
@@ -7805,8 +7832,9 @@ by it**.
    `--deletion-capabilities` (so neither Article 17 surface can mount), `--tenant-status-gate`,
    `--rate-limit-policy`, `--read-state-routes`, `--preference-routes`. So the request path is
    configured and nothing *recurs*: no job fires, no timer fires, no notification is delivered, no
-   audit row is anchored, no integrity proof runs. One increment, and the only question is which
-   flags a reference deployment should default to. **This entry's own count has gone stale three
+   audit row is anchored, no integrity proof runs. ~~One increment, and the only question is which
+   flags a reference deployment should default to.~~ — **that framing is false for 4 of the 9, and
+   the per-flag map below says which.** **This entry's own count has gone stale three
    times in three increments** — 15 when it was written, a 16th from ADR-0364
    (`--credential-admin-role`), and two more from ADR-0368 (`--require-design-review`,
    `--design-review-role`) — every one a request-path flag that arrived with the feature needing it
@@ -7829,7 +7857,67 @@ by it**.
    legacy anchor sitting at an *idle* chain's tail is never replaced (`DO NOTHING`), so such a scope
    re-folds from genesis every pass, and `includePlatform` defaults to true over a chain that holds
    only escalation rows. At 152 µs of signature CPU per entry that is cheap on a short chain and is
-   15.2 s per pass at 100k. The remaining eleven have not been asked either question.
+   15.2 s per pass at 100k.
+   **The remaining nine have now been asked both questions, and the answer refutes this entry's own
+   framing: only 3 are a default decision.** *Default on* — `--tenant-status-gate` (`meta.tenants`
+   carries zero policies and no `rls` in `META_TABLES`, so the directory read works for any role, and
+   the boot survey separates `missing` from `unreachable` from `blocked` before the first request);
+   `--read-state-routes` + `--read-state-role`, which has a **live consumer in the shipped UI** —
+   `operate-web/lib/notifications.ts:217`/`:272` reached from `Sidebar.tsx:78` for the nav badge, whose
+   own comment says the unmounted case "answers 404, and a nav badge must degrade rather than
+   disappear", so today every badge fetch 404s and falls back silently to a recency approximation over
+   50 notices; and `--notification-drain-ms`, which **serves** because `--ai-design` and
+   `--require-design-review` are both already on, so `notifyDecision` writes a real dispatch per review
+   decision, and the vacuity check passes (`unroutedResult` answers `outcome: "failed"`, not a
+   success). *Default off with the reason already argued in the repo* — `--rate-limit-policy`, on
+   `README.md:410`'s *"nothing defaults the ceiling … switching an existing deployment from
+   10,000/60s on upgrade would refuse traffic that works today"* (ADR-0338's rule), and declaring it
+   retires ADR-0337's six `rate_limit_decision_not_found` replay findings.
+   **Four are blocked by a missing mechanism rather than an undecided default, and the mechanism is
+   one line that does not exist: the `api` service declares no `volumes:` key at all** (measured
+   top-level keys: `build`, `depends_on`, `environment`, `command`, `expose`, `ports`, `healthcheck`,
+   `restart`). So `--audit-chain-config`, `--deletion-capabilities`, `--integrity-proof-config` and
+   `--checkpoint-config` — every file-taking flag — have **no path by which an operator supplies a
+   file**, and `deploy/ORACLE.md:534`'s instruction *"Each is a line added to that `command:`"* cannot
+   be followed for any of them. That is ADR-0364's addendum class (the `.env.example` curl naming a
+   port the stack published nowhere) in the document an Oracle operator actually follows, and it wants
+   a documented Ed25519 keypair-generation step beside it.
+   **`--deletion-capabilities` is additionally a category error in the list above**: it mounts
+   *nothing* on its own — `--tenant-deletion-routes` needs `conn` **and** an audit chain producer
+   **and** the capabilities **and** `--tenant-deletion-role` — and the three surfaces
+   (`--tenant-deletion-routes` / `--deletion-request-routes` / `--tenant-erasure-routes`) appear in
+   neither this entry's eleven nor any compose file, all measured 0 hits.
+   **`--schedule-ms` and `--workflow-workers` are blocked by P1.6**, not by a default: 14 job
+   declarations on `erp-core` (`{scheduled: 7, event: 7}`), `buildJobHandlerRegistry({providers: []})`
+   answers `servedJobIds: []` with 14 unservable, and `JOB_HANDLER_PROVIDERS` ships empty. The two
+   differ in *kind*, which is worth keeping: `--schedule-ms` is **harmful** (scheduled crons include
+   `*/15` and `*/30`, so ~149 pending rows per tenant per day accumulate for ever with no consumer)
+   and also raises `CliUsageError` without `--schedule-tenant` or `--schedule-all-tenants`, both
+   absent; `--workflow-workers` is merely **inert**, because `PostgresWorkflowDefinitionStore` has
+   exactly one non-test construction in the workspace and that call only *reads*, so
+   `meta.workflow_definitions` is empty in every deployment by construction → `no_definitions` for
+   the timer and activity workers, and `jobEngine` is supplied only when `servedJobIds` is non-empty →
+   `no_job_handlers`. **Zero of its three workers can start**; it prints three refusals and boots.
+   And `--emit-entity-events` cannot rescue either: with the emitter on, the survey moves from
+   `{handler_missing: 7, event_unproducible: 7}` to `{handler_missing: 11, event_unproducible: 3}`
+   while `servedJobIds` stays `[]` — it changes only the **reason** a job is unserved, never whether
+   it runs.
+   **The sharpest finding of that measurement is not about defaults at all, and this entry did not
+   have it**: `node.ts:3061` gates the drain-absence warning on
+   `senderWiring.report.channels.length > 1`, the compose sets no SES or Twilio variable, so
+   `channels = ["in_app"]` — length 1 — the warning **never fires**, and boot prints only
+   `[notify] channels: in_app`, which reads as working. That is precisely the
+   looks-healthy-sends-nothing failure the comment two lines below it says the warning exists to
+   prevent, and it makes `README.md:522`'s *"Without the drain flag nothing is sent at all, and the
+   API says so at boot"* **false for every deployment that ships**. It belongs in the same change as
+   the three defaults.
+   One further measurement worth carrying, because it is a fence that holds for the wrong reason:
+   `enqueueScheduledJobs` is a bare `conn.query` with **no tenant context**, and `meta.job_runs`
+   carries exactly one `ALL`-scope isolation policy with no platform arm — so as a non-owner that
+   `INSERT` raises `42501` every tick. `--schedule-ms` works on the shipped stack only because the
+   compose connects as `POSTGRES_USER`, the same role that ran `migrate`, so the owner bypasses RLS.
+   It stops holding the moment a deployment uses a least-privilege serving role, which is the
+   configuration every other store in the repo is written for.
 4. **An Article 17 request naming one data subject erases the whole tenant.** `subjectIdentifier`
    is required on the submit body and the stored record, `DeletionRunnerOptions.run` has no field
    that could carry it, and `node.ts` calls `deleteTenantAtomically` with
@@ -7837,6 +7925,22 @@ by it**.
    `TombstoneRecordSchema` requires no subject for that kind, so the proof parses with none. A
    verified request for one person destroys every person's data. Subsystem, and its honest
    prerequisite is P1 item 4.
+   **Two corrections from a later measurement, and the second changes the scope of the fix.** The
+   first half of this entry corrects nothing it had not already said — `subjectIdentifier` *is*
+   required on the submit body and the stored record, and the genuinely new fact is that
+   `DeleteTenantInput.subjectIdentifier?` **exists** on the pipeline and `deletion-pipeline.ts:498` is
+   its only use, so the field is threaded one level and then read by nothing that scopes a statement.
+   And **there are two `data_subject_erasure` emitters, not one**: besides the runner seam, the
+   *synchronous* route admits the kind (`DELETABLE_TOMBSTONE_KINDS` at
+   `tenant-deletion-routes.ts:48`), `node.ts:1859` passes `kind: req.kind` straight through, and that
+   route's own `.strict()` body schema (`tenant-deletion-routes.ts:243-270`) carries `approvedBy`,
+   `confirmTenantId`, `kind`, `attestations` and `relatedDeletionRequestId` and **no
+   `subjectIdentifier` field at all**. So "one field across one interface" would leave the sync path
+   still emitting a subjectless `data_subject_erasure`, and "stop `node.ts` asserting the kind" would
+   leave a caller free to choose it on the sync route. Both paths could recover the subject from the
+   `relatedDeletionRequestId` they already require. Threading it fixes the **claim** and not the
+   erasure: `input.subjectIdentifier` scopes no statement anywhere, and both the delete and its
+   confirm-absence pass stay `WHERE t.tenant_id = $1::uuid` plus `DROP SCHEMA`.
 5. ~~**An upgraded deployment owes an undocumented `ALTER`, and until it runs the verify route
    silently fails to make the tenant read-only.**~~ — **closed by ADR-0363**, which also found the
    defect had a *second* copy one layer up that this entry could not see: the planner's own
@@ -7923,9 +8027,19 @@ by it**.
    at 100% completion"* over a pack covering **zero reviewed items**, reachable from the shipped
    producer rather than from a hand-edited row.
 9. **No automated backup, no tested restore.** ~~and no healthcheck on `api` or `web`~~ — ADR-0357
-   added the `api` healthcheck and made `web` wait on it. Backup is still prose only
-   (`README:181`, a manual `pg_dump` with no cron, no retention, no restore drill) on a platform
-   that models DR tiers with RPO/RTO targets.
+   added the `api` healthcheck and made `web` wait on it. Backup is still prose only, on a platform
+   that models DR tiers with RPO/RTO targets: no backup service in any compose file, no
+   `pg_restore` anywhere in `deploy/`, `BackupRecord` with **zero producers**, and
+   `meta.backup_records` declared writerless as `unwritten_table`.
+   **Two citation corrections, one of which inverts a clause.** `README:181` is about api-key specs
+   and `--platform-user-routes`; the backup prose is at `:441-442` and `:821-831`. And *"no cron, no
+   retention"* is true of the compose stack and **false of `deploy/ORACLE.md:500-510`**, which ships
+   a dump script, a `17 3 * * *` crontab line and a 14-day `-mtime +14 -delete` retention — so the
+   document an Oracle operator follows does schedule a backup. What it does **not** do is test the
+   restore: its own *"Test the restore now"* block runs `gunzip -c … | head -40`, which restores
+   nothing and proves only that the file decompresses. Both `README:830-831` and `ORACLE.md:519-520`
+   already say the platform ships no backup scheduler, so the honest finding is the untested
+   restore and the absent in-stack scheduler, not an absent cron.
 
 ### P1 — the product claims it and no deployment can execute it
 
@@ -8117,7 +8231,11 @@ land with or before it.
    declarations whose entities do not exist.
 5. **`meta.users` keeps every user's email, display name and phone after a completed tenant
    erasure, and the proof is silent about it.** `partitionSharedTables` skips any catalogued table
-   with no `tenant_id`, and of those 31 `meta.users` is the only one holding a natural person's
+   with no `tenant_id`, and of those 31 `meta.users` is the only one holding a *tenant user's*
+   contact details — "the only one" full stop is **literally false**, since
+   `meta.extension_packs.author_email` is a second contact-detail column among the 31, a marketplace
+   publisher rather than a tenant user, which is why it does not change the decision — a natural
+   person's
    direct contact details — while `meta.user_tenant_membership` *is* erased in the same
    transaction, so the rows survive **un-attributable**. Neither erased, nor declared retained with
    an obligation, nor listed in `examinedTables`. The decision is erase, cascade with the last
@@ -8184,20 +8302,31 @@ land with or before it.
     runner serves. Two consecutive increments bug-fixed that detector while nothing called it.
 11. **Five residuals in the Article 17 proof**: own-record statutory retention inexpressible; a
     write window between the confirm-absence pass and the commit — **which inverting the retirement
-    order would now close, because the foreign key that blocked it is gone**; which tables were
+    order would now close, because the foreign key that blocked it is gone — though a later
+    measurement found a *second* constraint on that inversion nobody had named: the pipeline reads
+    `fromState` from `meta.tenants` inside the transaction and retirement is an `UPDATE`, not a
+    `DELETE`, so retiring first makes `fromState` read `deleted`, and any inversion must capture it
+    first**; which tables were
     examined is in no digest, so "we looked at all 97" and "we looked at 12" hash identically; a
     deployment that moved from `pg-columns` to `pg` has leftover entity tables nothing censuses;
     and a tampered tombstone can never be put right, so its paging `sev1` re-declares every tick
     with hand-written SQL against an append-only table as the only exit.
 12. **The sealed cursor has no rotation path and a sealed deployment still accepts a forged
-    plaintext cursor.** `buildCursorKeySource` takes a generation and its only caller passes none,
+    plaintext cursor.** And when a rotation path is built, **generation 1 cannot be the first
+    rotation**: `deriveTenantCursorKey(secret, tenantId, generation = DEFAULT_KEY_GENERATION)` has
+    `DEFAULT_KEY_GENERATION === 1`, so the ternary in `cursor-encryption.ts` derives the *identical*
+    key for `undefined` and for `1` — rotating to 1 is a silent no-op and the first generation that
+    actually rotates is 2. `buildCursorKeySource` takes a generation and its only caller passes none,
     and `SEALED_CURSOR_PREFIX` is a fixed `"s1."` with no generation field — so rotating the
     secret 400s every walk in flight at the page boundary. Both downstream of P0 item 2.
 13. **Four contracts admit or assert something structurally false**, each in a subsystem whose job
     is to be checkable: a **late GDPR 72-hour breach notification is unrepresentable** (the
     refinement and the CHECK both refuse `publishedAt` past the deadline, so
     `isBreachNotificationTimely` can never answer false for a record that parsed — the first fact a
-    regulator asks for cannot be stored); a forensic checkpoint may claim `sha512` or `blake3` over
+    regulator asks for cannot be stored, and this entry names only half of it: that predicate also
+    has **zero non-test callers**, so the one function that would report a late GDPR notification
+    both cannot answer `false` for a stored record *and* is read by nothing); a forensic checkpoint
+    may claim `sha512` or `blake3` over
     a `rootHash` pinned to sha256's shape, neither computable anywhere, in the sole witness for
     truncation detection; `meta.workflow_timers` accepts a `cron_schedule` row with a NULL
     expression; and `meta.job_runs.status` admission is reported and never refused, so a fleet that
@@ -8256,9 +8385,18 @@ land with or before it.
     rather than the wrong principal reaching them — which is why this sits in P2 and not P0: the
     cost is an unreachable surface, not a disclosure. It is this run's recurring class on an
     *option* rather than a column (ADR-0339's `policyForEntity` with no producer, ADR-0336's flag
-    subsystem with no evaluator), and the fix is one flag plus one wiring line, with the open
+    subsystem with no evaluator), and the fix is one flag plus **two** wiring lines, with the open
     question being whether the settings routes and the marketplace ones want one grant or two —
     `--notification-admin-role` and `--credential-admin-role` are the precedent for two.
+    **One addition from a later measurement, which is why it is two lines and not one**: `node.ts`
+    has exactly two `buildOperateHttpServer(` call sites — the boot gateway and the **per-tenant**
+    one — and *neither* passes `adminRoles` while *both* pass `settingsStore`. So a tenant serving
+    its own activated manifest (ADR-0314) also gets the hardcoded `erp_admin` on its own settings
+    routes, even when that manifest declares no such role. The routes are gated on
+    `options.settingsStore !== undefined` and `node.ts` always constructs one and always passes it,
+    so `GET`/`PUT /v1/admin/settings` are always mounted on both. Fail-closed is confirmed at the
+    handler: `authorize` answers `""` on a role miss and the route returns 403 *"admin role
+    required"*.
 
 ### P3 — debt and stale documentation
 
@@ -8271,7 +8409,10 @@ method is that a stale figure misleads.
    finding: `KeyRotationMigrator` called callerless two increments after the ADR that wired it;
    `validateWriteMask` called callerless from the commit that gave it a caller; residency called
    unenforced when it answers 421/403 pre-auth; the tenant-retirement order defended by a foreign
-   key ADR-0335 removed, with a **stale comment in the catalog contradicting the line below it**;
+   key ADR-0335 removed, with a **stale comment in the catalog contradicting the line below it** —
+   and a later measurement found **two more comments citing that same vanished key**, in
+   `tenant-deletion-routes.ts:33` and `deletion-pipeline.ts:427`, so the pair that justifies the
+   retirement ordering is stale in three places at once;
    `ABAC_GRANT_POSITIONS` counted at eight when it is nine; the callerless declarations counted at
    16 when the array holds 15; "no top-level lint script" when one exists and passes vacuously; and
    the compose telling an operator "there is no rekey executor yet" after ADR-0349 shipped one.
@@ -8312,6 +8453,17 @@ method is that a stale figure misleads.
    increment at a one-commit distance: a comment citing a bind position (`$16`) that a parallel
    slice had already shifted to `$17`, and a clause **count** ("eleven") that the same increment
    took to thirteen. A bind position and a count in a comment are volatile by construction.
+   **A later pass over this register added four more members, and the shape of the fourth is new.**
+   Two were *citations*: this register sent a reader to `README:181` for backup prose that is at
+   `:441-442` and `:821-831`, and it called the stack's backup "no cron, no retention" when
+   `deploy/ORACLE.md:500-510` ships both — true of the compose stack, false of the document an
+   operator follows. One was a *scope*: the retirement-ordering comment is stale in **three** places,
+   not one. And the fourth is a **cross-reference off by one**: ADR-0371's own Alternatives cite its
+   open questions as 3 and 2 where it means 4 and 3, consistent with Q1 having been inserted at the
+   head of the list after the alternatives were written — so a reader following either pointer lands
+   on the wrong question, which no figure-checking catches because both numbers are real questions.
+   A pointer into a list goes stale when the list is reordered, and nothing in this repo compares the
+   two.
 2. **Six concepts are modelled several times over, two with non-nesting member sets.** Data
    classification has five declarations — four identical and one, in `data-lineage`, **disjoint past
    two members**, so the moment anything bridges the kernel's classification into the lineage graph
