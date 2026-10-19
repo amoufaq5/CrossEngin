@@ -445,13 +445,140 @@ The payload is the free-form audit `after` and **not** the verdict's signed byte
 `storedReportFrom` must move together or the stored report stops being byte-identical to its
 committed payload, which is the trap ADR-0371 reverted a field out of. None is touched.
 
+### The detail that quoted the row
+
+`unreadableDetail` exists so that no stored value travels into a log line, an HTTP body or an
+incident note — and `path.join(".")` is a **disclosure**, because a path component is not always a
+field name. For a `ZodObject` it always is: an undeclared key is either stripped or reported as
+`unrecognized_keys` at the *parent's* path with the keys in `issue.keys`, which this never prints.
+For a `z.record` the component **is the stored key**, and the contract bounds neither the key nor
+the value.
+
+Verified live as a non-owner on PG 16.13 through the real `PostgresAccessReviewDecisionStore`, one
+hand-edited `meta.access_review_decisions` row — a shape the `jsonb` column takes with no CHECK
+against it:
+
+| | detail |
+|---|---|
+| before | `modifiedGrantAttributes.employee_ssn_123-45-6789: invalid_type` |
+| after | `modifiedGrantAttributes.<withheld>: invalid_type` |
+
+and that string is also the text of that store's own `UnreadableRowsError`, so it reaches a caller.
+
+**The measurement eliminated the obvious fix.** A `ZodError`'s own keys are `stack, issues,
+addIssue, addIssues, name` — it carries no reference to the schema that produced it — and a
+record-key issue is byte-identical to a declared-key one in `path`:
+`["grantAttributes", "employee_ssn_123456789"]` against `["actor", "kind"]`, both `string`, with no
+marker on the issue. So *render only what the schema declares* needs the schema, which means a
+parameter: ten call sites would pass nothing, and an **optional** parameter defaulting to the old
+render is the disclosure restored as a default — the shape ADR-0364's addendum and ADR-0371's
+`onRefused` exist against. A shape test over the component (identifier-like, bounded) is refused on
+ADR-0355's grounds: a record key is *precisely* a plausible field name, so every cutoff is unsound
+rather than merely imprecise — `department` and `ssn123456789` are both identifiers.
+
+So the rule is **positional**, and it is what the detail's job actually needs — *which column to
+look at*. `path[0]` renders, being the key the mapper's own source names, and every multi-segment
+path in the workspace heads a real JSONB column (`meta.audit_log.actor`,
+`meta.dr_drill_executions.record`). Every deeper **string** collapses into one `<withheld>` and the
+tail stops there, since a record's value may itself be an object. A **numeric** component renders
+wherever it sits — an array index is a position, never stored text — so `attestations.0.<withheld>`
+still says which element, where bare truncation would say only `attestations`. And `record` stays
+distinguishable from `record.<withheld>`: *the JSONB column is not an object* and *a field in it is
+wrong* are two remedies.
+
+**The precision lost on declared nested keys is a real cost, and it is paid in the open.** Five
+assertions in three packages read `record.<withheld>` and `actor.<withheld>` now, each carrying the
+reason at the assertion, and each writes the literal out rather than reading
+`WITHHELD_PATH_COMPONENT`, so changing the constant fails there. One of the five was this
+increment's own and was **inverted rather than deleted**, because the fact under it — a nested
+refusal must still name its column — is still worth pinning.
+
+Two corrections to the brief, both now comments at the code. `AccessReviewItem.grantAttributes` is
+the other `z.record(z.string(), z.string())` in a stored shape and is **not** reachable: `rowToItem`
+returns a bare object literal typed as the contract and never parses (ADR-0362's class), so it
+becomes a live disclosure on the day that mapper is made to parse. And `records.ts`' numeric guard
+interpolated `JSON.stringify(value)` — the field alone now, matching the three guards beside it,
+pinned across `"000-11-2222"`, `"MRN-1"`, an object and `NaN`; no existing test asserted the value,
+so nothing was inverted. The sharpest thing found here is that `audit-log-store.test.ts` had
+**already written the rule down** for the neighbouring issue code — *"a JSONB key is as much a
+stored value as what it holds"*, about `unrecognized_keys`, whose keys the formatter already dropped
+— so the `z.record` case was the hole beside a test that stated the principle.
+
+The **third** copy of the try/catch loop went with it. `readRequestRows` is `readRows` now and
+`requestIdOf` is deleted, having been byte-identical to `textIdentity(row, "request_id")` — a fourth
+spelling of that predicate — and the twelfth rule reported its own declaration **`overtaken`** the
+moment the migration landed, which is the forcing function working rather than a list going stale.
+And `chain-log-store.ts`' comment said `INTEGER` where the column is `BIGINT`, which is the whole
+reason `numericIdentity` has two arms: node-postgres returns a `BIGINT` as a **string** and an
+`INTEGER` as a number (measured on PG 16.13: `select 7::bigint` → `"7"`), so the identity arrives as
+a string and it is the string arm that reads it. The comment cited the one shape that column never
+produces, and nothing failed either way — which is why it survived.
+
+### The pack certified over a page it could not read
+
+This increment's own open question 3, closed, and it is ADR-0372's class reintroduced one layer in
+**by the increment that stopped the throw**: a DR readiness snapshot is now recorded over the
+*readable* subset, so `resilience.dr_readiness` read `satisfied` with the summary *"DR readiness:
+READY (0 issues)"* while the refused row sat in a `console.error`. The test that pinned it asserted
+`ready: true, totalIssues: 0` and named no consequence, so it read as a documented trade-off rather
+than a live gap.
+
+`DrReadinessReport.unreadableEvidenceAxes` is a **sibling of `unevidencedAxes`, not an eighth
+count**: the seven are projected `INTEGER` columns a reader sums, the per-row figure already reaches
+an operator through `onUnreadableExecution`, and a count here would be a second place for it to
+drift. Four decisions:
+
+- **Typed over all five axes**, not the two with a store read. `failovers`-as-unevidenced is
+  *meaningless*, which is why ADR-0372 narrowed that one; `backups`-as-partly-unreadable is merely
+  *unproduced*, since `meta.backup_records` is catalogued with no writer — so narrowing would refuse
+  a legitimate future value and cost a vocabulary migration. The load-bearing narrowing stays at the
+  call site that knows, `UnreadableDrExecution.axis`.
+- **Nullable, with no `[]` default**, and the counter-argument is recorded rather than dismissed:
+  pre-ADR-0373 snapshots *provably* read completely, because a refused row threw before `record()`
+  was reached, so `[]` would be true of every one of them. Refused anyway — that proves something
+  about one producer at one commit while a default applies on every parse for ever (hand-edited rows,
+  later producers), and the premise is the behaviour this increment removed, so the population is
+  closed. On the *input* side absence does mean `[]`, with its own reason: three of the five axes are
+  config literals with no read behind them.
+- **It rides on `DrReadinessInput.evidenceRead`, not a second parameter** — and ADR-0372's own type
+  fence is what decided that. A `readonly DrReadinessAxis[]` member of `DrReadinessInput` makes the
+  alias circular (measured: `TS2502` + `TS2456`), because every list-valued member of that input
+  **is** an axis by the type's definition. That fence was right, and it also located the field: the
+  lifecycle is two hops from `assessDrReadiness`, so a parameter would be two intermediaries that
+  could drop the fact — and dropping it reads as *no row was refused*. Riding on the input also
+  means **no change in `dr-runtime-pg`**: the report goes whole into the `report` JSONB, pinned by a
+  test, with no projected column needed.
+- **The guard is in the adapter** (ADR-0372's placement), with its own finding kind
+  (`axis_evidence_unreadable`) and its own unknown (`evidence_read_unknown`) rather than reusing
+  `axis_unevidenced` — because the two are about the *same control* and must be separable in one
+  list: *nobody drilled* and *a drill was recorded and cannot be read* are opposite remedies. The
+  unreadable facts **lead** the findings and the summary, since an absent axis leaves the figures
+  true about what they measured while a refused row makes them claims about a different row set.
+
+`ready` folds it in too, and the brief's *"`ready` is correct about the readable rows"* was
+half-true: ADR-0372 had already made `ready` mean *no issue found **and** the evidence was
+complete*. Guarding only the adapter would have left `formatDrReadiness` and the `[dr] readiness`
+line saying READY while the control said unevidenced — one process contradicting itself with the
+reassuring half on the surface an operator reads (ADR-0361). `totalIssues` is untouched.
+`axisClaimFindings` is the list-shaped counterpart to `scopeIsAbsent` now that two of that file's
+guarded adapters ask a list-shaped question, folding `undefined` in with `null`, which is the whole
+runtime fence given these are structural views; and `DR_VERDICT_UNEXPLAINED_FINDING` gained a fourth
+clause or it would again misdescribe its own trigger.
+
+And `formatUnreadableEvidenceAxes` reaches the `[dr] readiness` line, because that line is the
+deployed binary's **only** DR-readiness surface — no route serves a snapshot — so a fact computed
+into a report no deployment prints is this run's most-found shape. The `onUnreadableExecution`
+comment is corrected with it: `unevidencedAxes` still deliberately does not name the axis, and what
+has changed is that the callback is no longer the *only* surface such a row reaches.
+
 ## Open questions
 
 | Question | Owner | Deadline |
 |---|---|---|
-| `unreadableDetail`'s non-zod arm returns `err.message` verbatim, on the stated ground that a mapper's own guard messages name no row value — a convention of exactly the kind ADR-0367 found failing in **four of six** refusal strings, one of them an id. The only honest fence is a text test over the live construction sites with a vacuity floor; nothing inside the module can check it. | platform | 2026-11-30 |
+| `unreadableDetail`'s non-zod arm returns `err.message` verbatim, on the stated ground that a mapper's own guard messages name no row value — a convention of exactly the kind ADR-0367 found failing in **four of six** refusal strings, one of them an id. The only honest fence is a text test over the live construction sites with a vacuity floor; nothing inside the module can check it. The addendum found and closed one live member of that class (`records.ts`' numeric guard, which interpolated `JSON.stringify(value)`), which is evidence for the question rather than against it. | platform | 2026-11-30 |
+| `AccessReviewItem.grantAttributes` is the other `z.record(z.string(), z.string())` in a stored shape, and `renderIssuePath` closed the one disclosure that was *reachable*. It is unreachable only because `rowToItem` returns a bare object literal typed as the contract and never parses (ADR-0362's class) — so the day that mapper is made to parse, which is the fix ADR-0362 argues for, this becomes a live disclosure that the positional render then handles. Worth knowing in that order. | platform | _informational_ |
 | A new required field on `AuditActor` (or any `.strict()` stored shape) now turns every pre-existing row into a paging `sev1`. Whether that wants a declared schema version per stored shape, or a rule that such a field must be `.optional()`, is a contract-evolution decision this increment does not make. | platform | 2026-12-31 |
-| `DrReadinessReport` has no field for *this axis's evidence was partly unreadable* — `unevidencedAxes` cannot say it (naming `failovers` is a compile error by design, and naming `drills` renders a false sentence into a SOC 2 pack), so a page of one readable drill beside one refused one still reads `ready: true` with `totalIssues: 0`. Pinned as a named limitation test; closing it is a `packages/dr-runtime` contract change. | platform | 2026-12-31 |
+| ~~`DrReadinessReport` has no field for *this axis's evidence was partly unreadable*~~ — **closed in the addendum** by `unreadableEvidenceAxes`, and it was worse than this question stated: the adapter signed `satisfied` with *"DR readiness: READY (0 issues)"*, so this was not a limitation but ADR-0372's own class reintroduced one layer in. | — | closed |
 | `TombstoneAuditPage.unreadable` reaches no escalator: `DeletionEvidenceEscalator.onAuditFinding` takes findings only, so a sweep that cannot read a stored Article 17 proof still has no alarm behind it — the same gap `onRefused` was made required for in ADR-0371. It is reported on the sweep's log line and nowhere durable. | platform | 2026-12-31 |
 | `tombstone-store.ts`' `listForTenant` and `findForRequest` still throw. The second is the sharper one: it is `DeletionReconciler`'s *evidence* lookup, where "a tombstone naming the request exists ⟺ that request's deletion committed", so a refused row there is not a missing proof but an unanswerable question. Dropping it would be **worse** than the throw — `found.length === 1` would answer `completed_by_evidence` over a broken premise — and neither existing verdict fits (`ambiguous_evidence` says two tombstones name this; `evidence_unverified` says a record failed `verifyStoredEvidence`), so the honest shape is the pair plus a **sixth** verdict. A verdict decision, not a read one. | platform | 2026-12-31 |
 | `UnreadableRowReporter` is now two incompatible exported types under one name — `kernel-pg`'s over `UnreadableRow` and `tenant-lifecycle-pg`'s over `UnreadableRequestRow` — both re-exported with `export *`, with `node.ts` importing from both. The *field* name divergence is argued above; the type name was not noticed, and it is the shape CLAUDE.md records as a finding for `packages/deploy`. | platform | 2026-12-31 |
