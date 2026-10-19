@@ -147,6 +147,42 @@ const TENANT_ISOLATION_USING =
   "tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID";
 
 /**
+ * The window in which a `TIMESTAMPTZ` column round-trips through an `Iso8601` contract field.
+ *
+ * A `TIMESTAMPTZ`'s type admits two infinities and years to 294276; `Iso8601` is
+ * `z.string().datetime({ offset: true })`, and the string a reader hands it comes from
+ * `Date.prototype.toISOString()`, which renders a **four-digit** year inside this window and a
+ * signed expanded year (`+010000-…`, `-000001-…`) outside it. So the contract is narrower than the
+ * type at **both** ends and in a third way the ends do not describe, and a column parsed against it
+ * is owed this CHECK. Measured on PG 16.13 — the expression refuses `infinity`, `-infinity`,
+ * `10000-01-01` and `0002-01-01 BC`, and admits `0001-01-01 BC` and an ordinary instant.
+ *
+ * Three things about the spelling are load-bearing, each measured rather than preferred:
+ *
+ * - **Both bounds carry an explicit `+00`.** A bare `'0001-01-01 BC'::timestamptz` is folded in the
+ *   *applying session's* `TimeZone`, so the same declaration becomes a different instant per
+ *   deployment: measured, the offset-bearing bounds fold to epoch `-62167219200` / `253402300800`
+ *   identically under UTC, Asia/Tokyo and America/Los_Angeles, while the bare forms move by 9h18m59s
+ *   and 9h under Tokyo — and bare `'0001-01-01'` crosses into **BC** there. "Simplifying" the
+ *   offsets away is silent and changes which rows the rule admits.
+ * - **The lower bound is 1 BC and not 1 AD**, because `toISOString()` renders JS year 0 — which is
+ *   Postgres `0001-01-01 BC` — as `0000-01-01T…Z`, and the contract admits it. A bound at 1 AD would
+ *   refuse a value the reader accepts, which is the defect this rule exists for pointing the other
+ *   way (the entries test says the same thing about a width bound on a string).
+ * - **The upper bound is half-open**, so the rule says "the year is below 10000" rather than encoding
+ *   Postgres's microsecond resolution as `…23:59:59.999999`.
+ *
+ * `isfinite(col)` is deliberately absent: measured, it is implied — `infinity` fails the upper bound
+ * and `-infinity` the lower — and a clause that can never fire reads as coverage it does not provide.
+ * The shape lands in `check-admission.ts`'s `unclassified` (verified by calling
+ * `classifyDeclaredCheck`), exactly as ADR-0374's two `char_length` CHECKs do, so the boot survey
+ * derives no candidate and claims nothing about it; `diffColumnChecks` is what covers it.
+ */
+const READABLE_INSTANT_WINDOW = (column: string): string =>
+  `${column} >= '0001-01-01 00:00:00+00 BC'::timestamptz AND ` +
+  `${column} < '10000-01-01T00:00:00Z'::timestamptz`;
+
+/**
  * A table's platform read arm, which since ADR-0332 is a `SELECT`-scoped policy of its own rather
  * than an `OR` inside the isolation one. Found by its predicate, not by its name, so a renamed
  * policy still satisfies the assertions that use this.
@@ -1710,6 +1746,51 @@ describe("table column shapes", () => {
     expect(idx?.where).toBe("related_deletion_request_id IS NOT NULL");
   });
 
+  it("bounds the instant window at the edge where toISOString stops rendering a four-digit year", () => {
+    // The fact the two CHECKs below rest on, pinned where the bound is declared rather than left as
+    // a sentence in a comment. `Iso8601` constrains a **string**, and the string a row mapper hands
+    // it is `toISOString()`'s — so the contract's real boundary is this formatting edge, and the
+    // CHECK is correct only if the edge is where the bound says it is. Pure `Date`, no imports: the
+    // same assertion in `forensics-pg` would be about that package's mapper, and this one is about
+    // why the number in the catalog is 10000.
+    const atYear = (y: number): string => {
+      const d = new Date(0);
+      d.setUTCFullYear(y);
+      return d.toISOString();
+    };
+    // Inside: four digits, no sign. These two are the bounds, so they must be renderable.
+    expect(atYear(0)).toMatch(/^0000-/);
+    expect(atYear(9999)).toMatch(/^9999-/);
+    // Outside: a signed expanded year, which `z.string().datetime()` refuses. Were either of these
+    // renderable as four digits the bound would be narrower than the contract.
+    expect(atYear(10000)).toMatch(/^\+010000-/);
+    expect(atYear(-1)).toMatch(/^-000001-/);
+    // And the lower bound is JS year **0**, which is Postgres `0001-01-01 BC` — the reason the
+    // declared literal says `BC` and the reason a bound at 1 AD would refuse a readable value.
+    expect(atYear(0)).not.toMatch(/^[+-]/);
+  });
+
+  it("declares both instant bounds with an explicit offset, so neither folds per session", () => {
+    // The one "simplification" that breaks these CHECKs silently. `'0001-01-01 BC'::timestamptz`
+    // with no offset is folded in the applying session's `TimeZone`: measured on PG 16.13, the
+    // offset-bearing bounds fold to the same epoch under UTC, Asia/Tokyo and America/Los_Angeles,
+    // while the bare forms move by 9h18m59s and 9h under Tokyo — and bare `'0001-01-01'` lands in
+    // BC there, so a rule meant to admit [1 BC, 10000) would admit part of what the reader refuses.
+    // Nothing downstream notices: the reconciler renders both sides in one session, so the plan
+    // stays clean (verified live, created under UTC and re-planned under Tokyo and LA) and the
+    // divergence shows up only as rows a deployment accepts and cannot read back.
+    for (const [table, column] of [
+      [META_FORENSIC_CHAIN_ENTRIES, "recorded_at"],
+      [META_FORENSIC_CHAIN_CHECKPOINTS, "checkpointed_at"],
+    ] as const) {
+      const check = table.columns.find((c) => c.name === column)?.check ?? "";
+      // Every timestamptz literal in the expression, and each must name its offset.
+      const literals = check.match(/'[^']*'::timestamptz/g) ?? [];
+      expect(literals).toHaveLength(2);
+      for (const literal of literals) expect(literal).toMatch(/(\+00|Z)/);
+    }
+  });
+
   it("META_FORENSIC_CHAIN_ENTRIES leaves no column of a chain entry uncheckable", () => {
     const col = (n: string) => META_FORENSIC_CHAIN_ENTRIES.columns.find((c) => c.name === n);
     // ADR-0373. These two were the only columns on this table carrying no CHECK, which made them
@@ -1726,19 +1807,30 @@ describe("table column shapes", () => {
     // column — so a bound here would be a second place for the two to disagree.
     expect(col("actor_reference")?.check).not.toContain("BETWEEN");
     expect(col("signature")?.check).not.toContain("BETWEEN");
-    // The invariant the two above are instances of, asserted over the whole table rather than per
+    // The **third** column in that state, which ADR-0373 exempted by name and should not have:
+    // `recordedAt` is `Iso8601` and is inside `canonicalEntryBytes` exactly as the two above are,
+    // so this ADR's own argument applies to it unchanged. What made it look exempt is that the
+    // refusal arrives by a different route — not `''`, but `'infinity'`, which node-postgres yields
+    // as the **number** `Infinity`, so `asIso`'s `instanceof Date` is false, `String()` gives
+    // `"Infinity"`, and `z.string().datetime({offset: true})` refuses it. Measured live as the
+    // non-owner `serving` role in tenant context: `UPDATE 1`.
+    expect(col("recorded_at")?.check).toBe(READABLE_INSTANT_WINDOW("recorded_at"));
+    // The invariant the three above are instances of, asserted over the whole table rather than per
     // column, so a twelfth column added without one fails here instead of being discovered live.
-    // The four exempt ones are exempt for one reason and it is not "they are generated": each is
-    // **fully constrained by its declared type**, so no value it can hold is a shape the contract
-    // refuses. `id` and `created_at` are UUID and TIMESTAMPTZ with defaults; `recorded_at` is the
-    // TIMESTAMPTZ that `Iso8601` parses to; and `tenant_id` is the scope rather than a field of
-    // `ChainedLogEntrySchema` at all — nullable, with NULL meaning platform (ADR-0331), so there is
-    // no narrower rule to state. Every remaining column's contract says something its type does
-    // not, which is exactly when a CHECK is owed.
+    //
+    // The rule is **not** "the column's type constrains it" — that is what ADR-0373 wrote here and
+    // it is false of `recorded_at`, whose type admits two infinities and a year range four times
+    // wider than the one `toISOString()` can render. The rule is: **a column is owed a CHECK iff a
+    // reader parses it against a contract narrower than the column's type.** The three exempt ones
+    // are exempt because *nothing parses them at all* — `READ_COLUMNS` in
+    // `forensics-pg/src/chain-log-store.ts` names neither `id` nor `created_at`, and
+    // `ChainedLogEntrySchema` has no field for either, so no value they can hold reaches a parse;
+    // `tenant_id` travels in the `WHERE` clause as the scope and is never mapped into the record
+    // (nullable, NULL meaning platform — ADR-0331).
     const uncovered = META_FORENSIC_CHAIN_ENTRIES.columns
       .filter((c) => c.check === undefined)
       .map((c) => c.name);
-    expect(uncovered).toEqual(["id", "tenant_id", "recorded_at", "created_at"]);
+    expect(uncovered).toEqual(["id", "tenant_id", "created_at"]);
   });
 
   it("META_FORENSIC_CHAIN_CHECKPOINTS leaves no column of an anchor uncheckable", () => {
@@ -1765,16 +1857,29 @@ describe("table column shapes", () => {
     // same defect pointing the other way.
     expect(col("checkpointed_by")?.check).not.toContain("BETWEEN");
     expect(col("external_anchor_reference")?.check).not.toContain("BETWEEN");
+    // The **third** column in the same state, which ADR-0374 exempted in this very test on the
+    // stated ground that it is "the TIMESTAMPTZ that `Iso8601` parses to". That is the claim this
+    // line retracts: the type admits two infinities and years up to 294276, and the contract admits
+    // only what `Date.prototype.toISOString()` can render with a four-digit year. Measured live as
+    // the non-owner `serving` role, with both of ADR-0374's CHECKs already applied:
+    // `checkpointed_at = 'infinity'` is `UPDATE 1`, and `latest()` then throws
+    // `CheckpointRowUnreadable`. So ADR-0374's part 2 (route the refusal into the verdict) does
+    // cover this value — `readOne` wraps *any* throw from the mapper, not only a `ZodError` — and it
+    // is part 3 that was incomplete: that ADR's claim that its CHECKs "make the write itself fail,
+    // so the attack is refused rather than merely reported" held for two columns of three.
+    expect(col("checkpointed_at")?.check).toBe(READABLE_INSTANT_WINDOW("checkpointed_at"));
     // The whole-table invariant, so an eleventh column added without a CHECK fails here rather
-    // than being discovered when an hourly proof stops producing a verdict. The four exempt ones
-    // are each fully constrained by their declared type: `id` and `created_at` are UUID and
-    // TIMESTAMPTZ with defaults, `checkpointed_at` is the TIMESTAMPTZ that `Iso8601` parses to, and
-    // `tenant_id` is the scope rather than a field of `ChainCheckpointSchema` at all — nullable,
-    // with NULL meaning platform (ADR-0331).
+    // than being discovered when an hourly proof stops producing a verdict. The rule is the entries
+    // table's — a column is owed a CHECK iff a reader parses it against a contract narrower than
+    // its type — and the three exempt ones are exempt because nothing parses them: `READ_COLUMNS`
+    // in `forensics-pg/src/checkpoint-store.ts` names neither `id` nor `created_at` and
+    // `ChainCheckpointSchema` has no field for either, while `tenant_id` is the scope carried in the
+    // `WHERE` clause rather than a field of the record (nullable, NULL meaning platform —
+    // ADR-0331).
     const uncovered = META_FORENSIC_CHAIN_CHECKPOINTS.columns
       .filter((c) => c.check === undefined)
       .map((c) => c.name);
-    expect(uncovered).toEqual(["id", "tenant_id", "checkpointed_at", "created_at"]);
+    expect(uncovered).toEqual(["id", "tenant_id", "created_at"]);
   });
 
   it("META_GDPR_DELETION_REQUESTS outlives the verifier and names its proof", () => {

@@ -11266,7 +11266,52 @@ export const META_FORENSIC_CHAIN_ENTRIES: TableDefinition = {
       check:
         "kind IN ('audit_event', 'access_event', 'data_change', 'config_change', 'security_event', 'deletion_event', 'approval_decision')",
     },
-    { name: "recorded_at", type: "TIMESTAMPTZ", notNull: true },
+    /**
+     * The window `Iso8601` can render, and the column ADR-0373 **exempted by name** on this very
+     * table (ADR-0374's addendum). That ADR fenced `actor_reference` and `signature` and called this
+     * one "the TIMESTAMPTZ that `Iso8601` parses to" — which is false in the same way the sibling
+     * table's `checkpointed_at` was: `recorded_at` is inside `canonicalEntryBytes`, so a tamper here
+     * is signature-breaking exactly as `actor_reference` is, and `TIMESTAMPTZ` admits two infinities
+     * and years to 294276 while `z.string().datetime({offset: true})` admits none of them. Measured
+     * live as the non-owner `serving` role in tenant context: `SET recorded_at = 'infinity'` is
+     * `UPDATE 1`, and the real `rowToChainEntry` then refuses the row.
+     *
+     * **The alarm was never buried here, and that is why this is a missing fence rather than a live
+     * hole**: ADR-0373's own read-path fix covers it, so `loadChain` answers `entries=11
+     * unreadable=1` and `unreadableEntryVerdict` grades it `compromised`. What was missing is only
+     * the write fence, which is this.
+     *
+     * Three things about the expression are measured rather than chosen, and the second is the one
+     * worth knowing before touching it.
+     *
+     * The lower bound is **1 BC and not 1 AD**, because `toISOString()` renders JS year 0 as
+     * `0000-01-01T00:00:00.000Z` and zod **admits** it — and JS year 0 is Postgres 1 BC. An
+     * `0001-01-01` AD bound refuses a value the reader accepts, which is the same defect ADR-0373
+     * refused an upper bound for, pointing the other way.
+     *
+     * The explicit **`+00` on both bounds is load-bearing**: a bare literal is folded in the
+     * *applying session's* `TimeZone`, so `'0001-01-01 BC'` under `Asia/Tokyo` lands at
+     * `0001-12-31 … BC` — it crosses the era boundary and moves the bound by 9h18m59s — while the
+     * offset-bearing form folds to the identical epoch under UTC, Tokyo and Los Angeles. The
+     * reconciler stays clean either way (`pg_get_constraintdef` renders at read time, so both sides
+     * render in one session and agree), which is exactly why the bare form would go unnoticed.
+     *
+     * The upper bound is **half-open** rather than `<= '9999-12-31T23:59:59.999999Z'`: both are
+     * equivalent, and the inclusive form encodes Postgres's microsecond resolution as a magic number
+     * where this one states the rule. There is deliberately no `isfinite()` clause — the range
+     * bounds refuse both infinities on their own, so it could never fire — and deliberately no
+     * `extract(year from …)` form, which Postgres *accepts* in a CHECK and which is **STABLE**, so
+     * the constraint would mean different things in the writing session and a later validation
+     * (`9999-12-31T23:30:00Z` is year 9999 under UTC and 10000 under Tokyo). `extract` does not
+     * raise on infinity either; it returns `Infinity`.
+     */
+    {
+      name: "recorded_at",
+      type: "TIMESTAMPTZ",
+      notNull: true,
+      check:
+        "recorded_at >= '0001-01-01 00:00:00+00 BC'::timestamptz AND recorded_at < '10000-01-01T00:00:00Z'::timestamptz",
+    },
     /**
      * Non-empty, matching `ChainedLogEntrySchema`'s `z.string().min(1)` and no more (ADR-0373).
      *
@@ -11359,7 +11404,30 @@ export const META_FORENSIC_CHAIN_CHECKPOINTS: TableDefinition = {
     { name: "tenant_id", type: "UUID" },  // platform record: deliberately no TENANT_FK (ADR-0335) — the cascade destroyed the record of the deletion; see TENANT_FK's note
     { name: "sequence_number", type: "BIGINT", notNull: true, check: "sequence_number >= 0" },
     { name: "root_hash", type: "CHAR(64)", notNull: true, check: "root_hash ~ '^[0-9a-f]{64}$'" },
-    { name: "checkpointed_at", type: "TIMESTAMPTZ", notNull: true },
+    /**
+     * `META_FORENSIC_CHAIN_ENTRIES.recorded_at`'s window — read that column's note for the three
+     * measurements behind the expression — and the **third column of this table** carrying the
+     * attack ADR-0374 is about, which that increment's first commit missed while asserting that its
+     * two CHECKs "make the write itself fail".
+     *
+     * `'infinity'` is admitted by `TIMESTAMPTZ`, arrives from node-postgres as the **number**
+     * `Infinity` (so `asIso`'s `instanceof Date` is false and `String()` yields `"Infinity"`), and
+     * is then refused by `ChainCheckpointSchema` — identically for `-infinity`, `10000-01-01` and
+     * `294276-01-01`, all verified live. Reachable as a non-owner for this table's own stated
+     * reason: the isolation policy is `ALL`-scope, so its `USING` doubles as its `WITH CHECK`.
+     *
+     * Not a buried alarm, which is the one thing ADR-0374's addendum had to correct about its own
+     * framing: `readOne` catches **any** throw from the mapper rather than only a `ZodError`, so
+     * `latest()` answers `CheckpointRowUnreadable` and `anchorRowsRefused` grades it `compromised`
+     * on both proof modes. The fence is what was missing, not the detector.
+     */
+    {
+      name: "checkpointed_at",
+      type: "TIMESTAMPTZ",
+      notNull: true,
+      check:
+        "checkpointed_at >= '0001-01-01 00:00:00+00 BC'::timestamptz AND checkpointed_at < '10000-01-01T00:00:00Z'::timestamptz",
+    },
     /**
      * Non-empty, matching `ChainCheckpointSchema`'s `z.string().min(1)` and no more (ADR-0374).
      *
