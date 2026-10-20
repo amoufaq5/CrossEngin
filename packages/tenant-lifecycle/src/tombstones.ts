@@ -19,6 +19,80 @@ export const TOMBSTONE_KINDS = [
 export type TombstoneKind = (typeof TOMBSTONE_KINDS)[number];
 export const TombstoneKindSchema = z.enum(TOMBSTONE_KINDS);
 
+/**
+ * Whether destroying a **whole tenant** is a truthful performance of this kind.
+ *
+ * The one question no refinement below can answer, and the reason it cannot: a tombstone's `scope`
+ * is a list of schemas and tables, so the contract can see *what* was destroyed and never *whose*.
+ * `data_subject_erasure` must reference a deletion request (refined below) and the request carries a
+ * required `subjectIdentifier`, so the proof names its subject transitively and is internally
+ * consistent — while nothing anywhere bounds that kind's scope. A tenant-wide scope under it
+ * therefore parses, verifies, and anchors, and it is exactly what the asynchronous Article 17 runner
+ * wrote: a signed claim that one person's data was erased, over a `DELETE` of every table and a
+ * `DROP SCHEMA`.
+ *
+ * A total map rather than a predicate with a `switch`, so a sixth kind is a compile error that has
+ * to say which side it is on — and an enum member is the right granularity because this is a
+ * property of the *claim*, not of a deployment or a request.
+ *
+ * `scheduled_purge` is `true` and is not a loophole: it is a tenant purged on a schedule, which is
+ * what the kind names. `abandoned_export_purge` is `false` because it claims export artefacts, and a
+ * tenant-wide delete is not a wider version of that — it is a different act.
+ */
+export const TENANT_WIDE_ERASURE_HONOURS: Readonly<Record<TombstoneKind, boolean>> =
+  Object.freeze({
+    tenant_deletion: true,
+    scheduled_purge: true,
+    user_deletion: false,
+    data_subject_erasure: false,
+    abandoned_export_purge: false,
+  });
+
+/** `TENANT_WIDE_ERASURE_HONOURS` read as a predicate, so no caller indexes the map by hand. */
+export function tenantWideErasureHonours(kind: TombstoneKind): boolean {
+  return TENANT_WIDE_ERASURE_HONOURS[kind];
+}
+
+/**
+ * Why a tenant-wide erasure cannot perform this kind — the sentence a refusal prints.
+ *
+ * Keyed only on the kinds that answer `false`, because the honoured ones have nothing to explain,
+ * and each one names **what the claim is about** rather than a field to supply: the remedy for
+ * `data_subject_erasure` is a per-subject erasure this platform does not have (`@crossengin/
+ * data-lineage` has zero importers and no SAR route, store or scheduler exists), and telling an
+ * operator to pass a subject identifier would have them manufacture the falsely-true proof instead
+ * of the tenant-wide one — a worse record, because a reader could no longer see that the scope and
+ * the claim disagree.
+ */
+const TENANT_WIDE_ERASURE_REFUSALS: Readonly<
+  Record<Exclude<TombstoneKind, "tenant_deletion" | "scheduled_purge">, string>
+> = Object.freeze({
+  data_subject_erasure:
+    "claims one data subject's data was erased, and a tenant-wide erasure destroys every subject's;" +
+    " performing it needs a per-subject erasure, which this platform does not have",
+  user_deletion:
+    "claims one user's data was erased, and a tenant-wide erasure destroys every user's; performing" +
+    " it needs a per-user erasure, which this platform does not have",
+  abandoned_export_purge:
+    "claims expired export artefacts were purged, which is a different act from destroying the" +
+    " tenant that owns them",
+});
+
+/**
+ * Why a tenant-wide erasure cannot perform this kind, or `null` when it can.
+ *
+ * The one reader a caller wants, and the reason it is a function rather than the map above being
+ * exported: the map is keyed on a *subset* of the enum, so every caller holding a plain
+ * `TombstoneKind` would have to narrow it first — and the narrowing a predicate returning `boolean`
+ * gives is none, so each one would reach for a cast. A cast standing in for a check is the shape
+ * ADR-0362 found a four-eyes clause unverified behind.
+ */
+export function tenantWideErasureRefusal(kind: TombstoneKind): string | null {
+  return kind in TENANT_WIDE_ERASURE_REFUSALS
+    ? TENANT_WIDE_ERASURE_REFUSALS[kind as keyof typeof TENANT_WIDE_ERASURE_REFUSALS]
+    : null;
+}
+
 export const ANCHOR_KINDS = [
   "internal_audit_log",
   "trillian_log",

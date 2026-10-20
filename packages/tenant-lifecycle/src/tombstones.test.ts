@@ -7,6 +7,7 @@ import {
   RECORD_STORAGE_BEARING_PROOF_VERSIONS,
   RECORD_STORAGE_MODELS,
   RETENTION_BEARING_PROOF_VERSIONS,
+  TENANT_WIDE_ERASURE_HONOURS,
   TOMBSTONE_KINDS,
   TOMBSTONE_PROOF_VERSIONS,
   TombstoneCapabilityDeclarationSchema,
@@ -20,6 +21,8 @@ import {
   proofVersionCoversRetentionClaim,
   readDeclaredAbsences,
   readRecordStorage,
+  tenantWideErasureHonours,
+  tenantWideErasureRefusal,
   readRetentionClaim,
   readUnerasedSubsystems,
   tombstoneAge,
@@ -1236,5 +1239,81 @@ describe("helpers", () => {
 
   it("isCryptographicallyAnchored false for internal_audit_log only", () => {
     expect(isCryptographicallyAnchored(base)).toBe(false);
+  });
+});
+
+/**
+ * The question no refinement in this file can answer: a `scope` is a list of schemas and tables, so
+ * the contract sees *what* was destroyed and never *whose*.
+ */
+describe("TENANT_WIDE_ERASURE_HONOURS", () => {
+  it("is total over TOMBSTONE_KINDS", () => {
+    expect(Object.keys(TENANT_WIDE_ERASURE_HONOURS).sort()).toEqual([...TOMBSTONE_KINDS].sort());
+  });
+
+  it("honours exactly the two tenant-shaped kinds", () => {
+    // An exact set rather than key by key, so flipping a member back fails here rather than
+    // passing quietly (ADR-0345's reason for pinning ABAC_RECORD_AVAILABILITY's `never` set).
+    const honoured = TOMBSTONE_KINDS.filter((k) => tenantWideErasureHonours(k));
+    expect([...honoured].sort()).toEqual(["scheduled_purge", "tenant_deletion"]);
+  });
+
+  it("gives every refused kind a reason, and the honoured ones none", () => {
+    for (const kind of TOMBSTONE_KINDS) {
+      const refusal = tenantWideErasureRefusal(kind);
+      expect(refusal === null).toBe(tenantWideErasureHonours(kind));
+      if (refusal !== null) expect(refusal.length).toBeGreaterThan(20);
+    }
+  });
+
+  it("names what the claim is about, never a field to supply", () => {
+    // The remedy for data_subject_erasure is a per-subject erasure this platform does not have.
+    // Telling an operator to pass a subject identifier would have them manufacture the
+    // falsely-true proof instead of the tenant-wide one — a worse record, because a reader could
+    // no longer see that the scope and the claim disagree (ADR-0337's direction).
+    for (const kind of TOMBSTONE_KINDS) {
+      const refusal = tenantWideErasureRefusal(kind);
+      if (refusal === null) continue;
+      expect(refusal).not.toContain("subjectIdentifier");
+      expect(refusal).not.toContain("pass ");
+    }
+  });
+
+  it("does not bound a data_subject_erasure's scope — which is why the map exists", () => {
+    // A tenant-wide scope under that kind parses, so no contract-level check could have caught
+    // what the asynchronous runner wrote. Pinned so the map's reason for existing is not lost if
+    // a refinement is added later: this assertion is the thing that would then fail.
+    const parsed = TombstoneRecordSchema.safeParse({
+      id: "tomb_abc12345abc12345",
+      kind: "data_subject_erasure",
+      tenantId: "t-1",
+      relatedDeletionRequestId: "gdr_1",
+      deletedAt: "2026-05-14T10:00:00Z",
+      executedBy: "u-executor",
+      approvedBy: "u-approver",
+      proofVersion: "v1",
+      scope: {
+        schemas: ["t_abc"],
+        tables: ["meta.audit_log", "public.patient"],
+        objectStorageBuckets: [],
+        backupGenerations: [],
+        searchIndexes: [],
+        cacheKeys: [],
+        rowCount: 9999,
+        storageBytes: 1_000_000,
+        fileCount: 0,
+      },
+      contentManifestSha256: "a".repeat(64),
+      proofSha256: "b".repeat(64),
+      anchors: [
+        {
+          kind: "internal_audit_log",
+          reference: "audit-log-2026-05-14",
+          anchoredAt: "2026-05-14T10:00:00Z",
+        },
+      ],
+      invalidationOfPriorTombstoneId: null,
+    });
+    expect(parsed.success).toBe(true);
   });
 });

@@ -3,7 +3,12 @@ import type { ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { Handler, HandlerInput } from "@crossengin/api-gateway-runtime";
 
 import {
+  tenantWideErasureHonours,
+  tenantWideErasureRefusal,
+} from "@crossengin/tenant-lifecycle";
+import {
   DELETABLE_TOMBSTONE_KINDS,
+  ROUTE_TOMBSTONE_KINDS,
   DeleteTenantInputSchema,
   TENANT_DELETED_OPERATION,
   TENANT_DELETE_REFUSED_OPERATION,
@@ -251,9 +256,34 @@ describe("DeleteTenantInputSchema", () => {
     expect(DeleteTenantInputSchema.safeParse({ ...BODY, confirmTenantId: "nope" }).success).toBe(false);
   });
 
-  it("accepts only the two kinds a tenant-scoped delete can produce", () => {
-    expect([...DELETABLE_TOMBSTONE_KINDS]).toEqual(["tenant_deletion", "data_subject_erasure"]);
+  it("offers only the kind a tenant-wide erasure can truthfully perform", () => {
+    // This assertion read `["tenant_deletion", "data_subject_erasure"]` and its title said "the two
+    // kinds a tenant-scoped delete can produce" — which was the defect written down as the intended
+    // behaviour: the pipeline destroys every table carrying the tenant's id and drops its schema, so
+    // it cannot produce one data subject's erasure at all.
+    expect([...DELETABLE_TOMBSTONE_KINDS]).toEqual(["tenant_deletion"]);
     expect(DeleteTenantInputSchema.safeParse({ ...BODY, kind: "scheduled_purge" }).success).toBe(false);
+    expect(DeleteTenantInputSchema.safeParse({ ...BODY, kind: "data_subject_erasure" }).success).toBe(
+      false,
+    );
+  });
+
+  it("is this route's remit minus the kinds the contracts map refuses, in both directions", () => {
+    // The literal above is written down rather than derived through a cast — `filter` types as the
+    // full union, and a cast standing in for a check is ADR-0362's class. So the derivation is
+    // asserted here instead (`pg-record-retention.ts`'s both-ways idiom): the contracts map stopping
+    // agreeing with the literal fails here, naming the kind, rather than quietly recompiling.
+    expect([...DELETABLE_TOMBSTONE_KINDS]).toEqual(
+      ROUTE_TOMBSTONE_KINDS.filter((k) => tenantWideErasureHonours(k)),
+    );
+    // And the other direction: nothing this route offers may be a kind the pipeline refuses.
+    for (const kind of DELETABLE_TOMBSTONE_KINDS) {
+      expect(tenantWideErasureRefusal(kind), kind).toBeNull();
+    }
+    // Non-vacuous: the route's remit really is wider than what it offers, so the filter removed
+    // something. Without this the pair above passes if ROUTE_TOMBSTONE_KINDS is ever narrowed to
+    // match by hand, which would retire the fence while keeping its assertions green.
+    expect(ROUTE_TOMBSTONE_KINDS.length).toBeGreaterThan(DELETABLE_TOMBSTONE_KINDS.length);
   });
 
   /**
@@ -389,25 +419,38 @@ describe("the delete route", () => {
     expect(h.deleteCalls).toEqual([]);
   });
 
-  it("refuses a data_subject_erasure with no deletion request, before the drop", async () => {
-    const h = harness();
-    const res = await call(h.ctx, DELETE, {
-      parsedBody: { ...BODY, kind: "data_subject_erasure" },
-    });
-    // The pipeline would abort after the drop had executed; refusing here keeps a recoverable
-    // mistake from costing a rolled-back transaction over a tenant's data.
-    expect(res.status).toBe(400);
-    expect(String(res.body["detail"])).toContain("relatedDeletionRequestId");
-    expect(h.deleteCalls).toEqual([]);
+  /*
+   * Two tests stood here and both asserted the defect as the intended behaviour — the shape
+   * ADR-0372 found five times over. One checked that a `data_subject_erasure` with no deletion
+   * request was refused *before the drop*, and the other that one naming its request was **accepted
+   * with a 200**: a signed claim that one person's data had been erased, over a `DELETE` of every
+   * table carrying the tenant's id and a `DROP SCHEMA`. They are replaced by their complement.
+   */
+  it("refuses a data_subject_erasure outright, whether or not it names a request", async () => {
+    for (const body of [
+      { ...BODY, kind: "data_subject_erasure" },
+      { ...BODY, kind: "data_subject_erasure", relatedDeletionRequestId: "del_1" },
+    ]) {
+      const h = harness();
+      const res = await call(h.ctx, DELETE, { parsedBody: body });
+      // 400 from the body schema rather than a hand-written guard: the kind is no longer in
+      // DELETABLE_TOMBSTONE_KINDS, so there is one refusal and it is the parse.
+      expect(res.status).toBe(400);
+      expect(h.deleteCalls).toEqual([]);
+    }
   });
 
-  it("accepts a data_subject_erasure that names its request", async () => {
+  it("still carries a deletion request reference on the kind it does offer", async () => {
+    // The reference is not what was wrong — a tenant deletion performed in answer to a subject's
+    // request should say so, and the request holds the subject. What was wrong is claiming the
+    // erasure reached only them.
     const h = harness();
     const res = await call(h.ctx, DELETE, {
-      parsedBody: { ...BODY, kind: "data_subject_erasure", relatedDeletionRequestId: "del_1" },
+      parsedBody: { ...BODY, kind: "tenant_deletion", relatedDeletionRequestId: "del_1" },
     });
     expect(res.status).toBe(200);
     expect(h.deleteCalls[0]?.["relatedDeletionRequestId"]).toBe("del_1");
+    expect(h.deleteCalls[0]?.["kind"]).toBe("tenant_deletion");
   });
 
   it("reports a rolled-back pipeline as 409, saying the tenant is unchanged", async () => {

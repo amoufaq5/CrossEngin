@@ -2,6 +2,7 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 import {
   SELF_EXEMPTION_BY_DISPOSITION,
   assembleTombstone,
+  tenantWideErasureRefusal,
   type ActionTrigger,
   type AssemblyRefusal,
   type DeletionCapabilities,
@@ -427,6 +428,45 @@ function inputRefusals(input: DeleteTenantInput): readonly PipelineRefusal[] {
         `${subsystem} is declared '${input.capabilities[subsystem]}' in this deployment and` +
         ` ${selfExemption}, but this pipeline erases it anyway; declare it 'erases' (or 'retains')` +
         " so the proof covers what the deletion destroys",
+    });
+  }
+  /*
+   * The kind has to be one a tenant-wide erasure can truthfully perform.
+   *
+   * This function destroys **every** table carrying the tenant's id and drops its schema. That is
+   * the whole of its remit and it is not a parameter, so a kind claiming a narrower subject is not
+   * an under-configured erasure — it is a claim this code cannot honour, and it was reaching the
+   * store: the asynchronous runner hardcoded `data_subject_erasure`, so every verified Article 17
+   * request destroyed the whole tenant under a signed proof saying one person's data was erased.
+   *
+   * At the `input` stage, so it is established before the transaction opens and a *returned* refusal
+   * still means nothing was destroyed — which is also what makes it deterministic for the runner,
+   * which files a returned refusal as `rejected` and strands only a throw (ADR-0321).
+   */
+  const kindRefusal = tenantWideErasureRefusal(input.kind);
+  if (kindRefusal !== null) {
+    out.push({
+      stage: "input",
+      reason: "kind_claims_a_narrower_subject",
+      detail:
+        `this pipeline erases the whole of tenant ${input.tenantId}, and kind '${input.kind}' ` +
+        kindRefusal,
+    });
+  } else if (input.subjectIdentifier !== undefined) {
+    /*
+     * And the converse, which is the wrong fix for the refusal above rather than a shape anyone
+     * passes today: no caller in the workspace supplies this field. Naming a subject on a proof
+     * whose scope is every table would be ADR-0337's falsely-true direction — the record would read
+     * as a per-subject erasure that *verifies*, where the unlabelled one at least lets a reader see
+     * that the scope and the claim disagree.
+     */
+    out.push({
+      stage: "input",
+      reason: "subject_named_on_a_tenant_wide_erasure",
+      detail:
+        `kind '${input.kind}' destroys the whole of tenant ${input.tenantId}, so naming a subject` +
+        " would put a claim in the proof that its own scope contradicts; record the subject on the" +
+        " deletion request this tombstone references instead",
     });
   }
   return out;

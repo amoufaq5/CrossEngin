@@ -19,6 +19,23 @@ const DEFAULT_SCHEDULER: IntervalScheduler = {
 export const DEFAULT_DELETION_EXECUTED_BY = "system:deletion-runner";
 export const DEFAULT_DELETION_APPROVED_BY = "system:retention-policy";
 
+/**
+ * The tombstone kind an unattended deletion claims, given what the deployment declared a verified
+ * request reaches (`--deletion-subject-scope`).
+ *
+ * One member, because `subject` is refused at parse — nothing in this platform scopes an erasure to
+ * a data subject. A map rather than the literal inline, so the day that becomes possible the second
+ * kind lands here and the compiler asks for it, instead of a second `kind:` appearing beside a
+ * condition somewhere in `node.ts`. The runner previously answered this question by hardcoding
+ * `data_subject_erasure`, which the pipeline now refuses at its `input` stage: it destroys every
+ * table carrying the tenant's id and drops its schema, which is not one subject's erasure.
+ *
+ * Typed as `TombstoneKind` by its consumer rather than imported here, so this module keeps its rule
+ * of importing no `tenant-lifecycle` (see `DeletionRunnerLike` below).
+ */
+export const TENANT_WIDE_KIND_BY_SCOPE: Readonly<Record<"tenant", "tenant_deletion">> =
+  Object.freeze({ tenant: "tenant_deletion" });
+
 /** Consecutive non-advancing sweep attempts that make a stall a condition rather than a blip. */
 export const DEFAULT_SWEEP_STALL_ATTEMPTS = 3;
 

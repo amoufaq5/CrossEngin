@@ -1061,6 +1061,40 @@ describe("parseServeArgs — reconciling a stranded deletion", () => {
     expect(() => parseServeArgs([...PG, "--deletion-stranded-after-ms", "5000"])).toThrow(/60000/);
     expect(() => parseServeArgs([...PG, "--deletion-stranded-after-ms", "nope"])).toThrow();
   });
+
+  it("accepts --deletion-subject-scope tenant and defaults it to nothing", () => {
+    // No default, because neither value is safe to assume: `tenant` destroys every subject's data
+    // when one person asks, and `subject` cannot be performed at all. The runner refuses to mount
+    // without it (node.ts), where it used to answer the question by hardcoding the kind.
+    expect(parseServeArgs(PG).deletionSubjectScope).toBeNull();
+    expect(parseServeArgs([...PG, "--deletion-subject-scope", "tenant"]).deletionSubjectScope).toBe(
+      "tenant",
+    );
+    expect(parseServeArgs([...PG, "--deletion-subject-scope=tenant"]).deletionSubjectScope).toBe(
+      "tenant",
+    );
+  });
+
+  it("refuses --deletion-subject-scope subject by name, and says what is missing", () => {
+    // In the vocabulary and refused, rather than left out so the flag has one legal value: an
+    // operator who needs it has a declaration to reach for and a refusal naming the real blocker,
+    // where a single legal value would read as the platform's position on the question.
+    let message = "";
+    try {
+      parseServeArgs([...PG, "--deletion-subject-scope", "subject"]);
+    } catch (e) {
+      message = e instanceof Error ? e.message : String(e);
+    }
+    expect(message).toContain("cannot erase one data subject");
+    // Names the capability, not a field to supply — the remedy is a subsystem, and telling an
+    // operator to pass a subject identifier would have them manufacture a falsely-true proof.
+    expect(message).toContain("P1.4");
+    expect(message).not.toContain("subjectIdentifier");
+    // And an unknown value is an ordinary usage error rather than this one.
+    expect(() => parseServeArgs([...PG, "--deletion-subject-scope", "both"])).toThrow(
+      /tenant \| subject/,
+    );
+  });
 });
 
 describe("parseServeArgs — deletion-evidence escalation", () => {

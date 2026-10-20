@@ -482,6 +482,16 @@ export interface ServeOptions {
    * deployment the proof covered.
    */
   readonly deletionCapabilities: string | null;
+  /**
+   * Whether a verified Article 17 request erases one data subject or the whole tenant.
+   *
+   * REQUIRED by the deletion runner, and there is no default because neither value is safe to
+   * assume: `tenant` destroys every subject's data when one person asks, which is honest only where
+   * a tenant is one subject, and the alternative is refused at parse because nothing can perform it.
+   * Before this the runner hardcoded `data_subject_erasure` over a tenant-wide erasure, so the
+   * question was answered — wrongly, and in the signed proof.
+   */
+  readonly deletionSubjectScope: "tenant" | null;
   /** Run the reverse-direction audit (completed requests whose proof no longer stands up) every Nth deletion-runner tick. Default 0 = never; it re-hashes every completed request's tombstone, so it is far more expensive than the forward pass. */
   readonly deletionAuditEveryTicks: number | null;
   /**
@@ -668,6 +678,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let deletionStrandedAfterMs: number | null = null;
   let deletionEscalationConfig: string | null = null;
   let deletionCapabilities: string | null = null;
+  let deletionSubjectScope: "tenant" | null = null;
   let deletionAuditEveryTicks: number | null = null;
   let deletionSweepStallAfter: number | null = null;
   let deletionRequestDeadlineDays: number | null = null;
@@ -1355,6 +1366,37 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       arg.startsWith("--deletion-capabilities=")
     ) {
       deletionCapabilities = takeValue(arg, next, "--deletion-capabilities");
+      i += consumed();
+    } else if (
+      arg === "--deletion-subject-scope" ||
+      arg.startsWith("--deletion-subject-scope=")
+    ) {
+      const raw = takeValue(arg, next, "--deletion-subject-scope");
+      /*
+       * `subject` is in the vocabulary and refused by name, rather than left out so the flag has one
+       * legal value. An operator whose deployment really does need to erase one person has a
+       * declaration to reach for and a refusal naming what is missing; leaving it out would make
+       * them read the single legal value as the platform's position on the question.
+       *
+       * Refused at parse rather than at boot because nothing about the deployment changes the
+       * answer: no code anywhere can scope an erasure to a subject, so the refusal is a property of
+       * this binary (ADR-0340's shape, not ADR-0338's — there is no degraded-but-coherent version).
+       */
+      if (raw === "subject") {
+        throw new CliUsageError(
+          "--deletion-subject-scope subject: this platform cannot erase one data subject's data." +
+            " Nothing scopes an erasure to a subject — the deletion pipeline destroys every table" +
+            " carrying the tenant's id and drops its schema — so declaring it would make every" +
+            " verified request refuse. Declare 'tenant' if a request here means the whole tenant," +
+            " and see register P1.4 (GDPR Article 15/20 and per-subject erasure are unbuilt).",
+        );
+      }
+      if (raw !== "tenant") {
+        throw new CliUsageError(
+          `invalid --deletion-subject-scope: ${raw} (tenant | subject)`,
+        );
+      }
+      deletionSubjectScope = raw;
       i += consumed();
     } else if (
       arg === "--deletion-audit-every-ticks" ||
@@ -2069,6 +2111,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     deletionStrandedAfterMs,
     deletionEscalationConfig,
     deletionCapabilities,
+    deletionSubjectScope,
     deletionAuditEveryTicks,
     deletionSweepStallAfter,
     deletionRequestDeadlineDays,
@@ -2651,6 +2694,17 @@ Options:
   --deletion-stranded-after-ms <n>  How long a request must sit in_progress before an ABSENCE of
                        evidence is read as "never committed" (>=60000, default 3600000). A tombstone
                        naming the request is conclusive at any age; an absence never is
+  --deletion-subject-scope <s>  tenant | subject. What a verified Article 17 request erases.
+                       REQUIRED by --deletion-request-routes, with no default, because neither
+                       value is safe to assume. "tenant" says a request here means the whole
+                       tenant: every table carrying its id is emptied and its schema dropped, and
+                       the proof says tenant_deletion referencing the request — honest only where a
+                       tenant is one data subject, since otherwise one person's request destroys
+                       everyone else's data. "subject" is REFUSED: nothing in this platform scopes
+                       an erasure to a subject (register P1.4), so declaring it would make every
+                       verified request refuse. Before this flag the runner hardcoded
+                       data_subject_erasure over the tenant-wide erasure, so the question was
+                       answered wrongly inside the signed proof
   --deletion-capabilities <file>  JSON: one of "erases" | "retains" | "absent" |
                        "present_not_erased" for every one of the six deletion subsystems. REQUIRED
                        by the deletion routes and the runner, because every default is wrong:

@@ -45,7 +45,31 @@ const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0
 /** Mirrors `TOMBSTONE_ID_REGEX` in the contract, so a generated id cannot fail downstream. */
 const TOMBSTONE_ID_RE = /^tomb_[A-Za-z0-9_-]{12,40}$/;
 
-export const DELETABLE_TOMBSTONE_KINDS = ["tenant_deletion", "data_subject_erasure"] as const;
+/**
+ * The kinds this route may be *asked* for, before the honouring question is applied.
+ *
+ * Its own remit, narrower than `TOMBSTONE_KINDS`: `scheduled_purge` is a scheduler's kind and
+ * `abandoned_export_purge` an export reaper's, and neither belongs on a human-approved route. Which
+ * is also why `DELETABLE_TOMBSTONE_KINDS` is not simply the contracts map read wholesale — that
+ * would hand this route `scheduled_purge`, a widening nobody asked for.
+ */
+export const ROUTE_TOMBSTONE_KINDS = ["tenant_deletion", "data_subject_erasure"] as const;
+
+/**
+ * What the route actually offers: its remit minus the kinds a tenant-wide erasure cannot truthfully
+ * perform, so the surface never advertises a value the pipeline always refuses (ADR-0359's rule —
+ * never offer a surface the server discards). `data_subject_erasure` is gone from it because
+ * `deleteTenantAtomically` empties every table carrying the tenant's id and drops its schema, which
+ * is not one data subject's erasure.
+ *
+ * **Written down and fenced, not derived through a cast.** `ROUTE_TOMBSTONE_KINDS.filter(...)` types
+ * as the full union, so stating the narrower tuple needs an `as` — and a cast standing in for a
+ * check is the shape ADR-0362 found a four-eyes clause sitting unverified behind. So this is the
+ * literal, and `tenant-deletion-routes.test.ts` asserts it equals the filtered list in both
+ * directions (`pg-record-retention.ts`'s idiom): the map stopping agreeing with it is a test
+ * failure naming the kind, rather than a cast that quietly keeps compiling.
+ */
+export const DELETABLE_TOMBSTONE_KINDS = ["tenant_deletion"] as const;
 export type DeletableTombstoneKind = (typeof DELETABLE_TOMBSTONE_KINDS)[number];
 
 /**
@@ -397,14 +421,17 @@ function buildDeleteHandler(ctx: TenantDeletionRoutesContext): Handler {
         detail: "approvedBy must not be the caller: deleting a tenant needs a second person",
       });
     }
-    if (parsed.data.kind === "data_subject_erasure" && parsed.data.relatedDeletionRequestId === undefined) {
-      // The contract requires it and the pipeline would abort *after* the drop had executed. Refusing
-      // here keeps a recoverable mistake from costing a rolled-back transaction over a tenant's data.
-      return json(400, {
-        error: "invalid_request",
-        detail: "data_subject_erasure requires relatedDeletionRequestId",
-      });
-    }
+    /*
+     * A guard stood here refusing `data_subject_erasure` with no `relatedDeletionRequestId`, because
+     * the contract requires the pair and the pipeline would otherwise abort *after* the drop had
+     * executed. It is **deleted** rather than kept: that kind is no longer in
+     * `DELETABLE_TOMBSTONE_KINDS`, so `parsed.data.kind` cannot hold it and the condition could
+     * never fire — and a check that cannot fire reads as coverage it does not provide
+     * (ADR-0361's reason for deleting `validateReports`' unreachable duplicate check). The
+     * typechecker found it, which is the argument for the kind set being a narrowed type rather
+     * than a runtime filter. If a kind requiring a request reference is ever offered here again,
+     * this is the shape to restore.
+     */
 
     const at = (ctx.clock ?? ((): Date => new Date()))().toISOString();
     const tombstoneId = (ctx.newTombstoneId ?? (() => newTombstoneId(crypto.randomUUID())))();

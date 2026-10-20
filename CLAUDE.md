@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 373 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 374 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 20,156 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 20,167 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -2023,6 +2023,51 @@ type errors.
   on top of what a Payment already settled (**AR net −50, cash +170**), silently, because the entry
   numbers differ so no constraint fires. ADR-0366's rule read forward: a *proposed addition* is
   withdrawn with its refutation exactly as a retention is.
+
+  ADR-0379 takes the register's most serious remaining item — an Article 17 request naming one data
+  subject erasing the whole tenant — and the class is **a claim the code cannot make**. The runner
+  hardcoded `kind: "data_subject_erasure"` over a pipeline whose entire remit is to empty every
+  table carrying the tenant's id and drop its schema, so every verified request destroyed everyone's
+  data under a signed proof saying one person's had been erased. Live, with the pre-fix behaviour
+  reproduced by a two-point mutation on one cluster: Bob asked, the stored tombstone read
+  `kind=data_subject_erasure rows=3`, and **0 records were left — including Carol's, who never
+  asked**. After, the same flow stores `kind=tenant_deletion` referencing the request.
+  **Nothing downstream could have caught it, and that is the finding rather than an aside.** The
+  kind's only refinement is that it reference a deletion *request*, the request's `subjectIdentifier`
+  is required, so the proof names its subject **transitively and is internally consistent** — while
+  no refinement anywhere bounds that kind's **scope**, because a `DeletionScope` is a list of
+  schemas and tables and the contract sees *what* was destroyed and never *whose*. A tenant-wide
+  scope under it parses, hashes, verifies and anchors, measured. So the two obvious fixes are both
+  wrong: **threading `subjectIdentifier` makes the record worse**, since a subject named on a proof
+  covering every table reads as a per-subject erasure that *verifies* where the unlabelled one at
+  least lets a reader see the contradiction (ADR-0337's direction, and the field exists on
+  `DeleteTenantInput` with **no caller in the workspace**); and refusing the kind at the runner alone
+  would make every verified request refuse, **silencing the only wired Article 12(3) instrument**,
+  since `auditCompleted` walks `status = 'completed'` and a path that cannot complete is never
+  audited for lateness.
+  So the fix is one level up and in three parts: `TENANT_WIDE_ERASURE_HONOURS`, a total map over
+  `TOMBSTONE_KINDS` answering whether destroying a whole tenant *truthfully performs* that kind
+  (`tenant_deletion` and `scheduled_purge` yes, the other three no), refused at the pipeline's
+  **`input`** stage so a returned refusal still means nothing was destroyed and the runner files it
+  `rejected` rather than stranding it; `--deletion-subject-scope tenant|subject`, **required** by the
+  runner with no default on ADR-0328's argument one question across — that flag says what the
+  deployment *holds* and this one what a verified request *reaches*, and neither value is safe to
+  assume since `tenant` destroys every subject's data when one asks while `subject` is **refused at
+  parse by name**, naming the missing per-subject capability (P1.4) rather than a flag to add; and
+  the synchronous route's kind set narrowed to what the map admits.
+  Four things were sharper than the defect. **The map's own type refused the mutation** — restoring
+  the hardcoded kind is `TS2322` against `Readonly<Record<"tenant", "tenant_deletion">>`, so the
+  pre-fix line does not compile in the post-fix tree and the before-measurement needed the
+  annotation widened first. **Two existing tests asserted the defect as the intended behaviour**
+  (ADR-0372's shape for the sixth time), one of them accepting a `data_subject_erasure` with a
+  **200**, and a third titled *"accepts only the two kinds a tenant-scoped delete can produce"*
+  naming both — the defect written down as a specification. **A guard was deleted rather than kept**:
+  it refused that kind with no request reference and could no longer fire, and the typechecker found
+  it, which is the argument for the kind set being a narrowed type rather than a runtime filter.
+  And the route's narrowed list is **written down and fenced in both directions** rather than
+  derived through a cast, because `filter` types as the full union and an `as` there would be
+  ADR-0362's annotation-standing-in-for-a-check — with a non-vacuity assertion beside it, so
+  narrowing the remit by hand cannot retire the fence while keeping it green.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -8881,7 +8926,35 @@ by it**.
    compose connects as `POSTGRES_USER`, the same role that ran `migrate`, so the owner bypasses RLS.
    It stops holding the moment a deployment uses a least-privilege serving role, which is the
    configuration every other store in the repo is written for.
-4. **An Article 17 request naming one data subject erases the whole tenant.** `subjectIdentifier`
+4. ~~**An Article 17 request naming one data subject erases the whole tenant.**~~ — **closed by
+   ADR-0379**, which corrected this entry a third time and found that **the two readings it had
+   settled on were both the wrong fix**. The mechanism is confirmed and the exposure is bounded:
+   **no deletion flag appears on any shipped compose `command:`** (both occurrences of the word in
+   `docker-compose.yml` are comments), so no shipped deployment ran it, while `ORACLE.md` documents
+   how to mount it. What this entry had wrong: `TombstoneRecordSchema` does **not** "require no
+   subject for that kind" in the sense that matters — it requires the kind to reference a deletion
+   *request*, and the request's `subjectIdentifier` is required, so **the proof names its subject
+   transitively and is internally consistent**. What nothing anywhere bounds is that kind's
+   **scope**: a `DeletionScope` is a list of schemas and tables, so the contract sees *what* was
+   destroyed and never *whose*, and a tenant-wide scope under `data_subject_erasure` parses, hashes,
+   verifies and anchors (measured). So no downstream check could have caught it, and **threading
+   `subjectIdentifier` would have made the record worse** — a subject named on a proof whose scope is
+   every table reads as a per-subject erasure that *verifies*, where the unlabelled one at least lets
+   a reader see that scope and claim disagree (ADR-0337's direction). The fix is one level up:
+   `TENANT_WIDE_ERASURE_HONOURS`, a total map over `TOMBSTONE_KINDS` answering whether destroying a
+   whole tenant truthfully performs that kind, refused at the pipeline's **`input`** stage so a
+   returned refusal still means nothing was destroyed; `--deletion-subject-scope tenant|subject`
+   required by the runner with no default (ADR-0328's argument — that flag says what the deployment
+   *holds*, this one what a request *reaches*), `subject` refused at parse by name because nothing
+   can perform it; and the route's kind set narrowed to what the map admits, written down and fenced
+   both ways rather than cast (ADR-0362). Live before/after on one cluster: Bob asked, and the
+   pre-fix proof read `kind=data_subject_erasure rows=3` with **0 records left** including Carol's,
+   who never asked; after, the same flow stores `kind=tenant_deletion` referencing the request.
+   What remains is ADR-0379's open ends — chiefly that **per-subject erasure is still unbuilt**
+   (P1.4), so this increment makes the platform honest about not having it rather than providing it,
+   and that `tenant` is over-deletion for a multi-user tenant with nothing saying which tenants
+   those are.
+   The original entry, kept because its measurements are what the fix rests on: `subjectIdentifier`
    is required on the submit body and the stored record, `DeletionRunnerOptions.run` has no field
    that could carry it, and `node.ts` calls `deleteTenantAtomically` with
    `kind: "data_subject_erasure"` over a tenant-wide `DELETE` plus `DROP SCHEMA` — while

@@ -357,6 +357,7 @@ import {
   DEFAULT_DELETION_APPROVED_BY,
   DEFAULT_DELETION_EXECUTED_BY,
   DeletionScheduler,
+  TENANT_WIDE_KIND_BY_SCOPE,
   type TombstoneSweepPage,
   type TombstoneSweepProgress,
 } from "./deletion-scheduler.js";
@@ -4021,9 +4022,25 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         "[platform] --deletion-runner-ms requires --deletion-capabilities (an unattended deletion " +
           "signs a proof nobody reviews); skipping",
       );
+    } else if (options.deletionSubjectScope === null) {
+      // Refused on `--deletion-capabilities`' own argument, one question across: that flag says what
+      // the deployment *holds*, and this one says what a verified request *reaches*. The runner used
+      // to answer it by hardcoding `data_subject_erasure`, so every scheduled deletion destroyed the
+      // whole tenant under a signed claim that one person's data was erased — unattended, and with
+      // the proof internally consistent, since the kind's only refinement is that it reference a
+      // request and the request names a subject. No default is safe: `tenant` destroys every
+      // subject's data when one asks, and the alternative is refused at parse because nothing can
+      // perform it.
+      console.warn(
+        "[platform] --deletion-runner-ms requires --deletion-subject-scope (a verified request " +
+          "erases the whole tenant here, and the proof has to say so); skipping",
+      );
     } else {
       const runConn = conn;
       const runnerCapabilities = deletionCapabilities;
+      // Hoisted, not read through `options` at the call site: the kind is chosen inside the `run`
+      // closure, where the `else if (… === null)` guard above does not narrow.
+      const runnerKind = TENANT_WIDE_KIND_BY_SCOPE[options.deletionSubjectScope];
       const emitter = auditEmitter;
       const tombstones = new PostgresTombstoneStore(runConn, auditChainProducer, schemaOpt);
       const requests = new PostgresDeletionRequestStore(runConn, schemaOpt);
@@ -4050,9 +4067,22 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
               tenantId: input.tenantId,
               tombstoneId: input.tombstoneId,
               bootSchema: deletionBootSchema,
-              // Unattended, so always the data subject's erasure — never a commercial wind-down,
-              // which is a decision a person makes through the synchronous route.
-              kind: "data_subject_erasure",
+              /*
+               * `tenant_deletion`, from the deployment's `--deletion-subject-scope` declaration —
+               * **not** `data_subject_erasure`, which is what stood here.
+               *
+               * The old comment read "unattended, so always the data subject's erasure", and it was
+               * naming the *request's* subject rather than what the erasure does: this pipeline
+               * empties every table carrying the tenant's id and drops its schema, so the proof said
+               * one person's data had been erased over the destruction of every person's. It is
+               * refused at the pipeline's `input` stage now, which is why this had to move rather
+               * than merely being documented.
+               *
+               * The subject is not lost — `relatedDeletionRequestId` is carried below and the
+               * request holds a required `subjectIdentifier`, so the proof still says who asked.
+               * What it no longer says is that only their data went.
+               */
+              kind: runnerKind,
               executedBy: input.executedBy,
               approvedBy: input.approvedBy,
               capabilities: input.capabilities,

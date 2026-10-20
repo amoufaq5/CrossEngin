@@ -3,6 +3,7 @@ import {
   PIPELINE_ERASES_UNCONDITIONALLY,
   SELF_EXEMPTION_BY_DISPOSITION,
   readRecordStorage,
+  tenantWideErasureRefusal,
   verifyTombstoneHashes,
   type DeletionAttestation,
   type DeletionCapabilities,
@@ -385,6 +386,59 @@ describe("deleteTenantAtomically", () => {
         expect(h.calls, label).toEqual([]);
       }
     }
+  });
+
+  it("refuses a kind a tenant-wide erasure cannot perform, before a statement runs", async () => {
+    // The live defect: the asynchronous runner hardcoded this kind, so every verified Article 17
+    // request destroyed the whole tenant under a signed proof saying one person's data was erased.
+    // Nothing could catch it downstream — the kind's only refinement is that it reference a
+    // deletion request, which it did, so the proof parsed, verified and anchored.
+    for (const kind of ["data_subject_erasure", "user_deletion", "abandoned_export_purge"] as const) {
+      const h = harness({}, { sharedRows: SHARED_ROWS });
+      const out = await deleteTenantAtomically(h.conn, h.store, h.erase, inputOf({ kind }));
+      expect(out.ok, kind).toBe(false);
+      if (out.ok) continue;
+      expect(out.refusals.map((r) => r.stage), kind).toEqual(["input"]);
+      expect(out.refusals.map((r) => r.reason), kind).toEqual(["kind_claims_a_narrower_subject"]);
+      // The sentence comes from the contracts map, so the refusal and the contract cannot
+      // disagree about why the claim is wrong.
+      expect(out.refusals[0]?.detail, kind).toContain(tenantWideErasureRefusal(kind) ?? "");
+      // Returned, not thrown, and before the transaction opened — which is what makes it
+      // deterministic for the runner, which files a return as `rejected` and strands a throw.
+      expect(h.calls, kind).toEqual([]);
+    }
+  });
+
+  it("admits both kinds a tenant-wide erasure does perform", async () => {
+    // The complement, so the refusal above cannot be a blanket one: a fence that refused every
+    // kind would pass the test above and break every deletion.
+    for (const kind of ["tenant_deletion", "scheduled_purge"] as const) {
+      const h = harness({}, { sharedRows: SHARED_ROWS });
+      const out = await deleteTenantAtomically(h.conn, h.store, h.erase, inputOf({ kind }));
+      expect(out.ok, kind).toBe(true);
+    }
+  });
+
+  it("refuses a subject named on a tenant-wide erasure — the wrong fix for the refusal above", async () => {
+    // Nobody passes this field today. It is fenced because it is the shape a future reader reaches
+    // for on seeing `subjectIdentifier?` unsupplied: naming a subject on a proof whose scope is
+    // every table would make the record read as a per-subject erasure that *verifies*, where the
+    // unlabelled one at least lets a reader see that scope and claim disagree (ADR-0337).
+    const h = harness({}, { sharedRows: SHARED_ROWS });
+    const out = await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({ kind: "tenant_deletion", subjectIdentifier: "subject-42" }),
+    );
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusals.map((r) => r.stage)).toEqual(["input"]);
+    expect(out.refusals.map((r) => r.reason)).toEqual(["subject_named_on_a_tenant_wide_erasure"]);
+    // It must not echo the subject it refused: the value is a data subject's identifier and the
+    // refusal reaches a log line and an HTTP body (ADR-0373's rule for `unreadableDetail`).
+    expect(out.refusals[0]?.detail).not.toContain("subject-42");
+    expect(h.calls).toEqual([]);
   });
 
   it("names the performed subsystems the same way the contracts package does", () => {

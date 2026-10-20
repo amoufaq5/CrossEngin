@@ -568,6 +568,7 @@ anchored until you say so.
 | `--checkpoint-config …` | the periodic chain checkpoints the truncation check needs | a mounted **file**, see below |
 | `--integrity-proof-config …` | the periodic audit-integrity verification | a mounted **file** |
 | `--deletion-capabilities …` | GDPR Article 17 — neither deletion surface mounts without it | a mounted **file** |
+| `--deletion-subject-scope tenant` | the Article 17 **runner** — it does not mount without it | a `command:` line, and a decision (below) |
 | `--audit-chain-config …` | the hash-chained audit trail | a mounted file **holding a private key** |
 
 The last column is the honest part, and none of it is a `command:` line.
@@ -606,6 +607,24 @@ They are also not peers, which decides how that edit should be designed:
   know before you add a flag: **the keypair is not an interlock on destroying tenant data.** The
   surface that drops a tenant's schema mounts on `--store pg` plus a role, with neither the chain nor
   a capability declaration, and the integrity proof will later report its rows as unproven.
+
+**`--deletion-subject-scope` is a decision, not a value to paste.** It is the only flag in the
+table whose two legal-looking values are not a preference, and it has no default for that reason.
+
+- **`tenant`** says that a verified Article 17 request, here, means the **whole tenant**: every table
+  carrying its id is emptied and its schema is dropped. The proof then says `tenant_deletion`
+  referencing the request, so it still records who asked — it no longer claims that only their data
+  went. Honest where a tenant *is* one data subject, and over-deletion otherwise: one person's
+  request destroys every other user in that tenant.
+- **`subject`** is **refused at startup**, by name. Nothing in this platform scopes an erasure to a
+  data subject, so declaring it would make every verified request refuse. The refusal names the
+  real blocker rather than a flag to add.
+
+Before this flag the runner answered the question by itself, and wrongly: it labelled every
+scheduled deletion `data_subject_erasure` over that same tenant-wide erasure, so the signed proof
+said one person's data had been erased while every person's had been. The deletion **pipeline** now
+refuses that kind before it opens a transaction, so the runner cannot mount without saying which it
+means. If you do not run the unattended runner, you do not need this flag.
 
 **`--workflow-workers` and `--schedule-ms` are inert rather than off.** `JOB_HANDLER_PROVIDERS`
 ships empty and `erp-core` declares 14 jobs, so the job worker refuses `no_job_handlers` and the
