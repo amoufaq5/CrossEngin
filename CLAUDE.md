@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 372 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 373 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 20,136 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 20,156 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -1975,6 +1975,54 @@ type errors.
   own stated reason the pepper exists. The rule: **an entropy floor cannot see the one weakness a
   placeholder has, which is that it is published**, so the check is on the literal and not on its
   strength.
+
+  ADR-0378 takes the register's oldest arithmetic item and the class is **a wrong figure that
+  balances**. It opens by retiring two of that item's three clauses: `Currency.decimal_places` is
+  inert and **reading it could not change a figure**, because no money *amount* field in any of the
+  seven packs exceeds `scale: 2`, so a 3-decimal currency cannot be stored at three decimals
+  anywhere; and the hardcoded `100` is not the defect either, being correct for every declared field
+  and the same choice `billing/src/tax.ts:84` made when it was written. **The defect is the *rate***
+  — `Math.round(net * (rate / 100) * 100) / 100`, a double times a double — and the fix is that
+  module's own idiom with the *rate* scaled to an integer too, so the product is exact rather than a
+  double.
+  The measurement is what makes the finding both narrower and worse than the register's. Over
+  **60,000,000** (rate, net) pairs — every `decimal(6,3)` rate against nets to 20.00 — the per-line
+  error is **exactly 0 or −1 cent, 764 times under, never over**, and that one-directional property
+  *decides which figures were reachable*. For **regular tax the reconciliation gate already protected
+  the posted amount**: it accepts a line-derived split only when `|netTotal + taxTotal − total| <=
+  0.005`, and since no line can be a cent **high**, a total that ties to an exact stamped total
+  implies every line was exact — no combination of codes can compensate for a deficit — so what moved
+  was never the figure but **which GL account it landed on**, a correctly-totalled document having
+  silently lost its per-code split. The one reachable **money** defect is **withholding**, and it is
+  reachable precisely because the gate excludes it by design (`taxTotal` is regular tax only): the AR
+  control amount `total − withholdingTotal` was **overstated** by a cent and the statutory
+  `withholding_total` that `whtCertificateClearingEffect` prefills a certificate from
+  **understated** by one — **in an entry that balances**, 0.70 debits against 0.70 credits, which is
+  why no gate, write guard or replayer could ever have caught it and `journalPostingGuard`'s
+  double-entry invariant is satisfied by a wrong set of numbers.
+  Three things were sharper than the defect. **An independent refutation recommended the wrong form
+  and was refuted by a wider population**: it measured net-only scaling at **0 divergences** and this
+  increment measures it at **52 in 1.8M real-rate pairs** (`12.50 @ 2.28%` answers 0.28 for an exact
+  0.29), because its rate set evidently reached no 3-decimal rate — so a recommendation backed by a
+  measurement is still only as wide as its population, and the form is kept as the *fallback* where
+  its imprecision beats the alternative. Which matters, because **truncating an unrepresentable rate
+  is not the conservative failure**: `1234.56 @ 0.0625%` truncates to `0.063%` and answers `0.78`
+  where the exact figure is `0.77` — wrong in the **over** direction the whole increment exists to
+  stop — so a fourth decimal falls back rather than scaling. And **the headline is the mechanism and
+  deliberately not a frequency**, because three honest measurements of one defect give 1 in 376, 1 in
+  174 and 1 in 306: the rate is a property of the tenant's (rate, net) population and swings ~450x
+  between a real-rate rectangle and the full declared domain, so the comment records the direction
+  and the cause, which are durable.
+  The **952 pre-existing `write-effects` tests are assertion-neutral** to the change — every fixture
+  uses a round net against a round rate, which is the honest account of why 20k tests never saw it —
+  and restoring the double form fails **4 of the 5** new boundary tests and **none** of the 952.
+  Beside it, **P0.6b is withdrawn with its measurement rather than shipped**: the facts hold (no
+  effect `compile.ts` wires triggers on `paid`, while five declared transitions reach it), and the
+  proposed remedy is measured **harmful** — a residual posting cannot tell *paid with no Payment
+  rows* from *paid via payment application*, so on the ordinary ordering it posts the document total
+  on top of what a Payment already settled (**AR net −50, cash +170**), silently, because the entry
+  numbers differ so no constraint fires. ADR-0366's rule read forward: a *proposed addition* is
+  withdrawn with its refutation exactly as a retention is.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -8868,12 +8916,28 @@ by it**.
    **nothing** rather than a transition that disagreed, because `recordLifecycle` answers `false`
    when no row moved — so there was never a second record to contradict the first, which is why
    the honest grade for the gate-off case is a warning rather than a refusal.
-6. **`Currency.decimal_places` has zero readers while the accounting core hardcodes two.** One hit
-   in the whole workspace — its own declaration — against nine `Math.round(x*100)/100` sites in
-   `write-effects.ts` and a `0.005` balance tolerance in `write-guards.ts`. Reproduced: 7.5% of a
-   13.40 net computes `1.00` against an exact `1.005` that should post `1.01`. A 3-decimal currency
-   (KWD, BHD, JOD) loses a minor unit per line. Multi-increment, and it is the one P0 that is
-   arithmetic rather than wiring.
+6. ~~**`Currency.decimal_places` has zero readers while the accounting core hardcodes two.**~~ —
+   **closed by ADR-0378**, which found that **two of this entry's three clauses do not survive
+   measurement and the third is sharper than it reads**. `Currency.decimal_places` is genuinely inert
+   and reading it **could not change a figure**: no money *amount* field in any of the seven packs
+   exceeds `scale: 2`, so a 3-decimal currency cannot be *stored* at three decimals anywhere and a
+   reader would have nothing to round to — a P1.2-shaped declaration, not a money defect. The
+   hardcoded `100` is not the defect either; it is correct for every declared amount field and is the
+   same choice `packages/billing/src/tax.ts:84` already made. **The defect is the *rate*** — a double
+   times a double — and the reproduction holds (13.40 @ 7.5% posted `1.00` against an exact `1.01`).
+   The honest finding is both narrower and worse: measured over **60,000,000 (rate, net) pairs** the
+   per-line error is **exactly 0 or −1 cent, never over**, and that one-directional property means
+   the reconciliation gate at `write-effects.ts:916` **already protected every regular-tax amount** —
+   a line-derived total that ties to an exact stamped total implies every line was exact, since no
+   line can be a cent high and no combination of codes can compensate. So for regular tax only the
+   **GL account** moved (a correctly-totalled document silently lost its per-code split), while the
+   one reachable **money** defect is **withholding**, which the gate excludes by design: the AR
+   control amount was **overstated** and the statutory `withholding_total` a WHT certificate is
+   prefilled from **understated**, by a cent, in an entry that **balances** — 0.70 against 0.70 —
+   which is why no gate, guard or replayer could have caught it. Live before/after on one cluster:
+   AR `0.67 → 0.66`, stamped `"0.03" → "0.04"`. What remains is ADR-0378's open ends: the sites that
+   *add* (`aging.ts`, `wht-reconciliation.ts`, the FX revaluation) are still `double` arithmetic, and
+   `Currency.decimal_places` stays inert because closing it honestly is a **schema** increment.
 6b. **A document marked paid by hand clears no control account, on three declared edges** (found by
    ADR-0366, in neither the backlog nor this register before it). Every settlement-side effect is
    gated on `names.has("Payment")` — `paymentSettlementGlPostingEffect` at `compile.ts:473`,
@@ -8892,7 +8956,14 @@ by it**.
    "no completed Payments cover this document" predicate: re-wiring ADR-0366's deleted
    `paymentGlPostingEffect` is measured harmful on exactly this scenario (**AR net −50, cash +170**),
    because it cannot tell "paid with no Payment rows" from "paid via payment application" and posts
-   the document total regardless of what was paid.
+   the document total regardless of what was paid. **ADR-0378 re-measured it and withdrew the fix
+   rather than shipping it**, on ADR-0366's rule that a retention is withdrawn *with its
+   measurement* and the same discipline applies to an addition: the facts hold (every `triggerState`
+   is `sent` or `approved`, and **five** declared transitions reach `paid` — the entry says three,
+   counting the two `mark_paid` edges and `TaxReturn`'s while the two timer transitions are the
+   fourth and fifth), and the remedy is the harmful one. It stays open, and the shape of a correct
+   fix is a ledger question — how a residual effect and the settlement effects share one notion of
+   an open control balance — rather than a wiring step.
 7. ~~**`unique: true` emits no constraint on any entity table while the UI says the field is
    unique.**~~ — **closed by ADR-0360**, which corrected two of the three things this entry said.
    *"while the UI says the field is unique"* is **false**: `unique` occurs exactly once in the whole

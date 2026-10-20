@@ -436,6 +436,99 @@ describe("computeLineTaxBreakdown", () => {
   });
 });
 
+/**
+ * Every fixture above uses a round net against a round rate, so every one of them is exact and
+ * none of them moved when the minor-unit arithmetic landed. These are the boundary this function
+ * is actually wrong at, and they are the whole fence over `lineTaxCents`.
+ */
+describe("computeLineTaxBreakdown — the half-cent boundary", () => {
+  /**
+   * Exact tax in cents by rational arithmetic over the operands' declared scales, independent of
+   * the implementation's scaled-integer doubles: a genuinely different algorithm rather than a
+   * re-derivation of the code under test (ADR-0362's retired truth table).
+   */
+  const exactCents = (netCents: number, rate: number): number => {
+    const s = rate.toString();
+    const dot = s.indexOf(".");
+    const k = dot < 0 ? 0 : s.length - dot - 1;
+    const num = BigInt(netCents) * BigInt(s.replace(".", ""));
+    const den = 100n * 10n ** BigInt(k);
+    return Number((2n * num + den) / (2n * den));
+  };
+
+  it("owes the cent up when the true tax is an exact half-cent", () => {
+    // 0.70 × 5% = 0.035 exactly. Half-away-from-zero owes 0.04; the double form answered 0.03.
+    const b = computeLineTaxBreakdown([{ net: 0.7, taxCodeId: null, flatRatePct: 5 }], new Map());
+    expect(b.taxTotal).toBe(0.04);
+    // 13.40 × 7.5% = 1.005 exactly -> 1.01, not 1.00.
+    const c = computeLineTaxBreakdown([{ net: 13.4, taxCodeId: null, flatRatePct: 7.5 }], new Map());
+    expect(c.taxTotal).toBe(1.01);
+  });
+
+  it("is exact over a declared-domain sweep, and never errs upward", () => {
+    let divergent = 0;
+    let over = 0;
+    let pairs = 0;
+    // decimal(6,3) rates an ERP carries, against nets spanning four magnitudes.
+    for (const rate of [5, 7.5, 2.28, 0.175, 12.5, 19, 20]) {
+      for (const netCents of [7, 70, 1250, 1340, 99999, 1000001, 123456789]) {
+        pairs++;
+        const want = exactCents(netCents, rate);
+        const got = Math.round(
+          computeLineTaxBreakdown([{ net: netCents / 100, taxCodeId: null, flatRatePct: rate }], new Map())
+            .taxTotal * 100,
+        );
+        if (got !== want) {
+          divergent++;
+          if (got > want) over++;
+        }
+      }
+    }
+    expect(pairs).toBe(49);
+    expect(divergent).toBe(0);
+    expect(over).toBe(0);
+  });
+
+  it("keeps a rate it cannot scale faithfully rather than truncating it", () => {
+    // No declared field can produce a 4th decimal, but truncating one is not the safe failure:
+    // 1234.56 @ 0.0625% truncated to 0.063% answers 0.78 where the exact figure is 0.77 — wrong,
+    // and in the over direction. The fallback keeps the rate the caller stated.
+    const b = computeLineTaxBreakdown([{ net: 1234.56, taxCodeId: null, flatRatePct: 0.0625 }], new Map());
+    expect(b.taxTotal).toBe(0.77);
+    expect(b.taxTotal).not.toBe(0.78);
+  });
+
+  it("multiplies the per-line cent across a document", () => {
+    // The per-line rounding is the whole of the live defect, and a document is where it becomes
+    // visible as money: 100 lines of 0.70 at 5% each owe a cent up, so the old form's 0.03 a line
+    // reported 3.00 against an exact 4.00 — a quarter of the tax on the document, not a rounding
+    // crumb. (The *accumulation* half of this change is belt-and-braces rather than a fix:
+    // measured, summing 2-dp doubles and rounding once first disagrees with an integer sum at
+    // 10^6 lines of ~1000 units, which no document reaches.)
+    const lines = Array.from({ length: 100 }, () => ({ net: 0.7, taxCodeId: null, flatRatePct: 5 }));
+    const b = computeLineTaxBreakdown(lines, new Map());
+    expect(b.netTotal).toBe(70);
+    expect(b.taxTotal).toBe(4);
+  });
+
+  it("moves the control line and the stamped withholding figure, not just a tax line", () => {
+    // Withholding is deliberately NOT part of taxTotal, so a withholding line passes the
+    // recognition effect's reconciliation gate and the cent lands unmitigated on the AR control
+    // amount (total − withholdingTotal) and on the document's stamped withholding_total, which a
+    // WHT certificate's amount is prefilled from. 0.70 @ 5% withholding: 0.04, so AR is 0.66.
+    const codes = new Map([["wht", { rate: 5, label: "WHT5", accountCode: "2155", withholding: true }]]);
+    const b = computeLineTaxBreakdown([{ net: 0.7, taxCodeId: "wht", flatRatePct: null }], codes);
+    expect(b.withholdingTotal).toBe(0.04);
+    expect(b.taxTotal).toBe(0);
+    // In minor units, and deliberately: `0.7 - 0.04` is 0.6599999999999999, which is the drift this
+    // increment is about one subtraction further on — the control amount is computed in major units
+    // at the posting site, so pinning the cents here says what the breakdown owes without asserting
+    // a double comparison that is false for a reason this function cannot fix.
+    expect(Math.round(b.netTotal * 100) - Math.round(b.withholdingTotal * 100)).toBe(66);
+    expect(b.netTotal - b.withholdingTotal).not.toBe(0.66);
+  });
+});
+
 describe("recognitionGlPostingEffect — per-TaxCode GL account", () => {
   const invoiceRec = recognitionGlPostingEffect({
     entity: "Invoice",

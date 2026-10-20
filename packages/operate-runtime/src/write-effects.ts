@@ -691,6 +691,38 @@ export interface TaxBreakdown {
   }[];
 }
 
+/** Scale a declared rate reaches this function at: `decimal(6,3)` is the widest (TaxCode.rate_pct). */
+const RATE_SCALE = 1000;
+
+/**
+ * One line's tax, in integer minor units — `packages/billing/src/tax.ts`'s idiom (which already
+ * computes `Math.round((subtotalCents * ratePercent) / 100)`) with the *rate* scaled to an integer
+ * too, so the product is exact rather than a double.
+ *
+ * The double form this replaced (`Math.round(net * (rate / 100) * 100) / 100`) is wrong on exactly
+ * one class and always in one direction: when the true tax is an exact half-cent, half-away-from-zero
+ * owes the cent up, and the double sometimes lands a hair below the midpoint, so `Math.round` takes it
+ * down. Never up — measured `under=N over=0` on every sweep. The *frequency* is a property of the
+ * rate/net population and not of this code (it swings ~450x between a real-rate rectangle and the full
+ * declared rate domain), so it is deliberately not recorded here; the mechanism is what is durable.
+ *
+ * Both rate fields that reach here are representable at `RATE_SCALE`: `TaxCode.rate_pct` is
+ * `decimal(6,3)` and `InvoiceLine.tax_rate_pct` is `decimal(5,2)`, and scaling every one of their
+ * 100,001 + 10,001 declared values deviates from an integer by at most 7.3e-12 — six orders inside the
+ * guard below. A rate carrying a *fourth* decimal cannot be scaled losslessly, and truncating it is
+ * **not** the conservative failure: `1234.56 @ 0.0625%` truncates to `0.063%` and answers `0.78` where
+ * the exact figure is `0.77` — wrong, and in the over direction this function exists to stop. So an
+ * unrepresentable rate falls back to the faithful-but-imprecise cents form, which keeps the rate the
+ * caller stated. Exact while `netCents * rateScaled` stays inside 2^53, i.e. to ~900.7e6 major units at
+ * the declared maximum rate of 100%; past that it degrades to measured-good rather than proved.
+ */
+function lineTaxCents(netCents: number, rate: number): number {
+  const scaled = rate * RATE_SCALE;
+  const rateScaled = Math.round(scaled);
+  if (Math.abs(scaled - rateScaled) >= 1e-6) return Math.round((netCents * rate) / 100);
+  return Math.round((netCents * rateScaled) / (100 * RATE_SCALE));
+}
+
 /**
  * Pure: given document lines + a resolved `taxCodeId → {rate, label, accountCode?,
  * jurisdiction?, withholding?}` map, sums the net, computes each line's tax (`net × rate%`,
@@ -713,15 +745,15 @@ export function computeLineTaxBreakdown(
     }
   >,
 ): TaxBreakdown {
-  let netTotal = 0;
+  let netTotalCents = 0;
   const order: string[] = [];
-  const taxByLabel = new Map<string, number>();
+  const taxCentsByLabel = new Map<string, number>();
   const accountByLabel = new Map<string, string | null>();
   const jurisdictionByLabel = new Map<string, string | null>();
   const withholdingByLabel = new Map<string, boolean>();
   for (const line of lines) {
-    const net = Math.round(line.net * 100) / 100;
-    netTotal += net;
+    const netCents = Math.round(line.net * 100);
+    netTotalCents += netCents;
     let rate = 0;
     let label: string | null = null;
     let accountCode: string | null = null;
@@ -738,37 +770,36 @@ export function computeLineTaxBreakdown(
       rate = line.flatRatePct;
     }
     if (rate <= 0) continue;
-    const tax = Math.round(net * (rate / 100) * 100) / 100;
-    if (tax <= 0) continue;
+    const taxCents = lineTaxCents(netCents, rate);
+    if (taxCents <= 0) continue;
     const key = label !== null && label.length > 0 ? label : `${rate}%`;
-    if (!taxByLabel.has(key)) {
+    if (!taxCentsByLabel.has(key)) {
       order.push(key);
       accountByLabel.set(key, accountCode);
       jurisdictionByLabel.set(key, jurisdiction);
       withholdingByLabel.set(key, withholding);
     }
-    taxByLabel.set(key, (taxByLabel.get(key) ?? 0) + tax);
+    taxCentsByLabel.set(key, (taxCentsByLabel.get(key) ?? 0) + taxCents);
   }
-  netTotal = Math.round(netTotal * 100) / 100;
-  let taxTotal = 0;
-  let withholdingTotal = 0;
+  let taxTotalCents = 0;
+  let withholdingTotalCents = 0;
   const groups = order.map((label) => {
-    const tax = Math.round((taxByLabel.get(label) ?? 0) * 100) / 100;
+    const taxCents = taxCentsByLabel.get(label) ?? 0;
     const withholding = withholdingByLabel.get(label) ?? false;
-    if (withholding) withholdingTotal += tax;
-    else taxTotal += tax;
+    if (withholding) withholdingTotalCents += taxCents;
+    else taxTotalCents += taxCents;
     return {
       label,
-      tax,
+      tax: taxCents / 100,
       accountCode: accountByLabel.get(label) ?? null,
       jurisdiction: jurisdictionByLabel.get(label) ?? null,
       withholding,
     };
   });
   return {
-    netTotal,
-    taxTotal: Math.round(taxTotal * 100) / 100,
-    withholdingTotal: Math.round(withholdingTotal * 100) / 100,
+    netTotal: netTotalCents / 100,
+    taxTotal: taxTotalCents / 100,
+    withholdingTotal: withholdingTotalCents / 100,
     groups,
   };
 }
