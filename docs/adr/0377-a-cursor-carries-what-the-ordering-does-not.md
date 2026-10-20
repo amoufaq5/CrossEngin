@@ -198,6 +198,41 @@ this change does not touch.
 | `?sort=<classified field>` is still *accepted* on a field the caller cannot read, and the ordering it reveals is a channel neither this nor ADR-0345 widened or closed. ADR-0345 refuses it only while rows are being withheld. Whether to refuse it generally is undecided. | platform | _unscheduled_ |
 | Decrypt-and-compare would make an encrypted column genuinely sortable and filterable rather than silently dropped (ADR-0338's open end 6). Correct, unindexed, and a sequential scan with a decrypt per row — worth it for `eq` on a unique field and not for `contains` or an `ORDER BY`. | platform | _unscheduled_ |
 
+## Addendum: a correction to ADR-0376, found by the same adversarial pass
+
+ADR-0376 called `--audit-chain-config` **the keystone of the whole Article 17 story**, on the
+grounds that `node.ts` skips `--tenant-deletion-routes` when no chain producer exists. That is true
+of **one** of the three deletion surfaces and false of the other two, including the destructive one,
+and the direction of the error is what makes it worth a correction rather than a quiet edit: an
+implementer reading it would believe the keypair is the interlock on everything that destroys tenant
+data.
+
+Measured:
+
+| Surface | Without `--audit-chain-config` | Capabilities gate |
+|---|---|---|
+| `--tenant-deletion-routes` | **skipped**, naming the flag | yes — refuses without `--deletion-capabilities` |
+| `--deletion-request-routes` | **warns and mounts** (rows unanchored) | yes |
+| `--tenant-erasure-routes` | **warns and mounts** | **none anywhere in the block** |
+
+So `--tenant-erasure-routes --tenant-erasure-role X --store pg` mounts a `DROP SCHEMA` surface with
+no chain and no capability declaration, and that is **deliberate**: ADR-0316's rule is that an
+erasure which succeeds and cannot be *recorded* is refused, and without a chain it is still recorded
+and merely unanchored — so refusing there would deny a working surface over a weaker guarantee
+(ADR-0322).
+
+ADR-0376's *conclusion* survives — the keypair still needs an environment route rather than a volume,
+and it still gates the surface that writes a tombstone — but its mechanism was over-general.
+`deploy/ORACLE.md` and this file's register entry are corrected with the table above, so the next
+person reasons from which surface gates on what rather than from "the compliance surfaces".
+
+The same pass confirmed the rest of ADR-0376 against the committed tree: `channels.length` survives
+in `node.ts` only inside the comment explaining the retired gate, the warning fires on the shipped
+compose, the read-state withdrawal is fenced by name, and the measurement's own proposed gate
+(`!deliveryEnabled`) would have been **harmful** — it fires on `--store memory`, where `cli.ts`
+refuses the very flag the warning tells an operator to pass, which is ADR-0334's
+remedy-that-cannot-work. The store conjunct that shipped is what prevents it.
+
 ## References
 
 - `packages/operate-runtime-pg/src/list-sql.ts` — `nullDroppedSortComponents`, and the corrected

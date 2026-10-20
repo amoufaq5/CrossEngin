@@ -8779,11 +8779,17 @@ by it**.
    fourth is different in kind: `AuditChainConfigSchema` requires `privateKeyBase64` and
    `publicKeyBase64`, validated as real Ed25519 keys rather than merely non-empty, so it is a
    **credential**, which ADR-0301 says reaches this process through the environment and not through a
-   file. And it is the **keystone of the whole Article 17 story** rather than one of four peers:
-   `node.ts` skips `--tenant-deletion-routes` outright when `auditChainProducer === null`, printing
-   *"needs the forensic chain (--audit-chain-config)"*, so every compliance surface sits behind the
-   one flag carrying a private key. A volume for three plus an env route for one, not one mount for
-   four.
+   file. A volume for three plus an env route for one, not one mount for four.
+   **ADR-0377's addendum corrects the next clause, which ADR-0376 over-generalised**: that flag was
+   called "the keystone of the whole Article 17 story" because `node.ts` skips
+   `--tenant-deletion-routes` when `auditChainProducer === null` — true of **one** of the three
+   deletion surfaces and false of the other two, including the destructive one.
+   `--deletion-request-routes` **warns and mounts** with rows unanchored, and
+   `--tenant-erasure-routes` — the `DROP SCHEMA` surface — warns and mounts **with no
+   `deletionCapabilities` gate anywhere in its block**, deliberately, on ADR-0316's rule that an
+   unanchored record still beats denying a working surface (ADR-0322). So **the keypair is not an
+   interlock on destroying tenant data**, and the error mattered in the direction that an implementer
+   would reason from: building the env route while believing it gates the erasure.
    **`--deletion-capabilities` is additionally a category error in the list above**: it mounts
    *nothing* on its own — `--tenant-deletion-routes` needs `conn` **and** an audit chain producer
    **and** the capabilities **and** `--tenant-deletion-role` — and the three surfaces

@@ -587,11 +587,25 @@ They are also not peers, which decides how that edit should be designed:
   deployment holds, with no secret in it.
 - **`--audit-chain-config` holds a 32-byte Ed25519 private seed.** It is the only one of the four
   whose schema has required fields (`privateKeyBase64` and `publicKeyBase64`, both validated as real
-  keys rather than merely non-empty), and it is the **keystone of the whole Article 17 story**:
-  `--tenant-deletion-routes` is skipped outright when no chain producer exists, printing *"needs the
-  forensic chain (--audit-chain-config)"*. So the compliance surfaces sit behind the one flag that
-  carries a credential — and ADR-0301's rule says a credential reaches this process through the
-  environment, which means this flag wants an env route for its keypair before it wants a volume.
+  keys rather than merely non-empty), so ADR-0301's rule applies: a credential reaches this process
+  through the **environment**, which means this flag wants an env route for its keypair before it
+  wants a volume.
+
+  **It gates one of the three deletion surfaces and not all three**, and the difference decides what
+  you can turn on:
+
+  | Surface | Without `--audit-chain-config` | Needs `--deletion-capabilities`? |
+  |---|---|---|
+  | `--tenant-deletion-routes` (writes the tombstone) | **skipped**, naming the flag | yes |
+  | `--deletion-request-routes` (the async handle) | **warns and mounts**, rows unanchored | yes |
+  | `--tenant-erasure-routes` (`DROP SCHEMA`) | **warns and mounts** | **no gate at all** |
+
+  That last row is deliberate rather than an oversight: ADR-0316's rule is that an erasure which
+  succeeds and cannot be *recorded* is refused, and without a chain it is still recorded and merely
+  unanchored — so refusing would deny a working surface over a weaker guarantee. The consequence to
+  know before you add a flag: **the keypair is not an interlock on destroying tenant data.** The
+  surface that drops a tenant's schema mounts on `--store pg` plus a role, with neither the chain nor
+  a capability declaration, and the integrity proof will later report its rows as unproven.
 
 **`--workflow-workers` and `--schedule-ms` are inert rather than off.** `JOB_HANDLER_PROVIDERS`
 ships empty and `erp-core` declares 14 jobs, so the job worker refuses `no_job_handlers` and the
