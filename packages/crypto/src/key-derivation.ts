@@ -90,7 +90,33 @@ export const DEFAULT_KEY_GENERATION = 1;
  */
 export const PLATFORM_COLUMN_KEY_SCOPE = "platform";
 
-export const COLUMN_SECRET_REFUSAL_REASONS = ["too_short", "too_uniform"] as const;
+/**
+ * The marker every `deploy/.env.example` placeholder carries, matched case-sensitively at the
+ * start of the value (ADR-0377).
+ *
+ * It exists because `REPLACE_WITH_32_PLUS_RANDOM_CHARS` is **33 bytes with 19 distinct byte
+ * values** and therefore passes both floors below — so until this refusal, a deployment that
+ * copied `.env.example` and replaced the one secret the binary happens to reject
+ * (`OPERATE_TOKEN_SIGNING_KEY`'s placeholder is 31 chars, so it fails a length check of its own)
+ * booted with every *other* secret derived from a string committed to a public repository. The
+ * damage is worse than a weak secret: a placeholder is **accepted**, so the surfaces that report
+ * on the secret switch from a true warning to a confident "sealed", which is the falsely-true
+ * control direction this repo ranks as the dangerous one (ADR-0337). It was measured as live for
+ * `CREDENTIAL_PEPPER`, which `meta.users` has no RLS to fall back on, and would have been created
+ * for `CURSOR_ENCRYPTION_SECRET` by the very change that was uncommenting it.
+ *
+ * A **prefix** and not an exact match, because the three placeholders differ after it and a list
+ * of exact strings is a maintained list in another package (ADR-0288's shape, wrong three times
+ * here). A real secret beginning with these fourteen characters is refused, which is the correct
+ * direction: the remedy is to generate one, and the refusal prints how.
+ */
+export const SECRET_PLACEHOLDER_PREFIX = "REPLACE_WITH_";
+
+export const COLUMN_SECRET_REFUSAL_REASONS = [
+  "too_short",
+  "too_uniform",
+  "unreplaced_placeholder",
+] as const;
 export type ColumnSecretRefusalReason =
   (typeof COLUMN_SECRET_REFUSAL_REASONS)[number];
 
@@ -145,6 +171,18 @@ export function isColumnSecretRefusalReason(
  * figures, which is what an operator needs to fix it.
  */
 function refuseWeakSecret(bytes: Uint8Array, label: string): void {
+  // Checked **first**, because the placeholder passes both floors below and a deployment that
+  // never replaced it would otherwise be told nothing at all. Decoded back to text rather than
+  // compared against bytes: the caller has already encoded, and the comparison is about a literal
+  // an operator typed, so reading it as text is what the check is actually about.
+  if (new TextDecoder().decode(bytes).startsWith(SECRET_PLACEHOLDER_PREFIX)) {
+    throw new ColumnSecretRefused(
+      "unreplaced_placeholder",
+      `secret is still the placeholder from deploy/.env.example; generate one with ` +
+        `node -e 'console.log(require("node:crypto").randomBytes(32).toString("base64"))'`,
+      label,
+    );
+  }
   if (bytes.length < MIN_COLUMN_SECRET_BYTES) {
     throw new ColumnSecretRefused(
       "too_short",

@@ -33,6 +33,7 @@ import {
   buildListSql,
   columnUnavailable,
   isSqlSafeNumericText,
+  nullDroppedSortComponents,
   refusableSurfaces,
   sqlColumn,
   type ListSqlAdapter,
@@ -434,7 +435,17 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
     const last = records[records.length - 1];
     const nextCursor =
       hasMore && last !== undefined && lastRow !== undefined
-        ? encodeKeyset(cursorExprs.keyset(last, lastRow, query.sort))
+        ? encodeKeyset(
+            // A sort key this store could not express contributes no clause to the seek, so its
+            // component is read by nothing — and on this store the inexpressible keys are exactly
+            // the `encryptAtRest` ones, so leaving the record's value in it put decrypted PHI in a
+            // token handed to a caller whose body the gateway had just redacted (ADR-0376).
+            nullDroppedSortComponents(
+              cursorExprs.keyset(last, lastRow, query.sort),
+              query.sort,
+              unserveable,
+            ),
+          )
         : null;
     return { records, nextCursor };
   }

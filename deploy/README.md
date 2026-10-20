@@ -23,9 +23,12 @@ git clone <your-fork-url> crossengin && cd crossengin/deploy
 cp .env.example .env
 # Edit .env: set POSTGRES_PASSWORD, DOMAIN, ACME_EMAIL, a strong token in
 # OPERATE_ADMIN_API_KEY, and the two login secrets (CREDENTIAL_PEPPER and
-# OPERATE_TOKEN_SIGNING_KEY). The UI has a login now, so you create the first
-# tenant and user yourself -- five curl calls, no shell in the container; see
-# "The UI has a login" below.
+# OPERATE_TOKEN_SIGNING_KEY) and CURSOR_ENCRYPTION_SECRET -- three secrets, one
+# generator line each in .env.example. The cursor one is not optional on this
+# pack: unsealed, `?sort=work_email` hands that field's plaintext back in
+# `nextCursor` to a caller the body redacts it from. The UI has a login now, so
+# you create the first tenant and user yourself -- five curl calls, no shell in
+# the container; see "The UI has a login" below.
 
 docker compose up -d --build          # build images + start everything
 docker compose logs -f migrate        # watch the schema apply, then exit 0

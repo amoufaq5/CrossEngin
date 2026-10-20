@@ -7,12 +7,14 @@ import {
   columnUnavailable,
   guardedNumericCast,
   isSqlSafeNumericText,
+  nullDroppedSortComponents,
   MAX_SQL_NUMERIC_TEXT_LENGTH,
   refusableSurfaces,
   SQL_NUMERIC_TEXT_PATTERN,
   sqlColumn,
   UNSERVEABLE_SURFACE_REFUSES,
   type ListSqlAdapter,
+  type UnserveableListSurface,
 } from "./list-sql.js";
 
 // A JSONB-style adapter: fields read from `document ->> 'field'`, text compares.
@@ -486,5 +488,64 @@ describe("buildListSql — numeric filters", () => {
     const parts = buildListSql(query({ filters: [{ field: "status", op: "eq", value: "active" }] }), NUM, [], params);
     expect(parts.where).toBe("document ->> 'status' = $1");
     expect(params).toEqual(["active"]);
+  });
+});
+
+describe("nullDroppedSortComponents", () => {
+  const sort = [
+    { field: "mrn", direction: "asc" as const },
+    { field: "family_name", direction: "asc" as const },
+  ];
+  const dropped: readonly UnserveableListSurface[] = [
+    { surface: "sort", field: "mrn", reason: "encrypted_at_rest" },
+  ];
+
+  it("blanks the dropped key's component and leaves the rest alone", () => {
+    // The value is decrypted PHI on the column store, in a token handed to a caller whose response
+    // body the gateway redacted on their own grants (ADR-0376).
+    expect(
+      nullDroppedSortComponents({ k: ["MRN-1", "Smith"], id: "rec_1" }, sort, dropped),
+    ).toEqual({ k: [null, "Smith"], id: "rec_1" });
+  });
+
+  it("nulls IN PLACE and never shortens the array", () => {
+    // The one thing to get right: `seekPredicate` indexes `cursor.k` by the key's DECLARED
+    // position, and that indexing is ADR-0359's own fix for the `?sort=mrn,family_name`
+    // mis-comparison. A shifted array compares `family_name`'s cursor value against `mrn`'s column.
+    const out = nullDroppedSortComponents({ k: ["MRN-1", "Smith"], id: "rec_1" }, sort, dropped);
+    expect(out.k).toHaveLength(sort.length);
+    expect(out.k[1]).toBe("Smith");
+  });
+
+  it("is the identity when nothing was dropped, so the JSONB store pays nothing", () => {
+    // `document ->> '<field>'` expresses every field, so that store reports no dropped sort key
+    // and this must not touch its cursor — the same object is returned, not a copy.
+    const cursor = { k: ["MRN-1", "Smith"], id: "rec_1" };
+    expect(nullDroppedSortComponents(cursor, sort, [])).toBe(cursor);
+  });
+
+  it("ignores a filter or search surface, which the store refuses rather than serving", () => {
+    // `UNSERVEABLE_SURFACE_REFUSES` already stops those reaching a cursor at all; reading them here
+    // would blank a component for a key whose ORDER BY was applied.
+    const cursor = { k: ["MRN-1", "Smith"], id: "rec_1" };
+    expect(
+      nullDroppedSortComponents(cursor, sort, [
+        { surface: "filter", field: "mrn", reason: "encrypted_at_rest" },
+        { surface: "search", field: "family_name", reason: "encrypted_at_rest" },
+      ] as readonly UnserveableListSurface[]),
+    ).toBe(cursor);
+  });
+
+  it("leaves the id, because a page boundary is still a position", () => {
+    // Withholding the id would not withhold anything — it is in every record the caller was shown —
+    // and it is the only component the seek reads once every sort key is dropped.
+    expect(
+      nullDroppedSortComponents({ k: ["MRN-1"], id: "rec_1" }, [sort[0]!], dropped).id,
+    ).toBe("rec_1");
+  });
+
+  it("drops a key named in the sort but absent from the cursor without inventing a component", () => {
+    const out = nullDroppedSortComponents({ k: ["MRN-1"], id: "rec_1" }, sort, dropped);
+    expect(out.k).toEqual([null]);
   });
 });

@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 371 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 372 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -1929,6 +1929,52 @@ type errors.
   increment's own class answered one level up: the compose is not typechecked, not linted and
   imported by nothing, so a deleted line there is invisible to all twelve rules and every test —
   exactly how `docker-compose.ai.yml` came to be ten flags behind the base.
+
+  ADR-0377 closes the register's P0 item 2 and the class is **a cursor carrying what the ordering
+  does not**. ADR-0357 measured the disclosure, surveyed it, reported it at boot and fixed nothing,
+  leaving two things half-true. *The mitigation was one environment variable and the canonical
+  quickstart told the operator to leave it unset*: `deploy/.env.example` carried
+  `COLUMN_ENCRYPTION_SECRET` and `CURSOR_ENCRYPTION_SECRET` **commented out identically** while
+  `ORACLE.md`, `README.md` and `VERCEL-SUPABASE.md` all treat the cursor one as required — so "still
+  open by default" understated it, and the asymmetry that settles it is measured on the pack the
+  compose serves rather than chosen: resolved `erp-core` declares **0** `phi`/`regulated` fields and
+  **1** classified field a list view can sort by, so the at-rest secret is right to stay commented
+  and the cursor one is not. It is uncommented with a generator line, and the boot pair over the
+  identical field is the verification (`plaintext_disclosing … Employee.work_email (pii)` →
+  `sealed … none of their values travels back in the clear`).
+  *And ADR-0357's own write-up claimed a second defect that does not exist.* It called the column
+  store worse than the document store with "a soundness bug in the keyset beside the disclosure",
+  because `columnExpr` answers `unavailable` for an `encryptAtRest` column so `?sort=mrn` is dropped
+  from `ORDER BY` while the value is still rendered into the cursor. **The disclosure is real and the
+  soundness claim is not**: a dropped key contributes no clause to `seekPredicate`, which builds from
+  `usable` alone and pushes the id tiebreaker unconditionally, so the component is read by nothing —
+  **dead payload**, which is exactly what makes withholding it free. `nullDroppedSortComponents`
+  blanks it, **in place and never removed**, because `seekPredicate` indexes `cursor.k` by *declared*
+  position and that indexing is ADR-0359's own fix for the `?sort=mrn,family_name` mis-comparison.
+  Measured live as `front_desk` (holds `Patient.list`, not `mrn.read`) on `pg-columns` with real
+  `bytea` PHI: the cursor goes from `{"k":["MRN-SECRET-1"],…}` to `{"k":[null],…}`, the body omits
+  `mrn` in both, and the walk still visits 3 of 3 rows once and terminates. The fix is **not** in
+  `keysetOf`, refused on two measurements — on `--store pg` every field is expressible so it would
+  close **0 of 14** members, and doing it anyway would confine that store's walk to the NULL tail.
+  Removing the call is a **compile error** rather than a silent revert, since the import then goes
+  unused.
+  **And an adversarial pass over part 1 *as first written* found it shipped a falsely-true control,
+  which is the sharpest thing in the increment.** `REPLACE_WITH_32_PLUS_RANDOM_CHARS` is **33 bytes
+  with 19 distinct byte values**, above both of `refuseWeakSecret`'s floors (32 and 16), so
+  `parseCursorEncryptionSecret` **accepts it** — and nothing in any `.ts` fenced the marker
+  (measured: zero hits). So `cp .env.example .env` without replacing that one line would have gone
+  from a *true* warning naming the field to a *false* `sealed` asserting "none of their values
+  travels back in the clear", under a key derivable from a file in this repository: ADR-0337's
+  direction, created by the fix, and the fifth time this run has reproduced its own class inside its
+  own fix. `SECRET_PLACEHOLDER_PREFIX` plus a third `COLUMN_SECRET_REFUSAL_REASONS` member
+  (`unreplaced_placeholder`, checked **first**) closes the cursor secret, the column secret **and
+  the credential pepper** in one change — and the pepper was **already live**, because
+  `OPERATE_TOKEN_SIGNING_KEY`'s placeholder is 31 characters and genuinely refused, so the
+  documented path is *copy → boot fails naming the signing key → replace that one line → boot
+  succeeds* and leaves the pepper published on a `meta.users` that has **no RLS**, which is ADR-0358's
+  own stated reason the pepper exists. The rule: **an entropy floor cannot see the one weakness a
+  placeholder has, which is that it is published**, so the check is on the literal and not on its
+  strength.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -6445,7 +6491,13 @@ Two constraints worth knowing before suggesting a host:
   `environment:` block, which needs **no `.env` change**: the variable it reads is the one that was
   already there. `CURSOR_ENCRYPTION_SECRET` is beside it and `.env.example` names both it and
   `COLUMN_ENCRYPTION_SECRET`, which the compose file had always passed and the example had never
-  mentioned. `--idempotency-store pg` is on the command, so the replay guard is durable rather
+  mentioned. **Naming them was not setting them** (ADR-0377): both were *commented out* in
+  `.env.example`, identically, while their measured facts are opposite — resolved `erp-core` has
+  **0** `phi`/`regulated` fields and **1** sortable classified field — so the at-rest one is right
+  to stay commented and the cursor one is now uncommented with a generator line and named in
+  `README.md`'s first-launch list. Three other deploy documents had treated it as required all
+  along; the canonical quickstart was the one that did not.
+  `--idempotency-store pg` is on the command, so the replay guard is durable rather
   than a `Map` in one process.
 - **The `api` service has a healthcheck and `web` waits on it** (ADR-0357). `/readyz`, not
   `/health`: the question compose is asking is whether `web` and Caddy may be pointed at the API,
@@ -6464,8 +6516,17 @@ Two constraints worth knowing before suggesting a host:
   **create the first user by hand**, because there is no mail channel so there is no forgot-password
   and no sign-up — `.env.example` has the three commands, ending in `set-credential` with the
   password in the environment; and **a session's role is frozen until it expires**, so revoking a
-  membership or suspending a user bites at the next login within `--session-token-ttl`, with
-  rotating the signing key as the way to cut every session off at once. The lockout's limits are
+  membership or suspending a user bites at the next login within `--session-token-ttl` — which on
+  the shipped compose is **one hour**, since that flag is not passed and
+  `DEFAULT_SESSION_TOKEN_SECONDS` is 3600; the register said only "within the ttl" and the figure is
+  worth having, because it is the window in which a revoked person keeps their old role. There is no
+  denylist and no per-request read of `meta.users.status` for a Bearer JWT, which is the whole of
+  what remains open here. Two stale-doc members rode along and are fixed (ADR-0377):
+  `apps/operate-web/README.md` documented `OPERATE_API_KEY` with its `devkey` default as a live
+  variable, and `deploy/VERCEL-SUPABASE.md` told a managed-cloud operator to set it on Vercel —
+  a variable read **nowhere** in that app, so following that page produced a UI authenticating
+  nobody and a troubleshooting entry naming a remedy that could not work. Rotating the signing key
+  remains the way to cut every session off at once. The lockout's limits are
   stated rather than overclaimed: it bounds guessing against *one* account and deliberately does
   not address credential stuffing, because behind Caddy every request arrives from the same
   container address so no per-IP limit is available — and it means anyone who knows an email can
@@ -8611,12 +8672,22 @@ by it**.
    revoking a membership or suspending a user takes effect at the next login, within
    `--session-token-ttl`. The precedent for closing it is ADR-0334's tenant-status directory.
 2. **The keyset cursor returns a classified field's plaintext to a caller who cannot read it.**
-   ~~Undetected~~ — **ADR-0357 surveys and reports it at boot**, naming each field, and
-   `CURSOR_ENCRYPTION_SECRET` is in the compose and `.env.example`. It is *mitigated by one
-   variable and still open by default*: the compose passes `${CURSOR_ENCRYPTION_SECRET:-}`, so an
-   operator who does not read the boot line still discloses. Making it refuse was argued and
-   rejected in ADR-0357 (it would refuse every deployment there is, and the hatch disarms the
-   sharper row check beside it).
+   ~~Undetected~~ — ADR-0357 surveys and reports it at boot, naming each field; **ADR-0377 closed
+   it on the shipped stack** and corrected this entry twice. *"`CURSOR_ENCRYPTION_SECRET` is in the
+   compose and `.env.example`"* was true of the compose and **false of `.env.example`**, where it
+   was **commented out** — identically to `COLUMN_ENCRYPTION_SECRET`, whose measured facts are the
+   opposite (resolved `erp-core`: **0** `phi`/`regulated` fields, **1** sortable classified field),
+   and while `ORACLE.md`, `README.md` and `VERCEL-SUPABASE.md` all treat the cursor one as required.
+   So the quickstart was the one deploy document telling an operator to leave it unset. It is
+   uncommented with a generator line and named in `README.md`'s first-launch list. And this entry's
+   second defect — ADR-0357's *"soundness bug in the keyset beside the disclosure"* on the column
+   store — **does not exist**: the dropped key contributes no clause to `seekPredicate` and the id
+   tiebreaker is pushed unconditionally, so the component is dead payload, which is what made
+   `nullDroppedSortComponents` free. Making the secret *mandatory in the binary* is still refused on
+   ADR-0357's first ground (the predicate is the same conjunction and `erp-core` has a member, so it
+   refuses every deployment there is) and is now gated on splitting the hatch, which is ADR-0377's
+   first open question. What is left: **14 (pack, field) pairs on a deployment that has not set the
+   secret**, no per-tenant-manifest survey, and `?sort=` on an unreadable field still accepted.
 3. **The shipped compose mounts no background subsystem, so nearly everything built since Phase 3
    is off.** Measured against the committed tree: the `api` command passes **18 distinct** flags
    (19 occurrences — `--ai-design-role` twice), not the six
@@ -9416,7 +9487,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 371 records; 292 Accepted, 79 Proposed (the
+title or status change cannot drift. 372 records; 293 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

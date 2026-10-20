@@ -55,7 +55,14 @@ Open <http://localhost:3000>.
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `OPERATE_API_URL` | `http://localhost:8787` | operate-server base URL |
-| `OPERATE_API_KEY` | `devkey` | token sent as `x-api-key`. The server-side key should bind a real user id (`key:role:tenant:userId`) — the notification inbox is per-recipient, so an unbound key sees an empty one. |
+
+`OPERATE_API_KEY` **is gone** and this table documented it as live for one release too long
+(ADR-0358 removed it, ADR-0377 removed the row). It is read nowhere in this app — the proxy forwards
+**the viewer's own session token** from an `httpOnly` cookie and answers a cookie-less `/api/*`
+request with a JSON 401 without calling upstream. The variable is deleted rather than left unset
+because its old `?? "devkey"` default meant removing it did not fail closed: every browser that
+could resolve the domain was one shared `platform_admin`. Setting it now does nothing at all, which
+is worse than an error — so if you have it in a `.env`, delete the line.
 
 The browser only talks to this app's `/api` proxy, so there are no CORS
 issues and the API key stays server-side. Use a `cashier`/limited role on

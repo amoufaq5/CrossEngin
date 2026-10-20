@@ -86,6 +86,43 @@ export function refusableSurfaces(
   return unserveable.filter((u) => UNSERVEABLE_SURFACE_REFUSES[u.surface]);
 }
 
+/**
+ * Blanks the cursor components of sort keys whose ORDER BY this store had to drop (ADR-0376).
+ *
+ * A cursor may carry a position the ordering actually describes, and nothing else. A dropped key
+ * contributes no clause to `seekPredicate` — which builds from `usable` alone and pushes the id
+ * tiebreaker unconditionally — so its component is read by nothing and rendering the record's value
+ * into it is pure disclosure. On the column store the dropped keys are exactly the
+ * `encryptAtRest` ones, so the value in question is decrypted PHI, in a token handed to a caller
+ * whose response body the gateway redacted on their own grants.
+ *
+ * **Nulled in place and never removed**, which is the one thing to get right here: `seekPredicate`
+ * indexes `cursor.k` by the key's **declared** position, and that indexing is ADR-0359's own fix
+ * for the `?sort=mrn,family_name` mis-comparison — shifting the array re-opens it. `null` is also
+ * already a legal component (`keysetOf` renders a missing value that way), so no format moves.
+ *
+ * Applied by the store and not by `keysetOf`, because `keysetOf` knows neither the store nor which
+ * keys it dropped — and the JSONB store drops none, since `document ->> '<field>'` expresses every
+ * field, so doing this in the shared helper would blank nothing there and be wrong if it did.
+ */
+export function nullDroppedSortComponents(
+  cursor: KeysetCursor,
+  sort: readonly ListSort[],
+  unserveable: readonly UnserveableListSurface[],
+): KeysetCursor {
+  const dropped = new Set(
+    unserveable.filter((u) => u.surface === "sort").map((u) => u.field),
+  );
+  if (dropped.size === 0) return cursor;
+  return {
+    k: cursor.k.map((component, i) => {
+      const field = sort[i]?.field;
+      return field !== undefined && dropped.has(field) ? null : component;
+    }),
+    id: cursor.id,
+  };
+}
+
 export interface ListSqlAdapter {
   /**
    * SQL expression yielding the field's value, or the reason this store cannot express it.
@@ -497,8 +534,15 @@ export function buildListSql(
       // A dropped sort key is reported for a different reason than a dropped filter: the rows are
       // right and the *order* is not, so the page comes back in whatever order the remaining keys
       // and the id tiebreaker give while the caller believes it is ordered by what they asked for.
-      // `keysetOf` then renders that key's value into the cursor from the record regardless, which
-      // is the disclosure ADR-0357 measured.
+      // `keysetOf` then rendered that key's value into the cursor from the record regardless, which
+      // is the disclosure ADR-0357 measured — and ADR-0376 established what it costs to withhold
+      // it, which is nothing: the component was **dead payload**. `seekPredicate` builds its
+      // clauses from `usable` only, and the id tiebreaker is pushed unconditionally, so with the
+      // key dropped the plan is `ORDER BY "id"` with seek `("id" > $n)` — a complete, terminating,
+      // once-per-row walk that never reads the dropped component. ADR-0357's own write-up called
+      // it "a soundness bug in the keyset beside the disclosure"; measured, it is only the
+      // disclosure. The store nulls it (see `nullDroppedSortComponents`), which is why it is
+      // reported here rather than silently skipped.
       unserveable.push({ surface: "sort", field: s.field, reason: resolved.reason });
       continue;
     }

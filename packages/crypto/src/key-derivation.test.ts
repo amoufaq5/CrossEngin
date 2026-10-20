@@ -62,8 +62,12 @@ describe("key-derivation constants", () => {
     expect(PLATFORM_COLUMN_KEY_SCOPE).toBe("platform");
   });
 
-  it("declares exactly two refusal reasons", () => {
-    expect(COLUMN_SECRET_REFUSAL_REASONS).toEqual(["too_short", "too_uniform"]);
+  it("declares exactly three refusal reasons", () => {
+    expect(COLUMN_SECRET_REFUSAL_REASONS).toEqual([
+      "too_short",
+      "too_uniform",
+      "unreplaced_placeholder",
+    ]);
   });
 });
 
@@ -701,5 +705,65 @@ describe("no module error leaks secret or key material", () => {
       expect(message).not.toContain(derivedCursorKeyHex);
       expect(message).not.toContain(derivedKekHex);
     }
+  });
+});
+
+describe("the unreplaced-placeholder refusal", () => {
+  // The refusal exists because the placeholder is STRONG by both floors and WEAK in the one way
+  // that matters: it is public. These two assertions are the measurement, so the refusal cannot be
+  // deleted on the grounds that the floors already cover it.
+  it("is needed because the shipped placeholder passes both floors", () => {
+    const bytes = new TextEncoder().encode("REPLACE_WITH_32_PLUS_RANDOM_CHARS");
+    expect(bytes.length).toBeGreaterThanOrEqual(MIN_COLUMN_SECRET_BYTES);
+    expect(new Set(bytes).size).toBeGreaterThanOrEqual(MIN_COLUMN_SECRET_DISTINCT_BYTES);
+  });
+
+  it("refuses each secret that reads this placeholder, and names the same reason", () => {
+    // All three parsers go through one `refuseWeakSecret`, which is what makes this one change
+    // close the cursor secret, the column secret and the pepper at once.
+    for (const parse of [
+      parseColumnEncryptionSecret,
+      parseCursorEncryptionSecret,
+      parseCredentialPepper,
+    ]) {
+      try {
+        parse("REPLACE_WITH_32_PLUS_RANDOM_CHARS");
+        throw new Error(`${parse.name} accepted the placeholder`);
+      } catch (e) {
+        expect(e).toBeInstanceOf(ColumnSecretRefused);
+        expect((e as ColumnSecretRefused).reason).toBe("unreplaced_placeholder");
+      }
+    }
+  });
+
+  it("is checked BEFORE the floors, so a short placeholder still names the placeholder", () => {
+    // Order matters for the message and not for the outcome: `REPLACE_WITH_X` is 14 bytes, so a
+    // floors-first check would answer `too_short` and send an operator to lengthen a string they
+    // should be deleting.
+    try {
+      parseColumnEncryptionSecret("REPLACE_WITH_X");
+      throw new Error("accepted");
+    } catch (e) {
+      expect((e as ColumnSecretRefused).reason).toBe("unreplaced_placeholder");
+    }
+  });
+
+  it("names the generator rather than only the fault, and discloses no part of the secret", () => {
+    try {
+      parseCursorEncryptionSecret("REPLACE_WITH_32_PLUS_RANDOM_CHARS");
+      throw new Error("accepted");
+    } catch (e) {
+      const msg = (e as Error).message;
+      expect(msg).toContain("randomBytes(32)");
+      expect(msg).toContain(".env.example");
+      // The same rule the two floors follow: a refusal carries figures and remedies, never bytes.
+      expect(msg).not.toContain("RANDOM_CHARS");
+    }
+  });
+
+  it("accepts a real secret that merely contains the marker away from the start", () => {
+    // Anchored at the start, so a generated secret is not refused for a coincidence. A secret that
+    // *begins* with it is refused, deliberately: the remedy is to generate one.
+    expect(() => parseColumnEncryptionSecret(`x-REPLACE_WITH_but-not-a-placeholder-at-all`)).not.toThrow();
   });
 });

@@ -205,7 +205,13 @@ API key never reaches the browser.
    | Name | Value |
    |---|---|
    | `OPERATE_API_URL` | the API URL from step 2, e.g. `https://<app>.up.railway.app` |
-   | `OPERATE_API_KEY` | the **token part only** of the API key (the `<STRONG_TOKEN>` before the first `:`) |
+
+   That is the **only** variable the UI takes. This table used to ask for
+   `OPERATE_API_KEY` as well, and that variable is read nowhere in `operate-web`
+   (ADR-0358 removed it; measured, zero occurrences in its source) — the proxy
+   forwards each viewer's own session token from an `httpOnly` cookie. Setting it
+   does nothing, so following this page as it stood produced a UI that
+   authenticated nobody and a troubleshooting entry pointing at the wrong cause.
 
 4. Deploy. Vercel serves the UI at `https://<project>.vercel.app`; the
    `/platform` route is the tenant-management console.
@@ -310,9 +316,11 @@ deployment.
   encrypted and unauthenticated.
 - **UI shows `upstream_unreachable`** → `OPERATE_API_URL` is wrong or the API
   isn't public. It must be the API's external HTTPS URL, reachable from Vercel.
-- **UI 401 / empty lists** → `OPERATE_API_KEY` on Vercel must be only the token
-  part (before the first `:`), matching the `<STRONG_TOKEN>` in the API's
-  `OPERATE_API_KEY_SPECS`.
+- **UI 401 / empty lists** → you are not signed in, or your session expired.
+  The UI has a login: open `/login` and sign in as a user provisioned through
+  `POST /v1/platform/users` (see `.env.example`'s bootstrap). This entry used to
+  blame `OPERATE_API_KEY` on Vercel, a variable the UI does not read — so the
+  remedy it named could not have worked.
 - **Boot log says `cursor disclosure: plaintext_disclosing`** → this manifest has
   a classified field a list view can sort by, and `CURSOR_ENCRYPTION_SECRET` is
   unset, so a caller naming that field in `?sort` gets its plaintext back in

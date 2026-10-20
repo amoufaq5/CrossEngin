@@ -190,6 +190,47 @@ function args_credentialAdminGranted(): boolean {
   return apiCommandArgs().includes("--credential-admin-role");
 }
 
+describe("the secrets .env.example ships", () => {
+  const env = readFileSync(resolve(here, "../../../deploy/.env.example"), "utf8");
+  const PLACEHOLDER = "REPLACE_WITH_";
+
+  it("ships the cursor secret uncommented, because a cursor carries a classified field", () => {
+    // Commented out, it was the one deploy document telling an operator to leave the disclosure
+    // open — `ORACLE.md`, `README.md` and `VERCEL-SUPABASE.md` all treat it as required (ADR-0377).
+    expect(env).toMatch(/^CURSOR_ENCRYPTION_SECRET=/m);
+  });
+
+  it("leaves the at-rest secret commented, because the shipped pack declares no phi field", () => {
+    // The asymmetry is measured on the pack this compose serves and not chosen: resolved erp-core
+    // has 0 phi/regulated fields and 1 sortable classified field. Uncommenting this one would ask
+    // an operator to generate a secret nothing reads.
+    expect(env).toMatch(/^#COLUMN_ENCRYPTION_SECRET=/m);
+  });
+
+  it("is safe to ship a placeholder only because an unreplaced one is refused at boot", () => {
+    // This is the assertion that makes the first one above honest, and it is a cross-package read
+    // for that reason. `REPLACE_WITH_32_PLUS_RANDOM_CHARS` is 33 bytes with 19 distinct values, so
+    // it passes BOTH entropy floors — it is strong and it is public. Without the refusal,
+    // uncommenting the cursor secret would turn a true `plaintext_disclosing` warning into a
+    // confident `sealed` under a key derivable from a file in this repository: ADR-0337's
+    // falsely-true control, created by the change meant to close the disclosure.
+    const kd = readFileSync(
+      resolve(here, "../../../packages/crypto/src/key-derivation.ts"),
+      "utf8",
+    );
+    expect(kd).toContain('SECRET_PLACEHOLDER_PREFIX = "REPLACE_WITH_"');
+    expect(kd).toContain("unreplaced_placeholder");
+    // Vacuity guard: an `.env.example` that stopped using this marker would make the refusal
+    // unreachable and leave both assertions above passing over a file nothing fences.
+    expect(env).toContain(PLACEHOLDER);
+  });
+
+  it("names a generator beside every secret it asks for", () => {
+    // The refusal prints this command, so the file and the binary have to agree about it.
+    expect(env).toContain("randomBytes(32)");
+  });
+});
+
 describe("the drain-absence warning's gate", () => {
   // A text fence over `node.ts`, because the branch is a `console.warn` inside `serve()` and there
   // is no seam to call: the three arms are verified live instead (a Postgres store with the drain
