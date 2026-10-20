@@ -1837,11 +1837,13 @@ describe("table column shapes", () => {
     const col = (n: string) => META_FORENSIC_CHAIN_CHECKPOINTS.columns.find((c) => c.name === n);
     // ADR-0374, and the sibling of the entries table above with the consequence one notch worse.
     // There a refused row makes an *entry* unreadable and ADR-0373 routed it into the verdict as
-    // `compromised`; here a refused row makes the **anchor** unreadable, and `proveScopeIntegrity`
-    // awaits `checkpoints.latest(scope)` twice with no `try`, so the hourly pass filed
-    // `outcome: "error"` — no verdict, no finding, no stored row, no escalation, no page. Measured
-    // live as a non-owner: this table's isolation arm is `ALL`-scope, so a tenant-context `UPDATE`
-    // of its own checkpoint cancelled a `compromised` verdict about its own chain.
+    // `compromised`; here a refused row makes the **anchor** unreadable, and at the time
+    // `proveScopeIntegrity` awaited `checkpoints.latest(scope)` twice with no `try`, so the hourly
+    // pass filed `outcome: "error"` — no verdict, no finding, no stored row, no escalation, no page.
+    // Measured live as a non-owner: this table's isolation arm is `ALL`-scope, so a tenant-context
+    // `UPDATE` of its own checkpoint cancelled a `compromised` verdict about its own chain.
+    // (ADR-0375 replaced those two reads with a whole-table scan, so that is the history this CHECK
+    // was added for rather than the current call graph. The CHECK is the write fence either way.)
     expect(col("checkpointed_by")?.check).toBe("char_length(checkpointed_by) >= 1");
     // The sibling column, which was in the same state and is the one nobody was pointed at:
     // `externalAnchorReference` is `z.string().min(1).optional()`, so `''` is refused by the

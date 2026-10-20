@@ -12,10 +12,11 @@ import {
 import type { PgConnection } from "@crossengin/kernel-pg";
 
 import {
-  anchoringWouldBury,
-  verifyChainFromCheckpoint,
-  type ChainVerificationReport,
-} from "./chain-verify.js";
+  anchorAuditHasFindings,
+  auditAnchors,
+  type AnchorAuditReport,
+} from "./anchor-audit.js";
+import { verifyChainFromCheckpoint, type ChainVerificationReport } from "./chain-verify.js";
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
@@ -109,7 +110,6 @@ export const CHECKPOINT_PASS_OUTCOMES = [
   "recorded",
   "skipped_empty",
   "refused_unverified",
-  "refused_anchor_would_bury",
   "error",
 ] as const;
 export type CheckpointPassOutcome = (typeof CHECKPOINT_PASS_OUTCOMES)[number];
@@ -124,19 +124,24 @@ export interface CheckpointPassResult {
    * not be performed at all, which says nothing about the chain. Both withhold the anchor — the
    * difference is what an operator is told, and only one of the two is a finding.
    *
-   * `refused_anchor_would_bury` is the fifth and is deliberately **not** that one, because its
-   * premise is the opposite of it: the chain **verified**, and the finding is the *stored anchor*,
-   * which `anchoringWouldBury` adjudicates over the report's `fullBecause`. Reporting a sound chain
-   * as `refused_unverified` would tell an operator "this chain did not verify" about a chain that
-   * did — the same conflation the refusal/error split above exists to prevent, one case across, and
-   * it would send them to look for a tamper in the entries rather than at the checkpoint row that
-   * is the whole finding. It carries `verification` for `refused_unverified`'s reason: the refusal
-   * leaves no row behind, so the report is the only thing that can say why.
+   * There is deliberately **no** outcome for a finding in the anchor table. A finding there does
+   * not withhold the anchor any more (see `pass`), so it is not an outcome of the pass at all: the
+   * pass records, and `onAnchorFindings` carries the finding. An outcome that named it would have to
+   * be reported *beside* `recorded` rather than instead of it, and this vocabulary answers what one
+   * scope resolved to.
    */
   readonly outcome: CheckpointPassOutcome;
   readonly checkpoint?: ChainCheckpoint;
   /** Present iff a verification ran: absent for `skipped_empty`, and for a throw. */
   readonly verification?: ChainVerificationReport;
+  /**
+   * Present whenever the audit ran — which is every outcome but a throw from the audit itself, so
+   * including `skipped_empty` (the audit runs before the tail check) and including an `error` raised
+   * by a later step of the same scope's pass. The audit is the reading, not a consequence of
+   * anchoring, so withholding it from the results of a scope whose verification then threw would
+   * hide a reading that was taken.
+   */
+  readonly anchorAudit?: AnchorAuditReport;
   readonly error?: unknown;
 }
 
@@ -181,22 +186,40 @@ export interface CheckpointSchedulerOptions {
   readonly runOnStart?: boolean;
   readonly onCheckpoint?: (scope: string | null, checkpoint: ChainCheckpoint) => void;
   /**
-   * A scope that was not anchored: either its chain did not verify, or its chain verified and the
-   * stored anchor is one a fresh checkpoint would bury (`refused_anchor_would_bury`). Either way no
-   * anchor was written and the pass carried on, and `verification` is what says which.
+   * A scope that was not anchored because its chain did not verify. No anchor was written, the pass
+   * carried on, and `verification` is what says what failed.
    *
-   * **Required**, unlike the other two callbacks, because a refusal is the only outcome here that
-   * leaves nothing in the database. An anchor that is written is its own record and a throw is a
-   * condition the next pass meets again, while a refused verification writes no row at all — see
-   * `CHAIN_FULL_REASONS`' note on why writing one would be worse — so an optional handler would let
-   * a deployment discover that its chain stopped verifying by never being told.
-   *
-   * That argument is **stronger** for the second cause and not weaker: the burying refusal recurs on
-   * every pass for as long as the row stands, and this is the only surface that says so — the
-   * integrity proof's own `anchorRowsRefused` names the row, but nothing there knows that the
-   * scheduler has stopped anchoring the scope.
+   * **Required**, unlike the other two optional callbacks, because a refusal is the only *outcome*
+   * here that leaves nothing in the database. An anchor that is written is its own record and a
+   * throw is a condition the next pass meets again, while a refused verification writes no row at
+   * all — see `CHAIN_FULL_REASONS`' note on why writing one would be worse — so an optional handler
+   * would let a deployment discover that its chain stopped verifying by never being told.
    */
   readonly onRefused: (scope: string | null, verification: ChainVerificationReport) => void;
+  /**
+   * What this scope's whole anchor table says about itself, when it says anything an operator has to
+   * act on — `anchorAuditHasFindings`, so a row the contract refuses, an anchor the chain
+   * contradicts, *or* a scan the ceiling stopped.
+   *
+   * **Required, for `onRefused`'s own reason and a stronger instance of it.** Nothing in the
+   * database distinguishes a refused or relocated checkpoint row from a sound one: `record` is
+   * `ON CONFLICT … DO NOTHING`, so the row stays exactly as it is and no later write marks it, and
+   * the only other reader is the integrity proof — a separate, opt-in process. So this callback is
+   * the finding's only record. The argument is stronger here than for a refusal because this surface
+   * now **anchors** rather than withholding: a refusal at least shows up as a scope that stopped
+   * gaining checkpoints, while an audited-and-anchored scope looks identical to a clean one, so an
+   * optional handler would let a deployment learn that its anchor table had been edited by never
+   * being told at all.
+   *
+   * Fired on **every** pass for as long as the condition stands, and deliberately not deduped in
+   * this process. ADR-0329 settled that for the sweep stall on the same grounds — a standing
+   * condition's signal *is* the repetition — and ADR-0332 refused the alternative directly, moving
+   * an episode's kind out of process memory because a remembered episode is forgotten by a restart
+   * and unknown to a second replica, so the one thing in-process dedup reliably suppresses is the
+   * report a new process would otherwise make. Per-episode adoption belongs where it is already
+   * done from durable state: the escalation's `findOpen` (ADR-0324).
+   */
+  readonly onAnchorFindings: (scope: string | null, audit: AnchorAuditReport) => void;
   readonly onError?: (err: unknown) => void;
 }
 
@@ -218,13 +241,17 @@ export interface CheckpointSchedulerOptions {
  * scheduler is a separate, opt-in process, so an anchor whose soundness depended on it would be
  * unsound on every deployment not running it.
  *
+ * Each pass also **audits the scope's whole anchor table** before it does anything else, and routes
+ * what that finds to `onAnchorFindings`. That reading is this pass's own job for the same reason the
+ * verification is: the table this process writes to is one a tenant-context session can `UPDATE`
+ * (ADR-0374), and nothing else in a deployment reads it as a set.
+ *
  * A scope with an empty chain is skipped — nothing to verify, nothing to anchor — and never surfaced
- * as an error. A scope is refused and routed to `onRefused` for either of **two** reasons: its chain
- * failed verification (`refused_unverified`), or its chain verified and the anchor already on disk
- * is one that writing a fresh checkpoint would bury (`refused_anchor_would_bury`, adjudicated by
- * `anchoringWouldBury`). A throw is routed to `onError`. All three let the pass continue, so one
- * scope never blocks the rest. Mirrors `JobScheduler` / `JwksRefreshPoller`: the timer is `unref`'d
- * so it never holds the process open, and `start()` fires an immediate pass before the interval.
+ * as an error. A scope is refused and routed to `onRefused` for exactly **one** reason: its chain
+ * failed verification (`refused_unverified`). A throw is routed to `onError`. All three let the pass
+ * continue, so one scope never blocks the rest. Mirrors `JobScheduler` / `JwksRefreshPoller`: the
+ * timer is `unref`'d so it never holds the process open, and `start()` fires an immediate pass
+ * before the interval.
  */
 export class CheckpointScheduler {
   private handle: IntervalHandle | null = null;
@@ -276,7 +303,32 @@ export class CheckpointScheduler {
     for (const scope of scopes) {
       let recorded: { checkpoint: ChainCheckpoint; verification: ChainVerificationReport } | null =
         null;
+      // Declared outside the `try` so an audit that ran is reported on the result of a scope whose
+      // *later* steps threw — see `CheckpointPassResult.anchorAudit`.
+      let anchorAudit: AnchorAuditReport | undefined;
       try {
+        // The audit runs FIRST, and specifically before the tail check, because an empty chain is a
+        // `skipped_empty` that `continue`s — and a scope whose anchors are the finding may well be
+        // one whose chain is gone. That is not hypothetical: a tenant-context session's `DELETE` on
+        // `forensic_chain_entries` matched the owner's whole row count on every scope measured
+        // (ADR-0374), so "the entries were destroyed and the anchors were not" is one statement, and
+        // auditing after the tail check would answer it by looking at nothing.
+        //
+        // `chain: null`, so only the refusal half is asked and `disagreeing` reads *not asked*
+        // rather than *none found* (ADR-0331, enforced by `AnchorAuditReport.disagreeing`'s type).
+        // The verifier this scheduler holds is a seam returning a verdict: it loads the chain
+        // internally and does not hand it back, and reading the chain a second time here would pay a
+        // whole-chain load per pass to duplicate a correspondence the integrity proof already
+        // computes from a chain it has in hand. So the correspondence is that pass's and the set-wide
+        // refusal reading — which needs no chain — is this one's.
+        anchorAudit = await auditAnchors(scope, this.opts.checkpointStore, null);
+        // Fired here rather than once the scope's pass has resolved, because the audit's finding is
+        // independent of everything after it: deferring it would lose the finding entirely on a
+        // scope whose verification throws, and that is the scope most likely to have one. Inside the
+        // `try` on `onRefused`'s precedent and not `onCheckpoint`'s — nothing has been written yet,
+        // so filing a throwing handler as `error` states nothing false about the database, which is
+        // exactly the condition that puts `onCheckpoint` outside.
+        if (anchorAuditHasFindings(anchorAudit)) this.opts.onAnchorFindings(scope, anchorAudit);
         // The tail is resolved BEFORE verifying because it is the sequence the anchor will claim,
         // and everything at or below it is provably inside what the verification then loaded. The
         // alternative — let `createCheckpoint` find a tail afterwards — anchors at a *later*
@@ -292,48 +344,51 @@ export class CheckpointScheduler {
         if (tail === null) {
           // An empty chain is a skip and not an error: `verifyChainFull` over zero entries is
           // vacuously `ok`, so verifying first would anchor nothing and report a failure instead.
-          results.push({ scope, outcome: "skipped_empty" });
+          results.push({ scope, outcome: "skipped_empty", anchorAudit });
           continue;
         }
         const verification = await this.opts.verify(scope);
         if (!verification.ok) {
           this.opts.onRefused(scope, verification);
-          results.push({ scope, outcome: "refused_unverified", verification });
+          results.push({ scope, outcome: "refused_unverified", verification, anchorAudit });
           continue;
         }
-        // Ordered AFTER `!verification.ok` and before any anchor is built. A verification that both
-        // failed and carries a burying reason is reported as the failure, because "this chain did
-        // not verify" is the stronger and more urgent statement and the anchor refusal is implied
-        // by it — nothing is written on either path.
+        // **The anchor is written whatever the audit found, and a refusal used to stand here.**
         //
-        // The chain verified here, and the finding is the anchor already on disk. Anchoring would
-        // write a **readable** checkpoint at the tail, which `latest()` then returns because it
-        // orders by `sequence_number DESC` — so the refused row sits below it and
-        // `IntegrityProofReport.anchorRowsRefused` goes back to empty. Measured live before and
-        // after one pass: `compromised` with `[onPass, onFinding, escalate]`, then `verified` with
-        // `[onPass, escalate]`, the refused row still on disk (ADR-0374). The scheduler would be
-        // erasing the alarm, and no callback would fire at all. The bound is exact rather than a
-        // narrow race: the finding survives only while the tail is at or below the refused anchor's
-        // sequence, where `ON CONFLICT … DO NOTHING` fires, and is buried the moment the chain gains
-        // one entry — which on a serving deployment is every audited request (ADR-0286).
+        // ADR-0374 withheld it over `anchoringWouldBury` (deleted with the guard, as is the map it
+        // read), and that was right *while the detector was one row wide*: `latest()` orders
+        // `sequence_number DESC`, so a fresh readable checkpoint at the tail shadowed the refused
+        // row and the verdict's anchor axis went back to empty — measured live before and after one
+        // pass
+        // as `compromised` then `verified`, with the row still on disk. What made the refusal
+        // correct also bounded its worth: it protected the one row a tamperer need not choose. On a
+        // scope holding anchors at 1, 3 and 4, blanking `checkpointed_by` at sequence 1 read
+        // `verified anchorRefused=0` and the identical statement at sequence 4 read
+        // `compromised anchorRefused=1` — same column, same role, same table, opposite verdicts.
         //
-        // The cost is stated because it is the deliberate price: this scope folds from genesis on
-        // every pass until the row is corrected, at a measured ~152 microseconds of Ed25519 verify
-        // per entry (ADR-0371), so 15.2 s of signature CPU per pass at 100k entries. It is the right
-        // price because the alternative silences the one detector there is for that row, and it is
-        // self-healing in the correct direction: once an operator corrects or removes the row,
-        // `latest()` reads again, the next pass anchors normally, and the cost disappears.
+        // That ADR predicted the relaxation as "one line — this member flips to `false`", and its own
+        // fence refuses it: `CHAIN_FULL_REASON_BLOCKS_ANCHORING` had `anchor_unreadable` as its only
+        // `true`, so flipping it leaves a map every member of which is `false`, which that
+        // increment's own test calls a silently disarmed fence. So the honest relaxation is a
+        // **deletion**, and what replaces the guard is a detector that reads the whole table.
         //
-        // It also makes `node.ts`'s start order **irrelevant** rather than merely safe. Today the
-        // checkpoint lifecycle starts before the integrity proof, both `runOnStart` and both hourly
-        // by default, so the burial happened milliseconds before the proof looked — but ADR-0371
-        // refused to let soundness depend on a start order in a third file, and a scheduler that
-        // cannot bury the finding cannot bury it in any order.
-        if (anchoringWouldBury(verification.fullBecause)) {
-          this.opts.onRefused(scope, verification);
-          results.push({ scope, outcome: "refused_anchor_would_bury", verification });
-          continue;
-        }
+        // Anchoring now buries nothing, and the scan's **direction** is what establishes that rather
+        // than its width: `scanCheckpoints` reads ascending from genesis with a ceiling, so a fresh
+        // anchor at the tail is the last row the scan would reach and never one that displaces an
+        // earlier finding (a descending scan with a ceiling would have reproduced the burial at
+        // ceiling depth instead of at depth 1). And the write itself was never the defect —
+        // `anchor_unreadable` folds from genesis, so the `verified_full` provenance this stamps is
+        // earned over the entire prefix and the bounded proof's induction holds.
+        //
+        // There is deliberately **no** residual refusal for a scan the ceiling stopped, which is the
+        // one case where "did the audit see everything?" is answerable `no`. Two reasons, and the
+        // second is decisive: the coverage gap is itself a finding (`anchorAuditHasFindings` reads
+        // `!complete`, and `integrityVerdictFor` answers `unproven` on it), so nothing is silent;
+        // and the scope that trips a 1,000,000-row ceiling is by construction the oldest and longest
+        // chain in the deployment, i.e. exactly the one least able to afford the fold-from-genesis a
+        // refusal imposes — at a measured ~152 microseconds of Ed25519 verify per entry (ADR-0371),
+        // 15.2 s of signature CPU per pass at 100k entries. Refusing there would spend the most CPU
+        // on the deployment with the least to spare in order to re-report a gap already reported.
         const checkpoint = checkpointFromTail(tail, {
           checkpointedBy: this.opts.checkpointedBy,
           // Resolved per scope rather than once per pass, so a long pass does not stamp its last
@@ -345,7 +400,12 @@ export class CheckpointScheduler {
         recorded = { checkpoint, verification };
       } catch (err) {
         this.opts.onError?.(err);
-        results.push({ scope, outcome: "error", error: err });
+        results.push({
+          scope,
+          outcome: "error",
+          error: err,
+          ...(anchorAudit !== undefined ? { anchorAudit } : {}),
+        });
         continue;
       }
       if (recorded === null) continue;
@@ -358,6 +418,7 @@ export class CheckpointScheduler {
         outcome: "recorded",
         checkpoint: recorded.checkpoint,
         verification: recorded.verification,
+        ...(anchorAudit !== undefined ? { anchorAudit } : {}),
       });
     }
     return results;
@@ -389,6 +450,12 @@ export interface CheckpointLifecycleOptions {
   readonly onCheckpoint?: (scope: string | null, checkpoint: ChainCheckpoint) => void;
   /** Required for `CheckpointSchedulerOptions.onRefused`'s reason: a refusal leaves no row behind. */
   readonly onRefused: (scope: string | null, verification: ChainVerificationReport) => void;
+  /**
+   * Required for `CheckpointSchedulerOptions.onAnchorFindings`' reason, which is the same one a step
+   * stronger: an edited anchor row leaves nothing in the database that distinguishes it, and this
+   * pass anchors over it rather than refusing, so the callback is the finding's only record.
+   */
+  readonly onAnchorFindings: (scope: string | null, audit: AnchorAuditReport) => void;
   readonly onError?: (err: unknown) => void;
   readonly now?: () => Date;
 }
@@ -446,6 +513,7 @@ export function buildCheckpointLifecycle(
     intervalMs: config.intervalMs,
     checkpointedBy: config.checkpointedBy,
     onRefused: opts.onRefused,
+    onAnchorFindings: opts.onAnchorFindings,
     ...(opts.now !== undefined ? { now: opts.now } : {}),
     ...(opts.scheduler !== undefined ? { scheduler: opts.scheduler } : {}),
     ...(opts.runOnStart !== undefined ? { runOnStart: opts.runOnStart } : {}),

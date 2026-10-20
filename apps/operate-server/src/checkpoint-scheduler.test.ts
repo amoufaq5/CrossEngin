@@ -11,15 +11,15 @@ import {
   PostgresChainLogStore,
   keyStoreChainSigner,
   type ChainSigner,
+  type ChainTail,
+  type CheckpointScanOptions,
+  type CheckpointScanOutcome,
 } from "@crossengin/forensics-pg";
-import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
+import type { PgConnection, PgQueryResult, RowRead } from "@crossengin/kernel-pg";
+import { assertBindArity } from "@crossengin/testing";
 
-import {
-  CHAIN_FULL_REASONS,
-  CHAIN_FULL_REASON_BLOCKS_ANCHORING,
-  type ChainFullReason,
-  type ChainVerificationReport,
-} from "./chain-verify.js";
+import { auditAnchors, type AnchorAuditReport } from "./anchor-audit.js";
+import type { ChainFullReason, ChainVerificationReport } from "./chain-verify.js";
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
 import {
   buildCheckpointLifecycle,
@@ -45,6 +45,18 @@ function paramIndex(sql: string, re: RegExp): number {
 }
 
 /**
+ * A row identity the fake has to mint because the real table defaults it: `id` is not in the
+ * `INSERT`'s column list, and `scanCheckpoints` keysets on `(sequence_number, id)` because
+ * `UNIQUE (tenant_id, sequence_number)` does not constrain the platform scope (ADR-0371). Shaped
+ * like a uuidv7 and **lexicographically ordered by insertion**, which is the one property the scan's
+ * tiebreaker depends on — a random uuid here would make the two-rows-at-one-sequence case answer
+ * differently from run to run.
+ */
+function fakeCheckpointId(n: number): string {
+  return `00000000-0000-7000-8000-${n.toString().padStart(12, "0")}`;
+}
+
+/**
  * Inline fake of `meta.forensic_chain_entries`, `meta.forensic_chain_checkpoints` and the one
  * `meta.crypto_keys` lookup a signature check makes, with RLS-like per-transaction tenant scoping
  * (mirrors forensics-pg's private test fake, which isn't exported).
@@ -52,18 +64,100 @@ function paramIndex(sql: string, re: RegExp): number {
  * `failTenant` makes every read for that scope throw, to exercise per-scope error isolation.
  * `keyRow` is the registry row `getByFingerprint` resolves to — omit it and the chain's signing
  * fingerprint is unresolvable, which is how an unregistered key is reproduced.
+ * `rawCheckpoints` are pushed in as they stand, which is the only way to put a row on disk that the
+ * contract refuses: `record` begins `ChainCheckpointSchema.parse`, so no write this binary performs
+ * can produce one, and a tenant-context `UPDATE` is what produces one live (ADR-0374).
  */
 function fakeChainPg(
-  opts: { readonly failTenant?: string; readonly keyRow?: Record<string, unknown> } = {},
+  opts: {
+    readonly failTenant?: string;
+    readonly keyRow?: Record<string, unknown>;
+    readonly rawCheckpoints?: readonly Record<string, unknown>[];
+  } = {},
 ): PgConnection {
   const entryRows: Record<string, unknown>[] = [];
-  const checkpointRows: Record<string, unknown>[] = [];
+  const checkpointRows: Record<string, unknown>[] = [...(opts.rawCheckpoints ?? [])];
+  let nextCheckpointId = checkpointRows.length;
+
+  /**
+   * **The whole disjunction the store writes**, both arms and the operator on each, rather than a
+   * probe for a `>` anywhere. Two reasons. The disjunction is the form the index can serve each arm
+   * of (ADR-0371's `scopeFilter` argument, one level across), so a scan rewritten to the row
+   * comparison `(sequence_number, id) > ($a, $b)` stops being paged here and the shape change is
+   * loud instead of silent. And the `id` arm's operator is **read rather than assumed**, which is
+   * what keeps the fake modelling the statement instead of the statement its author meant: a fake
+   * implementing `>` for a predicate spelling `>=` would hide the re-read of the cursor's own row
+   * that the difference causes, and a fake answering a statement it could not really serve is a test
+   * asserting the wrong thing (ADR-0363).
+   */
+  const CHECKPOINT_KEYSET_RE =
+    /\(sequence_number > \$(\d+)::bigint\s*OR \(sequence_number = \$\1::bigint AND id (>=?) \$(\d+)::uuid\)\)/;
+
+  /**
+   * Every read `PostgresChainCheckpointStore` issues, served off one model of the table: `latest`
+   * and `listRecent` (descending), `getBySequence` (one sequence) and `scanCheckpoints` (ascending
+   * with an optional `(sequence_number, id)` keyset).
+   */
+  function servedCheckpoints(
+    sql: string,
+    p: readonly unknown[],
+    currentTenant: string | null,
+  ): PgQueryResult {
+    let visible = checkpointRows.filter((r) => (r["tenant_id"] ?? null) === currentTenant);
+
+    const keyset = CHECKPOINT_KEYSET_RE.exec(sql);
+    if (keyset === null && /sequence_number > \$|id >=? \$/.test(sql)) {
+      throw new Error(
+        `a keyset this fake cannot page: it is neither the disjunction the store writes nor a ` +
+          `shape with no cursor at all — ${sql.replace(/\s+/g, " ").trim()}`,
+      );
+    }
+    if (keyset !== null) {
+      // `BIGINT` comes back from node-postgres as a string, so the cursor's sequence is carried as
+      // the raw string and bound with a `::bigint` cast. Compared numerically here, which is what
+      // Postgres does with it.
+      const afterSeq = Number(p[Number(keyset[1]) - 1]);
+      const afterId = String(p[Number(keyset[3]) - 1]);
+      const idStrict = keyset[2] === ">";
+      visible = visible.filter((r) => {
+        const seq = Number(r["sequence_number"]);
+        const id = String(r["id"]);
+        return seq > afterSeq || (seq === afterSeq && (idStrict ? id > afterId : id >= afterId));
+      });
+    } else {
+      const eqIdx = paramIndex(sql, /sequence_number = \$(\d+)/);
+      if (!Number.isNaN(eqIdx)) {
+        const val = Number(p[eqIdx]);
+        visible = visible.filter((r) => Number(r["sequence_number"]) === val);
+      }
+    }
+
+    const desc = sql.includes("ORDER BY sequence_number DESC");
+    visible = [...visible].sort((a, b) => {
+      const bySeq = Number(a["sequence_number"]) - Number(b["sequence_number"]);
+      const ordered = bySeq !== 0 ? bySeq : String(a["id"]).localeCompare(String(b["id"]));
+      return ordered * (desc ? -1 : 1);
+    });
+
+    const limitIdx = paramIndex(sql, /LIMIT \$(\d+)/);
+    if (!Number.isNaN(limitIdx)) {
+      visible = visible.slice(0, Number(p[limitIdx]));
+    } else if (/LIMIT 1\b/.test(sql)) {
+      visible = visible.slice(0, 1);
+    }
+    return { rows: visible, rowCount: visible.length };
+  }
 
   function makeClient(): PgConnection {
     let currentTenant: string | null = null;
 
     const query = async (sql: string, params?: readonly unknown[]): Promise<PgQueryResult> => {
       const p = params ?? [];
+      // The one thing interpreting SQL cannot answer: whether the statement references exactly the
+      // parameters it binds. Postgres decides that in the bind step, before the planner, so a fake
+      // that serves rows from a model of the table is otherwise answering statements no server would
+      // have accepted (ADR-0370).
+      assertBindArity(sql, params);
       if (sql.includes("set_config")) {
         currentTenant = (p[0] as string | null) ?? null;
         return { rows: [], rowCount: 0 };
@@ -79,7 +173,9 @@ function fakeChainPg(
             (r) => (r["tenant_id"] ?? null) === tenant && Number(r["sequence_number"]) === seq,
           );
           if (!exists) {
+            nextCheckpointId += 1;
             checkpointRows.push({
+              id: fakeCheckpointId(nextCheckpointId),
               tenant_id: p[0] ?? null,
               sequence_number: p[1],
               root_hash: p[2],
@@ -119,18 +215,24 @@ function fakeChainPg(
           const hit = row !== undefined && row["fingerprint_sha256"] === p[0];
           return { rows: hit && row !== undefined ? [row] : [], rowCount: hit ? 1 : 0 };
         }
-        const table = sql.includes(CHECKPOINTS) ? checkpointRows : entryRows;
-        let visible = table.filter((r) => (r["tenant_id"] ?? null) === currentTenant);
+        // The checkpoints table gets its own branch, ahead of the generic one, because the generic
+        // one would **mis-serve** `scanCheckpoints`: its `/sequence_number = \$(\d+)/` probe matches
+        // the `=` arm of the keyset disjunction, so the page would come back narrowed to one
+        // sequence. A fake that answers a statement it could not really serve is a test asserting
+        // the wrong thing (ADR-0363).
+        if (sql.includes(CHECKPOINTS)) {
+          return servedCheckpoints(sql, p, currentTenant);
+        }
+        // Entries only, now that the checkpoints table is served above. There is deliberately no
+        // `sequence_number = $n` arm here: the only reader of that form in either store is
+        // `getBySequence`, which is a checkpoint read, so an arm for it would be one that cannot
+        // fire and would read as coverage it does not provide.
+        let visible = entryRows.filter((r) => (r["tenant_id"] ?? null) === currentTenant);
 
         const geIdx = paramIndex(sql, /sequence_number >= \$(\d+)/);
         if (!Number.isNaN(geIdx)) {
           const min = Number(p[geIdx]);
           visible = visible.filter((r) => Number(r["sequence_number"]) >= min);
-        }
-        const eqIdx = paramIndex(sql, /sequence_number = \$(\d+)/);
-        if (!Number.isNaN(eqIdx)) {
-          const val = Number(p[eqIdx]);
-          visible = visible.filter((r) => Number(r["sequence_number"]) === val);
         }
 
         const desc = sql.includes("ORDER BY sequence_number DESC");
@@ -146,7 +248,10 @@ function fakeChainPg(
         }
         return { rows: visible, rowCount: visible.length };
       }
-      return { rows: [], rowCount: 0 };
+      // Not `{rows: []}`: an empty answer for a statement this fake does not model would make every
+      // assertion about what that statement *found* pass vacuously, which is this convention's own
+      // blind spot turned on the fake (ADR-0350).
+      throw new Error(`fakeChainPg cannot serve: ${sql.replace(/\s+/g, " ").trim()}`);
     };
 
     return {
@@ -168,31 +273,113 @@ interface ChainFixture {
   readonly checkpointStore: PostgresChainCheckpointStore;
 }
 
+/** The id space seeded rows take, kept clear of the one the fake's `INSERT` mints from. */
+function seededCheckpointId(sequenceNumber: number): string {
+  return `00000000-0000-7000-9000-${sequenceNumber.toString().padStart(12, "0")}`;
+}
+
 /**
- * A checkpoint store that counts the `record` calls reaching it, because that is the assertion the
- * burying refusal needs and `latest()` cannot give.
+ * A stored checkpoint row as the table holds one, for the cases that need a row on disk the contract
+ * refuses — `record` parses its input, so nothing this binary writes can produce one.
+ */
+function checkpointRow(
+  tenantId: string | null,
+  sequenceNumber: number,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    id: seededCheckpointId(sequenceNumber),
+    tenant_id: tenantId,
+    sequence_number: sequenceNumber,
+    root_hash: "a".repeat(64),
+    checkpointed_at: AT,
+    checkpointed_by: "operate-server",
+    external_anchor_reference: null,
+    algorithm: "sha256",
+    provenance: "verified_full",
+    ...overrides,
+  };
+}
+
+/**
+ * The measured tamper, which is also the cheapest row to make: `checkpointedBy` is
+ * `z.string().min(1)`, so `''` is refused by the contract and admitted by the column, and one
+ * `UPDATE` under a tenant's own context writes it — that table's isolation arm is `ALL`-scope, so
+ * its `USING` doubles as its `WITH CHECK` (ADR-0374, verified live as the non-owner `serving` role).
+ */
+function refusedCheckpointRow(
+  tenantId: string | null,
+  sequenceNumber: number,
+): Record<string, unknown> {
+  return checkpointRow(tenantId, sequenceNumber, { checkpointed_by: "" });
+}
+
+/**
+ * A checkpoint store that says what reached it and can misbehave on demand: the `record` calls it
+ * took, a note on the shared `trace` each time it was scanned, and a scan that throws or that
+ * reports the ceiling stopped it.
  *
- * `latest() === null` is the fence every other refusal test here uses, and it is sound for those:
- * nothing is on disk, so a write is the only thing that could make it non-null. It is **unsound for
- * the burying refusal**, because that write is a row the store accepts and the contract reads back
- * perfectly — so in the live shape, where a refused row is already on disk, `latest()` would answer
- * with the *new* row and `expect(...).toBeNull()` would be asserting the defect rather than its
- * absence. The question there is whether the write was attempted at all.
+ * `recorded` is the assertion `latest()` cannot give, and the distinction still matters now that the
+ * pass anchors over a finding instead of withholding: a fresh anchor at the tail is a row the store
+ * accepts and the contract reads back perfectly, so `latest()` answers with the *new* row and
+ * `expect(...).toBeNull()` would be asserting nothing. The question is whether the write was made.
+ *
+ * `trace` is what makes the audit's **position** assertable rather than only its presence — shared
+ * with `TracingChainLogStore`, so the order of the two calls is read off one list instead of
+ * inferred from what each of them found.
  *
  * A subclass rather than a stand-in object, because `CheckpointSchedulerOptions.checkpointStore` is
- * the concrete class: this keeps the real `record` (and its `ChainCheckpointSchema.parse`) on the
- * path, so a test asserting "nothing was recorded" cannot pass because the fake accepted something
- * the real store would refuse.
+ * the concrete class: this keeps the real `record` (and its `ChainCheckpointSchema.parse`) and the
+ * real scan on the path, so a test asserting "nothing was recorded" cannot pass because a fake
+ * accepted something the real store would refuse.
  */
-class RecordCountingCheckpointStore extends PostgresChainCheckpointStore {
+class ObservedCheckpointStore extends PostgresChainCheckpointStore {
   readonly recorded: Array<{
     readonly scope: string | null;
     readonly checkpoint: ChainCheckpoint;
   }> = [];
 
+  constructor(
+    conn: PgConnection,
+    private readonly behaviour: {
+      readonly scanThrows?: boolean;
+      readonly scanIncomplete?: boolean;
+      readonly trace?: string[];
+    } = {},
+  ) {
+    super(conn, {});
+  }
+
   override async record(tenantId: string | null, checkpoint: ChainCheckpoint): Promise<void> {
     this.recorded.push({ scope: tenantId, checkpoint });
     await super.record(tenantId, checkpoint);
+  }
+
+  override async scanCheckpoints(
+    tenantId: string | null,
+    onPage: (page: RowRead<ChainCheckpoint>) => void,
+    opts: CheckpointScanOptions = {},
+  ): Promise<CheckpointScanOutcome> {
+    this.behaviour.trace?.push("scan");
+    if (this.behaviour.scanThrows === true) throw new Error("checkpoint scan unavailable");
+    const outcome = await super.scanCheckpoints(tenantId, onPage, opts);
+    return this.behaviour.scanIncomplete === true ? { ...outcome, complete: false } : outcome;
+  }
+}
+
+/** The other half of the order trace; `tail` is the call the audit has to precede. */
+class TracingChainLogStore extends PostgresChainLogStore {
+  constructor(
+    conn: PgConnection,
+    signer: ChainSigner,
+    private readonly trace: string[],
+  ) {
+    super(conn, signer, {});
+  }
+
+  override async tail(tenantId: string | null): Promise<ChainTail | null> {
+    this.trace.push("tail");
+    return super.tail(tenantId);
   }
 }
 
@@ -205,7 +392,11 @@ class RecordCountingCheckpointStore extends PostgresChainCheckpointStore {
  * signing key was never registered: every signature is unresolvable and the pass must refuse.
  */
 async function newChainFixture(
-  opts: { readonly failTenant?: string; readonly unregisteredKey?: boolean } = {},
+  opts: {
+    readonly failTenant?: string;
+    readonly unregisteredKey?: boolean;
+    readonly rawCheckpoints?: readonly Record<string, unknown>[];
+  } = {},
 ): Promise<ChainFixture> {
   const keyStore = new InMemoryKeyStore();
   const record = await keyStore.createKey({
@@ -231,6 +422,7 @@ async function newChainFixture(
   const conn = fakeChainPg({
     ...(opts.failTenant !== undefined ? { failTenant: opts.failTenant } : {}),
     ...(opts.unregisteredKey === true ? {} : { keyRow }),
+    ...(opts.rawCheckpoints !== undefined ? { rawCheckpoints: opts.rawCheckpoints } : {}),
   });
   return {
     conn,
@@ -419,6 +611,7 @@ describe("allTenants config + tenantSourceScopes", () => {
       signer,
       registry,
       onRefused: () => undefined,
+      onAnchorFindings: () => undefined,
       tenants: tenantSourceScopes({ activeTenantIds: () => [TENANT_A, TENANT_B] }),
     });
     const results = await runOnce();
@@ -430,17 +623,20 @@ describe("allTenants config + tenantSourceScopes", () => {
 });
 
 describe("CHECKPOINT_PASS_OUTCOMES", () => {
-  it("is exactly these five members", () => {
+  it("is exactly these four members", () => {
     // An exact set rather than a count, on this repo's rule for a vocabulary an argued distinction
-    // hangs off: a count moves for a rename too, and these member names ARE the two refusals'
-    // arguments — `refused_unverified` says the chain did not verify, `refused_anchor_would_bury`
-    // says it did and the stored anchor is the finding. A sixth outcome fails here rather than
-    // landing unnoticed, which is the whole reason the union is derived from an array.
+    // hangs off: a count moves for a rename too, and the member names ARE the refusal's argument —
+    // `refused_unverified` says the chain did not verify, where `error` says no verdict was reached.
+    //
+    // It was five. `refused_anchor_would_bury` is **gone**, and the deletion is the increment: the
+    // pass anchors over an anchor-table finding now and reports it through `onAnchorFindings`, so
+    // there is nothing for a fifth outcome to name — a finding beside `recorded` is not what one
+    // scope resolved to. A sixth landing unnoticed fails here, which is the whole reason the union
+    // is derived from an array.
     expect([...CHECKPOINT_PASS_OUTCOMES]).toEqual([
       "recorded",
       "skipped_empty",
       "refused_unverified",
-      "refused_anchor_would_bury",
       "error",
     ]);
   });
@@ -455,6 +651,7 @@ describe("CheckpointScheduler.runOnce", () => {
       signer,
       registry,
       onRefused: () => undefined,
+      onAnchorFindings: () => undefined,
       now: () => new Date(AT),
     });
     const results = await runOnce();
@@ -477,6 +674,7 @@ describe("CheckpointScheduler.runOnce", () => {
       signer,
       registry,
       onRefused: () => undefined,
+      onAnchorFindings: () => undefined,
       onError: (err) => errors.push(err),
     });
     const results = await runOnce();
@@ -495,6 +693,7 @@ describe("CheckpointScheduler.runOnce", () => {
       signer,
       registry,
       onRefused: () => undefined,
+      onAnchorFindings: () => undefined,
     });
     const results = await runOnce();
 
@@ -511,6 +710,7 @@ describe("CheckpointScheduler.runOnce", () => {
       signer,
       registry,
       onRefused: () => undefined,
+      onAnchorFindings: () => undefined,
     });
     const results = await runOnce();
 
@@ -529,7 +729,13 @@ describe("CheckpointScheduler.runOnce", () => {
     const { runOnce } = buildCheckpointLifecycle(
       conn,
       { ...BASE_CONFIG, tenants: [TENANT_POISON, TENANT_A] },
-      { signer, registry, onRefused: () => undefined, onError: (err) => errors.push(err) },
+      {
+        signer,
+        registry,
+        onRefused: () => undefined,
+        onAnchorFindings: () => undefined,
+        onError: (err) => errors.push(err),
+      },
     );
     const results = await runOnce();
 
@@ -547,6 +753,7 @@ describe("CheckpointScheduler.runOnce", () => {
       signer,
       registry,
       onRefused: () => undefined,
+      onAnchorFindings: () => undefined,
       onCheckpoint: (scope, checkpoint) => seen.push({ scope, seq: checkpoint.sequenceNumber }),
     });
     await runOnce();
@@ -562,6 +769,7 @@ describe("CheckpointScheduler.runOnce", () => {
       signer,
       registry,
       onRefused: () => undefined,
+      onAnchorFindings: () => undefined,
       tenants: () => [TENANT_B],
     });
     const results = await runOnce();
@@ -579,6 +787,7 @@ describe("CheckpointScheduler.runOnce", () => {
       signer,
       registry,
       onRefused: () => undefined,
+      onAnchorFindings: () => undefined,
       tenants: () => {
         throw new Error("no tenant source");
       },
@@ -598,6 +807,7 @@ describe("CheckpointScheduler.runOnce", () => {
       signer,
       registry,
       onRefused: () => undefined,
+      onAnchorFindings: () => undefined,
     });
     const results = await runOnce();
 
@@ -622,6 +832,7 @@ describe("CheckpointScheduler.runOnce", () => {
       signer,
       registry,
       onRefused: (scope) => refused.push(scope),
+      onAnchorFindings: () => undefined,
       onError: (err) => errors.push(err),
     });
     const results = await runOnce();
@@ -646,13 +857,16 @@ describe("CheckpointScheduler verification", () => {
       readonly scopes: readonly (string | null)[];
       /** Overrides the fixture's store, for the tests that assert on `record` being called at all. */
       readonly checkpointStore?: PostgresChainCheckpointStore;
+      /** Overrides the log store, for the one test that needs `tail`'s position in the call order. */
+      readonly logStore?: PostgresChainLogStore;
       readonly onCheckpoint?: (scope: string | null, checkpoint: ChainCheckpoint) => void;
       readonly onRefused: (scope: string | null, verification: ChainVerificationReport) => void;
+      readonly onAnchorFindings?: (scope: string | null, audit: AnchorAuditReport) => void;
       readonly onError?: (err: unknown) => void;
     },
   ): CheckpointScheduler {
     return new CheckpointScheduler({
-      logStore: new PostgresChainLogStore(fixture.conn, fixture.signer, {}),
+      logStore: opts.logStore ?? new PostgresChainLogStore(fixture.conn, fixture.signer, {}),
       checkpointStore: opts.checkpointStore ?? fixture.checkpointStore,
       verify: opts.verify,
       scopes: () => opts.scopes,
@@ -661,6 +875,11 @@ describe("CheckpointScheduler verification", () => {
       now: () => new Date(AT),
       ...(opts.onCheckpoint !== undefined ? { onCheckpoint: opts.onCheckpoint } : {}),
       onRefused: opts.onRefused,
+      // Optional *here* and required on the scheduler, which is the split the whole file uses for
+      // `onRefused`: the option is required where it decides whether a finding is ever reported, and
+      // this helper supplies the no-op for the tests that are about something else. The test
+      // asserting it is not fired on a clean table is what keeps that no-op from being a hole.
+      onAnchorFindings: opts.onAnchorFindings ?? ((): void => undefined),
       ...(opts.onError !== undefined ? { onError: opts.onError } : {}),
     });
   }
@@ -893,142 +1112,261 @@ describe("CheckpointScheduler verification", () => {
   });
 
   /**
-   * The two sides of `CHAIN_FULL_REASON_BLOCKS_ANCHORING`, derived from the map rather than
-   * hand-listed, so a reason whose answer is flipped moves between the tables below instead of
-   * leaving one of them asserting the behaviour it used to have. The map's exact membership is
-   * `chain-verify.test.ts`'s claim to make; what these need is that every reason sits in exactly one
-   * table and that both tables have a member.
+   * What replaced `refused_anchor_would_bury`, whose two map-derived tables these supersede: the
+   * pass reads the scope's **whole** anchor table, reports what it finds through
+   * `onAnchorFindings`, and anchors anyway.
    */
-  const BURYING_REASONS = CHAIN_FULL_REASONS.filter((r) => CHAIN_FULL_REASON_BLOCKS_ANCHORING[r]);
-  const SUPERSEDING_REASONS = CHAIN_FULL_REASONS.filter(
-    (r) => !CHAIN_FULL_REASON_BLOCKS_ANCHORING[r],
-  );
-
-  describe("an anchor on disk that a fresh checkpoint would bury", () => {
-    it("partitions every full-fold reason into exactly one of the two tables", () => {
-      // The vacuity floor for both `it.each`s below: `it.each([])` passes having run nothing, which
-      // is the shape of coverage that is not coverage. `toContain` and not `toEqual` on the burying
-      // side, because the map's exact membership is asserted where the map lives and restating it
-      // here would be two spellings of one claim — what this file needs is that the member its
-      // headline fence is about is in the table that exercises it.
-      expect(BURYING_REASONS).toContain("anchor_unreadable");
-      expect(SUPERSEDING_REASONS.length).toBeGreaterThan(0);
-      expect([...BURYING_REASONS, ...SUPERSEDING_REASONS].sort()).toEqual(
-        [...CHAIN_FULL_REASONS].sort(),
-      );
-    });
-
-    it.each(BURYING_REASONS)(
-      "refuses to anchor over %s and writes nothing, on a chain that verified",
-      async (reason) => {
-        const fx = await newChainFixture();
-        await seed(fx.conn, fx.signer, TENANT_A, 2);
-        const store = new RecordCountingCheckpointStore(fx.conn, {});
-        const refused: ChainVerificationReport[] = [];
-
-        const results = await stubVerify(fx, {
-          verify: async (scope) => report(scope, "full", true, reason),
-          scopes: [TENANT_A],
-          checkpointStore: store,
-          onRefused: (_scope, verification) => refused.push(verification),
-        }).runOnce();
-
-        expect(results[0]?.outcome).toBe("refused_anchor_would_bury");
-        // `ok` is true, and that is the whole of why this is not `refused_unverified`: the chain
-        // verified and the finding is the stored anchor, so a reader of the result can tell the two
-        // apart rather than being told a sound chain failed to verify.
-        expect(results[0]?.verification?.ok).toBe(true);
-        expect(results[0]?.verification?.fullBecause).toBe(reason);
-        expect(results[0]?.checkpoint).toBeUndefined();
-        expect(refused).toHaveLength(1);
-        expect(refused[0]?.fullBecause).toBe(reason);
-        // The assertion `latest()` cannot give — see `RecordCountingCheckpointStore`. A row at the
-        // tail is one the store accepts and reads back, so on a deployment `latest()` would answer
-        // with it and asserting `null` would be asserting the defect.
-        expect(store.recorded).toEqual([]);
-      },
-    );
-
-    it.each(SUPERSEDING_REASONS)("still anchors over %s", async (reason) => {
-      // The negative controls, and the last two matter most. `anchor_unverified` and
-      // `anchor_provenance_absent` are the self-healing path ADR-0371 built: a row stating that
-      // nothing vouched for its prefix, or one written before the column existed, is *superseded*
-      // by a vouched anchor rather than hidden by it — so a fence that refused these would stop a
-      // legacy or hand-placed anchor ever being replaced and make the full fold permanent for
-      // exactly the deployments the healing exists for. `requested` and `no_checkpoint` have
-      // nothing on disk to bury at all.
-      const fx = await newChainFixture();
-      await seed(fx.conn, fx.signer, TENANT_A, 2);
-      const store = new RecordCountingCheckpointStore(fx.conn, {});
-      const refused: Array<string | null> = [];
+  describe("the anchor-table audit", () => {
+    it("audits before the tail check, so a scope whose chain is gone is still read", async () => {
+      // The ordering's live member, and it is one statement: a tenant-context `DELETE` on
+      // `forensic_chain_entries` matched the owner's whole row count on every scope measured
+      // (ADR-0374), so "the entries were destroyed and the anchors were not" is reachable by the
+      // tenant against its own scope, and nothing in the workspace reaches those rows otherwise. An
+      // audit placed after the tail check answers it by looking at nothing, because an empty chain
+      // is a `skipped_empty` that `continue`s.
+      const fx = await newChainFixture({
+        rawCheckpoints: [refusedCheckpointRow(TENANT_A, 4)],
+      });
+      const trace: string[] = [];
+      const store = new ObservedCheckpointStore(fx.conn, { trace });
+      const findings: AnchorAuditReport[] = [];
 
       const results = await stubVerify(fx, {
-        verify: async (scope) => report(scope, "full", true, reason),
+        verify: async (scope) => report(scope, "full", true),
         scopes: [TENANT_A],
         checkpointStore: store,
-        onRefused: (scope) => refused.push(scope),
+        logStore: new TracingChainLogStore(fx.conn, fx.signer, trace),
+        onRefused: () => undefined,
+        onAnchorFindings: (_scope, audit) => findings.push(audit),
       }).runOnce();
 
-      expect(results[0]?.outcome).toBe("recorded");
-      expect(refused).toEqual([]);
-      expect(store.recorded).toHaveLength(1);
-      // The superseding anchor carries the provenance the fold it rests on earned, which is what
-      // makes replacing the old row a heal rather than a second unvouched claim at a new sequence.
-      expect(store.recorded[0]?.checkpoint.provenance).toBe("verified_full");
-      expect((await fx.checkpointStore.latest(TENANT_A))?.sequenceNumber).toBe(1);
+      // The order itself, not merely that both happened: the scan precedes the tail read.
+      expect(trace).toEqual(["scan", "tail"]);
+      expect(results[0]?.outcome).toBe("skipped_empty");
+      expect(results[0]?.anchorAudit?.scanned).toBe(1);
+      expect(findings).toHaveLength(1);
+      expect(findings[0]?.refusedCount).toBe(1);
+      // `null` and not `[]`: the correspondence was not asked, and this scheduler's verifier does
+      // not hand back the chain it loaded (ADR-0331's claim-versus-nobody-looked, in the report).
+      expect(findings[0]?.disagreeing).toBeNull();
     });
 
-    it("reports a failed verification as the failure even when its reason would bury", async () => {
-      // Order: `!ok` wins. "This chain did not verify" is the stronger and more urgent statement,
-      // and the anchor refusal is implied by it, since nothing is written on either path.
-      const fx = await newChainFixture();
-      await seed(fx.conn, fx.signer, TENANT_A, 2);
-      const store = new RecordCountingCheckpointStore(fx.conn, {});
+    it("anchors over a refused anchor row and reports it, where it used to refuse", async () => {
+      // The reversal. `anchor_unreadable` is the reason ADR-0374 withheld the anchor over, and the
+      // withholding was right while `latest()` was the detector — one row, so a fresh checkpoint at
+      // the tail shadowed the refused one. The detector reads the whole table now, so the anchor is
+      // written and the finding survives the write: both assertions in one test, because either
+      // alone is the defect.
+      const fx = await newChainFixture({
+        rawCheckpoints: [refusedCheckpointRow(TENANT_A, 0)],
+      });
+      await seed(fx.conn, fx.signer, TENANT_A, 3); // sequences 0..2
+      const store = new ObservedCheckpointStore(fx.conn);
+      const findings: AnchorAuditReport[] = [];
 
       const results = await stubVerify(fx, {
-        verify: async (scope) => report(scope, "full", false, "anchor_unreadable"),
+        verify: async (scope) => report(scope, "full", true, "anchor_unreadable"),
         scopes: [TENANT_A],
         checkpointStore: store,
         onRefused: () => undefined,
+        onAnchorFindings: (_scope, audit) => findings.push(audit),
       }).runOnce();
 
-      expect(results[0]?.outcome).toBe("refused_unverified");
+      expect(results[0]?.outcome).toBe("recorded");
+      expect(store.recorded).toHaveLength(1);
+      // The provenance the fold it rests on earned: `anchor_unreadable` folds from genesis, so the
+      // claim covers the whole prefix and the bounded proof's induction holds. That was never the
+      // defect — the detector's aperture was.
+      expect(store.recorded[0]?.checkpoint.provenance).toBe("verified_full");
+      expect(findings).toHaveLength(1);
+      expect(findings[0]?.refusedCount).toBe(1);
+      // The claim the deleted guard existed to protect, asserted directly: re-reading the table
+      // *after* the anchor landed still finds the refused row. ADR-0374's measurement was that one
+      // pass took the verdict from `compromised` to `verified` with the row untouched on disk; the
+      // row is still untouched and the finding is still there, because the reader is no longer one
+      // row wide. Without this line the test above would pass on a detector that had been buried.
+      const after = await auditAnchors(TENANT_A, store, null);
+      expect(after.scanned).toBe(2);
+      expect(after.refusedCount).toBe(1);
+    });
+
+    it("fires nothing when the anchor table is clean", async () => {
+      // The control for every `onAnchorFindings: () => undefined` in this file: a clean table is
+      // silent, so a no-op handler elsewhere is not hiding a fired callback.
+      const fx = await newChainFixture();
+      await seed(fx.conn, fx.signer, TENANT_A, 2);
+      const findings: AnchorAuditReport[] = [];
+
+      const results = await stubVerify(fx, {
+        verify: async (scope) => report(scope, "full", true),
+        scopes: [TENANT_A],
+        onRefused: () => undefined,
+        onAnchorFindings: (_scope, audit) => findings.push(audit),
+      }).runOnce();
+
+      expect(results[0]?.outcome).toBe("recorded");
+      expect(findings).toEqual([]);
+      expect(results[0]?.anchorAudit?.refusedCount).toBe(0);
+      expect(results[0]?.anchorAudit?.complete).toBe(true);
+    });
+
+    it("fires on every pass, because the condition stands until somebody acts on it", async () => {
+      // Deliberately not deduped in this process. ADR-0329 settled it for the sweep stall on the
+      // same grounds — a standing condition's signal is the repetition — and ADR-0332 refused the
+      // alternative directly, moving an episode's kind out of process memory because a restart
+      // forgets it and a second replica never knew it. Per-episode adoption belongs in the
+      // escalation's `findOpen`, which reads durable state.
+      const fx = await newChainFixture({
+        rawCheckpoints: [refusedCheckpointRow(TENANT_A, 0)],
+      });
+      await seed(fx.conn, fx.signer, TENANT_A, 2);
+      const findings: AnchorAuditReport[] = [];
+
+      const scheduler = stubVerify(fx, {
+        verify: async (scope) => report(scope, "full", true),
+        scopes: [TENANT_A],
+        onRefused: () => undefined,
+        onAnchorFindings: (_scope, audit) => findings.push(audit),
+      });
+      await scheduler.runOnce();
+      await scheduler.runOnce();
+
+      expect(findings).toHaveLength(2);
+    });
+
+    it("reports a scan the ceiling stopped, and anchors anyway", async () => {
+      // `!complete` is a finding on its own — the counts beside it are lower bounds — and it is the
+      // one case where "did the audit see everything?" answers no. It is still not a refusal: the
+      // gap is reported here and answered `unproven` by the verdict, and the scope that trips a
+      // 1,000,000-row ceiling is the longest chain in the deployment, i.e. the one least able to
+      // afford the fold from genesis a refusal would impose.
+      const fx = await newChainFixture();
+      await seed(fx.conn, fx.signer, TENANT_A, 2);
+      const store = new ObservedCheckpointStore(fx.conn, { scanIncomplete: true });
+      const findings: AnchorAuditReport[] = [];
+
+      const results = await stubVerify(fx, {
+        verify: async (scope) => report(scope, "full", true),
+        scopes: [TENANT_A],
+        checkpointStore: store,
+        onRefused: () => undefined,
+        onAnchorFindings: (_scope, audit) => findings.push(audit),
+      }).runOnce();
+
+      expect(results[0]?.outcome).toBe("recorded");
+      expect(store.recorded).toHaveLength(1);
+      expect(findings).toHaveLength(1);
+      expect(findings[0]?.complete).toBe(false);
+      expect(findings[0]?.refusedCount).toBe(0);
+    });
+
+    it("carries the audit onto the result of every outcome it preceded", async () => {
+      // Including `error`: the audit is the reading, not a consequence of anchoring, so a scope
+      // whose verification then threw must not lose a reading that was taken.
+      const fx = await newChainFixture({
+        rawCheckpoints: [
+          checkpointRow(null, 0),
+          checkpointRow(TENANT_B, 0),
+          checkpointRow(TENANT_POISON, 0),
+        ],
+      });
+      await seed(fx.conn, fx.signer, null, 1);
+      await seed(fx.conn, fx.signer, TENANT_B, 1);
+      await seed(fx.conn, fx.signer, TENANT_POISON, 1);
+
+      const results = await stubVerify(fx, {
+        verify: async (scope) => {
+          if (scope === TENANT_POISON) throw new Error("key registry down");
+          return report(scope, "full", scope !== null);
+        },
+        scopes: [TENANT_A, null, TENANT_B, TENANT_POISON],
+        onRefused: () => undefined,
+      }).runOnce();
+
+      // One of each: nothing to anchor, refused, anchored, threw.
+      expect(results.map((r) => r.outcome)).toEqual([
+        "skipped_empty",
+        "refused_unverified",
+        "recorded",
+        "error",
+      ]);
+      expect(results.map((r) => r.anchorAudit?.scanned)).toEqual([0, 1, 1, 1]);
+    });
+
+    it("treats an audit that throws as an error, and anchors nothing for that scope", async () => {
+      const fx = await newChainFixture();
+      await seed(fx.conn, fx.signer, TENANT_A, 2);
+      const store = new ObservedCheckpointStore(fx.conn, { scanThrows: true });
+      const errors: unknown[] = [];
+      const findings: AnchorAuditReport[] = [];
+
+      const results = await stubVerify(fx, {
+        verify: async (scope) => report(scope, "full", true),
+        scopes: [TENANT_A],
+        checkpointStore: store,
+        onRefused: () => undefined,
+        onAnchorFindings: (_scope, audit) => findings.push(audit),
+        onError: (err) => errors.push(err),
+      }).runOnce();
+
+      expect(results[0]?.outcome).toBe("error");
+      // No report was produced, so none is carried and none is reported: a reading that could not
+      // be taken says nothing about the anchor table, which is `refused_unverified`-versus-`error`
+      // one table across.
+      expect(results[0]?.anchorAudit).toBeUndefined();
+      expect(findings).toEqual([]);
+      expect(errors).toHaveLength(1);
       expect(store.recorded).toEqual([]);
     });
 
-    it("anchors a bounded pass, which carries no reason and so buries nothing", async () => {
-      const fx = await newChainFixture();
+    it("files a throwing findings handler as that scope's error, having written nothing", async () => {
+      // Inside the `try` on `onRefused`'s precedent and not `onCheckpoint`'s: nothing has been
+      // written when this fires, so filing it as an `error` states nothing false about the
+      // database — which is exactly the condition that puts `onCheckpoint` outside the `try`.
+      const fx = await newChainFixture({
+        rawCheckpoints: [refusedCheckpointRow(TENANT_A, 0)],
+      });
       await seed(fx.conn, fx.signer, TENANT_A, 2);
-      const store = new RecordCountingCheckpointStore(fx.conn, {});
+      const store = new ObservedCheckpointStore(fx.conn);
+      const errors: unknown[] = [];
 
       const results = await stubVerify(fx, {
-        verify: async (scope) => report(scope, "from_checkpoint", true),
+        verify: async (scope) => report(scope, "full", true),
         scopes: [TENANT_A],
         checkpointStore: store,
         onRefused: () => undefined,
+        onAnchorFindings: () => {
+          throw new Error("findings sink down");
+        },
+        onError: (err) => errors.push(err),
       }).runOnce();
 
-      expect(results[0]?.verification?.fullBecause).toBeNull();
-      expect(results[0]?.outcome).toBe("recorded");
-      expect(store.recorded).toHaveLength(1);
+      expect(results[0]?.outcome).toBe("error");
+      expect(results[0]?.anchorAudit?.refusedCount).toBe(1);
+      expect(errors).toHaveLength(1);
+      expect(store.recorded).toEqual([]);
     });
 
-    it("lets the pass continue past a burying refusal, so other scopes still anchor", async () => {
-      const fx = await newChainFixture();
+    it("lets the pass continue past a finding, so every scope is read and anchored", async () => {
+      const fx = await newChainFixture({
+        rawCheckpoints: [refusedCheckpointRow(TENANT_A, 0)],
+      });
       await seed(fx.conn, fx.signer, TENANT_A, 1);
       await seed(fx.conn, fx.signer, TENANT_B, 1);
-      const store = new RecordCountingCheckpointStore(fx.conn, {});
+      const store = new ObservedCheckpointStore(fx.conn);
+      const findings: Array<string | null> = [];
 
       const results = await stubVerify(fx, {
-        verify: async (scope) =>
-          report(scope, "full", true, scope === TENANT_A ? "anchor_unreadable" : "no_checkpoint"),
+        verify: async (scope) => report(scope, "full", true),
         scopes: [TENANT_A, TENANT_B],
         checkpointStore: store,
         onRefused: () => undefined,
+        onAnchorFindings: (scope) => findings.push(scope),
       }).runOnce();
 
-      expect(results.map((r) => r.outcome)).toEqual(["refused_anchor_would_bury", "recorded"]);
-      expect(store.recorded.map((r) => r.scope)).toEqual([TENANT_B]);
+      expect(results.map((r) => r.outcome)).toEqual(["recorded", "recorded"]);
+      expect(store.recorded.map((r) => r.scope)).toEqual([TENANT_A, TENANT_B]);
+      expect(findings).toEqual([TENANT_A]);
     });
   });
 });
@@ -1048,6 +1386,7 @@ describe("CheckpointScheduler lifecycle", () => {
       signer,
       registry,
       onRefused: () => undefined,
+      onAnchorFindings: () => undefined,
       scheduler: manual.scheduler,
       onCheckpoint: () => resolveDone(),
     });
@@ -1077,6 +1416,7 @@ describe("CheckpointScheduler lifecycle", () => {
       intervalMs: 1000,
       checkpointedBy: "operate-server",
       onRefused: () => undefined,
+      onAnchorFindings: () => undefined,
       scheduler: manual.scheduler,
       runOnStart: false,
     });

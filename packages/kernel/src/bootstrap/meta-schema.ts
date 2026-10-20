@@ -11417,9 +11417,11 @@ export const META_FORENSIC_CHAIN_CHECKPOINTS: TableDefinition = {
      * reason: the isolation policy is `ALL`-scope, so its `USING` doubles as its `WITH CHECK`.
      *
      * Not a buried alarm, which is the one thing ADR-0374's addendum had to correct about its own
-     * framing: `readOne` catches **any** throw from the mapper rather than only a `ZodError`, so
-     * `latest()` answers `CheckpointRowUnreadable` and `anchorRowsRefused` grades it `compromised`
-     * on both proof modes. The fence is what was missing, not the detector.
+     * framing: `readOne` catches **any** throw from the mapper rather than only a `ZodError`, so a
+     * row refused for this reason is graded `compromised` on both proof modes. The fence is what
+     * was missing, not the detector. The *reader* has moved since: `proveScopeIntegrity` reads the
+     * whole table through `auditAnchors` rather than `latest()`, so the grade no longer depends on
+     * this row happening to be the newest (ADR-0375).
      */
     {
       name: "checkpointed_at",
@@ -11435,11 +11437,13 @@ export const META_FORENSIC_CHAIN_CHECKPOINTS: TableDefinition = {
      * CHECK, and the consequence is one notch worse than the two ADR-0373 closed on
      * `forensic_chain_entries`: there a refused row makes an *entry* unreadable, and that increment
      * routed it into the verdict as `compromised`. Here a refused row makes the **anchor** unreadable,
-     * and `proveScopeIntegrity` awaits `checkpoints.latest(scope)` twice with no `try` — once inside
-     * `verifyChainFromCheckpoint` and once for the truncation check — so `''` stored made the hourly
-     * pass file `outcome: "error"`: no verdict, no `onFinding`, no stored row, no escalation, no page.
-     * **The tamper disabled the detector**, which is ADR-0373's graded way (3) on a read that
-     * increment did not route.
+     * and at the time `proveScopeIntegrity` awaited `checkpoints.latest(scope)` twice with no `try` —
+     * once inside `verifyChainFromCheckpoint` and once for the truncation check — so `''` stored made
+     * the hourly pass file `outcome: "error"`: no verdict, no `onFinding`, no stored row, no
+     * escalation, no page. **The tamper disabled the detector**, which is ADR-0373's graded way (3)
+     * on a read that increment did not route. (ADR-0375 removed that function's `latest()` reads
+     * altogether — it scans the whole table instead — so the sentence above is the history the CHECK
+     * was added for and not the current call graph.)
      *
      * Reachable by the tenant and not only by an owner: this table's isolation policy is `ALL`-scope,
      * so its `USING` doubles as its `WITH CHECK` and a tenant-context session may `UPDATE` its own

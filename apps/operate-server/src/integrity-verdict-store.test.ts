@@ -5,7 +5,11 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 import { describe, expect, it } from "vitest";
 
 import { AUDIT_ANCHOR_VERDICTS, type AuditAnchorVerdict } from "./audit-anchor.js";
-import { integrityVerdictPayload, type IntegrityProofReport } from "./integrity-proof.js";
+import {
+  integrityVerdictPayload,
+  noAnchorFindings,
+  type IntegrityProofReport,
+} from "./integrity-proof.js";
 
 /** Narrows the mirror's plain-string anchor verdict to the real enum, faithfully or not at all. */
 function anchorVerdictOf(verdict: string): AuditAnchorVerdict {
@@ -118,12 +122,15 @@ function fullReportFor(report: IntegrityProofReportLike): IntegrityProofReport {
           },
     truncation: report.truncation,
     // The mirror omits both because the verdict payload does not commit to either, which is the
-    // parity check's whole subject: a refused chain row or a refused checkpoint reaches the stored
-    // record through `verdict` and not through a count of its own (ADR-0371's rule, and the trap
-    // that ADR reverted a field out of — four places would have to move together or the stored
-    // report stops being byte-identical to the committed payload).
+    // parity check's whole subject: a refused chain row, a refused anchor and an anchor the chain
+    // contradicts all reach the stored record through `verdict` and not through a count of their own
+    // (ADR-0371's rule, and the trap that ADR reverted a field out of — four places would have to
+    // move together or the stored report stops being byte-identical to the committed payload). That
+    // held when `anchorAudit` replaced `anchorRowsRefused` (ADR-0375): the mirror names neither, so
+    // `integrityVerdictPayload`, `StoredIntegrityReportSchema`, `canonicalStoredReport` and
+    // `storedIntegrityReportFor` were untouched by an axis that grew a second dimension.
     chainRowsRefused: [],
-    anchorRowsRefused: [],
+    anchorAudit: noAnchorFindings(report.scope),
   };
 }
 

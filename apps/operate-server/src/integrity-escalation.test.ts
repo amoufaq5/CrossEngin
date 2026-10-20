@@ -10,6 +10,7 @@ import type { AlertPolicy } from "@crossengin/observability";
 import type { PageDirective } from "@crossengin/observability-runtime";
 import { describe, expect, it } from "vitest";
 
+import type { AnchorAuditReport } from "./anchor-audit.js";
 import type { AuditAnchorReport, AuditAnchorResult } from "./audit-anchor.js";
 import type { ChainVerificationReport } from "./chain-verify.js";
 import {
@@ -26,6 +27,7 @@ import {
 import {
   COMPROMISE_CAUSES,
   compromiseCauses,
+  noAnchorFindings,
   type ChainTruncationCheck,
   type CompromiseCause,
   type IntegrityProofReport,
@@ -86,10 +88,15 @@ function report(over: Partial<IntegrityProofReport> = {}): IntegrityProofReport 
     chain,
     anchors,
     chainRowsRefused: [],
-    anchorRowsRefused: [],
+    anchorAudit: noAnchorFindings(TENANT_A),
     truncation,
     ...over,
   };
+}
+
+/** An anchor audit over this scope, clean unless a field is overridden. */
+function anchorAudit(over: Partial<AnchorAuditReport> = {}): AnchorAuditReport {
+  return { ...noAnchorFindings(TENANT_A), ...over };
 }
 
 /** Records what the emitter was asked to write, without a database. */
@@ -340,17 +347,20 @@ describe("IntegrityEscalator — failure handling", () => {
 /**
  * The anchored row has to say **why**.
  *
- * `integrityVerdictFor` answers `compromised` for six conditions and this row named two of them, so
+ * `integrityVerdictFor` answered `compromised` for six conditions and this row named two of them, so
  * a paging sev1 driven by any of the other four asserted that the trail was provably altered and
  * then named nothing — which is the one shape an operator cannot act on, and is the reason ADR-0373
  * gave for printing them in `formatIntegrityProof`.
  *
- * The tests below are five covering six conditions — the last one covers two — and the claim that
- * used to sit here, that there is one per branch *"so a seventh cause arriving with no key is a
- * failure here"*, was false in both halves. It was refuted by mutation in an isolated worktree:
- * adding a seventh `compromised` branch to `integrityVerdictFor`, with no key in the `after`
- * payload, passed **83 of 83**. Nothing enumerated the branches, so nothing could notice a seventh;
- * ADR-0288's maintained list, and ADR-0351's documented hazard that checked nothing.
+ * The claim that used to sit here, that there is one test per branch *"so a seventh cause arriving
+ * with no key is a failure here"*, was false in both halves. It was refuted by mutation in an
+ * isolated worktree: adding a seventh `compromised` branch to `integrityVerdictFor`, with no key in
+ * the `after` payload, passed **83 of 83**. Nothing enumerated the branches, so nothing could notice
+ * a seventh; ADR-0288's maintained list, and ADR-0351's documented hazard that checked nothing.
+ *
+ * A seventh cause has since arrived for real (`checkpoint_disagrees_with_chain`, ADR-0375) and the
+ * enumeration below is what demanded its key, which is the first time that fence has been exercised
+ * by anything but a mutation.
  *
  * The block after this one is that enumeration, walked from `COMPROMISE_CAUSES`. These five stay
  * beside it because each carries an argument the derived walk cannot: which table an identity
@@ -427,7 +437,14 @@ describe("IntegrityEscalator — the audit row names the cause", () => {
     // the axis that fires with everything else clean — a refused anchor leaves `chain.ok` true,
     // `truncated` false and nothing tampered, so before this it was a page that named nothing.
     expect(
-      await auditedAfter({ anchors: cleanAnchors(), anchorRowsRefused: [refusedCheckpointRow] }),
+      await auditedAfter({
+        anchors: cleanAnchors(),
+        anchorAudit: anchorAudit({
+          scanned: 1,
+          refused: [refusedCheckpointRow],
+          refusedCount: 1,
+        }),
+      }),
     ).toMatchObject({
       verdict: "compromised",
       truncated: false,
@@ -439,6 +456,81 @@ describe("IntegrityEscalator — the audit row names the cause", () => {
         auditRows: { count: 0, identities: [] },
       },
     });
+  });
+
+  it("reports the whole refusal count when the audit's own cap already sliced the list", async () => {
+    // Two caps compose — the audit's `MAX_REPORTED_ANCHOR_REFUSALS` and this row's
+    // `MAX_RECORDED_UNREADABLE_IDENTITIES` — and only the deepest list may be sliced. Reading
+    // `refused.length` for the count would have reported the audit's cap as the figure and
+    // understated by a slice applied one module upstream, which is why the checkpoint axis has its
+    // own function rather than sharing `recordedRefusal`.
+    const fifty: UnreadableRow[] = Array.from({ length: 50 }, (_, i) => ({
+      identity: `cp-${String(i)}`,
+      detail: "checkpointedBy: too_small",
+    }));
+    expect(
+      await auditedAfter({
+        anchors: cleanAnchors(),
+        anchorAudit: anchorAudit({ scanned: 900, refused: fifty, refusedCount: 900 }),
+      }),
+    ).toMatchObject({
+      unreadable: {
+        checkpointRows: {
+          count: 900,
+          identities: Array.from({ length: 20 }, (_, i) => `cp-${String(i)}`),
+        },
+      },
+    });
+  });
+
+  it("names each anchor the chain contradicts, with no stored column value beside it", async () => {
+    // The seventh cause's own key, and the one finding on this row that is not a row somebody could
+    // not parse. `root_hash` and `checkpointed_by` are deliberately absent: a checkpoint the chain
+    // disagrees with is of unestablished trustworthiness, so the kind, the sequence and `matchedAt`
+    // are the whole of what a durable, anchored row may carry (ADR-0310).
+    const after = await auditedAfter({
+      anchors: cleanAnchors(),
+      anchorAudit: anchorAudit({
+        scanned: 2,
+        disagreeing: [
+          { kind: "sequence_relocated", sequenceNumber: 99, matchedAt: 4 },
+          { kind: "root_hash_mismatch", sequenceNumber: 2, matchedAt: null },
+        ],
+      }),
+    });
+    expect(after).toMatchObject({
+      verdict: "compromised",
+      truncated: false,
+      tampered: [],
+      chain: { ok: true },
+      anchorDisagreements: {
+        count: 2,
+        anchors: [
+          { kind: "sequence_relocated", sequenceNumber: 99, matchedAt: 4 },
+          { kind: "root_hash_mismatch", sequenceNumber: 2, matchedAt: null },
+        ],
+      },
+      unreadable: { checkpointRows: { count: 0, identities: [] } },
+    });
+    expect(JSON.stringify(after)).not.toContain("rootHash");
+    expect(JSON.stringify(after)).not.toContain("checkpointedBy");
+  });
+
+  it("distinguishes a correspondence nobody asked from one that found nothing", async () => {
+    // ADR-0331 inside one key: `null` says the audit withheld the comparison — which on this path
+    // means the chain reader refused a row, so a comparison could only have been got wrong — and
+    // `{count: 0}` says every anchor was checked and agreed. Flattening the first to the second
+    // would let a row that proves nothing read as a row that proves the anchors are sound.
+    expect(
+      await auditedAfter({
+        anchors: cleanAnchors(),
+        chainRowsRefused: [refusedChainRow],
+        anchorAudit: anchorAudit({ scanned: 3, disagreeing: null }),
+      }),
+    ).toMatchObject({ anchorDisagreements: null });
+    expect(await auditedAfter({ anchors: cleanAnchors(), chainRowsRefused: [refusedChainRow] })).toMatchObject(
+      { anchorDisagreements: { count: 0, anchors: [] } },
+    );
   });
 
   it("carries no detail from a refused row, only its identity", async () => {
@@ -543,11 +635,13 @@ describe("IntegrityEscalator — the audit row names the cause", () => {
  *    "this key explains that cause", and it is why a key naming the wrong path fails — two absent
  *    values compare equal.
  *
- * Deliberately not a 64-way truth table compared against the old `if` sequence rewritten in the
+ * Deliberately not a 128-way truth table compared against the old `if` sequence rewritten in the
  * test. That is ADR-0362's retired test exactly: a rule compared against a derivation of itself,
- * calling the one disagreement a property. The golden for "the verdict is unchanged" is the 21
+ * calling the one disagreement a property. The golden for "the verdict is unchanged" is the
  * `integrityVerdictFor` call sites in `integrity-proof.test.ts`, which were written against the
- * sequence of `if`s and are untouched.
+ * sequence of `if`s — and whose **assertions** are untouched, though their fifth argument moved
+ * when ADR-0375 retyped it. Do not read "untouched" as "unedited": the edit was mechanical and the
+ * expected verdicts are the ones that were written against the `if`s.
  */
 describe("IntegrityEscalator — every compromise cause has a key that explains it", () => {
   const cleanAnchors = (over: Partial<AuditAnchorReport> = {}): AuditAnchorReport => ({
@@ -587,7 +681,17 @@ describe("IntegrityEscalator — every compromise cause has a key that explains 
     },
     chain_broken_or_unsigned: { anchors: cleanAnchors(), chain: brokenChain },
     chain_row_refused: { anchors: cleanAnchors(), chainRowsRefused: [refused("2")] },
-    checkpoint_row_refused: { anchors: cleanAnchors(), anchorRowsRefused: [refused("3")] },
+    checkpoint_row_refused: {
+      anchors: cleanAnchors(),
+      anchorAudit: anchorAudit({ scanned: 1, refused: [refused("3")], refusedCount: 1 }),
+    },
+    checkpoint_disagrees_with_chain: {
+      anchors: cleanAnchors(),
+      anchorAudit: anchorAudit({
+        scanned: 1,
+        disagreeing: [{ kind: "sequence_relocated", sequenceNumber: 99, matchedAt: 4 }],
+      }),
+    },
     audit_row_tampered: { anchors: cleanAnchors({ ok: false, tampered: [tamperedResult] }) },
     audit_row_refused: {
       anchors: cleanAnchors({

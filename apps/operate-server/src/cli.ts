@@ -2264,18 +2264,28 @@ Usage:
 
 Reads the scope's meta.forensic_chain_entries with a signer-free reader, folds the
 hash chain from genesis, and verifies each entry's Ed25519 signature against the
-public key resolved from the crypto-pg key registry (meta.crypto_keys). Read-only;
-exits 0 when valid, 1 when integrity or a signature fails, and 1 when the scope's
-stored anchor is in a shape the contract refuses — that last one folds the chain
-from genesis and so reports a sound chain as OK, which is a true statement about
-the entries and not the whole verdict (ADR-0374). Uses standard PG* env vars.
+public key resolved from the crypto-pg key registry (meta.crypto_keys). Read-only.
+
+It also audits the scope's whole anchor table, meta.forensic_chain_checkpoints, and
+reports that beneath the chain's own verdict — every row, not the newest one, so a
+checkpoint row the contract refuses is found wherever it sits (ADR-0375). Exits 0
+only when the chain verifies AND that audit found nothing AND it read the whole
+table; a scan the ceiling stopped did not read everything, and an exit code has no
+third answer for that.
 
 With --from-checkpoint, verifies only the suffix after the scope's latest persisted
 checkpoint (bounded cost for long chains) — integrity anchored at the checkpoint's
 root hash, signatures over just the suffix. It falls back to a full verify in four
 cases, not one: no checkpoint for this scope yet, an anchor recording no verified
 prefix, an anchor predating the provenance column, and an anchor this binary cannot
-read. The header names which; only the last exits non-zero.
+read. The header names which.
+
+Neither mode compares a checkpoint's root hash against the chain entry at its
+sequence: that needs the whole chain in hand, which neither fold hands back, and
+for --from-checkpoint it would mean reading the prefix a bounded verification is
+defined not to. The audit says so on its own line rather than going quiet. The
+hourly --integrity-proof-config pass does ask it, because it already loads the
+whole chain for the anchor half.
 
 Options:
   --tenant <uuid>      Tenant chain to verify (one of this or --platform)

@@ -3,13 +3,18 @@ import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import type { PostgresKeyRegistry } from "@crossengin/crypto-pg";
 import {
-  CheckpointRowUnreadable,
   PostgresChainCheckpointStore,
   PostgresChainLogStore,
   type ChainSigner,
 } from "@crossengin/forensics-pg";
 import type { PgConnection, UnreadableRow } from "@crossengin/kernel-pg";
 
+import {
+  anchorAuditHasFindings,
+  auditAnchors,
+  formatAnchorAudit,
+  type AnchorAuditReport,
+} from "./anchor-audit.js";
 import { verifyAuditAnchors, type AuditAnchorReport } from "./audit-anchor.js";
 import { IntegrityEscalationConfigSchema } from "./integrity-escalation-config.js";
 import { PostgresAuditEmitter } from "./audit-log-store.js";
@@ -161,25 +166,59 @@ export interface IntegrityProofReport {
    */
   readonly chainRowsRefused: readonly UnreadableRow[];
   /**
-   * The scope's stored checkpoint, where the contract refuses it. Required, and `[]` is the claim
-   * that the anchor read was made and answered.
+   * What this scope's whole anchor table says about itself: the rows the contract refuses, the
+   * anchors the chain contradicts, how far the scan got, and the truncation witness the check above
+   * reads.
    *
-   * A **third** table's refusals, and the axis is separate from the two above for the reason they
-   * are separate from each other: this one names a row in `meta.forensic_chain_checkpoints`, and
-   * its remedy is a different row from any chain entry or audit row an operator would be sent to.
-   * Naming the table is the whole value of the separation, since the identity is a sequence number
-   * either way and a merged list would say which position without saying which table.
+   * A **third** table, and the axis is separate from the two above for the reason they are separate
+   * from each other: this one names a row in `meta.forensic_chain_checkpoints`, and its remedy is a
+   * different row from any chain entry or audit row an operator would be sent to. Naming the table
+   * is the whole value of the separation, since the identity is a sequence number either way and a
+   * merged list would say which position without saying which table.
    *
-   * It is at most one row by construction — `latest` and the truncation check each read one — so
-   * this is a list for the shape's sake and not because a page is expected.
+   * It replaced `anchorRowsRefused: readonly UnreadableRow[]`, which was a list whose own doc
+   * comment argued it held **at most one row by construction** — true, and the defect: the one row
+   * was `latest()`'s, so a refused anchor was a finding only while it was the *newest*. Measured
+   * live as the non-owner `serving` role on one scope with anchors at 1, 3 and 4: blanking
+   * `checkpointed_by` at sequence 1 answered `verdict=verified anchorRefused=0` and the identical
+   * statement at sequence 4 answered `verdict=compromised anchorRefused=1` — same column, same
+   * role, same table, two rows, opposite verdicts. A report shaped as a list of refused rows could
+   * not have carried the fix either, because the second face of that aperture is a *readable* row
+   * that lies: `sequence_number`'s only CHECK is `>= 0`, so an anchor moved above the chain tail
+   * manufactured a false `chain_truncated` and one moved below it hid a real truncation
+   * (ADR-0375's Face 2).
    *
-   * What makes it load-bearing rather than decorative: `verifyChainFromCheckpoint` answers a
-   * refused anchor with a fold from genesis, which is the correct *verification* and, alone, reads
-   * as a healthy full pass. The fold is why `chain.ok` cannot carry this, and ADR-0373's own reason
-   * `chainRowsRefused` exists is why nothing else can: the fact has to reach the verdict by an axis
-   * that pages.
+   * What makes it load-bearing rather than decorative is unchanged from the list it replaced:
+   * `verifyChainFromCheckpoint` answers a refused anchor with a fold from genesis, which is the
+   * correct *verification* and, alone, reads as a healthy full pass. The fold is why `chain.ok`
+   * cannot carry this, and ADR-0373's own reason `chainRowsRefused` exists is why nothing else can:
+   * the fact has to reach the verdict by an axis that pages.
    */
-  readonly anchorRowsRefused: readonly UnreadableRow[];
+  readonly anchorAudit: AnchorAuditReport;
+}
+
+/**
+ * An anchor audit that was **asked and found nothing**, for a caller building a report by hand.
+ *
+ * Exported for the test call sites `integrityVerdictFor`'s retyped parameter moved, and it is a
+ * function rather than a frozen constant because `scope` is part of the report and a shared object
+ * would have every fixture claiming one tenant's.
+ *
+ * `disagreeing: []` and deliberately not `null`: `null` is the claim that the correspondence was
+ * **not asked** (ADR-0331), which is a different fact from a clean answer and is not what a fixture
+ * asserting a clean verdict means. A caller that really holds no chain gets `null` from
+ * `auditAnchors` itself and does not need this.
+ */
+export function noAnchorFindings(scope: string | null = null): AnchorAuditReport {
+  return {
+    scope,
+    scanned: 0,
+    complete: true,
+    refused: [],
+    refusedCount: 0,
+    disagreeing: [],
+    witnessSequence: null,
+  };
 }
 
 /**
@@ -203,7 +242,7 @@ export interface IntegrityProofPassResult {
 }
 
 /**
- * The whole audit-integrity proof for one scope: three checks, none sufficient alone.
+ * The whole audit-integrity proof for one scope: four checks, none sufficient alone.
  *
  * ADR-0286 anchored each audit row in the forensic chain and noted that **neither half is a
  * proof alone**: the anchor check shows each row matches what was committed to, the chain check
@@ -213,6 +252,12 @@ export interface IntegrityProofPassResult {
  * Running them live revealed a third gap they share — see {@link ChainTruncationCheck}. Cutting
  * entries off the chain's end leaves every link and signature valid, so truncation is asked about
  * separately, against a checkpoint.
+ *
+ * And a fourth, which is the one the other three *rest on*: nothing asked whether the checkpoint
+ * the truncation check reads is itself sound. ADR-0375 added the anchor audit for that — a
+ * cross-check of every readable anchor against the chain it claims to anchor — because an anchor is
+ * a witness, and a witness nobody examines is a number a tenant can edit. It is listed last and is
+ * a prerequisite of the third, which is why it runs before the tail is read.
  *
  * The platform chain (`scope === null`) is checked the same way as a tenant's, because
  * `audit_log.tenant_id` is nullable now and the three platform-scope escalators write rows into it
@@ -237,56 +282,63 @@ export async function proveScopeIntegrity(
     ? await verifyChainFromCheckpoint(deps.logStore, deps.registry, deps.checkpoints, scope)
     : await verifyChainFull(deps.logStore, deps.registry, scope);
 
-  // Neither verification path notices a chain that has been cut short, so ask separately — and the
-  // precise reason catching the refusal in the chain half alone would have closed nothing is the
-  // count of reachable reads. There are exactly two: the bounded chain verification's, in
-  // `chain-verify.ts`, which runs only under `fromCheckpoint: true`, and this one. So on a bounded
-  // pass this is the second and on a full fold it is the **only** one — and on a full fold the
-  // chain half never calls `latest` at all, so before this catch a refused anchor reached here and
-  // threw out of the whole pass. Measured live, both modes, before and after: `outcome: "error"`
-  // with `onError` the only callback, against `outcome: "proved"` with the verdict `compromised`
-  // and all four callbacks firing.
-  //
-  // A refused anchor leaves the truncation check **unanswerable** rather than negative, and the two
-  // must not render alike: `checkpointSequence: null` with the refusal on its own axis is what lets
-  // the formatter say which, since "no checkpoint yet — run the checkpoint scheduler" is the remedy
-  // that cannot work here (`record` is `ON CONFLICT … DO NOTHING`, so the refused row stays).
-  //
-  // Two reads are not one read, and the chain half **discards** the row it caught — it answers with
-  // a fold from genesis and `fullBecause: "anchor_unreadable"` — where this one keeps it. So a
-  // bounded pass can report that reason beside an empty `anchorRowsRefused`, if the refused row is
-  // replaced between the two statements. Left open deliberately, on three measurements: it needs a
-  // third party writing that table mid-pass, which `CheckpointScheduler` refuses to be
-  // (`anchoringWouldBury`); the *other* ordering — readable first, refused second — is the one that
-  // matters and already answers `compromised`, since `anchorRowsRefused` is what the verdict reads;
-  // and what the report would then say is a true statement about the row as the second read found
-  // it. Closing it would mean `ChainVerificationReport` carrying a checkpoint identity beside a
-  // chain sequence, which is the merge ADR-0373 argued against.
-  const anchorRowsRefused: UnreadableRow[] = [];
-  let checkpoint: Awaited<ReturnType<PostgresChainCheckpointStore["latest"]>> = null;
-  try {
-    checkpoint = await deps.checkpoints.latest(scope);
-  } catch (err) {
-    if (!(err instanceof CheckpointRowUnreadable)) throw err;
-    anchorRowsRefused.push(err.row);
-  }
-  const tail = await deps.logStore.tail(scope);
-  const truncation: ChainTruncationCheck = {
-    checkpointSequence: checkpoint?.sequenceNumber ?? null,
-    tailSequence: tail?.sequenceNumber ?? null,
-    truncated:
-      checkpoint !== null &&
-      (tail === null || tail.sequenceNumber < checkpoint.sequenceNumber),
-  };
-
-  const audit = await deps.audit.listAnchoredForScope(scope, { limit: deps.auditRowLimit });
   // The anchor check needs the entries the rows point at, which a checkpoint-bounded suffix may not
   // contain, so it always reads the whole chain. The chain *half* stays bounded — which is why this
   // read's own refusals are carried out separately rather than assumed to be the chain half's: see
   // `chainRowsRefused`. An audit row pointing at a refused entry is `unanchored` to
   // `verifyAuditAnchors`, and ADR-0286 deliberately does not page on that, so the fact has to reach
   // the verdict by the axis that does.
+  //
+  // Read **here**, above the anchor audit, rather than two statements lower where it used to sit:
+  // the audit cross-checks every anchor against the chain, so it needs these entries, and this
+  // function already performed the read. A second read for the audit would be a second snapshot of
+  // the same table, and an anchor compared against a chain the report does not carry is a finding
+  // nobody can re-derive from the report.
   const chainRead = await deps.logStore.loadChain(scope);
+
+  // `null` on a chain the reader refused a row of, and this is required rather than cautious. The
+  // audit's two lookup maps are built from the entries that **parsed**, so over an incomplete chain
+  // an anchor pointing at the refused entry finds no entry at its sequence and no entry carrying
+  // its root hash — which `disagreementFor` reads as *the chain does not reach this anchor*, and
+  // which would therefore hand the anchor a witness it has not earned, or, one sequence over, name
+  // it `root_hash_mismatch`: a finding attributed to the wrong table. `chain_row_refused` already
+  // answers `compromised` for that chain, so withholding the correspondence loses no verdict —
+  // only a sentence that would have been false.
+  const correspondenceChain = chainRead.unreadable.length > 0 ? null : chainRead.entries;
+
+  // Neither verification path notices a chain that has been cut short, so ask separately — against
+  // the **whole** anchor table rather than its newest row. `latest()` was the detector here until
+  // ADR-0375 and was wrong in both directions at once: a refused anchor was a finding only while it
+  // was the newest (so the other N−1 rows of a scope were unprotected), and a *readable* anchor was
+  // trusted whatever it said, so one `UPDATE` of `sequence_number` under a tenant's own context
+  // either manufactured a truncation or disabled the check. The scan reads every row and the
+  // correspondence refuses to stand behind one the chain contradicts, which is what makes the
+  // witness below a fact rather than a stored number.
+  //
+  // Both reads of this table are not one read, and the chain half **discards** the refusal it
+  // catches — it answers with a fold from genesis and `fullBecause: "anchor_unreadable"` — where
+  // this one keeps it. So a bounded pass can still report that reason beside a clean audit, if the
+  // refused row is *repaired* between `verifyChainFromCheckpoint`'s `latest()` and this scan. That
+  // residual is narrower than the one it replaces (a tamperer had only to append a readable row
+  // above the refused one; now they have to fix it) and is left open for the reason it always was:
+  // the other ordering — readable first, refused second — is the one that matters and already
+  // answers `compromised`, since this report is what the verdict reads.
+  const anchorAudit = await auditAnchors(scope, deps.checkpoints, correspondenceChain);
+
+  // After the audit, so the witness is read before the tail it is compared against — the order
+  // `latest()` and `tail()` were in. Widening the gap between them with a whole-table scan cannot
+  // manufacture a finding: `truncated` needs `tail < witness`, so an append in the window only ever
+  // clears the check and a delete in the window is a truncation that really happened.
+  const tail = await deps.logStore.tail(scope);
+  const truncation: ChainTruncationCheck = {
+    checkpointSequence: anchorAudit.witnessSequence,
+    tailSequence: tail?.sequenceNumber ?? null,
+    truncated:
+      anchorAudit.witnessSequence !== null &&
+      (tail === null || tail.sequenceNumber < anchorAudit.witnessSequence),
+  };
+
+  const audit = await deps.audit.listAnchoredForScope(scope, { limit: deps.auditRowLimit });
   const anchors: AuditAnchorReport = verifyAuditAnchors(
     scope,
     audit.rows,
@@ -301,14 +353,14 @@ export async function proveScopeIntegrity(
       anchors,
       truncation,
       chainRead.unreadable,
-      anchorRowsRefused,
+      anchorAudit,
     ),
     verifiedAt: deps.now().toISOString(),
     chain,
     anchors,
     truncation,
     chainRowsRefused: chainRead.unreadable,
-    anchorRowsRefused,
+    anchorAudit,
   };
 }
 
@@ -316,8 +368,8 @@ export async function proveScopeIntegrity(
  * Why a verdict is `compromised` — one member per condition, and the list the judgement is **built
  * from** rather than a description of one written elsewhere.
  *
- * It is a list because the escalation row named two of these six, and the block asserting it named
- * one per branch was refuted by mutation: a seventh `compromised` branch added to
+ * It is a list because the escalation row named two of the original six, and the block asserting it
+ * named one per branch was refuted by mutation: a seventh `compromised` branch added to
  * `integrityVerdictFor` with no key in the escalation `after` payload passed the entire suite. The
  * branches were a hand-written list of `if`s and the tests a hand-written list of `it`s with
  * nothing relating the two — ADR-0288's maintained list, and ADR-0351's documented hazard that
@@ -346,7 +398,34 @@ export async function proveScopeIntegrity(
  *   this binary writes can be one it cannot read back, so a refused anchor was edited or written
  *   out of band exactly as a refused entry was. `verifyChainFromCheckpoint` already answers it by
  *   folding from genesis, which is the correct *verification* and, on its own, reads as a healthy
- *   full pass — so the fold is not sufficient and this is the axis that pages.
+ *   full pass — so the fold is not sufficient and this is the axis that pages. It reads
+ *   `refusedCount` and not the list beside it, because that list is capped at
+ *   `MAX_REPORTED_ANCHOR_REFUSALS` and a cause gated on a capped list would stop firing if the cap
+ *   were ever lowered to 0.
+ * - `checkpoint_disagrees_with_chain` — a **readable** anchor says something the chain contradicts
+ *   at that anchor's own sequence. Beside the refusal rather than folded into it, because the two
+ *   are different acts with the same consequence: one row is malformed, the other is well-formed
+ *   and false. A checkpoint is a *witness*, so an anchor the chain disagrees with is either a
+ *   doctored witness or an altered entry — and which of the two is not decidable from here, which
+ *   is why the cause names the disagreement and not a culprit.
+ *
+ *   Its own cause rather than `chain_truncated` is the load-bearing part, and it is the correction
+ *   of a **false** `compromised` rather than the closing of a gap. `sequence_number`'s only CHECK
+ *   is `>= 0` and this table's isolation arm is `ALL`-scope, so its `USING` doubles as its
+ *   `WITH CHECK` (ADR-0374): one `UPDATE` under a tenant's own context, as the non-owner `serving`
+ *   role, raised an anchor from 4 to 99 on a fully-converged deployment and the pass answered
+ *   `verdict=compromised truncated=true witness=99 causes=[chain_truncated]`, with the formatter
+ *   printing *"TRUNCATED: checkpoint at 99 but the chain ends at 4"* while **every entry was
+ *   present** — a paging sev1 telling an operator that audit history was destroyed, naming the
+ *   wrong table. Excluding a contradicted anchor from the witness is what stops that, and this
+ *   cause is what keeps the row from reading clean once it is excluded.
+ *
+ *   Together with `checkpoint_row_refused` these two are exactly `anchorAuditDisproves`' disjuncts,
+ *   and they are read apart rather than through it because each names a different act and lands at
+ *   a different key in the escalation row. The cost of the split is that a *third* disjunct added
+ *   to that predicate would reach the scheduler's findings hook and no cause here, so a verdict
+ *   could read `verified` beside an anchor finding; a test asserts the two sides agree over the
+ *   shapes this report can hold.
  * - `audit_row_tampered` — an audit row no longer matches the chain entry that commits to it.
  * - `audit_row_refused` — an audit row is stored in a shape the contract refuses. The one judgement
  *   here that had to be argued rather than copied, and it sits beside `audit_row_tampered` and not
@@ -358,18 +437,26 @@ export async function proveScopeIntegrity(
  *   rewriting it into a valid one, so grading it below `compromised` would leave the cheaper attack
  *   as the one that does not page.
  *
- * The order is the order these were asked in before they were a list, so `causes[0]` is still the
- * condition that used to answer first. Every one of them is now asked **before** the
- * `anchors === null` guard; two — `audit_row_tampered` and `audit_row_refused` — used to be asked
- * after it, and hoisting them changed no answer, because a null anchor half has no tampered or
- * refused rows to find. What the hoist buys is that the guard can never again be the reason a cause
- * is not looked for, which is the mistake `checkpoint_row_refused` was placed ahead of it to avoid.
+ * The first six are in the order they were asked in before they were a list, so for any evidence
+ * those six describe `causes[0]` is still the condition that used to answer first — a property
+ * inserting a seventh member **in the middle** cannot disturb, because `compromiseCauses` filters
+ * and a filter preserves relative order. `checkpoint_disagrees_with_chain` is the seventh and was
+ * asked nowhere before, so it has no historical position to keep: it sits beside its sibling
+ * because the two are one table's two failure modes and an operator meeting either goes to the same
+ * rows, which is worth more than a precedence nothing measured.
+ *
+ * Every one of them is asked **before** the `anchors === null` guard; two — `audit_row_tampered`
+ * and `audit_row_refused` — used to be asked after it, and hoisting them changed no answer, because
+ * a null anchor half has no tampered or refused rows to find. What the hoist buys is that the guard
+ * can never again be the reason a cause is not looked for, which is the mistake
+ * `checkpoint_row_refused` was placed ahead of it to avoid.
  */
 export const COMPROMISE_CAUSES = [
   "chain_truncated",
   "chain_broken_or_unsigned",
   "chain_row_refused",
   "checkpoint_row_refused",
+  "checkpoint_disagrees_with_chain",
   "audit_row_tampered",
   "audit_row_refused",
 ] as const;
@@ -389,18 +476,21 @@ export interface CompromiseEvidence {
   readonly anchors: AuditAnchorReport | null;
   readonly truncation: ChainTruncationCheck;
   readonly chainRowsRefused: readonly UnreadableRow[];
-  readonly anchorRowsRefused: readonly UnreadableRow[];
+  readonly anchorAudit: AnchorAuditReport;
 }
 
 /**
  * One predicate per cause.
  *
- * A total map, so a seventh condition cannot join this judgement without a seventh member of
+ * A total map, so an eighth condition cannot join this judgement without an eighth member of
  * `COMPROMISE_CAUSES` — which is in turn a compile error in `COMPROMISE_CAUSE_PAYLOAD_KEY` and in
  * the escalation fence's per-cause fixtures, so the key that explains the new cause and the test
  * proving that key explains it both have to be written. That is the whole mechanism: the branch
  * list **is** the cause list, where it used to be a list of `if`s with a hand-written list of `it`s
- * beside it and nothing joining them.
+ * beside it and nothing joining them. The fence was exercised rather than assumed when the seventh
+ * member landed: adding `checkpoint_disagrees_with_chain` to this map alone is `TS2353` here,
+ * adding the enum member to clear that is `TS2741` at the payload key and at both suites' per-cause
+ * fixtures, and each of those is a file whose author has to say what the new cause means.
  *
  * What no type can fence is a bare `if (…) return "compromised"` added to `integrityVerdictFor`
  * itself. There is exactly one such return and it is gated on this map; a test reads this module as
@@ -411,7 +501,9 @@ const COMPROMISE_CAUSE_HOLDS: Record<CompromiseCause, (evidence: CompromiseEvide
   chain_truncated: (e) => e.truncation.truncated,
   chain_broken_or_unsigned: (e) => !e.chain.ok,
   chain_row_refused: (e) => e.chainRowsRefused.length > 0,
-  checkpoint_row_refused: (e) => e.anchorRowsRefused.length > 0,
+  checkpoint_row_refused: (e) => e.anchorAudit.refusedCount > 0,
+  checkpoint_disagrees_with_chain: (e) =>
+    e.anchorAudit.disagreeing !== null && e.anchorAudit.disagreeing.length > 0,
   audit_row_tampered: (e) => e.anchors !== null && e.anchors.tampered.length > 0,
   audit_row_refused: (e) => e.anchors !== null && e.anchors.unreadable.length > 0,
 };
@@ -420,8 +512,8 @@ const COMPROMISE_CAUSE_HOLDS: Record<CompromiseCause, (evidence: CompromiseEvide
  * Every cause this evidence exhibits, in precedence order.
  *
  * Exported because the escalation row has to name what drove the page and `integrityVerdictFor`'s
- * one-word answer cannot say which of six. It returns all of them rather than the first, because an
- * operator meeting a truncated chain *and* a tampered row has two things to look at and a
+ * one-word answer cannot say which of seven. It returns all of them rather than the first, because
+ * an operator meeting a truncated chain *and* a tampered row has two things to look at and a
  * first-match answer would name one.
  */
 export function compromiseCauses(evidence: CompromiseEvidence): readonly CompromiseCause[] {
@@ -433,25 +525,46 @@ export function compromiseCauses(evidence: CompromiseEvidence): readonly Comprom
  * distinction it draws is the one that decides whether anyone gets woken up.
  *
  * Its `compromised` half is `COMPROMISE_CAUSES` — see there for each condition's argument and for
- * why a list rather than a sequence of `if`s. What is left here is the two judgements that are not
- * findings, and the signature is unchanged: `integrityVerdictFor` has 21 call sites in this app's
- * tests, and the evidence object is built here so none of them had to move.
+ * why a list rather than a sequence of `if`s. What is left here is the three judgements that are
+ * not findings.
+ *
+ * The fifth parameter is a whole `AnchorAuditReport` and was a `readonly UnreadableRow[]`.
+ * ADR-0374 kept that shape *specifically* to spare 21 call sites in this app's tests, and that
+ * convenience expired the moment the axis grew a second dimension: a report that can also say *this
+ * anchor contradicts the chain* and *the scan did not reach the end* cannot be carried by a list of
+ * refused rows, and passing the three alongside each other would be three parameters nothing keeps
+ * in agreement. So the call sites moved, and `noAnchorFindings` is what they moved to.
  */
 export function integrityVerdictFor(
   chain: ChainVerificationReport,
   anchors: AuditAnchorReport | null,
   truncation: ChainTruncationCheck,
   chainRowsRefused: readonly UnreadableRow[],
-  anchorRowsRefused: readonly UnreadableRow[],
+  anchorAudit: AnchorAuditReport,
 ): IntegrityVerdict {
   const causes = compromiseCauses({
     chain,
     anchors,
     truncation,
     chainRowsRefused,
-    anchorRowsRefused,
+    anchorAudit,
   });
   if (causes.length > 0) return "compromised";
+  // A scan the ceiling stopped did not read the whole anchor table, so every count on that report is
+  // a **lower bound** and `verified` would claim a reading nobody took — ADR-0372's vacuous axis, in
+  // the one place that decides whether anybody is woken. Deliberately **not** a compromise cause:
+  // nothing is disproven, an absence of evidence is not evidence (ADR-0372 again, read the other
+  // way), and paging on a budget this deployment set itself would train everyone to raise the
+  // ceiling rather than look.
+  //
+  // `unproven` and deliberately not a fourth verdict, which is a measurement and not a preference:
+  // `INTEGRITY_VERDICTS` is mirrored by `STORED_INTEGRITY_VERDICTS` and constrained by
+  // `meta.audit_integrity_verdicts`' own column CHECK (`verdict IN ('verified', 'unproven',
+  // 'compromised')`), declared in `VALUE_SET_DOMAINS` — so a fourth member is a catalog change, a
+  // declaration change and a CHECK whose widening every deployed database has to be re-planned for.
+  // `unproven`'s own definition already covers this: *nothing is disproven, and something is not
+  // established*.
+  if (!anchorAudit.complete) return "unproven";
   if (anchors === null) return "verified";
   // `anchors.ok` also requires nothing unanchored; that is split out here, because an unanchored
   // row is unproven rather than disproven and must not page anyone. A deployment upgrading from
@@ -641,10 +754,15 @@ export class IntegrityProofScheduler {
  * So the question is asked of the **verdict**, which is total over every condition, rather than of
  * a conjunct list that has to be revisited whenever a condition is added. `verified` is the one
  * verdict compatible with *nothing to verify*: `compromised` is a finding by definition, and
- * `unproven` says rows exist and carry no anchor, which is not nothing. (`unproven` is also
- * unreachable from a report `proveScopeIntegrity` builds — `unanchored > 0` needs a row in
- * `results`, and `checked` is `results.length`, so `noAuditRows` already excluded it. The clause is
- * not there for that case; it is there so that no future condition needs this function edited.)
+ * `unproven` says something exists that is not established, which is not nothing.
+ *
+ * That last clause used to carry a parenthetical calling `unproven` **unreachable** from a report
+ * this function builds — `unanchored > 0` needs a row in `results` and `checked` is
+ * `results.length`, so `noAuditRows` excluded it — and the next condition to arrive made it false:
+ * ADR-0375's anchor-scan coverage answers `unproven` for a scope with no chain entries and no audit
+ * rows at all, because the question it asks is about a third table. The conclusion it was offered
+ * for survives and is better supported than when it was a theory: the clause is not there for a
+ * case somebody enumerated, it is there so that no future condition needs this function edited.
  */
 function isEmptyScope(report: IntegrityProofReport): boolean {
   // Keyed on the tail, NOT on how many signatures the chain half checked. In
@@ -662,11 +780,20 @@ function isEmptyScope(report: IntegrityProofReport): boolean {
  *
  * **Subsumed by the verdict clause in front of it**, and the honest statement is that it can no
  * longer change this predicate's answer for any report `proveScopeIntegrity` builds: each of the
- * four axes drives `integrityVerdictFor` to `compromised`, two of them directly
- * (`chain_row_refused`, `checkpoint_row_refused`), one through `chain.ok` — `verifyChainSignatures`
- * answers `valid: false` for a non-empty `unreadable` — and one through `audit_row_refused`. The
- * claim this comment used to make, that `anchorRowsRefused` is the axis that *genuinely fires*
- * here, was true for one commit and is not true now: that case is the verdict clause's.
+ * four axes drives `integrityVerdictFor` away from `verified`, two of them directly
+ * (`chain_row_refused`, and the anchor audit's own pair of causes), one through `chain.ok` —
+ * `verifyChainSignatures` answers `valid: false` for a non-empty `unreadable` — and one through
+ * `audit_row_refused`. The claim this comment used to make, that the anchor axis is the one that
+ * *genuinely fires* here, was true for one commit and is not true now: that case is the verdict
+ * clause's.
+ *
+ * The anchor conjunct is `anchorAuditHasFindings` and so is **wider** than the refused-row list it
+ * replaced — it also refuses a skip for an anchor the chain contradicts and for a scan the ceiling
+ * stopped. Both are right for this predicate's question, which is whether the pass can stand behind
+ * what it read: a contradicted anchor is something found, and an unread tail is something not read,
+ * and `skipped_empty` claims neither happened. It is the one conjunct here that is not purely about
+ * rows the reader refused, which is why the name is now slightly narrower than the predicate; the
+ * alternative was reading `refusedCount` alone and silently dropping the two new facts.
  *
  * It is retained for two reasons, and the first is not hypothetical. `verdict` is a **field on the
  * report**, and this predicate is handed reports by `opts.prove`, which is a seam: a caller can
@@ -691,7 +818,7 @@ function isEmptyScope(report: IntegrityProofReport): boolean {
 function readEveryRowFound(report: IntegrityProofReport): boolean {
   return (
     report.chainRowsRefused.length === 0 &&
-    report.anchorRowsRefused.length === 0 &&
+    !anchorAuditHasFindings(report.anchorAudit) &&
     report.chain.signatures.unreadable.length === 0 &&
     (report.anchors === null || report.anchors.unreadable.length === 0)
   );
@@ -733,24 +860,43 @@ export function formatIntegrityProof(report: IntegrityProofReport): string {
         ` but the chain ends at ${String(report.truncation.tailSequence)}`,
     );
   } else if (report.truncation.checkpointSequence === null) {
-    // Two reasons the check cannot run, and they are not interchangeable. A refused anchor also
-    // leaves `checkpointSequence` null, so the pre-ADR-0373 sentence was applied to it — and for
-    // that case both halves of it are false: there **is** a checkpoint, and the remedy cannot work,
-    // because `record` is `ON CONFLICT (tenant_id, sequence_number) DO NOTHING`, so running the
-    // scheduler leaves the unreadable row exactly where it is (ADR-0334 — a remedy that cannot work
-    // is worse than naming none). The refusal is named on its own line below; this one keeps its
-    // original wording for the case it was written for.
+    // Two reasons the check cannot run, and they are not interchangeable — which is why the second
+    // arm is gated rather than printed unconditionally: "no checkpoint yet — run the checkpoint
+    // scheduler" is the remedy that cannot work for a scope that *has* anchors, since `record` is
+    // `ON CONFLICT (tenant_id, sequence_number) DO NOTHING` so running the scheduler leaves an
+    // edited row exactly where it is (ADR-0334 — a remedy that cannot work is worse than naming
+    // none).
+    //
+    // The witness is the audit's now, not `latest()`'s, so `checkpointSequence === null` says *no
+    // anchor this audit will stand behind* rather than *the newest anchor could not be read*: it
+    // covers a scope with no checkpoints at all, one whose every row the contract refuses, and one
+    // whose every row the chain contradicts. The first is the only one the scheduler fixes; the
+    // other two are named by the audit's own lines below, so this arm points there rather than
+    // guessing which.
     lines.push(
-      report.anchorRowsRefused.length > 0
-        ? "  truncation: not checkable (the latest checkpoint cannot be read — see below)"
+      anchorAuditHasFindings(report.anchorAudit)
+        ? "  truncation: not checkable (no checkpoint this audit will stand behind — see below)"
         : "  truncation: not checkable (no checkpoint yet — run the checkpoint scheduler)",
     );
   }
   // Beside the chain and anchor refusals rather than inside the `anchors !== null` block, because
-  // this axis is answered on every pass: the checkpoint read happens before the audit rows are
-  // looked at, so a scope with no anchored rows at all still reports its refused anchor.
-  for (const u of report.anchorRowsRefused) {
-    lines.push(`  unreadable checkpoint ${u.identity ?? "<unidentified>"} (${u.detail})`);
+  // this axis is answered on every pass: the anchor table is read before the audit rows are looked
+  // at, so a scope with no anchored rows at all still reports what its checkpoints say.
+  //
+  // Printed only when there is something to act on, which keeps the unattended line count of a
+  // healthy scope exactly what it was — the block this replaces was a loop over refused rows and so
+  // was silent on a clean pass too. The one thing a findings gate withholds is the audit's
+  // *correspondence was not asked* line, and that is sound here rather than merely cheap: this
+  // function's caller passes `null` for the chain only when the reader refused one of its rows, and
+  // those rows are already printed above and already drive the verdict.
+  //
+  // Indenting these lines into this report is what found `formatAnchorAudit`'s label: its first
+  // line opened `anchors:` and so did the anchor half's below, about `meta.audit_log` rows anchored
+  // **in** the chain — two lines about two tables under one prefix, which is the merge ADR-0373
+  // refused as data and would have given away in output. It reads `checkpoints:` now, which is the
+  // live run of this increment paying for itself before a deployment met the report.
+  if (anchorAuditHasFindings(report.anchorAudit)) {
+    for (const line of formatAnchorAudit(report.anchorAudit)) lines.push(`  ${line}`);
   }
   if (report.anchors !== null) {
     lines.push(

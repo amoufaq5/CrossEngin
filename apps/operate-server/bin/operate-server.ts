@@ -16,7 +16,8 @@ import {
   setCredentialCliHelpText,
 } from "../src/cli.js";
 import { formatMultiTenantReport } from "../src/link-sweep.js";
-import { anchoringWouldBury, formatChainVerification } from "../src/chain-verify.js";
+import { formatChainVerification } from "../src/chain-verify.js";
+import { anchorAuditHasFindings, formatAnchorAudit } from "../src/anchor-audit.js";
 import { runPruneLinks, runRekey, runReplay, runVerifyChain, serve } from "../src/node.js";
 import { formatReplayReport } from "../src/replay.js";
 import { formatRekeyResult, formatRekeySurvey } from "../src/rekey.js";
@@ -63,22 +64,25 @@ async function runVerify(argv: readonly string[]): Promise<number> {
   process.stdout.write(
     options.format === "json"
       ? `${JSON.stringify(report, null, 2)}\n`
-      : `${formatChainVerification(report)}\n`,
+      : `${formatChainVerification(report.chain)}\n${formatAnchorAudit(report.anchors)
+          .map((l) => `  ${l}`)
+          .join("\n")}\n`,
   );
-  // `report.ok` is not the whole verdict, and ADR-0374's own Option B rejection says why: a full
-  // fold over a sound chain answers `ok: true`, so a bounded pass that *refused its anchor* and
-  // folded instead reads as a healthy full verification. That increment closed it for the hourly
-  // `proveScopeIntegrity` through `IntegrityProofReport.anchorRowsRefused` and left it standing
-  // here, in the by-hand auditor command, whose help text frames the exit code as the verdict —
-  // so `verify-chain --from-checkpoint` exited 0 printing "OK" for a scope whose stored anchor
-  // this binary cannot read, where before that increment the store's throw escaped and it exited 1.
+  // `chain.ok` is not the whole verdict, and ADR-0374's own Option B rejection says why: a full fold
+  // over a sound chain answers `ok: true`, so a pass whose stored **anchor** is a finding reads as a
+  // healthy verification. That increment closed it for the hourly `proveScopeIntegrity` and patched
+  // it here by reading `fullBecause` through `anchoringWouldBury` — which is a statement about the
+  // **newest** anchor alone, so a refused or relocated row anywhere else still exited 0 printing
+  // "OK", and `verify-chain` without `--from-checkpoint` could not see one at all, because
+  // `verifyChainFull` never read that table. The weaker command caught it and the stronger did not.
   //
-  // `anchoringWouldBury` is the predicate rather than `fullBecause !== null`, because three of the
-  // five reasons are not findings: a caller asking for a full fold, a scope with no checkpoint yet,
-  // and a legacy anchor predating the provenance column must all keep exiting 0. It is the same
-  // total map `CheckpointScheduler` refuses to anchor on, so the command and the scheduler cannot
-  // come to disagree about which anchors are a finding.
-  return report.ok && !anchoringWouldBury(report.fullBecause) ? 0 : 1;
+  // `anchorAuditHasFindings` is the predicate, and it is the **wider** of the audit's two: this
+  // command is a by-hand auditor whose help text frames the exit code as the verdict, so a scan the
+  // ceiling stopped must not exit 0 either — it did not read the whole table, and reporting a
+  // verdict over a set it did not read is the claim ADR-0372 is about. `proveScopeIntegrity` grades
+  // the same condition `unproven` rather than `compromised`, for the same reason and with a third
+  // answer available to it that an exit code does not have.
+  return report.chain.ok && !anchorAuditHasFindings(report.anchors) ? 0 : 1;
 }
 
 async function runReplayCommand(argv: readonly string[]): Promise<number> {

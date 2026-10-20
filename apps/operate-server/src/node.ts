@@ -470,6 +470,7 @@ import {
   verifyChainFull,
   type ChainVerificationReport,
 } from "./chain-verify.js";
+import { auditAnchors, formatAnchorAudit, type AnchorAuditReport } from "./anchor-audit.js";
 import { buildRequestMetering, loadMeteringConfig, type RequestMetering } from "./metering.js";
 import {
   buildStripeUsageSync,
@@ -3412,18 +3413,27 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           console.info(
             `[checkpoint] scope=${scope ?? "platform"} seq=${cp.sequenceNumber.toString()} root=${cp.rootHash.slice(0, 12)} provenance=${cp.provenance ?? "unstated"}`,
           ),
-        // A scope that is NOT anchored, for either of two reasons, and in both cases that is a
-        // standing condition an operator has to see: an un-anchored scope is re-folded from genesis
-        // on every later pass, and the reason it refused is the finding. The two differ in what
-        // went wrong and the first line of the report names which (ADR-0374) — the chain did not
-        // verify, or it verified and its stored **anchor** is a row this binary cannot read, which
-        // is withheld because anchoring would mask that row from `latest()`. Error level, and
-        // distinct from `onError` on ADR-0322's split — this one says a verification happened and
-        // names what it found, where `onError` says the verification could not be performed and
-        // asserts nothing about it.
+        // A scope that is NOT anchored, which is a standing condition an operator has to see: an
+        // un-anchored scope is re-folded from genesis on every later pass, and the reason it refused
+        // is the finding. Error level, and distinct from `onError` on ADR-0322's split — this one
+        // says a verification happened and names what it found, where `onError` says the
+        // verification could not be performed and asserts nothing about it.
         onRefused: (scope, verification) =>
           console.error(
             `[checkpoint] REFUSED scope=${scope ?? "platform"} — not anchored\n${formatChainVerification(verification)}`,
+          ),
+        // The anchor table's own findings, which are a **separate** report from the one above and
+        // not a reason to withhold the anchor (ADR-0375). ADR-0374 withheld it, because its
+        // detector was `latest()` — one row — so a fresh anchor at the tail hid a refused row
+        // beneath it; the audit reads the whole table, so nothing is hidden and the scope gets its
+        // bounded verification and its truncation witness back. This callback is the **only** record
+        // of the finding on a deployment running no integrity proof, because nothing in the database
+        // distinguishes a refused or relocated checkpoint row from a sound one.
+        onAnchorFindings: (scope, audit) =>
+          console.error(
+            `[checkpoint] ANCHOR FINDINGS scope=${scope ?? "platform"}\n${formatAnchorAudit(audit)
+              .map((l) => `  ${l}`)
+              .join("\n")}`,
           ),
         onError: (err) => console.error("[checkpoint] pass error", err),
       });
@@ -5120,18 +5130,40 @@ function buildReplayRunners(
   };
 }
 
-export async function runVerifyChain(options: VerifyChainOptions): Promise<ChainVerificationReport> {
+/**
+ * What `operate-server verify-chain` reports: the chain's verdict **and** its anchor table's.
+ *
+ * Two reports and not one, because they are two tables and the second was reported by nothing here.
+ * Before ADR-0375 this command inferred the anchor's state from `ChainVerificationReport.fullBecause`
+ * — which is a statement about the **newest** anchor alone, so a refused or relocated row anywhere
+ * else exited 0 printing "OK", and the *full* fold could not see one at all, because `verifyChainFull`
+ * never read that table. The weaker command caught it and the stronger did not.
+ */
+export interface VerifyChainReport {
+  readonly chain: ChainVerificationReport;
+  readonly anchors: AnchorAuditReport;
+}
+
+export async function runVerifyChain(options: VerifyChainOptions): Promise<VerifyChainReport> {
   const conn = createNodePgConnection(parsePgEnvConfig());
   try {
     const schemaOpt = options.schema !== null ? { schema: options.schema } : {};
     const reader = new PostgresChainLogReader(conn, schemaOpt);
     const registry = new PostgresKeyRegistry(conn);
     const tenantId = options.platform ? null : options.tenantId;
-    if (options.fromCheckpoint) {
-      const checkpoints = new PostgresChainCheckpointStore(conn, schemaOpt);
-      return await verifyChainFromCheckpoint(reader, registry, checkpoints, tenantId);
-    }
-    return await verifyChainFull(reader, registry, tenantId);
+    // Built in **both** modes now. It used to be built only for `--from-checkpoint`, because only a
+    // bounded fold needed an anchor; the audit needs the table whichever fold ran.
+    const checkpoints = new PostgresChainCheckpointStore(conn, schemaOpt);
+    const chain = options.fromCheckpoint
+      ? await verifyChainFromCheckpoint(reader, registry, checkpoints, tenantId)
+      : await verifyChainFull(reader, registry, tenantId);
+    // `chain: null`, so the correspondence half is not asked and the report says so. The two folds
+    // each hold the entries they read and neither hands them back, so asking it here would mean a
+    // second whole-chain load — two copies of a chain this command exists to walk — and for
+    // `--from-checkpoint` it would mean reading the prefix a bounded verification is defined not to.
+    // The integrity proof asks it, because it already loads the whole chain for the anchor half.
+    const anchors = await auditAnchors(tenantId, checkpoints, null);
+    return { chain, anchors };
   } finally {
     await conn.close();
   }

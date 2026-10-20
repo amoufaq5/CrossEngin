@@ -88,7 +88,10 @@ export function verifyChainSignaturesAgainstRegistry(
  * from genesis is the right answer here for ADR-0371's own reason — an anchor that cannot be trusted
  * is not an anchor — and it is **not sufficient**, because the fold alone would make the pass read
  * as a healthy full verification. The refusal reaches the verdict by
- * `IntegrityProofReport.anchorRowsRefused`.
+ * `IntegrityProofReport.anchorAudit`, which reads the whole table and so answers for a refused row
+ * wherever it sits; this reason is about the **newest** row alone, because that is the one a bounded
+ * fold would have taken its prefix from, and the two are deliberately not the same question
+ * (ADR-0375).
  */
 export const CHAIN_FULL_REASONS = [
   "requested",
@@ -114,66 +117,26 @@ export const CHAIN_FULL_REASON_PHRASES: Record<ChainFullReason, string> = {
   anchor_unreadable: "anchor is stored in a shape the contract refuses",
 };
 
-/**
- * Whether anchoring over this reason would destroy the evidence that produced it.
- *
- * **This exists because ADR-0374's first commit reproduced its own class inside its own fix.**
- * Before it, a refused anchor threw out of `verifyChainFromCheckpoint`, so `CheckpointScheduler`
- * filed `outcome: "error"` and wrote nothing. After it the function answers `ok: true`, the
- * scheduler's `if (!verification.ok)` falls through, and it records a **readable** checkpoint at the
- * current tail — which `latest()` then returns, because it orders by `sequence_number DESC`, so the
- * refused row sits below it and `IntegrityProofReport.anchorRowsRefused` goes back to empty. The
- * commit turned a loud scheduler error into a silent success that erases its own new finding.
- *
- * Measured live as a non-owner, additive writes only: `compromised` + `[onPass, onFinding,
- * escalate]` before one scheduler pass, and `verified` + `[onPass, escalate]` after it, with the
- * refused row still on disk. The bound is exact and is why this is not a narrow race — the finding
- * survives only while the tail is at or below the refused anchor's sequence (where `DO NOTHING`
- * fires) and is buried the moment the chain gains one entry, which on a serving deployment is every
- * audited request (ADR-0286). `node.ts` also starts the checkpoint lifecycle *before* the integrity
- * proof, both `runOnStart` and both hourly by default, so on the paired configuration the burial
- * happened milliseconds before the proof looked.
- *
- * It also refutes ADR-0374's own Option D reasoning, which argued that a refused row cannot heal
- * "because `record` is `ON CONFLICT … DO NOTHING` so the refused row stays where it is". `DO
- * NOTHING` blocks replacement **at that sequence**; the scheduler anchors at the **tail**, which is
- * a different sequence. The row stays and the finding does not.
- *
- * **Nothing about that write is wrong, and getting this right decides where the end state lives.**
- * On `anchor_unreadable` the verification is `foldFromGenesis`, which loads the whole chain and runs
- * both folds, so the `verified_full` provenance the scheduler would stamp is genuinely earned over
- * the entire prefix and the bounded proof's induction stays intact. What is narrow is the
- * **detector**: `latest()` reads one row, so a sound new anchor shadows the refused one. That makes
- * this ADR-0361's class — *a reader whose aperture is narrower than the writer's* — rather than a
- * bad write, and it is why the honest long-term fix is to widen the read (see
- * `PostgresChainCheckpointStore.listRecent`, whose own doc comment predicts exactly this consumer)
- * rather than to keep withholding the anchor. Withholding is what ships first on ADR-0340's
- * ordering rule: a refusal is correct whether or not the detector is later widened, while anchoring
- * is correct **only after** it is, so shipped in the other order it restores the defect. Relaxing it
- * afterwards is one line — this member flips to `false` — and the scheduler's tests re-aim
- * themselves, because they derive their cases from this map rather than listing them.
- *
- * Only `anchor_unreadable` answers true, and the map is named for what it decides rather than for
- * ADR-0371's finding-versus-gap split, which it deliberately does not re-litigate: `requested` and
- * `no_checkpoint` have nothing to bury, and for `anchor_unverified` and `anchor_provenance_absent`
- * anchoring **is** the heal — a row stating that nothing vouched for its prefix, or one written
- * before the column existed, is superseded by a vouched anchor rather than hidden by it. A row this
- * binary cannot read is the only one whose masking costs a detector.
- */
-export const CHAIN_FULL_REASON_BLOCKS_ANCHORING: Record<ChainFullReason, boolean> = {
-  requested: false,
-  no_checkpoint: false,
-  anchor_unverified: false,
-  anchor_provenance_absent: false,
-  anchor_unreadable: true,
-};
-
-/**
- * The one reader of that map. `null` is a bounded pass, which carries no reason and buries nothing.
- */
-export function anchoringWouldBury(fullBecause: ChainFullReason | null): boolean {
-  return fullBecause === null ? false : CHAIN_FULL_REASON_BLOCKS_ANCHORING[fullBecause];
-}
+// `CHAIN_FULL_REASON_BLOCKS_ANCHORING` and its one reader `anchoringWouldBury` stood here, and
+// ADR-0375 **deletes** them rather than flipping the one member ADR-0374 said would be the one-line
+// relaxation. That prediction is refused by the fence shipped beside it: `anchor_unreadable` was the
+// map's only `true`, so flipping it leaves every member `false`, which `chain-verify.test.ts` calls a
+// silently disarmed fence and asserts against. A judgement with no case left is not a judgement.
+//
+// What the map decided was that a fresh anchor at the tail would shadow a refused row, because the
+// detector was `latest()` — **one** row, so the finding existed only while the refused row was the
+// newest. Measured live as the non-owner `serving` role on one scope with anchors at 1, 3 and 4:
+// `checkpointed_by := ''` at sequence 1 answered `verdict=verified anchorRefused=0`, and the
+// identical statement at sequence 4 answered `verdict=compromised anchorRefused=1`. So the refusal
+// protected exactly the one row a tamperer need not choose, and charged a permanent fold from
+// genesis and an unanswerable truncation check for it.
+//
+// `anchor-audit.ts` reads the whole table instead, so a fresh anchor can hide nothing and the
+// scheduler anchors again. ADR-0374's own reasoning anticipated this and named the level: the write
+// was never wrong ("nothing about that write is wrong" — the fold earning `verified_full` covers the
+// entire prefix), what was narrow was the detector, which makes it ADR-0361's class rather than a
+// bad write. The ordering it shipped in was right under ADR-0340's rule — a refusal is correct
+// whether or not the detector is later widened, while anchoring is correct only after it is.
 
 export interface ChainVerificationReport {
   readonly tenantId: string | null;
@@ -291,13 +254,14 @@ export async function verifyChainFromCheckpoint(
   } catch (err) {
     if (!(err instanceof CheckpointRowUnreadable)) throw err;
     // The caught `err.row` is deliberately discarded: `ChainVerificationReport` has no refusal axis
-    // to put it on, and adding one would be a **second** derivation of the same fact, because
-    // `proveScopeIntegrity` catches its own `latest` and reports `anchorRowsRefused`. The cost is
-    // that the two reads can disagree if the row changes between them, so `fullBecause:
-    // "anchor_unreadable"` can coexist with an empty `anchorRowsRefused` — which is why the verdict
-    // reads the **axis** and never this reason, and why `anchoringWouldBury` is a *scheduler* and
-    // *CLI* predicate rather than a verdict one. Narrow, and in the safe direction: the surface that
-    // pages reads the axis, and this reason only ever adds a sentence to a line a human reads.
+    // to put it on, and adding one would be a **second** derivation of the same fact, because every
+    // surface that reports a refused anchor reads `auditAnchors`, which scans the whole table rather
+    // than this one row. So the reason and the axis answer different questions — *can a bounded fold
+    // use the newest anchor* against *does this scope hold an anchor row the contract refuses* — and
+    // a report can carry `fullBecause: "anchor_unreadable"` beside an audit that found the row
+    // somewhere other than the top, or (if the row is replaced between the two reads) nowhere at all.
+    // Narrow, and in the safe direction: the surface that pages reads the audit, and this reason only
+    // ever adds a sentence to a line a human reads.
     return foldFromGenesis(reader, registry, tenantId, "anchor_unreadable");
   }
   if (checkpoint === null) {

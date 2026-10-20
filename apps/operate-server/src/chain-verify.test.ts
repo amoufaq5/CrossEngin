@@ -18,9 +18,7 @@ import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 
 import {
   CHAIN_FULL_REASONS,
-  CHAIN_FULL_REASON_BLOCKS_ANCHORING,
   CHAIN_FULL_REASON_PHRASES,
-  anchoringWouldBury,
   formatChainVerification,
   keyRegistryResolver,
   verifyChainFromCheckpoint,
@@ -438,7 +436,7 @@ describe("verifyChainFromCheckpoint refuses an anchor it cannot trust", () => {
     // `CheckpointRowUnreadable` and used to take the whole pass with it. Folding is the right
     // verification — an anchor that cannot be read cannot vouch for a prefix — and on its own it
     // reads as a healthy full pass, which is why the refusal also has to reach the verdict
-    // (`IntegrityProofReport.anchorRowsRefused`).
+    // (`IntegrityProofReport.anchorAudit`, which reads the whole table — ADR-0375).
     const { store, fingerprint, publicKeyBase64 } = await seededChain(5);
     const refusing = {
       latest: async (): Promise<never> => {
@@ -587,51 +585,5 @@ describe("formatChainVerification", () => {
     // Unreachable from this module, which always names a reason; the type admits it, and the
     // honest rendering is the one that claims nothing.
     expect(formatChainVerification({ ...base, fullBecause: null })).toContain("[full]");
-  });
-});
-
-/**
- * The anchoring decision, which is a **boolean** total map and therefore carries the hazard its
- * sibling `CHAIN_FULL_REASON_PHRASES` names one comment up: a *missing* key will not compile, and a
- * **wrong** one compiles perfectly. For a string map the symptom is `[full: ]` and a non-emptiness
- * test catches it; here an all-`false` map compiles, type-checks, passes every scheduler test that
- * asserts anchoring, and silently disarms the fence — so the exact set is pinned here rather than
- * inferred from behaviour anywhere. `checkpoint-scheduler.test.ts` derives its cases *from* this
- * map, which is the right dependency and is exactly why the map itself has to be asserted
- * somewhere: tests that re-aim themselves when a member flips cannot also be what pins the member.
- */
-describe("CHAIN_FULL_REASON_BLOCKS_ANCHORING", () => {
-  it("blocks anchoring for exactly one reason, and it is the one that is a stored row", () => {
-    const blocks = CHAIN_FULL_REASONS.filter((r) => CHAIN_FULL_REASON_BLOCKS_ANCHORING[r]);
-    expect(blocks).toEqual(["anchor_unreadable"]);
-    // Asserted as an exact set and not key by key, so flipping a member fails here rather than
-    // passing quietly — the shape ADR-0342 adopted for `ABAC_RECORD_AVAILABILITY`'s `never` set
-    // after per-key assertions let one position sit on the wrong value.
-    const supersede = CHAIN_FULL_REASONS.filter((r) => !CHAIN_FULL_REASON_BLOCKS_ANCHORING[r]);
-    expect(supersede).toEqual([
-      "requested",
-      "no_checkpoint",
-      "anchor_unverified",
-      "anchor_provenance_absent",
-    ]);
-  });
-
-  it("is total over the reasons, so a sixth cannot default to permitting the anchor", () => {
-    // `Record<ChainFullReason, boolean>` makes a missing key a compile error; this is the runtime
-    // half, which catches a key added to the *array* and not the map in a build where the two are
-    // read from different places.
-    expect(Object.keys(CHAIN_FULL_REASON_BLOCKS_ANCHORING).sort()).toEqual(
-      [...CHAIN_FULL_REASONS].sort(),
-    );
-  });
-
-  it("answers false for a bounded pass, which carries no reason and so buries nothing", () => {
-    expect(anchoringWouldBury(null)).toBe(false);
-  });
-
-  it("agrees with the map for every reason, so the reader cannot drift from the decision", () => {
-    for (const reason of CHAIN_FULL_REASONS) {
-      expect(anchoringWouldBury(reason), reason).toBe(CHAIN_FULL_REASON_BLOCKS_ANCHORING[reason]);
-    }
   });
 });

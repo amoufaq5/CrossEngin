@@ -15,6 +15,7 @@ import type { UnreadableRow } from "@crossengin/kernel-pg";
 import type { AlertChannelTarget } from "@crossengin/observability";
 import { planPageDirective, type PageDirective } from "@crossengin/observability-runtime";
 
+import type { AnchorAuditReport } from "./anchor-audit.js";
 import { auditActor, auditEntry, type PostgresAuditEmitter } from "./audit-log-store.js";
 import type { IntegrityEscalationConfig } from "./integrity-escalation-config.js";
 import {
@@ -148,14 +149,79 @@ function recordedRefusal(rows: readonly UnreadableRow[]): RecordedRefusal {
 }
 
 /**
+ * The checkpoint axis, whose **count comes from the audit and not from the list beside it**.
+ *
+ * Its own function rather than `recordedRefusal(report.anchorAudit.refused)`, because that call
+ * would have been wrong in the quiet direction: `AnchorAuditReport.refused` is already capped at
+ * `MAX_REPORTED_ANCHOR_REFUSALS`, so reading `rows.length` for the count would report 50 for a scope
+ * with 500 edited anchors and the row would understate by a cap applied one module upstream. Two
+ * caps compose here — the audit's 50 and this row's 20 — and only the deepest list may be sliced;
+ * the figure has to be the whole one, which is `recordedRefusal`'s own rule (`count` is the figure,
+ * `identities` are the first of them) restated for an input that arrives pre-sliced.
+ */
+function recordedAnchorRefusal(audit: AnchorAuditReport): RecordedRefusal {
+  return {
+    count: audit.refusedCount,
+    identities: audit.refused
+      .slice(0, MAX_RECORDED_UNREADABLE_IDENTITIES)
+      .map((row) => row.identity),
+  };
+}
+
+/**
+ * What an escalation's audit row may say about anchors the chain contradicts.
+ *
+ * The **kind**, the **sequence** and `matchedAt` — three facts an operator starts a `WHERE` clause
+ * from, and no stored column value, which is `RecordedRefusal`'s rule for the same reason: a
+ * checkpoint the chain disagrees with is of unestablished trustworthiness, so its `root_hash` and
+ * `checkpointed_by` do not belong in a durable, anchored, chain-committed row (ADR-0310).
+ *
+ * `null` is carried through rather than flattened to an empty list, because the two are different
+ * facts: `null` says the correspondence was **not asked** — which on this path means the chain
+ * reader refused a row, so the audit withheld a comparison it could only have got wrong — and `[]`
+ * says it was asked and every anchor agreed (ADR-0331). Flattening would let a row that proves
+ * nothing read as a row that proves the anchors are sound.
+ *
+ * Capped on `MAX_RECORDED_UNREADABLE_IDENTITIES`' argument rather than on its own: the scan's bound
+ * is `CHECKPOINT_SCAN_CEILING`, so a tamperer who edited every anchor in a large scope would
+ * otherwise write that many objects into one JSONB column inside the escalation path, at the moment
+ * the deployment is least able to afford it.
+ */
+interface RecordedDisagreements {
+  readonly count: number;
+  readonly anchors: readonly {
+    readonly kind: string;
+    readonly sequenceNumber: number;
+    readonly matchedAt: number | null;
+  }[];
+}
+
+function recordedDisagreements(audit: AnchorAuditReport): RecordedDisagreements | null {
+  if (audit.disagreeing === null) return null;
+  return {
+    count: audit.disagreeing.length,
+    anchors: audit.disagreeing
+      .slice(0, MAX_RECORDED_UNREADABLE_IDENTITIES)
+      .map((d) => ({ kind: d.kind, sequenceNumber: d.sequenceNumber, matchedAt: d.matchedAt })),
+  };
+}
+
+/**
  * Where in the escalation's `after` payload the **evidence** for each compromise cause lands.
  *
- * A total map over `COMPROMISE_CAUSES`, so a seventh cause is a compile error here: the row has to
+ * A total map over `COMPROMISE_CAUSES`, so an eighth cause is a compile error here: the row has to
  * gain a key that explains it before it can be a cause at all. That is the half of the fence a type
  * can carry; the other half is in this module's suite, which walks the enum and asserts, per cause,
  * that a report exhibiting only that cause moves the value at this path. Written out rather than
  * derived, because the payload is a nested literal and building it by path assignment would be
  * worse code than the literal is.
+ *
+ * The fence was exercised rather than assumed when the seventh cause arrived (ADR-0375): adding
+ * `checkpoint_disagrees_with_chain` to `COMPROMISE_CAUSE_HOLDS` is a compile error until it is a
+ * member of `COMPROMISE_CAUSES`, and that membership is a compile error here until this map names
+ * the key — so `anchorDisagreements` and the block below it were written because the compiler asked
+ * for them, which is the arrangement this comment claims and had never been put to the test with a
+ * real new cause.
  *
  * Its reader is that fence and not the payload builder, which is the same arrangement as
  * `STORELESS_TABLES` and `VALUE_SET_DOMAINS` — a declaration whose consumer is the rule that checks
@@ -166,12 +232,18 @@ function recordedRefusal(rows: readonly UnreadableRow[]): RecordedRefusal {
  * one `unreadable` object on purpose: three tables and three identity namespaces (a chain sequence,
  * a `meta.audit_log` id, a checkpoint's `(scope, sequence)`), which ADR-0373 kept apart as three
  * lists and this groups without merging.
+ *
+ * `anchorDisagreements` is **not** under that object, and the placement is the argument: `unreadable`
+ * groups rows a *reader refused*, and a contradicted anchor is a row that read back perfectly and
+ * says something false. Putting it there would file a well-formed lie under the heading for
+ * malformed rows, which is the same conflation `COMPROMISE_CAUSES` keeps apart one level up.
  */
 export const COMPROMISE_CAUSE_PAYLOAD_KEY: Record<CompromiseCause, string> = {
   chain_truncated: "truncated",
   chain_broken_or_unsigned: "chain",
   chain_row_refused: "unreadable.chainRows",
   checkpoint_row_refused: "unreadable.checkpointRows",
+  checkpoint_disagrees_with_chain: "anchorDisagreements",
   audit_row_tampered: "tampered",
   audit_row_refused: "unreadable.auditRows",
 };
@@ -527,9 +599,9 @@ export class IntegrityEscalator {
               auditId: t.auditId,
               verdict: t.verdict,
             })),
-            // `integrityVerdictFor` answers `compromised` for six conditions and this row named two
-            // of them, so a paging sev1 driven by any of the other four asserted that the trail was
-            // provably altered and then named nothing — the one shape an operator cannot act on,
+            // `integrityVerdictFor` answered `compromised` for six conditions and this row named
+            // two of them, so a paging sev1 driven by any of the other four asserted that the trail
+            // was provably altered and then named nothing — the one shape an operator cannot act on,
             // which is the reason ADR-0373 gave for printing these in `formatIntegrityProof` and
             // `formatChainVerification` and then left this row alone. Every condition is named now,
             // and the completeness is **structural** rather than counted: the conditions are
@@ -563,8 +635,15 @@ export class IntegrityEscalator {
             unreadable: {
               chainRows: recordedRefusal(report.chainRowsRefused),
               auditRows: recordedRefusal(report.anchors?.unreadable ?? []),
-              checkpointRows: recordedRefusal(report.anchorRowsRefused),
+              checkpointRows: recordedAnchorRefusal(report.anchorAudit),
             },
+            // Outside `unreadable` on purpose — see `COMPROMISE_CAUSE_PAYLOAD_KEY`. A readable
+            // anchor the chain contradicts is the one finding on this row that is **not** a row
+            // somebody could not parse, and it is the one that corrects a false page rather than
+            // closing a gap: before the audit, an anchor raised above the chain tail read
+            // `causes=[chain_truncated]` with `truncated: true`, so this row asserted that audit
+            // history had been destroyed while every entry was present.
+            anchorDisagreements: recordedDisagreements(report.anchorAudit),
           },
           reason:
             operation === INTEGRITY_INCIDENT_OPERATION

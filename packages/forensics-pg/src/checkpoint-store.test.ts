@@ -7,12 +7,16 @@ import {
 } from "@crossengin/forensics";
 
 import {
+  CHECKPOINT_SCAN_CEILING,
+  CHECKPOINT_SCAN_PAGE_SIZE,
   CheckpointRowUnreadable,
   PostgresChainCheckpointStore,
   rowToCheckpoint,
+  type CheckpointScanOptions,
+  type CheckpointScanOutcome,
 } from "./checkpoint-store.js";
 import { fakeChainPg } from "./test-fakes.js";
-import type { PgConnection } from "@crossengin/kernel-pg";
+import type { PgConnection, RowRead } from "@crossengin/kernel-pg";
 
 const TENANT_A = "11111111-1111-1111-1111-111111111111";
 const TENANT_B = "22222222-2222-2222-2222-222222222222";
@@ -162,9 +166,11 @@ describe("PostgresChainCheckpointStore provenance", () => {
   // platform scope — SQL treats NULLs as distinct, so `(NULL, 3)` twice is legal and the
   // `ON CONFLICT` arm never fires there. Measured live: two such rows existed and ten runs of the
   // untiebroken query returned the OLDER one every time, which would let a stale `verified_full`
-  // mask a later `unverified` and license the very skip the provenance exists to refuse. Asserted
-  // on the recorded SQL because the fake de-duplicates on `(tenant, sequence)` in its INSERT
-  // branch, so no round trip through it can hold the two rows this is about (ADR-0371).
+  // mask a later `unverified` and license the very skip the provenance exists to refuse (ADR-0371).
+  // Asserted on the recorded SQL, which is the fence rather than a workaround: `fakeChainPg` holds
+  // the two rows and models the tiebreaker since ADR-0375 (it used to de-duplicate the platform
+  // scope too, which was stricter than the real table), so a round trip through it would pass
+  // whether the `ORDER BY` asked for the tiebreaker or the fake supplied it.
   it.each([
     ["latest", async (s: PostgresChainCheckpointStore) => s.latest(null)],
     ["listRecent", async (s: PostgresChainCheckpointStore) => s.listRecent(null)],
@@ -459,5 +465,453 @@ describe("a stored checkpoint row the contract refuses", () => {
     const read = await store.listRecent(TENANT_A);
     expect(read.records.map((c) => c.sequenceNumber)).toEqual([3]);
     expect(read.unreadable.map((u) => u.identity)).toEqual(["7", "1"]);
+  });
+});
+
+/** The pages a scan handed over, beside the outcome it ended with. */
+interface Scanned {
+  readonly outcome: CheckpointScanOutcome;
+  readonly pages: readonly RowRead<ChainCheckpoint>[];
+}
+
+async function scanned(
+  store: PostgresChainCheckpointStore,
+  tenantId: string | null,
+  opts?: CheckpointScanOptions,
+): Promise<Scanned> {
+  const pages: RowRead<ChainCheckpoint>[] = [];
+  const outcome = await store.scanCheckpoints(tenantId, (page) => pages.push(page), opts);
+  return { outcome, pages };
+}
+
+function sequencesIn(pages: readonly RowRead<ChainCheckpoint>[]): number[] {
+  return pages.flatMap((page) => page.records.map((c) => c.sequenceNumber));
+}
+
+/** `sequences` real checkpoints in one scope, written through a clean connection. */
+async function seeded(
+  tenantId: string | null,
+  sequences: readonly number[],
+): Promise<PostgresChainCheckpointStore> {
+  const store = new PostgresChainCheckpointStore(fakeChainPg());
+  for (const s of sequences) await store.record(tenantId, checkpoint(s));
+  return store;
+}
+
+/**
+ * The anchor table read as a **set** rather than one row at a time (ADR-0375).
+ *
+ * `latest` is the detector a refused checkpoint reaches, and it is one row — so on a scope holding N
+ * checkpoints the other N−1 could be edited with no verdict change at all. These cover the aperture
+ * and the three properties the paging rests on: the direction, the `id` tiebreaker, and what
+ * `complete` claims.
+ */
+describe("PostgresChainCheckpointStore.scanCheckpoints", () => {
+  it("hands over one page for a scope that fits in one", async () => {
+    const store = await seeded(TENANT_A, [1, 4, 9]);
+    const { outcome, pages } = await scanned(store, TENANT_A);
+
+    expect(sequencesIn(pages)).toEqual([1, 4, 9]);
+    expect(outcome).toEqual({ scanned: 3, refusedCount: 0, complete: true });
+  });
+
+  it("pages ascending across the whole scope and visits every row once", async () => {
+    const store = await seeded(TENANT_A, [1, 2, 3, 4, 5, 6, 7]);
+    const { outcome, pages } = await scanned(store, TENANT_A, { pageSize: 3 });
+
+    expect(pages.map((p) => p.records.length)).toEqual([3, 3, 1]);
+    expect(sequencesIn(pages)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(outcome.complete).toBe(true);
+    expect(outcome.scanned).toBe(7);
+  });
+
+  // The row a page ends at is the row the next page's cursor is made of, so it is the one position
+  // where a predicate that is not strictly-after would show: either re-read (a duplicate in the
+  // concatenation and an over-counted `scanned`) or stepped over. Asserted at every page size, so
+  // every row in turn is a boundary row and the claim does not rest on where the boundary falls.
+  it("visits the row a page boundary falls on exactly once, at every page size", async () => {
+    const sequences = [1, 2, 3, 4, 5];
+    for (const pageSize of [1, 2, 3, 4, 5, 6]) {
+      const { outcome, pages } = await scanned(await seeded(TENANT_A, sequences), TENANT_A, {
+        pageSize,
+      });
+
+      expect(sequencesIn(pages)).toEqual(sequences);
+      expect(outcome.scanned).toBe(sequences.length);
+      expect(outcome.complete).toBe(true);
+    }
+  });
+
+  // A full last page cannot be read as the end, so the scan costs one more statement to prove it —
+  // which is the price of `complete` being a claim about the set rather than about arithmetic.
+  it("spends a page proving the end when the scope divides exactly by the page size", async () => {
+    const store = await seeded(TENANT_A, [1, 2, 3, 4]);
+    const { outcome, pages } = await scanned(store, TENANT_A, { pageSize: 2 });
+
+    expect(pages.map((p) => p.records.length)).toEqual([2, 2, 0]);
+    expect(outcome.complete).toBe(true);
+    expect(outcome.scanned).toBe(4);
+  });
+
+  it("stops at the ceiling and says the scan is incomplete", async () => {
+    const store = await seeded(TENANT_A, [1, 2, 3, 4, 5, 6, 7, 8]);
+    const { outcome, pages } = await scanned(store, TENANT_A, { pageSize: 2, ceiling: 5 });
+
+    // The last page is trimmed to the remaining budget rather than reading past it, so `scanned` is
+    // the ceiling exactly and not the next multiple of the page size.
+    expect(pages.map((p) => p.records.length)).toEqual([2, 2, 1]);
+    expect(sequencesIn(pages)).toEqual([1, 2, 3, 4, 5]);
+    expect(outcome.scanned).toBe(5);
+    expect(outcome.complete).toBe(false);
+  });
+
+  // The conservative case, and the one documented at the `rows.length < limit` test: proving the end
+  // of a scope holding exactly `ceiling` rows needs one more page, and the ceiling is the budget. A
+  // consumer reads `complete: false` as *not proven*, which is the safe direction.
+  it("reports incomplete for a scope holding exactly the ceiling, having read all of it", async () => {
+    const store = await seeded(TENANT_A, [1, 2, 3]);
+    const { outcome, pages } = await scanned(store, TENANT_A, { pageSize: 2, ceiling: 3 });
+
+    expect(sequencesIn(pages)).toEqual([1, 2, 3]);
+    expect(outcome.scanned).toBe(3);
+    expect(outcome.complete).toBe(false);
+  });
+
+  // `complete: false` has exactly one cause, which is what lets a consumer read it as "the ceiling
+  // stopped me" without a second field naming why. A zero budget is that cause degenerately: it
+  // reads nothing and proves nothing, which is the honest answer rather than a vacuous `true`.
+  it("answers a non-positive ceiling with an incomplete scan that read nothing", async () => {
+    const store = await seeded(TENANT_A, [1, 2, 3]);
+    const { outcome, pages } = await scanned(store, TENANT_A, { ceiling: 0 });
+
+    expect(pages).toEqual([]);
+    expect(outcome).toEqual({ scanned: 0, refusedCount: 0, complete: false });
+  });
+
+  // The floor on the page size is the only thing between a `LIMIT 0` and a loop that reads an empty
+  // page for ever, since an empty page is indistinguishable from the end only by comparing against
+  // the limit — and `0 < 0` is false.
+  it("floors the page size, so a zero one still terminates", async () => {
+    const store = await seeded(TENANT_A, [1, 2]);
+    const { outcome, pages } = await scanned(store, TENANT_A, { pageSize: 0 });
+
+    expect(sequencesIn(pages)).toEqual([1, 2]);
+    expect(outcome.complete).toBe(true);
+  });
+
+  it("reads a scope with no checkpoints as a complete scan of nothing", async () => {
+    const store = new PostgresChainCheckpointStore(fakeChainPg());
+    const { outcome, pages } = await scanned(store, TENANT_A);
+
+    expect(sequencesIn(pages)).toEqual([]);
+    expect(outcome).toEqual({ scanned: 0, refusedCount: 0, complete: true });
+  });
+
+  it("scans one scope's checkpoints and neither another tenant's nor the platform's", async () => {
+    const store = new PostgresChainCheckpointStore(fakeChainPg());
+    await store.record(TENANT_A, checkpoint(4));
+    await store.record(TENANT_B, checkpoint(9));
+    await store.record(null, checkpoint(900));
+
+    expect(sequencesIn((await scanned(store, TENANT_A)).pages)).toEqual([4]);
+    expect(sequencesIn((await scanned(store, TENANT_B)).pages)).toEqual([9]);
+    expect(sequencesIn((await scanned(store, null)).pages)).toEqual([900]);
+  });
+});
+
+/**
+ * The direction, the cursor and the scope, asserted on the statements rather than on the rows.
+ *
+ * Three of these are properties no round trip through a fake can establish, because the fake answers
+ * whatever shape it is handed: that the order is the ascending one the stable-prefix argument rests
+ * on, that the cursor's sequence travels as a string through a `::bigint` cast, and that the
+ * predicate carries the one conjunct that makes the paging linear rather than quadratic.
+ */
+describe("the statements scanCheckpoints issues", () => {
+  interface Statement {
+    readonly sql: string;
+    readonly params: readonly unknown[];
+  }
+
+  async function scanStatements(
+    tenantId: string | null,
+    sequences: readonly number[],
+    opts?: CheckpointScanOptions,
+  ): Promise<{ seen: readonly Statement[]; reads: readonly Statement[] }> {
+    const { conn, seen } = recording();
+    const store = new PostgresChainCheckpointStore(conn);
+    for (const s of sequences) await store.record(tenantId, checkpoint(s));
+    seen.length = 0;
+    await store.scanCheckpoints(tenantId, () => undefined, opts);
+    return { seen, reads: seen.filter((q) => q.sql.includes("ORDER BY sequence_number ASC")) };
+  }
+
+  /** The statement as one line, so an assertion about its predicate is not about its indentation. */
+  function flat(sql: string | undefined): string {
+    return (sql ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  // Ascending because this table is append-only in sequence order, so an ascending prefix is stable
+  // under appends while a descending one shifts — a descending scan stopped by its ceiling would
+  // leave the oldest rows unread and let a later append push a row out of reach, which is
+  // ADR-0374's burial at ceiling depth instead of at depth 1.
+  it("orders ascending by sequence and then by id", async () => {
+    const { reads } = await scanStatements(TENANT_A, [1, 2]);
+    expect(reads).not.toHaveLength(0);
+    for (const q of reads) expect(q.sql).toContain("ORDER BY sequence_number ASC, id ASC");
+  });
+
+  // `id` is in the SELECT list only because the cursor is made of the pair; without it the scan
+  // cannot advance, and the symptom would be a loop rather than a wrong answer.
+  it("selects the id the cursor is made of beside the contract's own columns", async () => {
+    const { reads } = await scanStatements(TENANT_A, [1]);
+    expect(flat(reads[0]?.sql)).toContain("provenance, id FROM");
+  });
+
+  // Measured on PG 16.13 over a 200k-row scope: without this conjunct the plan is
+  // `Index Cond: (tenant_id = $1)` with the disjunction left as a `Filter`, so page 100 removes
+  // 100001 rows by filter (2745 buffers, 22.2 ms) and the full 200-page scan takes 4.86 s —
+  // quadratic in the page count. With it the plan is
+  // `Index Cond: ((tenant_id = $1) AND (sequence_number >= $2))`, 31 buffers, 0.563 ms, 0.13 s for
+  // the whole scan. It reads as redundant (the disjunction implies it) and is not, so it is pinned
+  // here rather than left to be simplified away.
+  it("asks the index for the cursor's lower bound as well as the keyset disjunction", async () => {
+    const { reads } = await scanStatements(TENANT_A, [1, 2], { pageSize: 1 });
+    expect(reads).not.toHaveLength(0);
+    for (const q of reads) {
+      expect(flat(q.sql)).toContain("AND sequence_number >= $1::bigint");
+      expect(flat(q.sql)).toContain(
+        "AND (sequence_number > $1::bigint OR (sequence_number = $1::bigint AND id > $2::uuid))",
+      );
+    }
+  });
+
+  // A `BIGINT` comes back from node-postgres as a string (ADR-0331), and it is bound back as one
+  // through the cast rather than passed through `Number`, which stops being the stored value past
+  // 2^53 and would then re-read a row or step over one.
+  it("binds the cursor's sequence as a string and casts it, starting below every row", async () => {
+    const { reads } = await scanStatements(TENANT_A, [1, 2, 3], { pageSize: 1 });
+
+    expect(reads.length).toBeGreaterThan(2);
+    // `-1` and not `0`: the column's CHECK is `sequence_number >= 0`, so `-1` is strictly below
+    // every row the table can hold and the first page needs no second statement shape.
+    expect(reads[0]?.params[0]).toBe("-1");
+    for (const q of reads) expect(typeof q.params[0]).toBe("string");
+    // Page two starts strictly after page one's last row, as a string rather than a number.
+    expect(reads[1]?.params[0]).toBe("1");
+    expect(reads[2]?.params[0]).toBe("2");
+  });
+
+  it("binds the tenant scope last and asks for IS NULL on the platform scope", async () => {
+    const tenant = await scanStatements(TENANT_A, [1]);
+    for (const q of tenant.reads) {
+      expect(q.sql).toContain("tenant_id = $4");
+      expect(q.params).toHaveLength(4);
+      expect(q.params[3]).toBe(TENANT_A);
+    }
+
+    const platform = await scanStatements(null, [1]);
+    for (const q of platform.reads) {
+      expect(q.sql).toContain("tenant_id IS NULL");
+      expect(q.params).toHaveLength(3);
+    }
+  });
+
+  // One transaction for the whole scan, so every page is read from one snapshot and the set a
+  // verdict is computed over is the set that was on disk at one instant.
+  it("reads every page inside one transaction", async () => {
+    const { seen, reads } = await scanStatements(TENANT_A, [1, 2, 3, 4], { pageSize: 1 });
+
+    expect(reads.length).toBeGreaterThan(3);
+    expect(seen.filter((q) => q.sql.includes("app.current_tenant_id"))).toHaveLength(1);
+    // A read never asks for the write elevation.
+    expect(seen.some((q) => q.sql.includes("app.platform_audit_write"))).toBe(false);
+  });
+
+  it("defaults the two bounds rather than leaving them to a caller", async () => {
+    expect(CHECKPOINT_SCAN_PAGE_SIZE).toBe(1_000);
+    expect(CHECKPOINT_SCAN_CEILING).toBe(1_000_000);
+    const { reads } = await scanStatements(TENANT_A, [1]);
+    expect(reads[0]?.params[2]).toBe(CHECKPOINT_SCAN_PAGE_SIZE);
+  });
+});
+
+/**
+ * A refused anchor in the middle of a set, which is the whole reason this read exists: `latest`
+ * reaches only the newest row, so every other refused checkpoint was a finding nothing could see.
+ */
+describe("scanCheckpoints over a scope holding a refused checkpoint", () => {
+  it("returns the readable rows of a page beside the refused one", async () => {
+    const store = await checkpointsReadThrough([1, 3, 7], [3, { checkpointed_by: "" }]);
+    const { outcome, pages } = await scanned(store, TENANT_A);
+
+    expect(sequencesIn(pages)).toEqual([1, 7]);
+    expect(pages[0]?.unreadable).toEqual([{ identity: "3", detail: "checkpointedBy: too_small" }]);
+    expect(outcome.refusedCount).toBe(1);
+    expect(outcome.scanned).toBe(3);
+    expect(outcome.complete).toBe(true);
+  });
+
+  // The case `latest` cannot answer at all, and the one the aperture was about: the refusal is
+  // neither the newest row nor on the first page, so nothing before this read would have reported
+  // it. The cursor comes off the **raw** row, so a refused row at a page boundary does not stall.
+  it("counts a refused row in a middle page and keeps paging past it", async () => {
+    const store = await checkpointsReadThrough(
+      [1, 2, 3, 4, 5, 6],
+      [3, { checkpointed_by: "" }],
+      [4, { external_anchor_reference: "" }],
+    );
+    const { outcome, pages } = await scanned(store, TENANT_A, { pageSize: 2 });
+
+    expect(sequencesIn(pages)).toEqual([1, 2, 5, 6]);
+    expect(pages[1]?.records).toEqual([]);
+    expect(pages[1]?.unreadable.map((u) => u.identity)).toEqual(["3", "4"]);
+    expect(outcome.refusedCount).toBe(2);
+    // Refused rows are scanned rows: the ceiling bounds the work, not the readable answer.
+    expect(outcome.scanned).toBe(6);
+    expect(outcome.complete).toBe(true);
+  });
+
+  // A scope every one of whose rows is refused is still a scope that was *read*, and it has to
+  // report so on the two fields that carry it: `scanned` counts rows and not records, and the scan
+  // runs to the end. Paged so the refused-only case also pins the cursor advancing, which is the one
+  // way an unreadable page could stall a sweep rather than merely empty it — the whole point of
+  // taking the cursor off the raw row.
+  it("reads a scope whose every row is refused to the end, counting the rows", async () => {
+    const store = await checkpointsReadThrough(
+      [1, 2, 3, 4],
+      [1, { checkpointed_by: "" }],
+      [2, { checkpointed_by: "" }],
+      [3, { checkpointed_by: "" }],
+      [4, { checkpointed_by: "" }],
+    );
+    const { outcome, pages } = await scanned(store, TENANT_A, { pageSize: 2 });
+
+    expect(sequencesIn(pages)).toEqual([]);
+    expect(pages.map((p) => p.unreadable.map((u) => u.identity))).toEqual([
+      ["1", "2"],
+      ["3", "4"],
+      [],
+    ]);
+    expect(outcome).toEqual({ scanned: 4, refusedCount: 4, complete: true });
+  });
+
+  // The narrowest form of the same invariant: at `pageSize: 1` a refused row is a *full* page, so
+  // the loop does not take the short-page exit and `cursorFrom` is handed the refused row itself.
+  // If it read the mapped record instead there would be none, and the scan would stall on the first
+  // tampered anchor — reporting a clean short history rather than a finding.
+  it("advances the cursor off a refused row that fills its own page", async () => {
+    const store = await checkpointsReadThrough([1, 3, 7], [3, { checkpointed_by: "" }]);
+    const { outcome, pages } = await scanned(store, TENANT_A, { pageSize: 1 });
+
+    expect(sequencesIn(pages)).toEqual([1, 7]);
+    expect(outcome).toEqual({ scanned: 3, refusedCount: 1, complete: true });
+  });
+
+  // The termination argument rests on the cursor coming off the pair, so a SELECT list that lost
+  // `id` must fail by name rather than loop. Patched to `undefined` on the way out, which is what a
+  // dropped column looks like from here.
+  it("refuses by name rather than looping when a page carries no id", async () => {
+    const store = await checkpointsReadThrough([1, 2], [1, { id: undefined }]);
+    await expect(
+      store.scanCheckpoints(TENANT_A, () => undefined, { pageSize: 1 }),
+    ).rejects.toThrow(/sequence_number and id/);
+  });
+});
+
+/**
+ * Two rows at **one** sequence, which `UNIQUE (tenant_id, sequence_number)` does not prevent for the
+ * platform scope: `tenant_id` is nullable, NULL means platform, and SQL treats NULLs as distinct, so
+ * `(NULL, 3)` twice is two legal rows and `ON CONFLICT … DO NOTHING` never fires there (ADR-0371).
+ * Verified live on PG 16.13 — the same two statements leave 2 rows at one platform sequence and 1 at
+ * one tenant sequence, and a `pageSize: 1` ascending scan from `(777776, nil)` answers
+ * `(777777,first)` then `(777777,second)` then nothing.
+ *
+ * It is why the cursor is the **pair**: a sequence-only cursor would either loop on the first of
+ * them for ever or step over the second, and both are wrong in a scan whose job is to examine every
+ * anchor.
+ */
+describe("scanCheckpoints over two checkpoints at one platform sequence", () => {
+  async function doubledPlatformSequence(): Promise<PostgresChainCheckpointStore> {
+    const store = new PostgresChainCheckpointStore(fakeChainPg());
+    await store.record(null, checkpoint(3, { checkpointedBy: "first" }));
+    await store.record(null, checkpoint(3, { checkpointedBy: "second" }));
+    await store.record(null, checkpoint(4));
+    return store;
+  }
+
+  it("visits each of them exactly once, in id order, however the page boundary falls", async () => {
+    for (const pageSize of [1, 2, 3, 4]) {
+      const { outcome, pages } = await scanned(await doubledPlatformSequence(), null, { pageSize });
+
+      expect(sequencesIn(pages)).toEqual([3, 3, 4]);
+      expect(pages.flatMap((p) => p.records.map((c) => c.checkpointedBy))).toEqual([
+        "first",
+        "second",
+        "auditor",
+      ]);
+      expect(outcome.scanned).toBe(3);
+      expect(outcome.complete).toBe(true);
+    }
+  });
+
+  /**
+   * The non-termination case, and the reason the `id` arm is strictly `>` rather than `>=`.
+   *
+   * Both arms of the disjunction have to be strict for the predicate to be strictly-after on the
+   * **pair**. With `id >= $2` the sequence arm is still strict and the `id` arm re-admits the row
+   * the cursor was taken from, so a page boundary inside a run of one sequence re-reads its own last
+   * row: progress becomes `pageSize - 1` rows a page, `scanned` over-counts, and `onPage` hands a
+   * refused row at a boundary to the consumer **twice**. Where a single sequence holds at least
+   * `pageSize` rows it does not progress at all — the page comes back full and identical for ever,
+   * bounded only by the ceiling, which would then report `complete: false` for a scope nothing read
+   * past its first page.
+   *
+   * That is reachable on the platform scope and nowhere else, which is what makes it worth a fixture
+   * rather than a comment: the duplicate sequences are the very thing the tiebreaker exists for.
+   * Measured by mutating the store to `id >= $2::uuid`: 17 of these 23 tests fail, and this
+   * describe's cases are among them.
+   */
+  it("terminates and visits each row once where one sequence fills a whole page", async () => {
+    for (const pageSize of [1, 2, 3, 4]) {
+      const store = new PostgresChainCheckpointStore(fakeChainPg());
+      for (const by of ["first", "second", "third"]) {
+        await store.record(null, checkpoint(3, { checkpointedBy: by }));
+      }
+      const { outcome, pages } = await scanned(store, null, { pageSize });
+
+      expect(pages.flatMap((p) => p.records.map((c) => c.checkpointedBy))).toEqual([
+        "first",
+        "second",
+        "third",
+      ]);
+      // `scanned` is the row count and not a page-boundary tally, which is what over-counting the
+      // boundary row would break first.
+      expect(outcome.scanned).toBe(3);
+      expect(outcome.complete).toBe(true);
+    }
+  });
+
+  // The boundary that a sequence-only cursor gets wrong: page one ends *between* the two, so page
+  // two has to resolve the `id` arm of the disjunction rather than the sequence arm.
+  it("resumes after the first of the pair rather than re-reading or skipping it", async () => {
+    const { conn, seen } = recording();
+    const store = new PostgresChainCheckpointStore(conn);
+    await store.record(null, checkpoint(3, { checkpointedBy: "first" }));
+    await store.record(null, checkpoint(3, { checkpointedBy: "second" }));
+    seen.length = 0;
+
+    const pages: RowRead<ChainCheckpoint>[] = [];
+    await store.scanCheckpoints(null, (page) => pages.push(page), { pageSize: 1 });
+
+    expect(pages.flatMap((p) => p.records.map((c) => c.checkpointedBy))).toEqual([
+      "first",
+      "second",
+    ]);
+    const reads = seen.filter((q) => q.sql.includes("ORDER BY sequence_number ASC"));
+    // Page two's cursor is the same sequence and a greater id — the pair, not the sequence.
+    expect(reads[1]?.params[0]).toBe("3");
+    expect(reads[2]?.params[0]).toBe("3");
+    expect(String(reads[2]?.params[1])).not.toBe(String(reads[1]?.params[1]));
   });
 });

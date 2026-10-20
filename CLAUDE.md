@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 369 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 370 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 20,034 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 20,118 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -1708,9 +1708,14 @@ type errors.
   ADR-0374 migrated `listRecent` and `getBySequence`: both figures move with every slice that
   migrates a store, which is why this entry says to **re-derive them by calling the module** —
   `scanWorkspacePageReads(readWorkspaceSources())` over `VERDICT_NEEDS_DECLARATION` — rather than
-  reading them here. As of ADR-0374 the module answers 906 files, 110 sites, 65 needing a
-  declaration, 65 declared, and `{guarded_by_primitive: 15, guarded_in_place: 2, record_throwing: 50,
-  record_total: 11, record_dropping: 2, projection: 30}`.)
+  reading them here. As of ADR-0375 the module answers 943 files, 111 sites, 65 needing a
+  declaration, 65 declared, 42 of them `unmigrated`, and `{guarded_by_primitive: 16,
+  guarded_in_place: 2, record_throwing: 50, record_total: 11, record_dropping: 2, projection: 30}` —
+  `scanCheckpoints` is the new `guarded_by_primitive` member, so it needs no declaration. The
+  figure recorded one increment earlier, `906 files`, was **stale when it was written**: measured in
+  a worktree at that increment's own commit, the module answers **942**, and this tree adds exactly
+  one non-test source file. So the file count moved by 1 and not by 37, and the entry it was written
+  into is the one telling the reader to re-derive. Re-derive; do not diff.)
   The two live members show the two routes to that silence: one makes the **row** unreadable
   (the sweep stops), the other makes the **evidence** unreadable in a way the contract tolerates (the
   detector answers *cannot say*, which is not a defect).
@@ -1812,6 +1817,47 @@ type errors.
   triple, while **ADR-0373's own `actor_reference` CHECK reports `constraint_violated_by_existing_rows`
   with the violator `SELECT` alone** — because that cluster really holds the blanked row ADR-0373
   measured, so the migration **found a tamper rather than merely preventing the next one**.
+
+  ADR-0375 takes ADR-0374's own open ends 6 and 7 and the class is **one witness read, and never
+  compared**. Two faces, both live, and measuring the open ends is what found them.
+  *The aperture*: the detector ADR-0374 built is `latest()` — **one row** — so a refused checkpoint
+  row is a finding only while it is the *newest*, and on a scope holding N anchors the other N−1 can
+  be blanked with no verdict change. Measured as the non-owner `serving` role on one scope with
+  anchors at 1, 3 and 4, `checkpointed_by := ''` under that tenant's own context: at sequence 1
+  `verdict=verified anchorRefused=0`, and the **identical statement** at sequence 4
+  `verdict=compromised anchorRefused=1`. So the scheduler's refusal-to-anchor protected exactly the
+  one row a tamperer need not choose, and charged a permanent fold from genesis and an unanswerable
+  truncation check for it.
+  *The correspondence, and the worse half*: nothing compares a checkpoint's `root_hash` against the
+  chain entry at its sequence, except incidentally inside `verifyChainSuffix` for the newest anchor
+  on a bounded pass — and `sequence_number`'s only CHECK is `>= 0`, so **on a fully converged
+  deployment** one `UPDATE` edits an anchor into a valid-shaped lie. Raised above the tail it
+  manufactures `truncated=true causes=[chain_truncated]` with the formatter printing *"TRUNCATED:
+  checkpoint at 99 but the chain ends at 4"* — a **false** paging sev1 telling an operator audit
+  history was destroyed while every entry is present, naming the wrong table, and leaving the bounded
+  fold checking **0** signatures because the suffix after 99 is empty. Lowered it hides a real one,
+  and that arm is the increment: a genuine truncation (`cut >= 3` → `compromised
+  causes=[chain_truncated]`) followed by two `UPDATE`s lowering the anchors below the new tail reads
+  **`VERIFIED`**, with *"integrity valid, signatures valid (3 checked)"* and no truncation line at
+  all — two destroyed entries of a tamper-evident audit log, hidden by editing the witness. A third
+  arm needs no sequence edit: `root_hash := 'f'*64` on the tail anchor reads `verified` on **both**
+  modes.
+  `scanCheckpoints` + `anchor-audit.ts` read the table as a set and cross-check it, which closes all
+  of that; the honest limit is that **the fix recovers the evidence that a witness was altered, not
+  the truncation itself** — once a witness is edited the truncation it would have proven is
+  unprovable, and what survives is proof of the edit (both lowered anchors come back
+  `root_hash_mismatch`, because their root hashes name entries the cut destroyed). With a sound
+  set-wide detector the scheduler anchors again, so `CHAIN_FULL_REASON_BLOCKS_ANCHORING`,
+  `anchoringWouldBury` and `refused_anchor_would_bury` are **deleted** rather than relaxed — which
+  corrects ADR-0374's own prediction of a "one-line relaxation", refused by the fence it shipped
+  beside it: `anchor_unreadable` was that map's only `true`, so flipping it leaves every member
+  `false`, which `chain-verify.test.ts` calls a silently disarmed fence and asserts against by name.
+  **A judgement with no case left is not a judgement.** The one attack it does not close is the
+  cheapest: every anchor `DELETE`d reads `verified`, `witness=null`, and the formatter prints
+  *"truncation: not checkable (no checkpoint yet — run the checkpoint scheduler)"* for a scope whose
+  checkpoints were destroyed — a remedy that cannot work (ADR-0334), measured and named as the top
+  open end rather than speculated, and closing it means reading the chain's own memory of a prior
+  witness, which makes one pass's verdict an input to the next.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -3837,6 +3883,33 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `verifyChainFromCheckpoint` fold from genesis on this one cause and rethrow every other — anything
   else from `latest` is a read that did not happen, and a fold claiming to replace it would assert a
   verification over a scope whose anchor state is unknown.
+
+  **And `scanCheckpoints` reads the whole table, because `latest` is one row** (ADR-0375). An
+  ascending keyset scan over `(sequence_number, id)`, one read transaction, handing each page to an
+  `onPage` callback as the pair above and returning only `{scanned, refusedCount, complete}` — it
+  counts rows and refusals and says whether it finished, and holds **no** opinion about which
+  sequences are witnesses, because it cannot check one (`highestReadableSequence` was there for one
+  commit, had no reader, and was a second derivation of the figure `auditAnchors` folds with the
+  exclusion applied). Three things about it are
+  load-bearing. The **direction**: this table is append-only in sequence order for every writer in
+  the workspace, so an ascending prefix is stable under appends while a descending one shifts — a
+  descending scan stopped by its ceiling would leave the oldest rows unread and let a later append
+  push a row out of reach, which is ADR-0374's burial at ceiling depth instead of at depth 1.
+  Ascending, what a ceiling leaves unread is the newest tail, which `complete: false` names. The
+  **`id` tiebreaker**, for `NEWEST_AT_ONE_SEQUENCE`'s reason one read across: two rows can share a
+  platform sequence, so a sequence-only cursor would loop on the first or step over the second. And
+  the **redundant-looking conjunct**: `sequence_number >= $1::bigint` beside the disjunction is
+  implied by it and is *not* redundant to the planner — measured on PG 16.13 at page 100 of a scan
+  over a 200k-row scope, without it the index condition is `tenant_id` alone and the disjunction is
+  left as a `Filter`, so every page re-reads every row before the cursor (`Rows Removed by Filter:
+  100001`, 22.2 ms a page, **4.86 s** for the 200-page scan, quadratic in the page count); with it
+  the condition is `(tenant_id, sequence_number)`, 0.563 ms a page and **0.13 s** for the scan.
+  `onPage` rather than a returned array is ADR-0367's `drainList` rule — the caller decides what it
+  holds, and neither consumer holds a million checkpoints to produce one verdict.
+  `listRecent`'s own prediction is **corrected** rather than fulfilled: it predicted "the caller this
+  will gain is one computing a verdict", that caller arrived, and it could not use the method, because
+  the shape it needed is ascending-with-a-cursor. The pair form it argued for is what `onPage` hands
+  over per page, so the principle is exercised and the method is still callerless.
 - **`access-reviews`** — periodic attestation campaigns (SOC 2 / ISO 27001 / HIPAA / PCI /
   GDPR / 21 CFR Part 11): campaigns, scoped items, decisions with attestation kinds and
   four-eyes, exceptions with per-reason duration caps, templates, sealed evidence with
@@ -4238,6 +4311,34 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   **no** elementwise truth-table test against a re-derivation of the old `if` sequence — that is
   ADR-0362's retired test verbatim, a rule compared against a derivation of itself — so the golden
   is the 21 existing `integrityVerdictFor` call sites, written against the branches and untouched.
+  **Seven causes since ADR-0375**, the new one being `checkpoint_disagrees_with_chain`, and the fence
+  held with the seventh exactly as it was built to: the enum member, the predicate, the payload key
+  and both fixtures had to move together. That increment also spent the one convenience ADR-0374
+  bought — the call sites were spared by keeping `integrityVerdictFor`'s signature, and the fifth
+  parameter is retyped to an `AnchorAuditReport` now, because the axis grew a second dimension and a
+  list of refused rows could not carry it. `noAnchorFindings()` is the fixture helper, and it answers
+  `disagreeing: []` and not `null` because it means *asked and clean*.
+  **`anchor-audit.ts` is the anchor table read as a set** (ADR-0375): `auditAnchors(scope, store,
+  chain | null)` folds `scanCheckpoints` into `{scanned, complete, refused, refusedCount,
+  disagreeing, witnessSequence}`. Three decisions in it. The **correspondence rule** is two maps
+  built once from the chain and four outcomes per readable anchor `(S, H)` — the entry at `S` carries
+  `H` → agrees and `S` is a witness; some entry **elsewhere** carries `H` → `sequence_relocated` with
+  `matchedAt`, not a witness; an entry at `S` exists and differs → `root_hash_mismatch`, not a
+  witness; neither → the chain does not reach this anchor, which is deliberately **not** a
+  disagreement and **is** a witness, because that is exactly what truncation looks like and
+  `ChainTruncationCheck` is its subject (folding it in would report one fact as two causes *and* take
+  the witness away from the check that needs it). `disagreeing: null` means the correspondence was
+  **not asked**, never "none found" (ADR-0331), and it is asked only over a chain the reader refused
+  no row of — the maps would otherwise be incomplete and an anchor pointing at a refused entry would
+  be named `root_hash_mismatch`, a finding attributed to the wrong table, while `chain_row_refused`
+  already answers `compromised`. And **`witnessSequence` supersedes `latest()` as the truncation
+  witness**, which is strictly stronger rather than merely wider: `latest()` answers the *highest*
+  sequence, so a single refused newest row left the check `null` while an older readable anchor sat
+  directly beneath it. Two predicates and not one — `anchorAuditDisproves` is `compromised` and
+  `anchorAuditHasFindings` adds coverage the scan did not reach, which is `unproven`, because an
+  absence of evidence is not evidence (ADR-0372). `!anchorAudit.complete` is therefore an `unproven`
+  arm in `integrityVerdictFor` and **not** a seventh cause: a scan the ceiling stopped did not read
+  the whole table, so `verified` would claim a reading nobody took, and nothing is disproven.
   **And `CheckpointScheduler` verifies before it anchors, which it did not** (ADR-0371):
   `verifyChainFromCheckpoint`'s own doc comment said *"trust in the anchor comes from the earlier
   verification that produced it"*, and this scheduler — the **only** checkpoint writer in the
@@ -4288,7 +4389,20 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   verification writes no row at all (see the provenance entry for why writing one would be worse). So
   an optional handler would let a deployment discover that its chain had stopped verifying by never
   being told. That gap is not closed, only made unmissable: the durable form is the increment's top
-  open question. `fullBecause` reaches the hourly `[integrity-proof]` line and
+  open question. **`onAnchorFindings` is required beside it** (ADR-0375), and its argument is that one
+  *strengthened*: the scheduler audits the whole anchor table on every pass and anchors regardless of
+  what it finds, so nothing in the database distinguishes a refused or relocated checkpoint row from a
+  sound one and this callback is the only record of the finding — and the surface now anchors rather
+  than refusing, which makes the gap bigger and not smaller. It passes `chain: null`, so the
+  correspondence half is the integrity proof's: this scheduler's verifier loads the chain internally
+  and does not hand it back, while `proveScopeIntegrity` already loads the whole chain for the anchor
+  half. It audits **before** the tail check, and the ordering is observable because its member is
+  live rather than hypothetical: a scope can hold checkpoints with an **empty chain**, and the only
+  thing in the workspace that produces that is the tamper itself — zero `DELETE FROM
+  forensic_chain_entries` anywhere, and the Article 17 shared-table erasure *retains* that table as a
+  `PLATFORM_RECORD_TABLES` member, while ADR-0374 measured a tenant-context `DELETE` matching the
+  owner's row count on 6 of 6 scopes. So an audit placed after the tail check answers the one case it
+  exists for by reading nothing. `fullBecause` reaches the hourly `[integrity-proof]` line and
   `formatIntegrityProof` too, because a deployment whose anchors cannot be trusted folds from genesis
   on every pass and still answers `verdict=verified` — so the one standing condition an operator has
   to act on, and the unbounded cost it carries, was reported nowhere. It is committed to **no** stored
@@ -6365,7 +6479,13 @@ opened them.
   exited **0** printing "OK" for a scope whose anchor this binary cannot read — ADR-0374's own
   Option B rejection, left standing in the by-hand auditor command; measured 0 → 1 against a
   pre-fix worktree, with the full fold correctly still 0 (it never consults the anchor) and
-  `no_checkpoint` on a sound chain still 0.
+  `no_checkpoint` on a sound chain still 0. **ADR-0375 found that last clause to be the hole rather
+  than the control**: "the full fold never consults the anchor" is why `verify-chain` *without*
+  `--from-checkpoint` could not see a refused anchor at all, so the weaker command caught it and the
+  stronger did not — and reading `fullBecause` is a statement about the **newest** row, so a refused
+  or relocated anchor anywhere else exited 0 in both modes. The command audits the whole table in
+  both modes now, through `anchorAuditHasFindings`, which is the wider of the audit's two predicates
+  because an exit code has no third answer for a scan the ceiling stopped.
   Two more live members came out of the same pass. **A `compromised` verdict driven by
   `truncation.truncated` was discarded as `skipped_empty`** — `isEmptyScope` never had `truncated`
   as a conjunct, and this increment added a fourth axis to `readEveryRowFound` and wrote a long
@@ -6424,18 +6544,12 @@ opened them.
   refinement against its column's CHECK, which no workspace rule compares (ADR-0362 established that
   none compares a contract *field* to a catalog *column*), over 505 TEXT, 159 JSONB and **444
   TIMESTAMPTZ** columns in the same unconstrained state, the last of which had **zero** CHECKs
-  anywhere in the catalog before this increment. **(6)** **widen the detector so the scheduler can
-  anchor again** — `listRecent` already returns records beside refused rows, has zero non-test
-  callers, and ADR-0373's own doc comment on it predicts this consumer verbatim; measured at
-  4.09 µs/row, so a year of hourly passes is 36 ms to scan the whole history against the 15.2 s/pass
-  at 100k entries the refusal now makes permanent, with the ratio improving as the chain grows one
-  entry per audited request and the checkpoint table one row per pass. Blocked on `listRecent` being
-  `LIMIT $1` with no cursor and a default of 50, so at hourly cadence the refused row leaves the
-  window in ~2 days — ADR-0367's *a prefix is not the set*. **(7)** until then, **truncation
-  detection is dark for a scope whose anchor is withheld** (`checkpoint` stays null so `truncated` is
-  always false), which loses a dimension of the diagnosis and no alarm, and whose symmetry is the
-  argument for (6): pre-fix the burial accidentally *restored* truncation detection while destroying
-  the refusal finding, post-fix it is the reverse, and only the widened read gives both.
+  anywhere in the catalog before this increment. ~~**(6)** widen the detector so the scheduler can
+  anchor again~~ and ~~**(7)** truncation detection is dark for a scope whose anchor is withheld~~ —
+  **both closed by ADR-0375**, which also found that (6)'s own plan does not work: `listRecent` is
+  descending-with-a-limit, so the consumer it predicted could not use it and the scan is a new
+  ascending-keyset method beside it. See *One witness read, and never compared* below, and note that
+  measuring these two is what found the two live defects that increment is actually about.
   **(8)** `pg-record-reads.ts` blanks string bodies before matching, so a **bracket-access** read of
   a catalogued column vanishes — neither column fenced here appears in its 66 reads, against ~1,270
   such reads workspace-wide, 100 of them temporal. Conservative-only, wide, and a thirteenth-rule
@@ -6444,6 +6558,40 @@ opened them.
   `RangeError` rather than a `ZodError`, in a `record_throwing` conversion with no wrapper, in the
   store that holds the verdicts — with `tombstone-store.deleted_at` and `report-store.generated_at`
   beside it.
+
+- **One witness read, and never compared, and what is left of it** (ADR-0375, closing ADR-0374's
+  open ends 6 and 7 and finding two live defects in them). The anchor table is read as a **set** now
+  — `scanCheckpoints` ascending page by page, `auditAnchors` folding it — and every readable anchor
+  is cross-checked against the chain, so a refused row is found wherever it sits and an anchor edited
+  into a valid-shaped lie is a named finding rather than a silent `verified` or a false
+  `chain_truncated`. The scheduler anchors again and reports what it anchored over, which is why
+  `CHAIN_FULL_REASON_BLOCKS_ANCHORING`, `anchoringWouldBury` and `refused_anchor_would_bury` are gone.
+  What remains, in order: **(1)** **a tenant can `DELETE` its own checkpoint rows**, and that leaves
+  no witness, no finding and a remedy that cannot work — measured, all three anchors deleted reads
+  `verified witness=null` with the formatter printing *"no checkpoint yet — run the checkpoint
+  scheduler"*. The chain already remembers what the last verdict saw (`integrityVerdictPayload`
+  commits `truncation.checkpointSequence` to a signed entry) and `witnessSequence` is monotone
+  non-decreasing, so a drop is evidence — but reading it makes one pass's verdict an **input** to the
+  next, needs an answer for the no-prior-verdict case, and is conditional on `recordVerdict`. Its own
+  increment. **(2)** `verify-chain` asks the correspondence in **neither** mode, because neither fold
+  hands its entries back and a bounded command must not read the prefix; closing it means a shape
+  change or a second whole-chain load for the manual auditor. **(3)** the scan is a sequence of
+  per-statement snapshots inside one transaction, so a row whose `sequence_number` is edited between
+  two pages can fall between them — `REPEATABLE READ` would close it and `withTenantContext` issues
+  `set_config` first, so the isolation level cannot be set late. **(4)** `root_hash_mismatch` cannot
+  say whether the anchor or the entry was altered, and saying so is better than guessing; a chained
+  anchor table would, at the cost of a second chain. **(5)** the aperture half is reachable on a
+  deployment that has not run ADR-0374's standing manual `ALTER`s, which is the live population and
+  is that increment's own open end 2. **(6)** a deployment with more checkpoints than the ceiling
+  reports `unproven` for ever; the default is 1,000,000 rows, which is a century of hourly passes per
+  scope, and no flag exposes it because nothing needs one yet. **(7)** the class behind face 2 is
+  **a column whose correctness is defined by another table, and which nothing compares** — no
+  workspace rule asks it, and it is not P2.12b (a contract field against its own column) but the
+  cross-table form. It is partly covered by hand where somebody thought of it: `isAnchoredByChain`
+  checks a tombstone's chain coordinates, `verifyAuditAnchors` checks an audit row's, and this
+  increment adds the checkpoint's. What has no fence is the question *which such pairs exist*, and
+  the answer is not derivable from the catalog, because a foreign key is exactly the case where
+  Postgres already enforces it and these are the cases where it cannot.
 
 - **Every money figure is read over the whole set, and what is left of it** (ADR-0367,
   user-directed). Thirteen capped reads drain their cursor to a declared ceiling now, and the
@@ -8597,7 +8745,7 @@ three make the rest honest, cheap or verifiable.
    P2 item 14's third clause, from the other end.)
 3. **No CI, no git hook, no smoke, e2e, load or migration test** — while `strategy/ci.ts` models
    triggers, budgets and a topological sort with no reader. No `.github/workflows`, no
-   `core.hooksPath`, so the twelve rules and 20,034 tests run only when a human types `pnpm -r test`,
+   `core.hooksPath`, so the twelve rules and 20,118 tests run only when a human types `pnpm -r test`,
    and this file's instruction never to use `--no-verify` describes a guardrail that does not
    exist. `operate-web` has **zero tests** against 15 pages and 34 unfenced `fetch` sites — the
    serialized-body boundary that shipped a broken console button for an hour (ADR-0335).
@@ -9084,7 +9232,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 369 records; 290 Accepted, 79 Proposed (the
+title or status change cannot drift. 370 records; 291 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

@@ -10,6 +10,30 @@ function paramIndex(sql: string, re: RegExp): number | null {
 }
 
 /**
+ * The ascending keyset `scanCheckpoints` pages with, matched **specifically** rather than merely
+ * truly: that statement also contains `sequence_number >= $1` and `sequence_number = $1`, which the
+ * generic read branch's own regexes would read as a lower bound and an equality and so narrow the
+ * page to the one sequence the cursor sits at. ADR-0363's lesson — a fake that answers the wrong
+ * query's rows is a test asserting the wrong thing — so this arm is checked first and the capture
+ * groups are the cursor's two parameter positions, which is what it needs anyway.
+ */
+const SCAN_KEYSET_RE =
+  /sequence_number > \$(\d+)::bigint\s+OR \(sequence_number = \$\d+::bigint AND id (>=?) \$(\d+)::uuid\)/;
+
+/**
+ * What `uuid_generate_v7()` gives the `id` column, modelled only in the one property the scan's
+ * cursor depends on: monotonic in insertion order, so the lexicographic comparison this fake makes
+ * agrees with the byte comparison Postgres makes on a `uuid`.
+ */
+function syntheticRowId(n: number): string {
+  const hex = n.toString(16).padStart(32, "0");
+  return (
+    `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-` +
+    `${hex.slice(16, 20)}-${hex.slice(20)}`
+  );
+}
+
+/**
  * Refuses an `INSERT` binding more parameters than this fake's row model reads, which is the one
  * thing `assertBindArity` structurally cannot see: that fence compares the statement's `$n` set
  * against the supplied array, so a column added to both agrees on arity and is then **dropped on the
@@ -51,6 +75,7 @@ function assertModelsEveryParam(
 export function fakeChainPg(): PgConnection {
   const entryRows: Record<string, unknown>[] = [];
   const checkpointRows: Record<string, unknown>[] = [];
+  let nextCheckpointRowId = 1;
 
   function makeClient(): PgConnection {
     let currentTenant: string | null = null;
@@ -92,11 +117,24 @@ export function fakeChainPg(): PgConnection {
           assertModelsEveryParam(p, 8, CHECKPOINTS);
           const tenant = (p[0] as string | null) ?? null;
           const seq = Number(p[1]);
-          const exists = checkpointRows.some(
-            (r) => (r["tenant_id"] ?? null) === tenant && Number(r["sequence_number"]) === seq,
-          );
+          // `ON CONFLICT (tenant_id, sequence_number) DO NOTHING` **never fires for a platform
+          // row**: `tenant_id` is nullable, NULL means platform, and SQL treats NULLs as distinct,
+          // so `(NULL, 3)` twice is two legal rows (ADR-0371). Verified live on PG 16.13 — the same
+          // pair of statements leaves 2 rows at one platform sequence and 1 at one tenant sequence.
+          // Deduplicating both scopes made this fake **stricter than the real database**, which is
+          // the hazard its own header describes for reads: an isolation the code never asked for
+          // cannot catch a missing one, and here it meant no round trip through this fake could
+          // hold the two rows the `id` tiebreaker and the scan's keyset exist for.
+          const exists =
+            tenant !== null &&
+            checkpointRows.some(
+              (r) => (r["tenant_id"] ?? null) === tenant && Number(r["sequence_number"]) === seq,
+            );
           if (!exists) {
             checkpointRows.push({
+              // Defaulted by the table (`uuid_generate_v7()`) rather than bound, so it is minted
+              // here — and `assertModelsEveryParam` still counts the 8 the statement binds.
+              id: syntheticRowId(nextCheckpointRowId),
               tenant_id: p[0] ?? null,
               sequence_number: p[1],
               root_hash: p[2],
@@ -106,6 +144,7 @@ export function fakeChainPg(): PgConnection {
               algorithm: p[6],
               provenance: p[7] ?? null,
             });
+            nextCheckpointRowId += 1;
           }
           return { rows: [], rowCount: exists ? 0 : 1 };
         }
@@ -138,6 +177,65 @@ export function fakeChainPg(): PgConnection {
           visible = visible.filter((r) => (r["tenant_id"] ?? null) === p[tenantIdx]);
         }
 
+        const keyset = SCAN_KEYSET_RE.exec(sql);
+        if (keyset !== null) {
+          const seqPos = Number(keyset[1]);
+          const idPos = Number(keyset[3]);
+          // The `id` arm's operator is read off the statement rather than assumed, which is what
+          // makes this fake able to *show* the consequence of weakening it instead of refusing the
+          // statement: with `>=` the cursor's own row is re-admitted, so a boundary inside a run of
+          // one sequence re-reads it and a sequence holding a full page never advances at all.
+          const idStrict = keyset[2] === ">";
+          if (!Number.isInteger(seqPos) || !Number.isInteger(idPos)) {
+            throw new Error("fakeChainPg: a keyset scan must bind both halves of its cursor");
+          }
+          // The order is asked for rather than supplied: this arm sorts by the pair, so a statement
+          // ordering by anything else would be answered in an order it did not request and a test
+          // over the rows could not tell the two apart (ADR-0363's rule — a fake must not answer a
+          // statement it could not really serve).
+          if (!sql.includes("ORDER BY sequence_number ASC, id ASC")) {
+            throw new Error(
+              "fakeChainPg: a keyset scan must order by the pair its cursor is made of",
+            );
+          }
+          const afterSeq = Number(p[seqPos - 1]);
+          const afterId = String(p[idPos - 1]);
+          // The predicate as written, which is what makes this fake able to answer the question the
+          // scan is about: after `(sequence, id)`, so two rows at one sequence are two distinct
+          // positions rather than one.
+          visible = visible.filter((r) => {
+            const seq = Number(r["sequence_number"]);
+            if (seq > afterSeq) return true;
+            if (seq !== afterSeq) return false;
+            const id = String(r["id"]);
+            return idStrict ? id > afterId : id >= afterId;
+          });
+          visible = [...visible].sort(
+            (a, b) =>
+              Number(a["sequence_number"]) - Number(b["sequence_number"]) ||
+              String(a["id"]).localeCompare(String(b["id"])),
+          );
+          const scanLimitIdx = paramIndex(sql, /LIMIT \$(\d+)/);
+          if (scanLimitIdx === null || Number.isNaN(scanLimitIdx)) {
+            // Not an answer this fake could really serve: without a bound limit the loop that reads
+            // it cannot page, so returning the whole scope would make a paging test pass vacuously.
+            throw new Error("fakeChainPg: a keyset scan must bind its LIMIT");
+          }
+          visible = visible.slice(0, Number(p[scanLimitIdx]));
+          return { rows: visible, rowCount: visible.length };
+        }
+
+        // A read that compares `id` is a keyset the arm above did not recognise, and the generic
+        // branch below would answer it with the *wrong* rows rather than badly: its
+        // `sequence_number = $n` regex matches the disjunction's equality arm and narrows the page
+        // to the one sequence the cursor sits at. So it is refused by name — the mutation that first
+        // showed this answered an empty page and read as a behavioural failure.
+        if (/\bid\s*>=?\s*\$\d+/.test(sql)) {
+          throw new Error(
+            `fakeChainPg: unrecognised keyset predicate — ${sql.replace(/\s+/g, " ").trim()}`,
+          );
+        }
+
         const geIdx = paramIndex(sql, /sequence_number >= \$(\d+)/);
         if (geIdx !== null && !Number.isNaN(geIdx)) {
           const min = Number(p[geIdx]);
@@ -150,10 +248,21 @@ export function fakeChainPg(): PgConnection {
         }
 
         const desc = sql.includes("ORDER BY sequence_number DESC");
-        visible = [...visible].sort(
-          (a, b) =>
-            (Number(a["sequence_number"]) - Number(b["sequence_number"])) * (desc ? -1 : 1),
-        );
+        // `NEWEST_AT_ONE_SEQUENCE`, modelled rather than assumed away. It mattered only once the
+        // platform scope could hold two rows at one sequence (see the `ON CONFLICT` note above):
+        // a stable sort on the sequence alone returns them in insertion order, i.e. the **older**
+        // first — which is exactly the fail-open order ADR-0371 added that tiebreaker to fix, so an
+        // unmodelled sort here would let a test assert the defect and pass.
+        const newestFirst = sql.includes("checkpointed_at DESC, id DESC");
+        visible = [...visible].sort((a, b) => {
+          const bySequence =
+            (Number(a["sequence_number"]) - Number(b["sequence_number"])) * (desc ? -1 : 1);
+          if (bySequence !== 0 || !newestFirst) return bySequence;
+          return (
+            String(b["checkpointed_at"]).localeCompare(String(a["checkpointed_at"])) ||
+            String(b["id"]).localeCompare(String(a["id"]))
+          );
+        });
 
         const limitIdx = paramIndex(sql, /LIMIT \$(\d+)/);
         if (limitIdx !== null && !Number.isNaN(limitIdx)) {
@@ -163,7 +272,10 @@ export function fakeChainPg(): PgConnection {
         }
         return { rows: visible, rowCount: visible.length };
       }
-      return { rows: [], rowCount: 0 };
+      // A statement this fake could not really serve raises rather than answering an empty result
+      // (ADR-0350): `{rows: []}` here is a well-formed answer to a question nobody asked, so an
+      // assertion about what a read *found* would pass vacuously the moment its shape changed.
+      throw new Error(`fakeChainPg cannot serve this statement: ${sql.replace(/\s+/g, " ").trim()}`);
     };
 
     const client: PgConnection = {
