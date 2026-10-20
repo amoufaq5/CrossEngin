@@ -190,6 +190,7 @@ import {
 } from "./abac-policy.js";
 import {
   CachedAbacAttributeDirectory,
+  DEFAULT_ABAC_TTL_MS,
   abacAttributeDirectoryFromStore,
 } from "./abac-attributes.js";
 import {
@@ -1278,11 +1279,43 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // evaluator (see the policy block above), and reading through `PostgresUserStore.membershipFor`,
   // which already carries the `withTenantContext` and strict `scopeFilter` this read needs — a
   // second spelling of that query is what this repo refuses.
-  const abacAttributeDirectory =
-    abacEvaluator !== undefined && conn !== undefined
+  //
+  // Built under **either** declaration now, and deliberately **one instance** shared by both: the
+  // ABAC attributes and the revocation check are two questions about one row, so two directories
+  // would be two caches with two TTLs that can disagree about whether a membership is active —
+  // which is the divergence this repo refuses wherever it has found it.
+  const membershipDirectory =
+    conn !== undefined && (abacEvaluator !== undefined || credentialAuth?.ok === true)
       ? new CachedAbacAttributeDirectory(
           abacAttributeDirectoryFromStore(new PostgresUserStore(conn, schemaOpt)),
         )
+      : undefined;
+  const abacAttributeDirectory = abacEvaluator !== undefined ? membershipDirectory : undefined;
+  /*
+   * The revocation gate's own option, supplied iff this deployment mints sessions.
+   *
+   * Default-on under `--credential-login` with no flag of its own, on ADR-0338's rule: nothing
+   * revoked a live session correctly before, so refusing one breaks nothing that worked. And the
+   * `absent` case cannot be the normal state here, because a session is minted only after the login
+   * read an active membership — which is also why this is gated on the login rather than offered to
+   * a `--jwks-url` deployment, where a subject with no `meta.users` row is ordinary.
+   */
+  const sessionRevocation =
+    membershipDirectory !== undefined && credentialAuth?.ok === true
+      ? {
+          directory: membershipDirectory,
+          onRefused: (tenantId: string, userId: string): void => {
+            // Named, because the 401 the gateway returns says nothing: a caller must learn only that
+            // their session is no longer good. The two causes this conflates — no membership row, or
+            // one whose status is not `active` — are one `null` from the directory and are not
+            // separated here; see the ADR's open ends.
+            console.warn(
+              `[auth] session refused: ${userId} holds no active membership in tenant ${tenantId}` +
+                " (revoked, suspended, or the row is gone) — the session token is still signed and" +
+                " unexpired, and this check is why it no longer works",
+            );
+          },
+        }
       : undefined;
   // Grouped so the evaluator, the keys it answers and the directory feeding it cannot be supplied
   // apart — see `BuildOperateHttpServerOptions.abac`.
@@ -3785,6 +3818,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     policyForEntity: sensitivePolicyForEntity,
     writeMaskMode,
     ...(abac !== undefined ? { abac } : {}),
+    ...(sessionRevocation !== undefined ? { sessionRevocation } : {}),
     ...(regionGuard !== undefined ? { regionGuard } : {}),
     ...(extraRoutes !== undefined ? { extraRoutes } : {}),
     ...(entitlementResolver !== undefined ? { entitlementResolver } : {}),
@@ -4561,6 +4595,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           // with whose manifest is compiled. The per-tenant manifest's own obligations are checked
           // against `answerableKeys` by `buildOperateHttpServer`.
           ...(abac !== undefined ? { abac } : {}),
+          // The per-tenant gateway gets it too, for the reason ADR-0340 put the obligation check in
+          // `buildOperateHttpServer`: a tenant serving its own activated manifest serves the same
+          // tenant's users, so a revoked membership must stop working there as well.
+          ...(sessionRevocation !== undefined ? { sessionRevocation } : {}),
           apiKeys,
           allocator,
           settingsStore,
@@ -4832,6 +4870,25 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     console.info(
       `[auth] serving ${AUTH_TOKEN_PATH} (session ttl ${ttl.toString()}s, lockout after` +
         ` ${lockout.attempts.toString()} failures for ${lockout.seconds.toString()}s)`,
+    );
+    /*
+     * One arm, not two.
+     *
+     * The first draft was a ternary with an `OFF — needs a Postgres store` branch, and that branch
+     * **cannot fire**: `--credential-login` is refused at parse under `--store memory` (*"the
+     * credential lives in meta.users and there is no such table"*), so reaching this line implies a
+     * connection, which implies the directory, which implies the gate. A check that cannot fire
+     * reads as coverage it does not provide — ADR-0361's reason for deleting `validateReports`'
+     * unreachable duplicate — and it was caught by booting the arm it claimed to describe.
+     *
+     * The figure is on the line because the figure *is* the guarantee, and it is the one an operator
+     * would otherwise assume wrong: the window is the directory's value TTL, not the session TTL
+     * printed immediately above, and the two differ by two orders of magnitude.
+     */
+    console.info(
+      `[auth] session revocation: on — a session's membership is re-read every` +
+        ` ${(DEFAULT_ABAC_TTL_MS / 1000).toString()}s, so revoking one (or suspending the user)` +
+        ` stops it within that, not at the next login ${ttl.toString()}s away`,
     );
   }
 

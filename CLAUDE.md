@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 375 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 376 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 20,177 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 20,185 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -2023,6 +2023,43 @@ type errors.
   on top of what a Payment already settled (**AR net −50, cash +170**), silently, because the entry
   numbers differ so no constraint fires. ADR-0366's rule read forward: a *proposed addition* is
   withdrawn with its refutation exactly as a retention is.
+
+  ADR-0381 closes the last of the register's P0 items and the class is **a fact already read and
+  thrown away** — this run's most-found shape, landing on the authorization path. A session carries
+  the roles the login resolved at mint time (ADR-0369) and nothing on the request path re-consulted
+  the membership, so revoking one took effect at the next login: **one hour** on the shipped
+  compose. Meanwhile `abacAttributeDirectoryFromStore` has read that row in the auth stage on every
+  request since ADR-0341 and answered `null` for exactly a revoked or absent membership — and the
+  only consumer of that `null` was `dischargeAbac`, which acts on it for a grant carrying an
+  obligation, of which the measured count across the seven packs is **zero**. The revocation was
+  detected and the detection reached nothing.
+  **The register's own named precedent would have built the wrong thing**, which is the increment's
+  second finding: it pointed at ADR-0334's tenant-status directory — a *second* cached directory —
+  and that is right for its own question (there was no existing read of `meta.tenants` on the
+  request path) and wrong here, because two directories over one row are two caches with two TTLs
+  that can disagree about whether one membership is active. So `withMembershipRevocationCheck` is a
+  **sibling decoration over the same instance**, composed outside `withAbacAttributes` so a refused
+  principal is refused before anything is attached, with the second `attributesFor` a cache hit by
+  construction.
+  The soundness rests on a **measurement rather than a type**: `attributesFor`'s `null` means *no
+  row* or *not active* and never *active with no attributes*, because `MembershipRecord.abacAttributes`
+  is `z.record(z.unknown())` — neither optional nor nullable — over a column declared
+  `NOT NULL DEFAULT '{}'::jsonb`. Were it nullable the gate would refuse active members whose
+  attributes are empty, which is most of them; an earlier draft assumed exactly that and had planned
+  a three-valued refactor of the cache, which the measurement retired. Default-on under
+  `--credential-login` with no flag of its own (ADR-0338's rule), scoped to a principal that names a
+  person so a bare api-key's shared `DEFAULT_PRINCIPAL_ID` cannot refuse every service credential at
+  once, and tied to the login rather than offered to `--jwks-url` — the two are mutually exclusive,
+  so the gate never sees a foreign subject and an *absent* row really is a revocation.
+  Live, one hour → **30 seconds**: 200, revoke, 200 (the cached value), **401** after 31s, with the
+  api-key unaffected and a restored membership working again six seconds later. The window is the
+  directory's value TTL and **not** the session TTL, which the boot line says with the figure because
+  the two differ by two orders of magnitude.
+  And **this increment's own class landed on its own fix**: that boot line was first a ternary with
+  an `OFF — needs a Postgres store` arm, and **that arm cannot fire**, because `--credential-login`
+  is refused at parse under `--store memory`, so reaching the line implies a connection, the
+  directory and the gate. ADR-0361's reason for deleting an unreachable check, and it was caught by
+  booting the arm it claimed to describe — the only thing that would have.
 
   ADR-0380 is the small sharp half of the register's oldest operational item, and the class is **a
   verdict over nothing**. P0.9 named it as *`verify-chain` exits 0 over an empty chain*; measuring it
@@ -6642,13 +6679,22 @@ Two constraints worth knowing before suggesting a host:
   `credential login: enabled (kid login-v1, public key …)`, or `refused` naming the variable);
   **create the first user by hand**, because there is no mail channel so there is no forgot-password
   and no sign-up — `.env.example` has the three commands, ending in `set-credential` with the
-  password in the environment; and **a session's role is frozen until it expires**, so revoking a
-  membership or suspending a user bites at the next login within `--session-token-ttl` — which on
-  the shipped compose is **one hour**, since that flag is not passed and
-  `DEFAULT_SESSION_TOKEN_SECONDS` is 3600; the register said only "within the ttl" and the figure is
-  worth having, because it is the window in which a revoked person keeps their old role. There is no
-  denylist and no per-request read of `meta.users.status` for a Bearer JWT, which is the whole of
-  what remains open here. Two stale-doc members rode along and are fixed (ADR-0377):
+  password in the environment; and **a revoked membership stops working within 30 seconds since
+  ADR-0381**, where it used to keep working until the token expired — one hour on the shipped
+  compose, since `--session-token-ttl` is not passed and `DEFAULT_SESSION_TOKEN_SECONDS` is 3600.
+  `withMembershipRevocationCheck` refuses a person-naming principal whose membership does not
+  resolve, over **the directory that was already reading that row**: the fact was computed in the
+  auth stage on every request and reached only `dischargeAbac`, which acts on it for a grant
+  carrying an obligation — of which the measured count across the seven packs is **zero**. So the
+  revocation was detected and the detection reached nothing. Default-on under `--credential-login`
+  with no flag (ADR-0338's rule — nothing revoked a session correctly before, so refusing one breaks
+  nothing that worked), and the window is the directory's 30s value TTL rather than the session TTL,
+  which the boot line names because the two differ by two orders of magnitude. Live: 200 → revoke →
+  200 (cached) → **401** after 31s, with the api-key unaffected and a restored membership working
+  again. What remains open is narrower: 30s is not immediate (a denylist would be), the refusal
+  conflates *no row* with *not active*, and **`meta.users.status` itself is still not read** — the
+  two statuses are independent columns on independent tables, so a suspended user whose membership
+  stays `active` keeps their session. Two stale-doc members rode along and are fixed (ADR-0377):
   `apps/operate-web/README.md` documented `OPERATE_API_KEY` with its `devkey` default as a live
   variable, and `deploy/VERCEL-SUPABASE.md` told a managed-cloud operator to set it on Vercel —
   a variable read **nowhere** in that app, so following that page produced a UI authenticating
@@ -8794,10 +8840,22 @@ by it**.
    side already worked and the increment was a credential, a mint and a browser session. There is a
    `/login`, an httpOnly session cookie and a proxy forwarding the viewer's own token;
    `OPERATE_WEB_API_KEY` is gone from `.env.example` and `OPERATE_API_KEY` from the proxy.
-   `deploy/Caddyfile` still has no auth directive and does not need one. What remains is
-   **revocation**: the role is read from the membership at mint time and frozen in the token, so
-   revoking a membership or suspending a user takes effect at the next login, within
-   `--session-token-ttl`. The precedent for closing it is ADR-0334's tenant-status directory.
+   `deploy/Caddyfile` still has no auth directive and does not need one. ~~What remains is
+   **revocation**~~ — **mostly closed by ADR-0381**, which found that **this entry's own named
+   precedent would have built the wrong thing**: it pointed at ADR-0334's tenant-status directory,
+   i.e. a *second* cached directory, while the membership row was **already being read on every
+   request** by `abacAttributeDirectoryFromStore` and already answering `null` for exactly a revoked
+   or absent membership. The only consumer of that `null` was `dischargeAbac`, which acts on it for
+   a grant carrying an obligation — measured count across the seven packs **zero** — so the
+   revocation was detected in the auth stage and the detection reached nothing. This run's
+   most-found shape. `withMembershipRevocationCheck` is a sibling decoration over the **same
+   directory instance** (two would be two caches with two TTLs that can disagree about one
+   membership), default-on under `--credential-login`, and the window is **one hour → 30 seconds**,
+   verified live (200 → revoke → 200 from cache → **401** after 31s, with the api-key unaffected and
+   a restored membership working again). Three things remain and are narrower: 30s is not immediate,
+   the refusal conflates *no row* with *not active*, and **`meta.users.status` is still unread** —
+   it and the membership status are independent columns on independent tables, so a suspended user
+   whose membership stays `active` keeps their session.
 2. **The keyset cursor returns a classified field's plaintext to a caller who cannot read it.**
    ~~Undetected~~ — ADR-0357 surveys and reports it at boot, naming each field; **ADR-0377 closed
    it on the shipped stack** and corrected this entry twice. *"`CURSOR_ENCRYPTION_SECRET` is in the

@@ -319,6 +319,67 @@ export function withAbacAttributes(
   };
 }
 
+/**
+ * Decorates a resolver so a session whose membership is no longer active is **refused**.
+ *
+ * The fact this reads was already being read, already correct, and thrown away. A session token
+ * carries the roles the login resolved at mint time (ADR-0369) and nothing on the request path
+ * re-consulted the membership — so revoking one, or suspending the user, took effect only at the
+ * next login, within `--session-token-ttl`, which is **one hour** on the shipped compose because
+ * that flag is not passed and `DEFAULT_SESSION_TOKEN_SECONDS` is 3600. Meanwhile
+ * `abacAttributeDirectoryFromStore` has answered `null` for exactly that condition since ADR-0341,
+ * and the only consumer of that `null` was `dischargeAbac` — which refuses `undischargeable` for a
+ * grant carrying an obligation, of which the measured count across the seven packs is **zero**. So
+ * the revocation was detected in the auth stage and the detection reached nothing.
+ *
+ * **`null` is a sound refusal signal, and that rests on a measurement rather than on the type.**
+ * `attributesFor` answers `null` in exactly two cases — no membership row, or a row whose status is
+ * not `active` — and never for an active membership with no attributes, because
+ * `MembershipRecord.abacAttributes` is `z.record(z.unknown())` (not optional, not nullable) over a
+ * column declared `NOT NULL DEFAULT '{}'::jsonb`. Were it nullable, this gate would refuse active
+ * members whose attributes column is empty, which is most of them. The property is pinned by a test
+ * beside this function, because the whole decoration rests on it.
+ *
+ * It is a **sibling** of `withAbacAttributes` rather than a flag on it, because the two are gated by
+ * different declarations — this one by `--credential-login`, that one by `--abac-policy` — and a
+ * boolean switching whether a refusal happens would make one function mean two things. Composed
+ * revocation-first in `node.ts`, so a revoked principal is refused before anything is attached; the
+ * second `attributesFor` is a cache hit by construction, since the first call populated the entry
+ * and no TTL can lapse inside one request.
+ *
+ * Scoped to a principal that **names a person** for `withAbacAttributes`' reasons, which are
+ * stronger here: a bare api-key shares one `DEFAULT_PRINCIPAL_ID` across the deployment (ADR-0331),
+ * so reading that id would refuse every service credential the moment any one placeholder membership
+ * lapsed. And it is only ever mounted alongside `--credential-login`, which is **mutually exclusive
+ * with `--jwks-url`** (refused twice in `cli.ts`) — so every Bearer session it sees was minted by
+ * this deployment from a membership it read, which is what makes an *absent* row a revocation here
+ * rather than a foreign subject this platform knows nothing about.
+ *
+ * Returning `null` and not throwing: the gateway's auth stage turns that into the same 401 a bad
+ * signature gets, which is the right answer — a caller learns their session is no longer good and
+ * nothing about why. The reason reaches the operator through `onRefused`.
+ */
+export function withMembershipRevocationCheck(
+  resolver: PrincipalResolver,
+  directory: AbacAttributeDirectory,
+  onRefused?: (tenantId: string, userId: string) => void,
+): PrincipalResolver {
+  return {
+    async resolve(input: PrincipalResolverInput): Promise<ResolvedPrincipal | null> {
+      const resolved = await resolver.resolve(input);
+      if (resolved === null) return null;
+      if (!principalNamesAPerson(resolved)) return resolved;
+      // No tenant means no `(user_id, tenant_id)` row to read, so there is no membership to have
+      // been revoked. The gateway already decided whether such a request may proceed.
+      if (resolved.tenantId === null) return resolved;
+      const attributes = await directory.attributesFor(resolved.tenantId, resolved.principalId);
+      if (attributes !== null) return resolved;
+      onRefused?.(resolved.tenantId, resolved.principalId);
+      return null;
+    },
+  };
+}
+
 // The absent→`null` mapping lives in `@crossengin/api-gateway` as `principalAbacAttributes`, beside
 // the `ResolvedPrincipal` it reads: the three request-path sites that build an `auth.Principal` are
 // in two other packages, so a copy here would have been the second spelling with no callers.

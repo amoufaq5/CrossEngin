@@ -24,7 +24,11 @@ import { parseMethod, rawToIncoming, splitTarget, type RawHttpRequest, type RawH
 import { buildPrincipalWiring, type ApiKeySpec, type JwtVerifyConfig } from "./principals.js";
 import { applyTenantStatusGate, type TenantStatusGateOptions } from "./tenant-status-gate.js";
 import { AbacObligationsUnevaluable, checkAbacObligations } from "./abac-obligations.js";
-import { withAbacAttributes, type AbacAttributeDirectory } from "./abac-attributes.js";
+import {
+  withAbacAttributes,
+  withMembershipRevocationCheck,
+  type AbacAttributeDirectory,
+} from "./abac-attributes.js";
 
 let requestCounter = 0;
 function defaultRequestId(): string {
@@ -306,6 +310,21 @@ export interface BuildOperateHttpServerOptions {
     readonly evaluateBatch?: AbacBatchEvaluator;
     readonly attributeDirectory?: AbacAttributeDirectory;
   };
+  /**
+   * Re-consult a session's membership on every request, so revoking one takes effect in seconds
+   * rather than at the next login.
+   *
+   * Supplied iff this deployment mints its own sessions (`--credential-login`), which is **mutually
+   * exclusive with `--jwks-url`** — so every Bearer session reaching the check was minted here from
+   * a membership this deployment read, which is what makes an absent row a revocation rather than a
+   * foreign subject. Its own field and not a member of `abac` above, because the two arrive under
+   * different declarations: a deployment with a login and no ABAC policy must still get the check,
+   * and that is the shipped compose.
+   */
+  readonly sessionRevocation?: {
+    readonly directory: AbacAttributeDirectory;
+    readonly onRefused?: (tenantId: string, userId: string) => void;
+  };
 }
 
 export interface BuiltOperateHttpServer {
@@ -339,10 +358,28 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
   // Decorated here rather than inside `buildPrincipalWiring`: the directory needs a connection and
   // this is the seam that already takes deployment-supplied collaborators, so the api-key and JWT
   // paths both get attributes from one wrap instead of two.
-  const principalResolver =
+  const withAttributes =
     options.abac?.attributeDirectory !== undefined
       ? withAbacAttributes(wiring.principalResolver, options.abac.attributeDirectory)
       : wiring.principalResolver;
+  /*
+   * The revocation check wraps **outside** the attribute decoration, so a refused principal is
+   * refused before anything is attached to it — and the inner `attributesFor` it then never reaches
+   * costs nothing, while if it did the entry is already in the cache.
+   *
+   * Two declarations and not one: the directory arrives under `--abac-policy` and the gate under
+   * `--credential-login`, so a deployment can have either, both or neither. `sessionRevocation`
+   * carries its own directory for that reason rather than reading `options.abac` — a deployment with
+   * a login and no ABAC policy must still get the check, and that is the shipped compose.
+   */
+  const principalResolver =
+    options.sessionRevocation !== undefined
+      ? withMembershipRevocationCheck(
+          withAttributes,
+          options.sessionRevocation.directory,
+          options.sessionRevocation.onRefused,
+        )
+      : withAttributes;
   const gateway = buildOperateGateway(options.manifest, {
     store: options.store,
     principalRoles: wiring.principalRoles,

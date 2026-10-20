@@ -12,6 +12,7 @@ import {
   abacAttributeDirectoryFromStore,
   principalNamesAPerson,
   withAbacAttributes,
+  withMembershipRevocationCheck,
   type AbacAttributeDirectory,
   type MembershipAttributeReader,
   type PrincipalWithAbacAttributes,
@@ -570,5 +571,111 @@ describe("principalAbacAttributes", () => {
     const decorated: PrincipalWithAbacAttributes = { ...principal(), abacAttributes: {} };
     expect(principalAbacAttributes(decorated)).toEqual({});
     expect(principalAbacAttributes(decorated)).not.toBeNull();
+  });
+});
+
+/**
+ * The gate over a fact that was already read, already correct, and discarded. Its soundness rests on
+ * `attributesFor`'s `null` meaning exactly *no membership, or one that is not active* — never *active
+ * with no attributes* — which the first test pins against the contract.
+ */
+describe("withMembershipRevocationCheck", () => {
+  it("rests on an active membership never resolving null, which the contract guarantees", () => {
+    // `MembershipRecord.abacAttributes` is `z.record(z.unknown())` — not optional, not nullable —
+    // over a column declared NOT NULL DEFAULT '{}'::jsonb, so an active membership always yields a
+    // Record. Were it nullable this gate would refuse active members whose attributes are empty,
+    // which is most of them. Asserted through the real `abacAttributeDirectoryFromStore`.
+    const reader: MembershipAttributeReader = {
+      async membershipFor() {
+        return { status: "active", abacAttributes: {} };
+      },
+    };
+    return abacAttributeDirectoryFromStore(reader)
+      .attributesFor(TENANT_A, USER)
+      .then((attrs) => {
+        expect(attrs).toEqual({});
+        expect(attrs).not.toBeNull();
+      });
+  });
+
+  it("refuses a user principal whose membership resolves null", async () => {
+    const directory = directoryOf({});
+    const refused: string[] = [];
+    const resolved = await withMembershipRevocationCheck(
+      resolverFor(principal()),
+      directory,
+      (t, u) => refused.push(`${t}|${u}`),
+    ).resolve(RESOLVER_INPUT);
+    // `null`, not a throw: the gateway's auth stage turns it into the same 401 a bad signature
+    // gets, so the caller learns their session is no longer good and nothing about why.
+    expect(resolved).toBeNull();
+    expect(refused).toEqual([`${TENANT_A}|${USER}`]);
+  });
+
+  it("admits a user principal whose membership is active, unchanged", async () => {
+    const directory = directoryOf({ [`${TENANT_A}|${USER}`]: {} });
+    const input = principal();
+    const resolved = await withMembershipRevocationCheck(resolverFor(input), directory).resolve(
+      RESOLVER_INPUT,
+    );
+    // Returned as-is, not a copy: this decoration refuses or passes through and attaches nothing.
+    expect(resolved).toBe(input);
+  });
+
+  it("does not read for a principal that names no person", async () => {
+    // A bare api-key shares one DEFAULT_PRINCIPAL_ID across the deployment (ADR-0331), so reading
+    // that id would refuse every service credential the moment any one placeholder lapsed.
+    for (const kind of ["service_account", "ai_architect", "system"] as const) {
+      const directory = directoryOf({});
+      const resolved = await withMembershipRevocationCheck(
+        resolverFor(principal({ principalKind: kind })),
+        directory,
+      ).resolve(RESOLVER_INPUT);
+      expect(resolved, kind).not.toBeNull();
+      expect(directory.calls, kind).toEqual([]);
+    }
+  });
+
+  it("does not read when there is no tenant to key the membership on", async () => {
+    const directory = directoryOf({});
+    const resolved = await withMembershipRevocationCheck(
+      resolverFor(principal({ tenantId: null })),
+      directory,
+    ).resolve(RESOLVER_INPUT);
+    expect(resolved).not.toBeNull();
+    expect(directory.calls).toEqual([]);
+  });
+
+  it("keeps the wrapped resolver's own refusal, and asks nothing", async () => {
+    const directory = directoryOf({});
+    expect(
+      await withMembershipRevocationCheck(resolverFor(null), directory).resolve(RESOLVER_INPUT),
+    ).toBeNull();
+    expect(directory.calls).toEqual([]);
+  });
+
+  it("propagates a directory failure rather than admitting the session", async () => {
+    // `withAbacAttributes`' rule, and sharper here: not knowing whether a membership is still
+    // active must not resolve to "it is". The cache's maxStaleMs arm is what keeps a blip from
+    // becoming an outage; it is not this function's job to soften one.
+    const directory: AbacAttributeDirectory = {
+      async attributesFor() {
+        throw new Error("unreachable");
+      },
+    };
+    await expect(
+      withMembershipRevocationCheck(resolverFor(principal()), directory).resolve(RESOLVER_INPUT),
+    ).rejects.toThrow("unreachable");
+  });
+
+  it("composes outside the attribute decoration, so a refusal attaches nothing", async () => {
+    // The order node.ts wires: revocation outermost. A revoked principal is refused before the
+    // inner decoration can hand back a decorated copy.
+    const directory = directoryOf({});
+    const composed = withMembershipRevocationCheck(
+      withAbacAttributes(resolverFor(principal()), directory),
+      directory,
+    );
+    expect(await composed.resolve(RESOLVER_INPUT)).toBeNull();
   });
 });
