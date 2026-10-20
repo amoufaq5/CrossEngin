@@ -23,8 +23,9 @@ git clone <your-fork-url> crossengin && cd crossengin/deploy
 cp .env.example .env
 # Edit .env: set POSTGRES_PASSWORD, DOMAIN, ACME_EMAIL, a strong token in
 # OPERATE_ADMIN_API_KEY, and the two login secrets (CREDENTIAL_PEPPER and
-# OPERATE_TOKEN_SIGNING_KEY). The UI has a login now, so the first user is a
-# shell step -- see "The UI has a login" below.
+# OPERATE_TOKEN_SIGNING_KEY). The UI has a login now, so you create the first
+# tenant and user yourself -- five curl calls, no shell in the container; see
+# "The UI has a login" below.
 
 docker compose up -d --build          # build images + start everything
 docker compose logs -f migrate        # watch the schema apply, then exit 0
@@ -303,19 +304,52 @@ and `.env.example` says what each is for and how to generate it. The boot line i
 `[auth] credential login: enabled (kid login-v1, public key …)`; if it says `refused`,
 nobody can log in and the reason names the variable.
 
-**Create the first user by hand — and only the first.** There is no mail channel in a fresh
-deployment, so there is no "forgot password" and no self-service sign-up. `.env.example` has
-the three commands: provision a user, grant it a membership in a tenant — which is what
-decides the role every session of theirs carries — then `set-credential`. The password comes
-from the environment and never from argv; the subcommand refuses `--password` by name and
-says why.
+**One boot line on a fresh stack is an error and is correct.** `--tenant-status-gate` is a
+default now, and it surveys the tenants your api-key specs name before the first request:
 
-The asymmetry is the bootstrap and not an oversight: the console sets a password over HTTP,
-and reaching that route needs a session, which needs a password. So exactly one credential
-has to come from outside the web. **Every user after the first is a console step** — see
-*The console* below. Until ADR-0364 that was not true of any of them: `--platform-user-routes`
-mounted ten identity routes and the one act that makes them usable had no route at all, so
-onboarding broke at step 3 of 4 and a `docker compose exec` was mandatory per person.
+```
+[tenant-status] 1 configured API-key tenant(s) have no meta.tenants row and EVERY request
+from them will be refused 403: 00000000-0000-4000-8000-000000000000
+```
+
+That is the placeholder uuid in `OPERATE_ADMIN_API_KEY`, and it has no row because the tenant
+id is **minted by the server** — there is no way to name a tenant that does not exist yet. The
+key is a platform-routes credential and `/v1/platform` is exempt from the gate, so the
+bootstrap below still runs and the console still works. Do not read the line as the default
+having broken the deployment; it goes away when a key points at a provisioned tenant. What the
+gate buys is the other case: before it, an api-key naming a placeholder tenant *with an ERP
+role* was served **200**, writing records under a `tenant_id` with no parent row.
+
+**Create the first user by hand — but not with a shell.** There is no mail channel in a fresh
+deployment, so there is no "forgot password" and no self-service sign-up: somebody has to make
+the first account deliberately. `.env.example` has the five commands and every one of them is a
+`curl` against `127.0.0.1:8787` — create the tenant, create the user, grant a membership (which
+is what decides the role every session of theirs carries), set the password, log in.
+
+This paragraph used to say the first password was a shell step, and gave the reason as: the
+console sets a password over HTTP, and reaching that route needs a session, which needs a
+password. **That reasoning expired when ADR-0364 shipped the operator route**, and it had been
+false since: `POST /v1/platform/users/{id}/credential` is authorised by the
+`--credential-admin-role` *grant*, which the shipped compose passes, and the credential that
+satisfies it is `OPERATE_ADMIN_API_KEY` — an api-key, not a session. Measured on a stack holding
+no password anywhere: that call answers 200 with `x-api-key` alone. `set-credential` remains the
+answer for a deployment that grants no credential-admin role, and it is the only path that works
+with the API refusing requests; it is no longer the only path for this one. The password comes
+from the environment and never from argv either way; the subcommand refuses `--password` by name
+and says why.
+
+**Every user after the first is a console step** — see *The console* below. Until ADR-0364 that
+was not true of any of them: `--platform-user-routes` mounted ten identity routes and the one act
+that makes them usable had no route at all, so onboarding broke at step 3 of 4 and a
+`docker compose exec` was mandatory per person.
+
+**And the documented bootstrap was one step short of runnable until now.** Every version of it
+omitted creating the tenant, so the membership call — step 3 of 5 — answered
+`422 cannot grant a membership: meta.tenants has no row for the id this grant names` on every
+fresh deployment, and there was no documented source for the `<tenant-uuid>` it wanted. The
+tenant id is **minted by the server** (`POST /v1/platform/tenants` takes `{slug, name}` and
+rejects an `id` key), which is also why `OPERATE_ADMIN_API_KEY`'s tenant uuid is a placeholder
+that can never name a real tenant — and why `/v1/platform` is exempt from the tenant-status gate.
 
 **A session's roles are frozen until it expires.** The membership's primary role *and its
 secondary roles* are read at login and stamped into the token, and nothing re-reads the
@@ -518,9 +552,16 @@ Out of the box only **in-app** notices are delivered: an email or SMS dispatch i
 `no_sender_configured`, which the drain treats as retryable — so configuring a channel later
 delivers the backlog rather than losing it.
 
-To turn them on, fill the SES and/or Twilio block in `.env` (see
-[`.env.example`](./.env.example)) and add `--notification-drain-ms 15000` to the `api` command in
-`docker-compose.yml`. Without the drain flag nothing is sent at all, and the API says so at boot.
+That sentence was false until the drain flag became a default, and in the direction that reads as
+working. `DeliveryScheduler` is the *only* delivery path in this binary, so without
+`--notification-drain-ms` nothing is delivered on **any** channel, `in_app` included — and the
+warning that was supposed to say so could not fire, because it was gated on more than one channel
+being registered and this stack registers exactly one. Boot printed `[notify] channels: in_app` and
+stopped. The flag is now on the `api` command, and the gate is the store rather than the channel
+count, so a deployment that removes it is told.
+
+To turn email and SMS on, fill the SES and/or Twilio block in `.env` (see
+[`.env.example`](./.env.example)). The drain is already running.
 
 These are credentials, so they live in the environment rather than in `command` — a process's argv
 is readable by anyone who can run `ps`. After the first `up`, check what was registered:
@@ -815,8 +856,9 @@ The first build takes 10–20 minutes on 2 A1 cores. Then read the boot lines th
 `[pg]` and `[cursor]` — and create your first tenant and user with
 [Create your first tenant](#create-your-first-tenant) and
 [Create your first user](#create-your-first-user). There is no sign-up page and no
-forgot-password, so the first user is a shell step; that is deliberate and
-[The UI has a login](#the-ui-has-a-login) explains why.
+forgot-password, so you create the first account yourself — five `curl` calls against
+`127.0.0.1:8787` and no shell in the container, since the compose grants
+`--credential-admin-role`; [The UI has a login](#the-ui-has-a-login) explains why.
 
 **9 — Backups.** *Block Volume → your boot volume → Create Backup Policy.* Always Free
 includes 5 volume backups, which is a snapshot story and not a PITR one. A volume

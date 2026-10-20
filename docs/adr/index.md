@@ -1,10 +1,10 @@
 # ADR index
 
-370 records. Generated from the ADR files themselves — regenerate rather than
+371 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 291  **Proposed:** 79
+- **Accepted:** 292  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -382,3 +382,4 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0373](0373-a-sweep-one-bad-row-stops.md) | A sweep one bad row stops | — | Accepted | 2026-10-19 |
 | [0374](0374-the-tamper-that-buries-the-finding.md) | The tamper that buries the finding | — | Accepted | 2026-10-19 |
 | [0375](0375-one-witness-read-and-never-compared.md) | One witness read, and never compared | — | Accepted | 2026-10-20 |
+| [0376](0376-a-default-that-is-not-a-default.md) | A default that is not a default | — | Accepted | 2026-10-20 |

@@ -2849,6 +2849,22 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             : {}),
         }),
       );
+      // Said on the success branch too, because the three arms above are the only thing this
+      // surface has ever printed and silence is its own claim: every other mount here announces
+      // itself (`[platform-users] registry routes mounted for roles: …`, `[auth] credential routes
+      // mounted: … for roles: …`, `[tenant-status] gate mounted over …`), and 18 bracketed boot
+      // surfaces do it. Without this line the inbox badge's own backing route is the one mount an
+      // operator cannot confirm from the log — and its client *catches* a failure and falls back to
+      // a recency approximation (Sidebar.tsx), so a 404 from an unmounted route and a 403 from an
+      // ungranted role both render a plausible badge rather than an error. The roles are named
+      // because the grant is per role and the flag is repeatable: a console user whose membership
+      // carries a role not on this line is silently on the approximation.
+      console.info(
+        `[read-state] per-viewer notification read state mounted for roles: ${options.readStateRoles.join(", ")}` +
+          (options.readStateBackfillRoles.length > 0
+            ? ` (backfill: ${options.readStateBackfillRoles.join(", ")})`
+            : ""),
+      );
     }
   }
 
@@ -3129,18 +3145,32 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // which the drain treats as retryable — configure the channel and re-drain and it goes out
   // (ADR-0274).
   const senderWiring = buildSenderRegistryFromEnv();
-  const deliveryEnabled = options.notificationDrainMs !== null && conn !== undefined;
   console.info(`[notify] channels: ${senderWiring.report.channels.join(", ")}`);
   for (const skipped of senderWiring.report.skipped) {
     console.warn(`[notify] ${skipped}`);
   }
-  if (!deliveryEnabled && senderWiring.report.channels.length > 1) {
-    // Otherwise the line above reads as "email works" to an operator who configured a provider but
-    // never started the drain, which is the same looks-healthy-sends-nothing failure the skip
-    // reasons exist to prevent.
+  // The same two conjuncts the scheduler is built from below, spelled out here rather than hoisted
+  // into a `deliveryEnabled` boolean so the interval narrows to a number in this branch.
+  if (options.notificationDrainMs !== null && conn !== undefined) {
+    console.info(`[notify] delivery drain: every ${options.notificationDrainMs.toString()}ms`);
+  } else if (conn !== undefined) {
+    // The gate used to be `channels.length > 1`, which made this warning **unreachable on every
+    // deployment that ships**: `in_app` is registered unconditionally and the compose sets no SES or
+    // Twilio variable, so `channels` is exactly `["in_app"]` — length 1 — and boot printed
+    // `[notify] channels: in_app` and nothing else. That line reads as "in-app notices work" and
+    // they do not: `DeliveryScheduler` is the *only* delivery path in this binary, so with no drain
+    // nothing is delivered on any channel, `in_app` included. So `in_app` is not an exception to the
+    // rule this warning states, it is the shipped instance of it — which is precisely the
+    // looks-healthy-sends-nothing failure the comment on the old gate said it existed to prevent.
+    //
+    // Gated on the store and not on the channel set, because those are the two genuinely different
+    // states (ADR-0334's `missing` vs `not applicable`): on `--store memory` the flag is *refused*
+    // at parse (cli.ts), `PostgresNotificationStore` is never built and no dispatch can be enqueued
+    // at all, so there is nothing to warn about and a warning would be noise on the one
+    // configuration where it names no remedy.
     console.warn(
-      "[notify] a real channel is configured but no drain is running; pass --notification-drain-ms " +
-        "(and a Postgres store) or nothing will be delivered",
+      "[notify] no delivery drain is running, so NOTHING is delivered on any channel — in_app " +
+        "included, because the drain is the only delivery path. Pass --notification-drain-ms <ms>",
     );
   }
 

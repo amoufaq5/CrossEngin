@@ -387,15 +387,21 @@ deliberately not on this surface — that is the audited GDPR flow behind
 
 ---
 
-## 12. Create your first user — a shell step for the first one only
+## 12. Create your first user — two curl calls, no shell
 
 There is no sign-up page and no forgot-password, because a fresh deployment has **no mail
-channel**. So one password comes from a shell and the rest do not, and the asymmetry is the
-bootstrap rather than a policy: setting a password in the console means being signed in to the
-console, which means already holding one. `set-credential` is how the first one gets in, and after
-it **Platform → Users** provisions a person and sets their first password over
-`POST /v1/platform/users/{id}/credential`, while each person changes their own at `/account`.
-Neither of those needs a shell.
+channel**. So you make the first account deliberately — but not from inside the container.
+
+This section used to say one password had to come from a shell, and gave the reason as: setting a
+password in the console means being signed in to the console, which means already holding one.
+That is true of the *console* and false of the *route*.
+`POST /v1/platform/users/{id}/credential` is authorised by the `--credential-admin-role` grant,
+which the shipped compose passes, and `$ADMIN` from step 11 satisfies it — measured on a stack
+holding no password anywhere, that call answers 200 with `x-api-key` alone. `set-credential` is
+still the right answer when the API is refusing requests or when a deployment grants no
+credential-admin role, and it is below as the fallback. After the first account,
+**Platform → Users** does the same thing in the browser and each person changes their own password
+at `/account`.
 
 **Nothing to mount.** The shipped `docker-compose.yml` already passes
 `--platform-user-routes --platform-user-role platform_admin` (the registry) and
@@ -410,10 +416,12 @@ hand-editing that list is where a neighbouring flag goes missing.
 
 ### Which role to grant, and why it is a fork
 
-**A session carries exactly one role.** The login reads the membership's `primaryRole` and stamps
-it into the token's `scope`; the gateway takes `scope[0]` and `secondaryRoles` is populated by
-nothing anywhere. So the membership below decides what this person can actually do, and the two
-jobs do not overlap:
+**A session carries every role its membership grants** — primary first, then the secondaries, all
+of them in the token's `scope` and all of them read by the gateway. This section used to say the
+opposite (*"the gateway takes `scope[0]` and `secondaryRoles` is populated by nothing anywhere"*),
+which was true until ADR-0369 and is the reason the fork below used to end in advice to keep a
+spare tenant for yourself. You do not need one. The two jobs still do not overlap, so the fork is
+real — it is just answered by one membership now:
 
 | Grant this | …and they reach |
 |---|---|
@@ -428,15 +436,20 @@ which *replaces* the default rather than adding to it, so `platform_admin` is re
 Studio too. Going the other way, `/v1/platform/*` is guarded by `--platform-admin-role`, which
 defaults to `platform_admin` alone.
 
-**One person doing both jobs means two memberships**, because
-`meta.user_tenant_membership` is `UNIQUE (user_id, tenant_id)` — one role per person per tenant.
-Grant `erp_admin` in the tenant from step 11 and `platform_admin` in a second tenant kept for the
-purpose, then choose which you are by the **Workspace** you type at the login form. Both tenants
-have to exist: the login resolves that field against `meta.tenants` and refuses a workspace it
-cannot find.
+**One person doing both jobs is one membership with both roles.**
+`meta.user_tenant_membership` is `UNIQUE (user_id, tenant_id)` — one *row* per person per tenant —
+and that row carries `primaryRole` **and** `secondaryRoles`, every one of which reaches an
+authorization decision since ADR-0369. So grant
+`primaryRole: platform_admin, secondaryRoles: ["erp_admin"]` and you hold both columns of the table
+above from one login: measured on `erp-core`, that reaches 250 of 255 (entity, operation) pairs
+where `platform_admin` alone reaches 0. The primary is the one the sidebar shows under *Signed in
+as* and the only one an api-key can express, which is the whole of why it still matters which is
+which.
 
-**If you only want one login, grant `platform_admin`** — it is the one that can provision everybody
-else, including a second membership for yourself later. The commands below use it.
+The commands below do exactly that. Two notes: a role name may not contain a space (the scope claim
+is space-delimited, so the grant is refused saying so), and an undeclared role is warned about at
+the grant rather than refused — `platform_admin` is deliberately not one of `erp-core`'s fifteen,
+so that warning is expected here and names the catalog.
 
 ```bash
 # Still on the VM, in crossengin/deploy, with $ADMIN set from step 11.
@@ -450,23 +463,37 @@ USER_ID=$(cat /proc/sys/kernel/random/uuid)   # the kernel's own generator; need
 curl -sS -X POST http://127.0.0.1:8787/v1/platform/users \
   -H "x-api-key: $ADMIN" -H 'content-type: application/json' \
   -d "{\"user\":{\"id\":\"$USER_ID\",\"email\":\"you@yourdomain.com\",\"displayName\":\"You\"},
-       \"membership\":{\"tenantId\":\"$TENANT\",\"primaryRole\":\"platform_admin\",\"status\":\"active\"}}"
+       \"membership\":{\"tenantId\":\"$TENANT\",\"primaryRole\":\"platform_admin\",
+                       \"secondaryRoles\":[\"erp_admin\"],\"status\":\"active\"}}"
 
-# 2. Set the password. Read from the ENVIRONMENT and never from argv, because argv is readable by
-#    anyone who can run `ps` — the subcommand refuses `--password` by name. It runs inside the api
-#    container, which is where CREDENTIAL_PEPPER and the PG* variables already are; run it anywhere
-#    else and you have to supply them yourself, and a pepper that differs from the server's stores a
-#    hash no login can verify.
+# 2. Set the password — over HTTP, with the same key. Authorised by --credential-admin-role, which
+#    the shipped compose passes, so this needs no session and no shell. The route refuses the
+#    caller's own id (`self_not_permitted`): changing your own password is /account, which proves
+#    possession of the current one instead.
+curl -sS -X POST "http://127.0.0.1:8787/v1/platform/users/$USER_ID/credential" \
+  -H "x-api-key: $ADMIN" -H 'content-type: application/json' \
+  -d "{\"confirmUserId\":\"$USER_ID\",\"password\":\"<a strong password>\"}"
+```
+
+**If that call is refused**, `set-credential` is the fallback and takes the password from the
+ENVIRONMENT and never from argv, because argv is readable by anyone who can run `ps` — the
+subcommand refuses `--password` by name. It runs inside the api container, which is where
+`CREDENTIAL_PEPPER` and the `PG*` variables already are; run it anywhere else and you have to
+supply them yourself, and a pepper that differs from the server's stores a hash no login can
+verify.
+
+```bash
 docker compose exec -e OPERATE_NEW_PASSWORD='<a strong password>' api \
   node apps/operate-server/dist/bin/operate-server.js set-credential \
   --user "$USER_ID" --confirm-user "$USER_ID"
 ```
 
 `status` has no default: `active` grants access now, `invited` only promises it, and only an
-active membership resolves as a notification recipient. The user id is typed **twice** on
-`set-credential` deliberately — it overwrites a credential, so naming the wrong user locks a real
-person out and hands their account to whoever typed the password. There is no `--yes`, because a
-flag meaning "I meant it" can be pasted from a runbook without reading the id.
+active membership resolves as a notification recipient. The user id is typed **twice** on both
+forms deliberately — `confirmUserId` on the route, `--confirm-user` on the subcommand — because
+this overwrites a credential, so naming the wrong user locks a real person out and hands their
+account to whoever chose the password. There is no `--yes`, because a flag meaning "I meant it"
+can be pasted from a runbook without reading the id.
 
 **Log in over HTTPS, because over plain HTTP it fails silently.** The session cookie is set
 `Secure` whenever `NODE_ENV=production`, which the compose file sets on `web` — so on a plain-http
@@ -479,7 +506,8 @@ address does not show you this either — an IP matches neither site block in `d
 Caddy answers it rather than the UI — so anything other than the sign-in form means DNS or the
 certificate, not the credential.
 
-**Success looks like:** `set-credential: ok`. Then open `https://yourdomain.com`, type the
+**Success looks like:** `{"userId":"…","credentialSet":true,…}` from the route, or
+`set-credential: ok` from the fallback. Then open `https://yourdomain.com`, type the
 tenant's **slug** (`acme`) as the workspace, your email and the password, and you should land in
 the console. From there on nobody needs a shell: **Platform → Users** provisions the next person
 and sets their first password, **Platform → Tenants → one tenant** grants them a membership, and
@@ -525,25 +553,53 @@ it does, that cron line is the deployment's real recovery point.
 
 The shipped `docker-compose.yml` passes the request path, the login, the identity surface and the
 AI Architect — `--platform-admin`, `--platform-user-routes`, `--credential-login`,
-`--credential-admin-role`, `--idempotency-store pg` and `--ai-design` are all on the `api` command
-already, so none of them is in the table below. What is still off is everything that **recurs**: no
-job fires, no timer fires, no notification is delivered and no audit row is anchored until you say
-so. Each is a line added to that `command:`; read `deploy/README.md` for what each one needs.
+`--credential-admin-role`, `--idempotency-store pg` and `--ai-design` — plus two that used to be in
+the table below and are now defaults: `--notification-drain-ms 15000` (nothing is delivered without
+it, in-app notices included) and `--tenant-status-gate`. Neither is in the table.
 
-| Flag | What it turns on |
-|---|---|
-| `--schedule-ms 60000` | the manifest's scheduled jobs (also needs `--workflow-workers` to drain them) |
-| `--workflow-workers` | the timer, activity and job workers — without this a due timer never fires |
-| `--notification-drain-ms 15000` | delivery — without it nothing is sent, in-app notices included |
-| `--audit-chain-config …` | the hash-chained audit trail |
-| `--checkpoint-config …` | the periodic chain checkpoints the next flag's truncation check needs |
-| `--integrity-proof-config …` | the periodic audit-integrity verification |
-| `--deletion-capabilities …` | GDPR Article 17 — **neither deletion surface mounts without it** |
-| `--tenant-status-gate` | enforces `suspended` / `archived` / `pending_deletion` on every request |
-| `--rate-limit-policy …` | durable, cross-replica rate limiting |
+What is still off is the rest of what **recurs**: no job fires, no timer fires and no audit row is
+anchored until you say so.
 
-Add them a few at a time and read the boot log after each `docker compose up -d`: every one of
-these has refusals that name what is missing.
+| Flag | What it turns on | Needs |
+|---|---|---|
+| `--rate-limit-policy …` | durable, cross-replica rate limiting | a `command:` line |
+| `--workflow-workers` | the timer, activity and job workers — without this a due timer never fires | a `command:` line, **and a job handler** (see below) |
+| `--schedule-ms 60000` | the manifest's scheduled jobs | `--workflow-workers`, **and a job handler** |
+| `--checkpoint-config …` | the periodic chain checkpoints the truncation check needs | a mounted **file**, see below |
+| `--integrity-proof-config …` | the periodic audit-integrity verification | a mounted **file** |
+| `--deletion-capabilities …` | GDPR Article 17 — neither deletion surface mounts without it | a mounted **file** |
+| `--audit-chain-config …` | the hash-chained audit trail | a mounted file **holding a private key** |
+
+The last column is the honest part, and none of it is a `command:` line.
+
+**None of the four file-taking flags has a path by which you can supply a file.** The `api` service
+declares no `volumes:` key at all, so there is nowhere on the host the container can read a config
+from, and the instruction "each is a line added to that `command:`" cannot be followed for any of
+them. That edit is yours to make until it ships as a default, which is why those four sit below the
+other three.
+
+They are also not peers, which decides how that edit should be designed:
+
+- **Three are ordinary committable config.** Measured, `CheckpointConfigSchema.safeParse({})` and
+  `IntegrityProofConfigSchema.safeParse({})` both succeed **fully defaulted** — every field has a
+  default, including `intervalMs: 3600000` and `includePlatform: true` — so `{}` in a file is a
+  valid config for either, and `--deletion-capabilities` is a six-key declaration of what this
+  deployment holds, with no secret in it.
+- **`--audit-chain-config` holds a 32-byte Ed25519 private seed.** It is the only one of the four
+  whose schema has required fields (`privateKeyBase64` and `publicKeyBase64`, both validated as real
+  keys rather than merely non-empty), and it is the **keystone of the whole Article 17 story**:
+  `--tenant-deletion-routes` is skipped outright when no chain producer exists, printing *"needs the
+  forensic chain (--audit-chain-config)"*. So the compliance surfaces sit behind the one flag that
+  carries a credential — and ADR-0301's rule says a credential reaches this process through the
+  environment, which means this flag wants an env route for its keypair before it wants a volume.
+
+**`--workflow-workers` and `--schedule-ms` are inert rather than off.** `JOB_HANDLER_PROVIDERS`
+ships empty and `erp-core` declares 14 jobs, so the job worker refuses `no_job_handlers` and the
+timer and activity workers refuse `no_definitions` — all three print their reason and the server
+boots. `--schedule-ms` is worse than inert: it enqueues a run per fire into a queue nothing drains,
+and the shipped crons include `*/15`, so a deployment that passes it alone accumulates pending rows
+for ever. Read the boot log after each `docker compose up -d`: every one of these names what is
+missing.
 
 ### The self-hosted model, if you want one
 

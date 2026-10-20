@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 370 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 371 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 20,123 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 20,136 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -1878,6 +1878,57 @@ type errors.
   checkpoints were destroyed — a remedy that cannot work (ADR-0334), measured and named as the top
   open end rather than speculated, and closing it means reading the chain's own memory of a prior
   witness, which makes one pass's verdict an input to the next.
+
+  ADR-0376 is the first increment to touch the **deployment** rather than the engine, and the class
+  is **a default that is not a default, and a surface that does not say it is there**. It takes the
+  register's oldest P0 item — the shipped compose mounts no background subsystem — and finds that
+  its framing was the wrong question: of eleven absent flags only **three** were a default decision,
+  and measuring the three refuted the register on one, refuted **this increment's own first draft**
+  on another, and turned up a defect in the binary that was in no register entry.
+  *The defect:* the drain-absence warning was gated on `senderWiring.report.channels.length > 1`,
+  and `buildSenderRegistryFromEnv` registers `in_app` **unconditionally** while the shipped compose
+  sets no SES or Twilio variable — so `channels` is exactly `["in_app"]`, length 1, and the warning
+  was **unreachable on every deployment that ships**. Boot printed `[notify] channels: in_app` and
+  stopped, which reads as "in-app notices work", and `DeliveryScheduler` is the *only* delivery path
+  in the binary, so with no drain nothing was delivered on any channel — the
+  looks-healthy-sends-nothing failure the comment on that gate said it existed to prevent. The gate
+  could not have been right at **any** value, because `in_app` makes `>= 1` a tautology; the honest
+  axis is the **store**, where a Postgres store with no drain has a remedy to name and `--store
+  memory` refuses the flag at parse and builds no notification store at all (ADR-0334's `missing` vs
+  `not applicable`). Verified live in three arms as a non-owner.
+  *The withdrawal is the better half.* `--read-state-routes --read-state-role platform_admin` was a
+  default in a draft, measured end to end (every badge fetch answers **404** today; with the flag,
+  **200** `{"scope":"self"}` through a session minted by the documented bootstrap) — and then
+  withdrawn, because `markNoticeRead` and `markReadThrough` have **zero consumers** in
+  `operate-web`, **no page lists notifications at all** (`/inbox` is the approvals inbox over entity
+  records, a different subject) and the badge counts unread in_app notices. So the default would
+  replace a *decaying* approximation with a true count nothing can ever reduce, which is ADR-0334's
+  remedy-that-cannot-work one notch out. It is blocked on a **surface**, not on a default, and the
+  absence is fenced with its reason. Beside it, the grant was measured to protect nothing:
+  `resolveViewer` takes the viewer from `principal.principalId` unconditionally and
+  `bodyNamesAViewer` refuses a body naming one, so `allowedRoles` gates a principal's access to its
+  **own** row — ADR-0364's argument for `/v1/account/password` needing no grant, at a second surface.
+  *`--tenant-status-gate` is on, and ADR-0334's reason for leaving it off is retired by
+  measurement:* the shipped key carries `platform_admin`, which reaches **0 of 255** (ADR-0365), so
+  `GET /v1/vendors` with it was *already* a 403 and the gate only improves the diagnosis — while an
+  api-key naming the placeholder tenant **with an ERP role** was served **200 over a tenant that has
+  no `meta.tenants` row**, writing records under a `tenant_id` with no parent. Serving an
+  unprovisioned tenant is not "working" (ADR-0338), and the boot survey names it by uuid before the
+  first request.
+  *And the documented bootstrap was one step short of runnable in all three documents*, which is
+  ADR-0364's addendum class for the fifth time: every version omitted creating the tenant, so the
+  membership grant answered **422** `meta.tenants has no row for the id this grant names` on every
+  fresh deployment and there was no documented source for the uuid it wanted — the id is **minted by
+  the server**, which is also why `OPERATE_ADMIN_API_KEY`'s placeholder can never name a real
+  tenant. The step it called shell-only has been an HTTP route since ADR-0364, authorised by a
+  **grant** the compose passes and satisfied by that same api-key (200 with `x-api-key` alone,
+  measured), so its stated reason — *"reaching that route needs a session, which needs a
+  password"* — was true of the console and false of the route. `ORACLE.md` additionally still
+  carried ADR-0369's pre-fix claim and told an operator to keep a **spare tenant** for themselves to
+  work around it. `deployment-defaults.test.ts` is the **first fence over `deploy/`**, which is the
+  increment's own class answered one level up: the compose is not typechecked, not linted and
+  imported by nothing, so a deleted line there is invisible to all twelve rules and every test —
+  exactly how `docker-compose.ai.yml` came to be ten flags behind the base.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -4635,6 +4686,21 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   live, and the no-match is named in the log rather than overwritten. The sets are chosen so a
   no-match still leaves the handle's claim true: `markPendingDeletion`'s complement is
   `{pending_deletion, deleted}` and both block writes, which a test asserts.
+  **The drain and the read-state routes announce themselves, and the drain-absence warning can
+  fire** (ADR-0376). Eighteen bracketed boot surfaces print a line and those two printed nothing:
+  `[notify]` said which channels were registered and never whether anything would be delivered, and
+  `[read-state]` had three warnings for its *refusal* branches and no line on success — so the one
+  mount an operator could not confirm from the log was the one whose client silently falls back. The
+  drain-absence warning's gate was `senderWiring.report.channels.length > 1` against an `in_app`
+  sender that is registered **unconditionally**, so it was unreachable on every shipped deployment;
+  it is gated on the **store** now, which is the only axis where the two states differ in remedy, and
+  it says that `in_app` is included because that is the clause an operator disbelieves. The
+  `[read-state]` line names the **granted roles**, because the grant is per role and the flag is
+  repeatable, so a console user whose membership carries a role not on that line is silently on the
+  recency approximation — and the grant was measured to protect nothing anyway (`resolveViewer` takes
+  the viewer from `principal.principalId` unconditionally and `bodyNamesAViewer` refuses a body
+  naming one, so it gates a principal's access to its own row; `backfillRoles` is the one that gates
+  something).
   **Per-viewer notification read state is reachable over HTTP** (`--read-state-routes`, ADR-0331),
   closing ADR-0309's tables-with-no-writer: mark one notice read, move a read-through watermark, read
   an unread count. The viewer is **always the credential** and a body naming one is *refused* rather
@@ -6196,6 +6262,20 @@ isolated copy of the package instead, which is the better answer when more than 
   *because* a defective row is the thing being looked for. A single-row read that throws is correct
   and is excluded structurally (63 of them), because there the caller asked about that row and
   ADR-0289 says it must not be served past.
+  **And a flag the deployment does not pass is outside every one of them** (ADR-0376), which is the
+  **tenth** reading and the first that is not about source code at all.
+  `deploy/docker-compose.yml` is not typechecked, not linted, imported by nothing and read by no
+  rule, so a flag deleted from the `api` command is invisible to all twelve workspace rules and to
+  every one of the 20k tests — which is exactly how `docker-compose.ai.yml` came to be ten flags
+  behind the base, including `--credential-login`, so the whole self-hosted-AI path shipped with no
+  login (ADR-0364's addendum). A fake connection is irrelevant and so is a real one: every flag the
+  binary *does* receive is parsed, validated and refused correctly; what is wrong is which flags it
+  receives. `deployment-defaults.test.ts` reads the file as text, parses the `command:` list and
+  asserts the two defaults with the measurement that earned each **and the absence of the third with
+  its reason** — the one *absence* fenced here, because `--read-state-routes` reads as a free win
+  and is not. It also fences ADR-0301's `--api-key`-on-argv instance by name and the documented
+  bootstrap's step ordering. What it cannot see is whether a flag the compose passes is one this
+  deployment should pass, which is the per-flag judgement the register's P0.3 entry holds.
   **And a query that is missing a predicate satisfies all of them** (ADR-0359), which is the blind
   spot the rules share rather than a seventh reading. Every one of them asks whether a column
   exists, whether an `INSERT` is complete, whether a live database admits a value, whether a CHECK
@@ -6337,6 +6417,27 @@ Two constraints worth knowing before suggesting a host:
   `COLUMN_ENCRYPTION_SECRET` is in the compose `environment:` block and **never** in `command:`,
   because argv is readable via `ps`; the compose file also says what switching `OPERATE_PACK` to
   `erp-healthcare` or `erp-government` requires, since that is where an operator meets the refusal.
+- **Two background flags are defaults now, and a third is deliberately not** (ADR-0376). The `api`
+  command passes `--notification-drain-ms 15000` — without which **nothing** is delivered on any
+  channel, `in_app` included, since `DeliveryScheduler` is the only delivery path — and
+  `--tenant-status-gate`, which converts a **200 over a tenant with no `meta.tenants` row** into a
+  403 naming it. Expect one boot **error** line on a fresh stack
+  (`[tenant-status] 1 configured API-key tenant(s) have no meta.tenants row …`): it is correct, it
+  is about `OPERATE_ADMIN_API_KEY`'s placeholder uuid, `/v1/platform` is exempt so the bootstrap
+  still runs, and it is documented in both the compose comment and `README.md` so it does not read
+  as the default having broken the deployment. `--read-state-routes` is **withheld with its reason
+  written down**: mounting it works and the inbox badge has nothing that can clear what it then
+  counts, so it is blocked on a notifications page rather than on a decision.
+  `deployment-defaults.test.ts` fences all three — the two presences and the one absence.
+- **The documented bootstrap is five curls and no shell** (ADR-0376). `deploy/.env.example` omitted
+  **creating the tenant**, so its step 2 was a `422 meta.tenants has no row for the id this grant
+  names` on every fresh deployment; the id is minted by the server (`{slug, name}`, and an `id` key
+  is a 400), which is why the api-key's tenant uuid is a placeholder that can never name a real
+  tenant. And the password step it called shell-only has been an HTTP route since ADR-0364,
+  authorised by the `--credential-admin-role` *grant* the compose passes and satisfied by the
+  bootstrap api-key — `set-credential` is the documented fallback, not the only path. `ORACLE.md`
+  carried ADR-0369's pre-fix one-role claim and told an operator to keep a spare tenant to work
+  around it; one membership with `secondaryRoles` is the answer and the commands grant both.
 - **The compose file no longer contradicts its own comment** (ADR-0357). It carried that `ps`
   sentence and then passed `--api-key ${OPERATE_ADMIN_API_KEY}` in `command:` nine lines down —
   the one credential on the stack that can provision and delete tenants — because the flag was the
@@ -8576,6 +8677,20 @@ by it**.
    `README.md:410`'s *"nothing defaults the ceiling … switching an existing deployment from
    10,000/60s on upgrade would refuse traffic that works today"* (ADR-0338's rule), and declaring it
    retires ADR-0337's six `rate_limit_decision_not_found` replay findings.
+   **ADR-0376 landed two of those three and withdrew the read-state one, correcting the citation in
+   the process: `:272` has no consumer at all.** `markNoticeRead` (`:241`) and `markReadThrough` (`:272`)
+   are both callerless in `operate-web`, **no page lists notifications** — `listNotifications` is
+   reached only by the badge's own fallback and by `/setup`, which filters to design-review
+   decisions — and `/inbox` is the *approvals* inbox over entity records, which `Sidebar.tsx`'s own
+   comment says is a different subject. So mounting the route replaces a **decaying** approximation
+   with a true unread count nothing in the UI can ever reduce, which is ADR-0334's
+   remedy-that-cannot-work: a number that only goes up is not information. It is blocked on a
+   **surface** — a notifications page with a mark-read affordance — and the absence is now fenced
+   with that reason in `deployment-defaults.test.ts`. The `--tenant-status-gate` verdict held but
+   **not for the reason given**: that the directory read works for any role answers a different
+   question, and the decisive measurement is that the shipped `platform_admin` key was already 403
+   on every entity route (ADR-0365's 0 of 255) while an api-key naming the placeholder tenant with
+   an *ERP* role was served **200** over a tenant with no `meta.tenants` row.
    **Four are blocked by a missing mechanism rather than an undecided default, and the mechanism is
    one line that does not exist: the `api` service declares no `volumes:` key at all** (measured
    top-level keys: `build`, `depends_on`, `environment`, `command`, `expose`, `ports`, `healthcheck`,
@@ -8585,6 +8700,19 @@ by it**.
    be followed for any of them. That is ADR-0364's addendum class (the `.env.example` curl naming a
    port the stack published nowhere) in the document an Oracle operator actually follows, and it wants
    a documented Ed25519 keypair-generation step beside it.
+   **ADR-0376 corrected that grouping and it changes the deliverable: the four are not peers.**
+   Measured, `CheckpointConfigSchema.safeParse({})` and `IntegrityProofConfigSchema.safeParse({})`
+   both succeed **fully defaulted** (every field has a default, `intervalMs: 3600000` and
+   `includePlatform: true` among them), and `--deletion-capabilities` is a six-key declaration with
+   no secret — so three are ordinary committable config and one `volumes:` mount serves them. The
+   fourth is different in kind: `AuditChainConfigSchema` requires `privateKeyBase64` and
+   `publicKeyBase64`, validated as real Ed25519 keys rather than merely non-empty, so it is a
+   **credential**, which ADR-0301 says reaches this process through the environment and not through a
+   file. And it is the **keystone of the whole Article 17 story** rather than one of four peers:
+   `node.ts` skips `--tenant-deletion-routes` outright when `auditChainProducer === null`, printing
+   *"needs the forensic chain (--audit-chain-config)"*, so every compliance surface sits behind the
+   one flag carrying a private key. A volume for three plus an env route for one, not one mount for
+   four.
    **`--deletion-capabilities` is additionally a category error in the list above**: it mounts
    *nothing* on its own — `--tenant-deletion-routes` needs `conn` **and** an audit chain producer
    **and** the capabilities **and** `--tenant-deletion-role` — and the three surfaces
@@ -8614,6 +8742,13 @@ by it**.
    prevent, and it makes `README.md:522`'s *"Without the drain flag nothing is sent at all, and the
    API says so at boot"* **false for every deployment that ships**. It belongs in the same change as
    the three defaults.
+   **ADR-0376 landed two of the three defaults, fixed that gate, and withdrew the third on a
+   measurement** — see *A default that is not a default* below. Two corrections to this entry's own
+   figures while it was being measured: the README defect is **two** sentences and not one (`:517`'s
+   *"Out of the box only in-app notices are delivered"* is false for the same reason as `:523`'s
+   second clause, since the drain is the only delivery path for `in_app` too), and the gate could not
+   have been right at **any** value rather than wanting a lower threshold — `in_app` is registered
+   unconditionally, so `>= 1` is a tautology dressed as a threshold and the honest axis is the store.
    One further measurement worth carrying, because it is a fence that holds for the wrong reason:
    `enqueueScheduledJobs` is a bare `conn.query` with **no tenant context**, and `meta.job_runs`
    carries exactly one `ALL`-scope isolation policy with no platform arm — so as a non-owner that
@@ -8786,7 +8921,7 @@ three make the rest honest, cheap or verifiable.
    P2 item 14's third clause, from the other end.)
 3. **No CI, no git hook, no smoke, e2e, load or migration test** — while `strategy/ci.ts` models
    triggers, budgets and a topological sort with no reader. No `.github/workflows`, no
-   `core.hooksPath`, so the twelve rules and 20,123 tests run only when a human types `pnpm -r test`,
+   `core.hooksPath`, so the twelve rules and 20,136 tests run only when a human types `pnpm -r test`,
    and this file's instruction never to use `--no-verify` describes a guardrail that does not
    exist. `operate-web` has **zero tests** against 15 pages and 34 unfenced `fetch` sites — the
    serialized-body boundary that shipped a broken console button for an hour (ADR-0335).
@@ -8844,7 +8979,15 @@ three make the rest honest, cheap or verifiable.
     `/platform/users` + `/platform/users/[id]` + a Members panel provision people, move their
     status, grant and revoke memberships and set a first password, and `/account` is the
     self-service change. Nothing else here moved: no workflow view, no report builder, no incident
-    surface, no deletion-request surface, no preferences page. ADR-0369 made `/account`'s
+    surface, no deletion-request surface, no preferences page — **and no notifications page**, which
+    ADR-0376 established while trying to default `--read-state-routes` on: `listNotifications` is
+    reached only by `Sidebar.tsx`'s badge fallback and by `/setup` (filtered to design-review
+    decisions), `markNoticeRead` and `markReadThrough` are **callerless**, and `/inbox` is the
+    *approvals* inbox over entity records rather than a notification inbox. So the nav badge counts a
+    set the UI neither displays nor can clear, which is why that flag is withheld rather than
+    defaulted; the page plus a mark-read affordance is the smallest piece that makes it landable, and
+    it is the one UI gap whose server surface is already built and waiting.
+    ADR-0369 made `/account`'s
     **Other roles** field populate for the first time at a cost of **zero** web changes — it reads
     `UiViewer.roles`, which `ui-schema.ts` has always built from the full list, so it had rendered
     `—` for every viewer in every deployment. **The viewer's identity is still
@@ -9273,7 +9416,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 370 records; 291 Accepted, 79 Proposed (the
+title or status change cannot drift. 371 records; 292 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

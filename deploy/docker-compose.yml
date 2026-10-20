@@ -348,6 +348,62 @@ services:
       - "50"
       - --ai-max-request-dollars
       - "2"
+      # Nothing in this binary delivers a notification except the drain, `in_app` included -- so
+      # without this flag the review decision this file turns on above is written to
+      # `meta.notification_dispatches` and never reaches the tenant, and the inbox is permanently
+      # empty. 15s because the only live producer here is a human approving a design: the latency
+      # that matters is "did the tenant hear", not throughput.
+      #
+      # Measured, which is why it is a default rather than a note: boot used to print
+      # `[notify] channels: in_app` and NOTHING else, because the drain-absence warning was gated on
+      # `channels.length > 1` and this stack configures no SES or Twilio variable -- so the one line
+      # an operator read said the channel was registered and nothing said it would never be sent.
+      - --notification-drain-ms
+      - "15000"
+      # NOT HERE, DELIBERATELY: `--read-state-routes --read-state-role <r>`. It was a default in a
+      # draft of this file and the measurement took it back out, which is worth the paragraph
+      # because the flag looks like a free win and is not.
+      #
+      # Mounting it does work: every badge fetch in `operate-web` answers 404 today
+      # (`no route for GET /v1/notifications/unread`, measured) and the client falls back to a
+      # recency approximation over the last 50 notices, where with the flag it answers 200 with the
+      # real per-viewer count (also measured, through a session minted by the bootstrap below).
+      # What has no surface is CLEARING it: `markNoticeRead` and `markReadThrough` exist in
+      # `operate-web/lib/notifications.ts` with ZERO consumers, no page lists notifications at all
+      # (`/inbox` is the approvals inbox over entity records, a different subject), and the badge
+      # counts unread in_app notices. So the flag would replace a decaying approximation with a true
+      # count that nothing in the UI can ever reduce -- a number that only goes up is not
+      # information, and a remedy that cannot work is worse than naming none (ADR-0334).
+      #
+      # It is blocked on a SURFACE and not on a default decision: a notifications page plus a
+      # mark-read affordance, and then this flag on the same day. The boot log names the granted
+      # roles when a deployment does pass it. Note also that the base grant protects nothing --
+      # `resolveViewer` takes the viewer from the credential unconditionally and a body naming one
+      # is refused, so the role check gates a principal's access to its own row (ADR-0364 made that
+      # argument for /v1/account/password needing no grant); the backfill role is the one that does.
+      #
+      # Enforce `meta.tenants.status` on every request: a suspended, archived or pending_deletion
+      # tenant is read-only and a deleted one is refused. `/v1/platform` routes are exempt, because
+      # the gate answers for the tenant a request ACTS ON and a platform route acts on the
+      # deployment -- which is what keeps the bootstrap above runnable, since OPERATE_API_KEY_SPECS
+      # names a placeholder tenant uuid that has no `meta.tenants` row.
+      #
+      # ADR-0334 left it opt-in on the stated grounds that on-by-default "would refuse requests of a
+      # deployment that works today". Measured on this stack, it does not: the shipped key carries
+      # `platform_admin`, which grants 0 of erp-core's 255 (entity, operation) pairs, so
+      # `GET /v1/vendors` with it was ALREADY a 403 and the gate only changes which 403 and improves
+      # the diagnosis. What it does change is the case an operator reaches by following the comment
+      # on OPERATE_ADMIN_API_KEY above -- an api-key naming "any placeholder tenant uuid" with a real
+      # ERP role was served **200 over a tenant that has no row**, writing records under a tenant_id
+      # with no parent. The gate makes that a 403 naming the tenant, and the boot survey lists every
+      # such configured tenant by uuid BEFORE the first request.
+      #
+      # So EXPECT A BOOT ERROR LINE on a fresh stack and do not read it as the default having broken
+      # the deployment: `[tenant-status] 1 configured API-key tenant(s) have no meta.tenants row and
+      # EVERY request from them will be refused 403: 00000000-...-000000000000`. It is correct and it
+      # is about the placeholder above. It goes away by pointing a key at a provisioned tenant, which
+      # you can only do after step 1 of the bootstrap, since the id is minted by the server.
+      - --tenant-status-gate
     expose:
       - "8787"
     # Published on the LOOPBACK ONLY, which is what makes the documented bootstrap runnable.
