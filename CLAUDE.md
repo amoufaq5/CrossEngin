@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 20,118 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 20,123 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -1707,15 +1707,18 @@ type errors.
   then said **67** and **44**, which were right when written and wrong one increment later, because
   ADR-0374 migrated `listRecent` and `getBySequence`: both figures move with every slice that
   migrates a store, which is why this entry says to **re-derive them by calling the module** —
-  `scanWorkspacePageReads(readWorkspaceSources())` over `VERDICT_NEEDS_DECLARATION` — rather than
-  reading them here. As of ADR-0375 the module answers 943 files, 111 sites, 65 needing a
+  `scanWorkspacePageReads(readWorkspaceSources().files)` over `VERDICT_NEEDS_DECLARATION` — rather
+  than reading them here. As of ADR-0375 the module answers 907 files, 111 sites, 65 needing a
   declaration, 65 declared, 42 of them `unmigrated`, and `{guarded_by_primitive: 16,
   guarded_in_place: 2, record_throwing: 50, record_total: 11, record_dropping: 2, projection: 30}` —
-  `scanCheckpoints` is the new `guarded_by_primitive` member, so it needs no declaration. The
-  figure recorded one increment earlier, `906 files`, was **stale when it was written**: measured in
-  a worktree at that increment's own commit, the module answers **942**, and this tree adds exactly
-  one non-test source file. So the file count moved by 1 and not by 37, and the entry it was written
-  into is the one telling the reader to re-derive. Re-derive; do not diff.)
+  `scanCheckpoints` is the new `guarded_by_primitive` member, so it needs no declaration.
+  ADR-0374's `906 files, 110 sites` was **right when it was written** and moved by exactly one of
+  each; ADR-0375's first draft of this sentence recorded **943**, which is
+  `readWorkspaceSources().files.length` — the *input* including tests, where `scan.files` is the
+  module's answer — and then "corrected" the earlier figure by comparing input against answer. So
+  the paragraph whose whole content is *re-derive* argued from a quantity nothing produces, and
+  `.files` is in the call above because omitting it throws rather than answering wrongly.
+  Re-derive; do not diff, and read the field name.)
   The two live members show the two routes to that silence: one makes the **row** unreadable
   (the sweep stops), the other makes the **evidence** unreadable in a way the contract tolerates (the
   detector answers *cannot say*, which is not a defect).
@@ -1842,11 +1845,28 @@ type errors.
   all — two destroyed entries of a tamper-evident audit log, hidden by editing the witness. A third
   arm needs no sequence edit: `root_hash := 'f'*64` on the tail anchor reads `verified` on **both**
   modes.
-  `scanCheckpoints` + `anchor-audit.ts` read the table as a set and cross-check it, which closes all
-  of that; the honest limit is that **the fix recovers the evidence that a witness was altered, not
-  the truncation itself** — once a witness is edited the truncation it would have proven is
-  unprovable, and what survives is proof of the edit (both lowered anchors come back
-  `root_hash_mismatch`, because their root hashes name entries the cut destroyed). With a sound
+  `scanCheckpoints` + `anchor-audit.ts` read the table as a set and cross-check it, which closes
+  every arm above; the honest limit is that **the fix recovers the evidence that a witness was
+  altered, not the truncation itself — and only for an edit that leaves `root_hash` behind** — once a
+  witness is edited the truncation it would have proven is unprovable, and what survives is proof of
+  the edit *because the stale root hash is still there* (both lowered anchors come back
+  `root_hash_mismatch`, because their root hashes name entries the cut destroyed). **An adversarial
+  pass over the commit found the other half of that sentence, and it bounds the whole increment: a
+  two-column `UPDATE` defeats the correspondence rule.** `disagreementFor` asks three questions and
+  every "no" falls through to *no finding*, which is deliberate for the case the truncation check owns
+  (an anchor the chain does not reach yet) and is also what setting both columns produces. Measured
+  by the same single statement as the same non-owner role: lowering each anchor **and** setting its
+  `root_hash` to the surviving entry at its new sequence reads `verified truncated=false witness=2
+  disagree=[] causes=[]`, byte-identical to a healthy scope; raising one to 99 **and** `root_hash :=
+  'f'*64` restores the false `chain_truncated` sev1. Neither costs the attacker anything extra — the
+  destination entry's hash is readable from the chain, and `UNIQUE (tenant_id, sequence_number)` only
+  needs the destination sequence free, which it is wherever an anchor moves *down* off its own. So
+  this raises the cost of the cheap edits and closes none of the dear ones, and the two-column form is
+  **quieter than the `DELETE`** below it, which at least leaves `witness=null` for an operator to see.
+  It is the top open end; the obvious detector beside it (`checkpointed_at` compared against
+  `sequence_number`'s order) is recorded **with its refutation**, because it reaches neither arm — the
+  lowering moves the anchors *in order*, so both orders are the same permutation, and the raising
+  moves one row, which is trivially monotonic. With a sound
   set-wide detector the scheduler anchors again, so `CHAIN_FULL_REASON_BLOCKS_ANCHORING`,
   `anchoringWouldBury` and `refused_anchor_would_bury` are **deleted** rather than relaxed — which
   corrects ADR-0374's own prediction of a "one-line relaxation", refused by the fence it shipped
@@ -4327,7 +4347,13 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   witness; neither → the chain does not reach this anchor, which is deliberately **not** a
   disagreement and **is** a witness, because that is exactly what truncation looks like and
   `ChainTruncationCheck` is its subject (folding it in would report one fact as two causes *and* take
-  the witness away from the check that needs it). `disagreeing: null` means the correspondence was
+  the witness away from the check that needs it). **That fourth outcome is also the rule's measured
+  limit, and it is stated where the code is rather than only in the ADR**: it is what a **two-column**
+  `UPDATE` produces, so setting `sequence_number` and `root_hash` in one statement hides a truncation
+  under a report byte-identical to a healthy scope's and restores the false `chain_truncated` sev1 the
+  one-column form no longer produces. Narrowing it is not available here — an anchor the chain does
+  not reach *is* the truncation signature, so the fourth outcome cannot distinguish the two from the
+  anchor table alone, and closing it needs evidence that table does not hold. `disagreeing: null` means the correspondence was
   **not asked**, never "none found" (ADR-0331), and it is asked only over a chain the reader refused
   no row of — the maps would otherwise be incomplete and an anchor pointing at a refused entry would
   be named `root_hash_mismatch`, a finding attributed to the wrong table, while `chain_row_refused`
@@ -6566,25 +6592,40 @@ opened them.
   into a valid-shaped lie is a named finding rather than a silent `verified` or a false
   `chain_truncated`. The scheduler anchors again and reports what it anchored over, which is why
   `CHAIN_FULL_REASON_BLOCKS_ANCHORING`, `anchoringWouldBury` and `refused_anchor_would_bury` are gone.
-  What remains, in order: **(1)** **a tenant can `DELETE` its own checkpoint rows**, and that leaves
+  What remains, in order: **(1)** **a two-column `UPDATE` defeats the correspondence rule**, found by
+  an adversarial pass over the commit and measured both ways as the same non-owner role: setting
+  `sequence_number` and `root_hash` in one statement hides a real truncation under a report
+  byte-identical to a healthy scope's, and restores the false `chain_truncated` sev1 the one-column
+  form no longer produces. `disagreementFor`'s three questions all fall through to *no finding*, which
+  is deliberate for the case the truncation check owns and is also what the two-column edit looks
+  like. No dearer to the attacker (the destination entry's hash is readable from the chain, and
+  `UNIQUE (tenant_id, sequence_number)` only needs the destination sequence free) and **quieter than
+  the `DELETE` below**, which at least leaves `witness=null`. Closing it needs evidence the anchor
+  table does not hold, which is the same Option G as (2) or an anchor table that is itself chained;
+  the obvious cheap detector — `checkpointed_at` against `sequence_number`'s order, which today is
+  compared against nothing — is recorded **with its refutation**, since it reaches neither arm (the
+  lowering moves the anchors in order, so both orders are one permutation; the raising moves one row).
+  **(2)** **a tenant can `DELETE` its own checkpoint rows**, and that leaves
   no witness, no finding and a remedy that cannot work — measured, all three anchors deleted reads
   `verified witness=null` with the formatter printing *"no checkpoint yet — run the checkpoint
   scheduler"*. The chain already remembers what the last verdict saw (`integrityVerdictPayload`
   commits `truncation.checkpointSequence` to a signed entry) and `witnessSequence` is monotone
   non-decreasing, so a drop is evidence — but reading it makes one pass's verdict an **input** to the
   next, needs an answer for the no-prior-verdict case, and is conditional on `recordVerdict`. Its own
-  increment. **(2)** `verify-chain` asks the correspondence in **neither** mode, because neither fold
+  increment, and the same one that closes (1). **(3)** `verify-chain` asks the correspondence in
+  **neither** mode, because neither fold
   hands its entries back and a bounded command must not read the prefix; closing it means a shape
-  change or a second whole-chain load for the manual auditor. **(3)** the scan is a sequence of
+  change or a second whole-chain load for the manual auditor. **(4)** the scan is a sequence of
   per-statement snapshots inside one transaction, so a row whose `sequence_number` is edited between
   two pages can fall between them — `REPEATABLE READ` would close it and `withTenantContext` issues
-  `set_config` first, so the isolation level cannot be set late. **(4)** `root_hash_mismatch` cannot
+  `set_config` first, so the isolation level cannot be set late. **(5)** `root_hash_mismatch` cannot
   say whether the anchor or the entry was altered, and saying so is better than guessing; a chained
-  anchor table would, at the cost of a second chain. **(5)** the aperture half is reachable on a
+  anchor table would, at the cost of a second chain — and it is the same mechanism (1) needs, so the
+  two compose. **(6)** the aperture half is reachable on a
   deployment that has not run ADR-0374's standing manual `ALTER`s, which is the live population and
-  is that increment's own open end 2. **(6)** a deployment with more checkpoints than the ceiling
+  is that increment's own open end 2. **(7)** a deployment with more checkpoints than the ceiling
   reports `unproven` for ever; the default is 1,000,000 rows, which is a century of hourly passes per
-  scope, and no flag exposes it because nothing needs one yet. **(7)** the class behind face 2 is
+  scope, and no flag exposes it because nothing needs one yet. **(8)** the class behind face 2 is
   **a column whose correctness is defined by another table, and which nothing compares** — no
   workspace rule asks it, and it is not P2.12b (a contract field against its own column) but the
   cross-table form. It is partly covered by hand where somebody thought of it: `isAnchoredByChain`
@@ -8745,7 +8786,7 @@ three make the rest honest, cheap or verifiable.
    P2 item 14's third clause, from the other end.)
 3. **No CI, no git hook, no smoke, e2e, load or migration test** — while `strategy/ci.ts` models
    triggers, budgets and a topological sort with no reader. No `.github/workflows`, no
-   `core.hooksPath`, so the twelve rules and 20,118 tests run only when a human types `pnpm -r test`,
+   `core.hooksPath`, so the twelve rules and 20,123 tests run only when a human types `pnpm -r test`,
    and this file's instruction never to use `--no-verify` describes a guardrail that does not
    exist. `operate-web` has **zero tests** against 15 pages and 34 unfenced `fetch` sites — the
    serialized-body boundary that shipped a broken console button for an hour (ADR-0335).

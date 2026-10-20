@@ -16,6 +16,7 @@ import { unreadableDetail, type PgConnection, type RowRead, type UnreadableRow }
 
 import {
   ANCHOR_DISAGREEMENT_KINDS,
+  MAX_REPORTED_ANCHOR_DISAGREEMENTS,
   MAX_REPORTED_ANCHOR_REFUSALS,
   anchorAuditDisproves,
   anchorAuditHasFindings,
@@ -186,18 +187,28 @@ async function audit(
   return auditScripted(scope, chain, { pages });
 }
 
-/** A report literal for the predicates and the formatter, which are pure over one. */
+/**
+ * A report literal for the predicates and the formatter, which are pure over one.
+ *
+ * `disagreeingCount` is **derived after the spread** rather than defaulted in the base, because a
+ * fixture overriding `disagreeing` and leaving the count at 0 would assert the opposite of the shape
+ * it names — `anchorAuditDisproves` reads the count. An explicit override still wins, which is how
+ * the cap is exercised.
+ */
 function reportOf(over: Partial<AnchorAuditReport> = {}): AnchorAuditReport {
-  return {
+  const base: AnchorAuditReport = {
     scope: TENANT_A,
     scanned: 0,
     complete: true,
     refused: [],
     refusedCount: 0,
     disagreeing: [],
+    disagreeingCount: 0,
     witnessSequence: null,
     ...over,
   };
+  if (over.disagreeingCount !== undefined) return base;
+  return { ...base, disagreeingCount: base.disagreeing === null ? null : base.disagreeing.length };
 }
 
 describe("ANCHOR_DISAGREEMENT_KINDS", () => {
@@ -469,6 +480,57 @@ describe("the refusal cap", () => {
   });
 });
 
+describe("the disagreement cap", () => {
+  const TOTAL = MAX_REPORTED_ANCHOR_DISAGREEMENTS + 7;
+
+  /**
+   * Every anchor contradicted at its own sequence, which is the benign trigger rather than a
+   * tamperer: a restore from backup, or any change to `canonicalEntryBytes`, puts the whole table in
+   * this state at once. Spread across pages, because the cap is a property of the fold.
+   */
+  async function manyDisagreeing(): Promise<AnchorAuditReport> {
+    const anchors = Array.from({ length: TOTAL }, (_, n) => checkpoint(n + 1, FOREIGN_HASH));
+    return audit(TENANT_A, chainTo(TOTAL + 1), [
+      page(anchors.slice(0, 20)),
+      page(anchors.slice(20)),
+    ]);
+  }
+
+  it("names at most the cap and still reports the whole figure", async () => {
+    const report = await manyDisagreeing();
+    expect(report.disagreeing).toHaveLength(MAX_REPORTED_ANCHOR_DISAGREEMENTS);
+    expect(report.disagreeingCount).toBe(TOTAL);
+    expect(report.scanned).toBe(TOTAL);
+  });
+
+  it("disproves from the count, so the verdict does not depend on the reporting bound", async () => {
+    const report = await manyDisagreeing();
+    expect(anchorAuditDisproves(report)).toBe(true);
+    // The assertion that earns the count's existence: a report whose list the cap emptied is still
+    // a disproof. Reading `disagreeing.length` here would answer `false`.
+    expect(anchorAuditDisproves({ ...report, disagreeing: [] })).toBe(true);
+  });
+
+  it("says in the formatter how many it did not name", async () => {
+    const lines = formatAnchorAudit(await manyDisagreeing()).join("\n");
+    expect(lines).toContain(`DISAGREES WITH THE CHAIN: ${TOTAL.toString()} anchor(s)`);
+    expect(lines).toContain("… and 7 more");
+  });
+
+  it("names every disagreement and adds no tally when there are fewer than the cap", async () => {
+    const report = await audit(TENANT_A, chainTo(4), [page([checkpoint(2, FOREIGN_HASH)])]);
+    expect(report.disagreeing).toHaveLength(1);
+    expect(report.disagreeingCount).toBe(1);
+    expect(formatAnchorAudit(report).join("\n")).not.toContain("more");
+  });
+
+  it("answers `null` for the count exactly when the correspondence was not asked", async () => {
+    const pages = [page([checkpoint(1)])];
+    expect((await audit(TENANT_A, null, pages)).disagreeingCount).toBeNull();
+    expect((await audit(TENANT_A, chainTo(2), pages)).disagreeingCount).toBe(0);
+  });
+});
+
 describe("a correspondence not asked for, against one asked and clean", () => {
   it("answers `null` with no chain in hand and `[]` with one", async () => {
     const pages = [page([checkpoint(1)])];
@@ -681,6 +743,7 @@ describe("auditAnchors reads the store through the scan and nothing else", () =>
     expect(Object.keys(report).sort()).toEqual([
       "complete",
       "disagreeing",
+      "disagreeingCount",
       "refused",
       "refusedCount",
       "scanned",

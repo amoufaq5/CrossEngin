@@ -217,6 +217,7 @@ export function noAnchorFindings(scope: string | null = null): AnchorAuditReport
     refused: [],
     refusedCount: 0,
     disagreeing: [],
+    disagreeingCount: 0,
     witnessSequence: null,
   };
 }
@@ -883,19 +884,32 @@ export function formatIntegrityProof(report: IntegrityProofReport): string {
   // this axis is answered on every pass: the anchor table is read before the audit rows are looked
   // at, so a scope with no anchored rows at all still reports what its checkpoints say.
   //
-  // Printed only when there is something to act on, which keeps the unattended line count of a
-  // healthy scope exactly what it was — the block this replaces was a loop over refused rows and so
-  // was silent on a clean pass too. The one thing a findings gate withholds is the audit's
-  // *correspondence was not asked* line, and that is sound here rather than merely cheap: this
-  // function's caller passes `null` for the chain only when the reader refused one of its rows, and
-  // those rows are already printed above and already drive the verdict.
+  // Printed when there is something to act on **or** when the truncation check fired, which keeps
+  // the unattended line count of a healthy scope exactly what it was — the block this replaces was
+  // a loop over refused rows and so was silent on a clean pass too.
+  //
+  // The `truncated` disjunct is not symmetry: without it, the one report that most needs the anchor
+  // table described is the one that withholds it. `chain_truncated` is raised **from the witness**,
+  // and a two-column edit (lower or raise a `sequence_number` *and* set a `root_hash` the chain
+  // cannot contradict) leaves the audit clean, so `anchorAuditHasFindings` is false while the
+  // report says `TRUNCATED: checkpoint at 99 but the chain ends at 4`. Measured against this
+  // module: an operator was told audit history had been destroyed and given no line saying how many
+  // anchors exist, which one claims that sequence, or that the audit stood behind it.
+  //
+  // A findings gate therefore withholds **two** lines on a clean pass, not one: the unconditional
+  // `checkpoints: N row(s) scanned…` summary and the *correspondence was not asked* line. The
+  // second is sound for the reports this binary produces — `proveScopeIntegrity` passes `null` for
+  // the chain only when the reader refused one of its rows, and those rows are printed above and
+  // drive the verdict — and that is a statement about the producer rather than about the type,
+  // because `opts.prove` is a seam (see `readEveryRowFound`) and a caller may hand over a report
+  // whose content does not follow from how this binary would have built it.
   //
   // Indenting these lines into this report is what found `formatAnchorAudit`'s label: its first
   // line opened `anchors:` and so did the anchor half's below, about `meta.audit_log` rows anchored
   // **in** the chain — two lines about two tables under one prefix, which is the merge ADR-0373
   // refused as data and would have given away in output. It reads `checkpoints:` now, which is the
   // live run of this increment paying for itself before a deployment met the report.
-  if (anchorAuditHasFindings(report.anchorAudit)) {
+  if (anchorAuditHasFindings(report.anchorAudit) || report.truncation.truncated) {
     for (const line of formatAnchorAudit(report.anchorAudit)) lines.push(`  ${line}`);
   }
   if (report.anchors !== null) {

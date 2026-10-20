@@ -1842,8 +1842,9 @@ describe("table column shapes", () => {
     // pass filed `outcome: "error"` — no verdict, no finding, no stored row, no escalation, no page.
     // Measured live as a non-owner: this table's isolation arm is `ALL`-scope, so a tenant-context
     // `UPDATE` of its own checkpoint cancelled a `compromised` verdict about its own chain.
-    // (ADR-0375 replaced those two reads with a whole-table scan, so that is the history this CHECK
-    // was added for rather than the current call graph. The CHECK is the write fence either way.)
+    // (ADR-0375 replaced *one* of those two — the truncation read — with a whole-table scan; the
+    // one inside `verifyChainFromCheckpoint` remains, guarded, and still answers
+    // `fullBecause: "anchor_unreadable"`. The CHECK is the write fence either way.)
     expect(col("checkpointed_by")?.check).toBe("char_length(checkpointed_by) >= 1");
     // The sibling column, which was in the same state and is the one nobody was pointed at:
     // `externalAnchorReference` is `z.string().min(1).optional()`, so `''` is refused by the

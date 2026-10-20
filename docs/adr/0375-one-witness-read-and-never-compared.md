@@ -220,11 +220,15 @@ anything.
   ceiling stops degrades the verdict to `unproven`, which is honest and, at a default ceiling of
   1,000,000 rows, unreachable inside a century of hourly passes.
 
-  **The fix recovers the evidence that a witness was altered, not the truncation itself.** Once a
-  witness is edited the truncation it would have proven is unprovable; what survives is proof of the
-  edit. In the composed arm above, both lowered anchors come back `root_hash_mismatch` — their root
-  hashes name entries the cut destroyed — so the verdict is `compromised` and names the anchor table,
-  which is where the surviving evidence is.
+  **The fix recovers the evidence that a witness was altered, not the truncation itself — and only
+  for an edit that leaves `root_hash` behind.** Once a witness is edited the truncation it would have
+  proven is unprovable; what survives is proof of the edit, and it survives *because the stale root
+  hash is still there*. In the composed arm below, both lowered anchors come back
+  `root_hash_mismatch` — their root hashes name entries the cut destroyed — so the verdict is
+  `compromised` and names the anchor table, which is where the surviving evidence is. Set both
+  columns in the same `UPDATE` and nothing survives: the scope reads `verified` with a report
+  byte-identical to a healthy one, measured. So this is a cost-raising fix and not a closure, and the
+  residual is open question 1 rather than a line in this section.
 
 - **Neutral.** `verify-chain`'s `--format json` payload gains a level (`{chain, anchors}`); the
   command has no in-repo consumer. `ChainVerificationReport` is unchanged, deliberately: the audit is
@@ -384,11 +388,32 @@ and `0375-post-measured.txt`.
 | refused anchor at seq **1** (not newest) | `verified refused=0` | `compromised refused=1 causes=[checkpoint_row_refused]`, the row named as `checkpoint 1 (checkpointedBy: too_small)` |
 | refused anchor at seq **4** (the newest) | `compromised refused=1 mode=full` | same |
 | scheduler, over a refused anchor | `refused_anchor_would_bury recorded=[]` | `recorded=[4] findings=[refused=1]`, and the next pass still `compromised refused=1` |
-| anchor lowered 4 → 2 | `verified` | `compromised sequence_relocated matchedAt=3` |
-| anchor raised 3 → 99 | `compromised truncated=true causes=[chain_truncated]` (false) | `compromised truncated=false causes=[checkpoint_disagrees_with_chain]`, rendered *"anchor at 99: sequence_relocated, whose root hash is the entry at 3"* |
+| anchor lowered 4 → 2, **`sequence_number` only** | `verified` | `compromised sequence_relocated matchedAt=3` |
+| anchor raised 3 → 99, **`sequence_number` only** | `compromised truncated=true causes=[chain_truncated]` (false) | `compromised truncated=false causes=[checkpoint_disagrees_with_chain]`, rendered *"anchor at 99: sequence_relocated, whose root hash is the entry at 3"* |
 | `root_hash := 'f'*64` at the tail anchor | `verified` on both modes | `compromised root_hash_mismatch` |
-| chain cut, then every anchor lowered | **`VERIFIED`**, *"signatures valid (3 checked)"*, no truncation line | `compromised`, two `root_hash_mismatch` |
+| chain cut, then every anchor lowered, **`sequence_number` only** | **`VERIFIED`**, *"signatures valid (3 checked)"*, no truncation line | `compromised`, two `root_hash_mismatch` |
+| chain cut, then every anchor lowered **and its `root_hash` set to the surviving entry at its new sequence** | **`VERIFIED`** | **unchanged** — see below |
+| anchor raised 3 → 99 **and `root_hash := 'f'*64`** | `compromised truncated=true causes=[chain_truncated]` (false) | **unchanged** |
 | every anchor `DELETE`d | `verified witness=null` | unchanged — the named open question |
+
+**The correspondence rule catches a one-column edit and is defeated by a two-column one**, which an
+adversarial pass over this commit established and which bounds every `sequence_relocated` and
+`root_hash_mismatch` row above. `disagreementFor` asks three questions — is the entry at this
+sequence carrying this hash, does some *other* entry carry it, does an entry exist here at all — and
+every "no" falls through to `null`, which is deliberate for the case the truncation check owns (an
+anchor the chain does not reach yet) and is also what an edit to *both* columns produces. Measured on
+the same cluster, by the same single `UPDATE` as the arms above, as the same non-owner role: lowering
+each anchor **and** setting its `root_hash` to the surviving entry at its new sequence reads
+`verdict=verified truncated=false witness=2 refused=0 disagree=[] causes=[]`, with a report
+byte-identical to a healthy scope's; raising one to 99 **and** setting `root_hash := 'f'*64` reads
+`truncated=true causes=[chain_truncated]`, the same false paging sev1 this increment corrects for the
+one-column form. Neither costs the attacker anything extra — the destination entry's hash is readable
+from the chain, and on a tenant scope `UNIQUE (tenant_id, sequence_number)` only requires the
+destination sequence to be free, which it is wherever the anchor is being moved *down* off its own.
+So the honest statement is that this closes the cheap, single-column edits and leaves the two-column
+one, which is **quieter than the `DELETE` already named below**: a `DELETE` at least leaves
+`witness=null` and the formatter's "no checkpoint yet" line for an operator to see. It is the first
+open question now, above the `DELETE`.
 
 **The tail-anchor arm is the one that shows all three claims at once.** With the refused anchor *at*
 the tail: the pass reads `compromised mode=full fullBecause=anchor_unreadable witness=null`; one
@@ -433,7 +458,9 @@ the proof passes the whole one.
 
 | Question | Owner | Deadline |
 |---|---|---|
+| **A two-column `UPDATE` defeats the correspondence rule**, measured both ways above: setting `sequence_number` and `root_hash` in one statement hides a truncation under a report byte-identical to a healthy one, and manufactures the false `chain_truncated` sev1 the one-column form no longer produces. Quieter than the `DELETE` below and no dearer to the attacker. Closing it needs evidence the anchor table does not hold — the chain's own memory of a prior witness (Option G, which also closes the `DELETE`), or an anchor table that is itself chained. | Platform | 2026-11-30 |
 | A tenant can `DELETE` its own checkpoint rows, which leaves no witness, no finding and a remedy that cannot work. Close it by reading the chain's own memory of a prior `truncation.checkpointSequence` (Option G)? | Platform | 2026-11-30 |
+| **`checkpointed_at` is compared against nothing** — not against `sequence_number`'s order, not against the entry it anchors — so a reordering the correspondence rule cannot see leaves a timestamp that disagrees with it. Recorded with its refutation attached, because the obvious detector does **not** reach the two arms it would be built for: in the lowering arm the anchors move *in order* (3→1, 4→2), so sequence order and time order are the same permutation and a monotonicity check passes; in the raising arm one row moves, which is trivially monotonic. Building it on that justification would be a control that reports health it never established. | Platform | _N/A_ |
 | `verify-chain` does not ask the correspondence in either mode, because neither fold hands its entries back. Worth a shape change, or a second chain load for the manual auditor? | Platform | 2026-11-30 |
 | The scan is a sequence of per-statement snapshots, so a row whose `sequence_number` is edited between two pages can fall between them. Worth `REPEATABLE READ`, which `withTenantContext`'s statement order currently makes impossible to set? | Platform | 2026-12-31 |
 | `root_hash_mismatch` cannot say whether the anchor or the entry was altered. A chained anchor table would, at the cost of a second chain. | Platform | _N/A_ |

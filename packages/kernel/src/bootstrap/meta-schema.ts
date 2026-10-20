@@ -11441,9 +11441,12 @@ export const META_FORENSIC_CHAIN_CHECKPOINTS: TableDefinition = {
      * once inside `verifyChainFromCheckpoint` and once for the truncation check — so `''` stored made
      * the hourly pass file `outcome: "error"`: no verdict, no `onFinding`, no stored row, no
      * escalation, no page. **The tamper disabled the detector**, which is ADR-0373's graded way (3)
-     * on a read that increment did not route. (ADR-0375 removed that function's `latest()` reads
-     * altogether — it scans the whole table instead — so the sentence above is the history the CHECK
-     * was added for and not the current call graph.)
+     * on a read that increment did not route. (ADR-0375 removed **one** of those two — the
+     * truncation read, which is a whole-table scan now. The one inside `verifyChainFromCheckpoint`
+     * remains and is still reached on a bounded pass, guarded, where a refused anchor folds from
+     * genesis under `fullBecause: "anchor_unreadable"`. So the sentence above is the history the
+     * CHECK was added for; the surviving read is why `anchor_unreadable` is still a
+     * `ChainFullReason`.)
      *
      * Reachable by the tenant and not only by an owner: this table's isolation policy is `ALL`-scope,
      * so its `USING` doubles as its `WITH CHECK` and a tenant-context session may `UPDATE` its own

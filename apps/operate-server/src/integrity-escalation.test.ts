@@ -94,9 +94,15 @@ function report(over: Partial<IntegrityProofReport> = {}): IntegrityProofReport 
   };
 }
 
-/** An anchor audit over this scope, clean unless a field is overridden. */
+/**
+ * An anchor audit over this scope, clean unless a field is overridden. `disagreeingCount` is derived
+ * after the spread so overriding `disagreeing` cannot leave the count — which the verdict reads — at
+ * zero; an explicit override still wins.
+ */
 function anchorAudit(over: Partial<AnchorAuditReport> = {}): AnchorAuditReport {
-  return { ...noAnchorFindings(TENANT_A), ...over };
+  const base: AnchorAuditReport = { ...noAnchorFindings(TENANT_A), ...over };
+  if (over.disagreeingCount !== undefined) return base;
+  return { ...base, disagreeingCount: base.disagreeing === null ? null : base.disagreeing.length };
 }
 
 /** Records what the emitter was asked to write, without a database. */

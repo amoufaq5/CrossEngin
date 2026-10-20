@@ -66,8 +66,20 @@ export interface AnchorAuditReport {
    * row would be named `root_hash_mismatch`, which is a finding attributed to the wrong table. A
    * refused chain row already answers `compromised` on its own axis, so nothing is lost but a
    * sentence that would have been false.
+   *
+   * Capped at `MAX_REPORTED_ANCHOR_DISAGREEMENTS`; `disagreeingCount` is the whole figure.
    */
   readonly disagreeing: readonly AnchorDisagreement[] | null;
+  /**
+   * How many anchors disagree, `null` exactly when `disagreeing` is — so the two are one fact and a
+   * reader cannot mistake the cap for the count.
+   *
+   * It exists because the sibling axis had a cap and this one did not, and the cap's own reason
+   * applies here **with a benign trigger rather than a tamperer**: a restore from backup, or any
+   * change to `canonicalEntryBytes`, makes *every* anchor disagree at once. Uncapped, an hourly
+   * unattended `console.error` then carries one line per anchor up to `CHECKPOINT_SCAN_CEILING`.
+   */
+  readonly disagreeingCount: number | null;
   /**
    * The highest readable checkpoint sequence this audit will stand behind as a truncation witness.
    *
@@ -104,6 +116,13 @@ export interface AnchorAuditReport {
  */
 export const MAX_REPORTED_ANCHOR_REFUSALS = 50;
 
+/**
+ * The same cap on the disagreement axis, and the same figure for the same reason — one number
+ * rather than two, because the two lists are read by one operator in one report and a difference
+ * between them would be a distinction nobody asked for.
+ */
+export const MAX_REPORTED_ANCHOR_DISAGREEMENTS = 50;
+
 /** The two lookups the correspondence rule needs, built once per audit. */
 interface ChainIndex {
   readonly hashAt: Map<number, string>;
@@ -133,6 +152,16 @@ function indexChain(entries: readonly ChainedLogEntry[]): ChainIndex {
  * whose root hash names a real entry elsewhere has a *location*, which is strictly more than
  * "these two hashes differ", and naming the weaker fact would send an operator to compare hashes
  * when the row simply needs its sequence put back.
+ *
+ * The final fall-through is this rule's measured limit and not only its truncation arm: it is also
+ * what a **two-column** `UPDATE` produces. Setting `sequence_number` and `root_hash` in one
+ * statement — lowering an anchor onto a surviving entry and taking that entry's hash with it — hides
+ * a real truncation behind a report byte-identical to a healthy scope's, and raising one past the
+ * tail with a hash the chain does not hold restores the false `chain_truncated` the one-column form
+ * no longer produces. Both measured live as a non-owner (ADR-0375). It cannot be narrowed from here:
+ * an anchor the chain does not reach *is* the truncation signature, so this table alone cannot
+ * separate the two, and closing it needs evidence held elsewhere — the chain's own memory of a prior
+ * witness, or an anchor table that is itself chained.
  */
 function disagreementFor(
   checkpoint: ChainCheckpoint,
@@ -177,6 +206,7 @@ export async function auditAnchors(
   // and a `?.push`) the guard reads as a check and is one that cannot fire, which is coverage it
   // does not provide; and if it ever could, it would silently drop a finding.
   const disagreements: AnchorDisagreement[] = [];
+  let disagreementCount = 0;
   let witnessSequence: number | null = null;
 
   const onPage = (page: RowRead<ChainCheckpoint>): void => {
@@ -187,7 +217,10 @@ export async function auditAnchors(
       if (index !== null) {
         const disagreement = disagreementFor(checkpoint, index);
         if (disagreement !== null) {
-          disagreements.push(disagreement);
+          disagreementCount += 1;
+          if (disagreements.length < MAX_REPORTED_ANCHOR_DISAGREEMENTS) {
+            disagreements.push(disagreement);
+          }
           continue;
         }
       }
@@ -208,6 +241,7 @@ export async function auditAnchors(
     refused,
     refusedCount: outcome.refusedCount,
     disagreeing: index === null ? null : disagreements,
+    disagreeingCount: index === null ? null : disagreementCount,
     witnessSequence,
   };
 }
@@ -221,8 +255,13 @@ export async function auditAnchors(
  * `unproven`, and an absence of evidence is not evidence.
  */
 export function anchorAuditDisproves(report: AnchorAuditReport): boolean {
+  // Both axes read their **count** and not their list, because both lists are capped: past the cap
+  // a list-length read would be a verdict computed from the reporting bound rather than from the
+  // table. It cannot currently differ — a non-empty count has a non-empty list under either cap —
+  // and that is exactly why it has to be written the right way round now rather than when a cap of
+  // zero, or a per-axis cap, makes the two disagree.
   return (
-    report.refusedCount > 0 || (report.disagreeing !== null && report.disagreeing.length > 0)
+    report.refusedCount > 0 || (report.disagreeingCount !== null && report.disagreeingCount > 0)
   );
 }
 
@@ -275,13 +314,15 @@ export function formatAnchorAudit(report: AnchorAuditReport): readonly string[] 
     lines.push("  correspondence: not asked (no fully-readable chain in hand)");
     return lines;
   }
-  if (report.disagreeing.length === 0) return lines;
-  lines.push(
-    `  DISAGREES WITH THE CHAIN: ${report.disagreeing.length.toString()} anchor(s)`,
-  );
+  const disagreeingCount = report.disagreeingCount ?? 0;
+  if (disagreeingCount === 0) return lines;
+  lines.push(`  DISAGREES WITH THE CHAIN: ${disagreeingCount.toString()} anchor(s)`);
   for (const d of report.disagreeing) {
     const where = d.matchedAt === null ? "" : `, whose root hash is the entry at ${d.matchedAt.toString()}`;
     lines.push(`    anchor at ${d.sequenceNumber.toString()}: ${d.kind}${where}`);
+  }
+  if (disagreeingCount > report.disagreeing.length) {
+    lines.push(`    … and ${(disagreeingCount - report.disagreeing.length).toString()} more`);
   }
   return lines;
 }

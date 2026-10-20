@@ -409,8 +409,17 @@ export class PostgresChainCheckpointStore {
                 OR (sequence_number = $1::bigint AND id > $2::uuid))
          ORDER BY sequence_number ASC, id ASC LIMIT $3`;
 
-    // One transaction for the whole scan, so every page is read from one snapshot and the set a
-    // verdict is computed over is the set that was on disk at one instant.
+    // One transaction for the whole scan, and what that buys is **not** a single snapshot:
+    // `PgConnection.transaction` issues a bare `BEGIN`, so the scan runs at READ COMMITTED and each
+    // statement takes its own snapshot — measured inside one `transaction`, where statement 1 saw 9
+    // rows, another session committed, and statement 2 saw 0. A row whose `sequence_number` is
+    // edited between two pages can therefore fall between them, which is an open end of ADR-0375
+    // and not a property this comment may assert away.
+    //
+    // What it does buy: one connection and so one scope elevation for every page, no interleaved
+    // tenant context from a pooled connection serving another scope mid-scan, and one place to set
+    // `REPEATABLE READ` if the exactness is ever wanted — which has to be set before the first
+    // statement, so it is the reason this is a transaction at all rather than a loop of reads.
     return this.scoped(tenantId, "read", async (conn) => {
       let cursor = SCAN_START_CURSOR;
       let scanned = 0;

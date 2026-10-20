@@ -106,7 +106,12 @@ function noTruncation(over: Partial<ChainTruncationCheck> = {}): ChainTruncation
  * helper the production call sites use — and so a sixth field on `AnchorAuditReport` reaches both.
  */
 function anchorAudit(over: Partial<AnchorAuditReport> = {}): AnchorAuditReport {
-  return { ...noAnchorFindings(TENANT_A), ...over };
+  // `disagreeingCount` derived after the spread, for `refusedAnchors`' reason one axis across: a
+  // fixture overriding `disagreeing` and leaving the count at 0 would assert the opposite of the
+  // shape it names, since `anchorAuditDisproves` reads the count. An explicit override wins.
+  const base: AnchorAuditReport = { ...noAnchorFindings(TENANT_A), ...over };
+  if (over.disagreeingCount !== undefined) return base;
+  return { ...base, disagreeingCount: base.disagreeing === null ? null : base.disagreeing.length };
 }
 
 /** A refused anchor on the axis the verdict reads, with the count and the list in agreement. */
@@ -964,8 +969,11 @@ describe("COMPROMISE_CAUSES", () => {
     // The cost of reading the audit through two predicates rather than through
     // `anchorAuditDisproves` itself: a third disjunct added there would reach the scheduler's
     // findings hook and neither cause here, so a verdict could read `verified` beside an anchor
-    // finding. Asserted over the shapes this report can hold rather than by calling the predicate
-    // from the production code, which would be a rule compared against itself (ADR-0362).
+    // finding. Asserted over the three shapes that decide this predicate — clean, refusal-only,
+    // disagreement-only — rather than by calling the predicate from the production code, which
+    // would be a rule compared against itself (ADR-0362). Deliberately not "every shape the report
+    // can hold": `complete: false` is a fourth, and it is `anchorAuditHasFindings`' arm rather than
+    // this one, so including it here would assert the equality this test exists to deny.
     const refusalOnly = refusedAnchors(refusedRow);
     const disagreementOnly = anchorAudit({
       scanned: 1,
