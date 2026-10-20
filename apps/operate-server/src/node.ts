@@ -471,7 +471,13 @@ import {
   verifyChainFull,
   type ChainVerificationReport,
 } from "./chain-verify.js";
-import { auditAnchors, formatAnchorAudit, type AnchorAuditReport } from "./anchor-audit.js";
+import {
+  auditAnchors,
+  chainTruncation,
+  formatAnchorAudit,
+  type AnchorAuditReport,
+  type ChainTruncationCheck,
+} from "./anchor-audit.js";
 import { buildRequestMetering, loadMeteringConfig, type RequestMetering } from "./metering.js";
 import {
   buildStripeUsageSync,
@@ -5202,6 +5208,18 @@ function buildReplayRunners(
 export interface VerifyChainReport {
   readonly chain: ChainVerificationReport;
   readonly anchors: AnchorAuditReport;
+  /**
+   * Three reports, not two — and the third is the one that was computed nowhere but
+   * `proveScopeIntegrity`.
+   *
+   * A chain's fold cannot see truncation (both halves are vacuously valid over zero entries) and the
+   * anchor audit deliberately does not call a witness the chain fails to reach a *disagreement*,
+   * because that is exactly what truncation looks like and this check is its subject. So the one
+   * condition separating *nothing ever happened* from *the history was destroyed* fell between them:
+   * a scope with a checkpoint at sequence 7 and zero entries printed `witness 7` beside
+   * `signatures: valid (0 checked)` and concluded **OK** with exit 0.
+   */
+  readonly truncation: ChainTruncationCheck;
 }
 
 export async function runVerifyChain(options: VerifyChainOptions): Promise<VerifyChainReport> {
@@ -5223,7 +5241,13 @@ export async function runVerifyChain(options: VerifyChainOptions): Promise<Verif
     // `--from-checkpoint` it would mean reading the prefix a bounded verification is defined not to.
     // The integrity proof asks it, because it already loads the whole chain for the anchor half.
     const anchors = await auditAnchors(tenantId, checkpoints, null);
-    return { chain, anchors };
+    // After the audit, so the witness is read before the tail it is compared against — and widening
+    // that gap cannot manufacture a finding, since `truncated` needs `tail < witness`, so an append
+    // in the window only ever clears the check while a delete in it is a truncation that really
+    // happened (`proveScopeIntegrity`'s own ordering argument, one caller across).
+    const tail = await reader.tail(tenantId);
+    const truncation = chainTruncation(anchors.witnessSequence, tail?.sequenceNumber ?? null);
+    return { chain, anchors, truncation };
   } finally {
     await conn.close();
   }

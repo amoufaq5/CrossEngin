@@ -21,7 +21,10 @@ import {
   anchorAuditDisproves,
   anchorAuditHasFindings,
   auditAnchors,
+  chainTruncation,
   formatAnchorAudit,
+  formatChainTruncation,
+  verificationExaminedNothing,
   type AnchorAuditReport,
 } from "./anchor-audit.js";
 
@@ -763,5 +766,82 @@ describe("auditAnchors reads the store through the scan and nothing else", () =>
     await expect(
       auditAnchors(TENANT_A, new ThrowingStore(servesNothing(), {}), chainTo(2)),
     ).rejects.toThrow("the anchor table is unreachable");
+  });
+});
+
+/**
+ * The check that was computed in exactly one place, and so was absent from the command an operator
+ * runs by hand to ask whether a scope's trail is intact.
+ */
+describe("chainTruncation", () => {
+  it("proves a truncation when the chain no longer reaches the witness", () => {
+    expect(chainTruncation(7, 4)).toEqual({
+      checkpointSequence: 7,
+      tailSequence: 4,
+      truncated: true,
+    });
+  });
+
+  it("treats an empty chain under a witness as the strongest form, not a special case", () => {
+    // An anchor commits to a sequence the chain no longer reaches by any amount. ADR-0375: this
+    // state is one only the tamper produces — nothing in the workspace deletes a chain entry, and
+    // the Article 17 erasure retains that table.
+    expect(chainTruncation(7, null).truncated).toBe(true);
+  });
+
+  it("is clean when the chain reaches the witness, at the boundary too", () => {
+    expect(chainTruncation(7, 7).truncated).toBe(false);
+    expect(chainTruncation(7, 9).truncated).toBe(false);
+  });
+
+  it("answers nothing without a witness, whatever the tail", () => {
+    // Not "not truncated" — there is nothing to compare against, which is a different fact and the
+    // one `formatChainTruncation` gives its own sentence (ADR-0372).
+    for (const tail of [null, 0, 4]) {
+      expect(chainTruncation(null, tail).truncated).toBe(false);
+      expect(chainTruncation(null, tail).checkpointSequence).toBeNull();
+    }
+  });
+});
+
+describe("formatChainTruncation", () => {
+  it("names both figures on a proven truncation", () => {
+    const lines = formatChainTruncation(chainTruncation(7, 4)).join("\n");
+    expect(lines).toContain("TRUNCATED");
+    expect(lines).toContain("7");
+    expect(lines).toContain("4");
+  });
+
+  it("says NO ENTRIES AT ALL rather than printing a null tail", () => {
+    expect(formatChainTruncation(chainTruncation(7, null)).join("\n")).toContain(
+      "NO ENTRIES AT ALL",
+    );
+  });
+
+  it("distinguishes a clean axis from a question nobody could ask", () => {
+    // The quiet conflation this exists to prevent: printing "not truncated" for a scope with no
+    // witness would claim a check that never ran.
+    expect(formatChainTruncation(chainTruncation(7, 9)).join("\n")).toContain("none");
+    const unasked = formatChainTruncation(chainTruncation(null, 9)).join("\n");
+    expect(unasked).toContain("not checkable");
+    expect(unasked).not.toContain("none");
+  });
+});
+
+describe("verificationExaminedNothing", () => {
+  it("is true for a fold over zero entries with nothing witnessing otherwise", () => {
+    // Both halves of the fold are vacuously valid over an empty chain, so `ok` was true and the
+    // headline read OK. This is what stops it reading as verified.
+    expect(verificationExaminedNothing(0, chainTruncation(null, null))).toBe(true);
+  });
+
+  it("is false once anything was checked", () => {
+    expect(verificationExaminedNothing(1, chainTruncation(null, null))).toBe(false);
+  });
+
+  it("yields to a proven truncation, which is the sharper verdict", () => {
+    // A scope with a witness and no entries checks nothing AND is truncated; the truncation is the
+    // finding, so this predicate must not claim the milder state for it.
+    expect(verificationExaminedNothing(0, chainTruncation(7, null))).toBe(false);
   });
 });

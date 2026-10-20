@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 374 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 375 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 20,167 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 20,177 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -2023,6 +2023,40 @@ type errors.
   on top of what a Payment already settled (**AR net −50, cash +170**), silently, because the entry
   numbers differ so no constraint fires. ADR-0366's rule read forward: a *proposed addition* is
   withdrawn with its refutation exactly as a retention is.
+
+  ADR-0380 is the small sharp half of the register's oldest operational item, and the class is **a
+  verdict over nothing**. P0.9 named it as *`verify-chain` exits 0 over an empty chain*; measuring it
+  rather than taking it on trust found that it survives two increments that had touched that command
+  (ADR-0374's addendum for a refused anchor, ADR-0375 for anchor findings) and that **the sharp case
+  is worse than the item records**: a scope with a checkpoint at sequence 7 and **zero** chain
+  entries — which ADR-0375 says is a state only the tamper produces, since nothing in the workspace
+  deletes a chain entry and the Article 17 shared-table erasure *retains* that table — printed
+  `witness 7` beside `signatures: valid (0 checked)` and concluded **`OK`, exit 0**. Every fact was
+  on the page and the verdict contradicted them.
+  Three things compose into it and none is a bug alone: `verifyChainIntegrity([])` and
+  `verifyChainSignatures([])` are **both vacuously valid**, so `ok` is true over zero entries; the
+  anchor audit **deliberately** does not call a witness the chain fails to reach a *disagreement*,
+  because that is the truncation check's whole subject and folding it in would report one fact as two
+  causes and take the witness away from the check that needs it (its own doc says so); and **the
+  truncation check was computed in exactly one place**, inline inside `proveScopeIntegrity`, so
+  `verify-chain` — which holds the witness and *prints* it — never read the tail to compare against.
+  The hourly pass caught it and the command an operator runs by hand did not.
+  So `chainTruncation` is one definition with two callers, moved to `anchor-audit.ts` which owns the
+  witness it compares (ADR-0371's reason for moving `ChainTail`), and the exit code is a three-way
+  conjunction. The second half is the **headline**: a fold that examined nothing now prints
+  `NO HISTORY — nothing was examined` rather than `OK`, and **exits 0**, which is the decision rather
+  than an oversight — a new tenant and a tenant whose entries *and* checkpoints were both deleted are
+  byte-identical from these two tables, closing that needs the chain's memory of a prior witness
+  (ADR-0375's open end 2), and the repo's exit vocabulary has no third value since **2 already means
+  a usage error**. So the state is *named* rather than resolved, and the word an operator reads as
+  "verified" is withheld. `formatChainTruncation` gives all three states a sentence and the quiet one
+  is the point: no witness prints *"not checkable"* and never *"not truncated"*, because the second
+  claims a check that never ran (ADR-0372).
+  Live, four arms, and the last two are the non-vacuity controls a fence that refused everything
+  would have passed: the witnessed empty chain goes `OK/0` → `TRUNCATED/1`, the unwitnessed one
+  `OK/0` → `NO HISTORY/0`, and a 6-entry scope stays `OK/0` both with and without a witness it
+  reaches. Mutation-checked: narrowing the predicate to the obvious `tailSequence !== null && …`,
+  which silently drops the empty-chain case, fails 3 of the 10 new tests.
 
   ADR-0379 takes the register's most serious remaining item — an Article 17 request naming one data
   subject erasing the whole tenant — and the class is **a claim the code cannot make**. The runner
@@ -9048,7 +9082,27 @@ by it**.
    pairs. The instruction to refuse the encrypted case was right and is what shipped. The entry also
    did not know `UniqueHintSchema` admits `{scope: string[]}`, which is read now, or that 14 of the
    45 are sequence-defaulted, which is what gates the 409.
-8. **`compliancePacks` is a counted string — and "one increment" is false, measured four ways.**
+8. **`compliancePacks` is a counted string — and a fifth measurement (2026-10-20) makes the
+   deliverable bigger again, so the "one-line fix" named in (d) is withdrawn.** Re-derived against
+   the committed tree while scoping it: `resolveCompliancePacks` has **zero** callers outside its
+   own test, `@crossengin/compliance` has **zero** importers, there are **four** pack definitions on
+   disk (`hipaa`, `gdpr`, `uae-moh`, `21-cfr-part-11`), the seven ERP packs name **six** ids
+   (`hipaa`, `pci`, `haccp`, `osha`, `ferpa`, `nist-800-53`) of which **only `hipaa` has a
+   definition** — the other five throw `UnknownPackError` — and the three remaining definitions are
+   declared by **no pack at all**. All of that confirms (a)–(c). What changes is (d): the
+   `compliancePacks: []` at `node.ts:1416` is **one of five fabricated fields in the same literal**
+   (`platformVersion: "1.0.0"`, `region: "us-east"`, `planTier: "professional"`,
+   `isDedicatedTenant: false`), under a comment that **already declares them a deployment default**
+   — *"The tenant context is a deployment default; per-tenant plan/region is a follow-up."* So
+   fixing only the compliance field would leave four equally-fabricated siblings and be a count
+   reduction inside a defect class, which ADR-0366 established is not progress against the class.
+   The honest increment is therefore **the marketplace `TenantContext` is five fabricated facts**,
+   which needs a decision about where a tenant's plan, region and compliance posture come from
+   (per-tenant settings? the `meta.tenants` row?) before any of the five can be read rather than
+   invented — and separately a **report** over the compliance half, since five of six declared ids
+   name a pack that does not exist and nothing says so at boot. Both are larger than one line and
+   neither is the wiring (b) and (c) refuse. The original entry, whose four corrections still
+   stand:
    The core claim holds: `resolveCompliancePacks` has zero non-test callers, `@crossengin/compliance`
    has zero importers, and healthcare's `["hipaa"]` contributes nothing. Four corrections from a
    scout against the committed tree, three of them decisive. **(a)** Only **four** pack definitions
@@ -9085,7 +9139,24 @@ by it**.
    and is also closed: `evidenceFromAccessReviewEvidence` answered `satisfied: true` with *"sealed
    at 100% completion"* over a pack covering **zero reviewed items**, reachable from the shipped
    producer rather than from a hand-edited row.
-9. **No automated backup, no tested restore.** ~~and no healthcheck on `api` or `web`~~ — ADR-0357
+9. **No automated backup, no tested restore** — **the live half is closed by ADR-0380 and the
+   backup half is the item's real remainder.** That increment measured this entry's own live
+   finding (`verify-chain` exits 0 over an empty chain) rather than taking it on trust, found it
+   survives two increments that had touched the command, and found **the sharp case is worse than
+   this entry records**: a scope with a checkpoint at sequence 7 and **zero** entries — a state
+   ADR-0375 says only the tamper produces — printed `witness 7` beside `signatures: valid (0
+   checked)` and concluded `OK` with exit 0. Every fact was on the page and the verdict contradicted
+   them. The cause is three things composing, none a bug alone: both halves of the fold are
+   **vacuously valid** over zero entries; the anchor audit *deliberately* does not call an unreached
+   witness a disagreement (that is the truncation check's subject, and its own doc says so); and
+   **the truncation check was computed in exactly one place**, inline inside `proveScopeIntegrity`,
+   so the command that holds the witness and prints it never read the tail. `chainTruncation` is one
+   definition with two callers now, `verify-chain`'s exit code is a three-way conjunction, and a
+   fold that examined nothing prints `NO HISTORY — nothing was examined` rather than `OK` — exiting
+   **0**, deliberately, because a new tenant and a tenant whose chain *and* checkpoints were both
+   deleted are byte-identical from these two tables, and the repo's exit vocabulary has no third
+   value (2 is a usage error). What is left of **that** is ADR-0375's open end 2. The rest of this
+   entry stands: ~~and no healthcheck on `api` or `web`~~ — ADR-0357
    added the `api` healthcheck and made `web` wait on it. Backup is still prose only, on a platform
    that models DR tiers with RPO/RTO targets: no backup service in any compose file, no
    `pg_restore` anywhere in `deploy/`, `BackupRecord` with **zero producers**, and

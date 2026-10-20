@@ -1,10 +1,10 @@
 # ADR index
 
-374 records. Generated from the ADR files themselves — regenerate rather than
+375 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 295  **Proposed:** 79
+- **Accepted:** 296  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -386,3 +386,4 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0377](0377-a-cursor-carries-what-the-ordering-does-not.md) | A cursor carries what the ordering does not | — | Accepted | 2026-10-20 |
 | [0378](0378-a-cent-that-balances.md) | A cent that balances | — | Accepted | 2026-10-20 |
 | [0379](0379-a-claim-the-erasure-cannot-make.md) | A claim the erasure cannot make | — | Accepted | 2026-10-20 |
+| [0380](0380-a-verdict-over-nothing.md) | A verdict over nothing | — | Accepted | 2026-10-20 |

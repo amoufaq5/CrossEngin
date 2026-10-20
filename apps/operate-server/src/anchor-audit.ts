@@ -326,3 +326,110 @@ export function formatAnchorAudit(report: AnchorAuditReport): readonly string[] 
   }
   return lines;
 }
+
+/**
+ * Whether entries the chain was already committed to have gone missing from its end.
+ *
+ * Hash chains detect modification and removal from the *middle* — both break a link. They do not
+ * detect **truncation**: lopping entries off the tail leaves a shorter, perfectly-linked chain, and
+ * `verifyChainSuffix` returns valid on an empty suffix. So the newest entries, including the most
+ * recent verdict, could be deleted and every signature check would still pass.
+ *
+ * A checkpoint is the external witness that closes this. Once one exists at sequence N, the chain
+ * must still hold an entry at N or beyond; a shorter chain has lost history it was committed to.
+ * Before the first checkpoint there is nothing to compare against, which is why running the
+ * checkpoint scheduler alongside the integrity proof is not optional.
+ *
+ * It lives **here** rather than with `IntegrityProofReport`, which declared it: this is a statement
+ * about the anchor table versus the chain's tail, and the witness it compares is this module's
+ * answer. `integrity-proof.ts` re-exports the type, so no consumer moved (ADR-0371's reason for
+ * moving `ChainTail` to the module that owns what a checkpoint is made of).
+ */
+export interface ChainTruncationCheck {
+  readonly checkpointSequence: number | null;
+  readonly tailSequence: number | null;
+  readonly truncated: boolean;
+}
+
+/**
+ * The truncation verdict over a witness and a tail — **one** definition, two callers.
+ *
+ * It was computed inline in `proveScopeIntegrity` and nowhere else, so `verify-chain` — the command
+ * an operator runs by hand to ask whether a scope's trail is intact — did not compute it at all. It
+ * holds the witness (it prints it) and never read the tail, so a scope with a checkpoint at
+ * sequence 7 and **zero** chain entries reported `OK`, `integrity: valid`,
+ * `signatures: valid (0 checked)`, `witness 7` and exit 0. ADR-0375 says that state is one only the
+ * tamper produces: nothing in the workspace deletes a chain entry, and the Article 17 erasure
+ * *retains* that table. Every fact was on the page and the verdict contradicted them.
+ *
+ * Extracted rather than spelled a second time in the command, which is this repo's recurring
+ * finding (ADR-0362: four spellings of one confinement rule, and the accurate comment describing the
+ * defective one).
+ *
+ * `tailSequence === null` is a chain with no entries at all, and with a witness in hand that is the
+ * **strongest** form of the finding rather than a special case: an anchor commits to a sequence the
+ * chain no longer reaches by any amount.
+ */
+export function chainTruncation(
+  witnessSequence: number | null,
+  tailSequence: number | null,
+): ChainTruncationCheck {
+  return {
+    checkpointSequence: witnessSequence,
+    tailSequence,
+    truncated:
+      witnessSequence !== null && (tailSequence === null || tailSequence < witnessSequence),
+  };
+}
+
+/**
+ * The truncation check as an operator reads it — a line when there is something to say, and nothing
+ * when the question could not be asked.
+ *
+ * Three states and each needs its own sentence, because the quiet one is the dangerous conflation:
+ * a **proven** truncation names both figures, a witness the chain reaches is one clean axis and
+ * says so, and *no witness* is a question nobody could answer — printing "not truncated" for that
+ * would be the claim this whole family refuses (ADR-0372: an absence of evidence is not evidence).
+ */
+export function formatChainTruncation(check: ChainTruncationCheck): readonly string[] {
+  if (check.checkpointSequence === null) {
+    return [
+      "truncation: not checkable (no checkpoint yet — run the checkpoint scheduler)",
+    ];
+  }
+  if (!check.truncated) {
+    return [
+      `truncation: none — the chain reaches the witness at ${check.checkpointSequence.toString()}`,
+    ];
+  }
+  const tail =
+    check.tailSequence === null
+      ? "the chain holds NO ENTRIES AT ALL"
+      : `the chain ends at ${check.tailSequence.toString()}`;
+  return [
+    `TRUNCATED: a checkpoint witnesses sequence ${check.checkpointSequence.toString()} and ${tail}`,
+    "  entries the chain was committed to are gone; a hash fold cannot see this, which is what the",
+    "  checkpoint exists for",
+  ];
+}
+
+/**
+ * Whether a verification examined anything at all.
+ *
+ * `verifyChainIntegrity([])` and `verifyChainSignatures([])` are **both vacuously valid**, so a
+ * scope holding no entries folds to `ok: true` and the headline read `OK`. That is two facts wearing
+ * one word: a scope where nothing has yet been audited, and one whose entries were destroyed along
+ * with its checkpoints. Where a witness survives, `chainTruncation` separates them conclusively;
+ * where it does not, **nothing in this table can** — closing that needs the chain's own memory of a
+ * prior witness, which makes one pass's verdict an input to the next (ADR-0375's open end).
+ *
+ * So the state is *named* rather than resolved: the command reports it, and exits 0, because a
+ * genuinely new scope has nothing wrong with it and the repo's exit vocabulary has no third value
+ * (2 is a usage error). What it no longer does is print the word an operator reads as "verified".
+ */
+export function verificationExaminedNothing(
+  signaturesChecked: number,
+  check: ChainTruncationCheck,
+): boolean {
+  return signaturesChecked === 0 && !check.truncated;
+}

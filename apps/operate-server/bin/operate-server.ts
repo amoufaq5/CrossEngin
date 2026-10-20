@@ -17,7 +17,12 @@ import {
 } from "../src/cli.js";
 import { formatMultiTenantReport } from "../src/link-sweep.js";
 import { formatChainVerification } from "../src/chain-verify.js";
-import { anchorAuditHasFindings, formatAnchorAudit } from "../src/anchor-audit.js";
+import {
+  anchorAuditHasFindings,
+  formatAnchorAudit,
+  formatChainTruncation,
+  verificationExaminedNothing,
+} from "../src/anchor-audit.js";
 import { runPruneLinks, runRekey, runReplay, runVerifyChain, serve } from "../src/node.js";
 import { formatReplayReport } from "../src/replay.js";
 import { formatRekeyResult, formatRekeySurvey } from "../src/rekey.js";
@@ -61,12 +66,29 @@ async function runVerify(argv: readonly string[]): Promise<number> {
     return 0;
   }
   const report = await runVerifyChain(options);
+  // The headline is this command's verdict, so it is composed here rather than taken from
+  // `formatChainVerification`, which can only speak for the fold. A fold over zero entries is
+  // vacuously valid on both halves, so that function printed `OK` for a scope whose history was
+  // destroyed — with `signatures: valid (0 checked)` one line below it, which is the honest half
+  // contradicting the headline.
+  const examinedNothing = verificationExaminedNothing(
+    report.chain.signatures.checked,
+    report.truncation,
+  );
+  const verdict = report.truncation.truncated
+    ? "TRUNCATED"
+    : examinedNothing
+      ? "NO HISTORY — nothing was examined"
+      : null;
   process.stdout.write(
     options.format === "json"
       ? `${JSON.stringify(report, null, 2)}\n`
-      : `${formatChainVerification(report.chain)}\n${formatAnchorAudit(report.anchors)
+      : `${formatChainVerification(report.chain)}\n${[
+          ...formatAnchorAudit(report.anchors),
+          ...formatChainTruncation(report.truncation),
+        ]
           .map((l) => `  ${l}`)
-          .join("\n")}\n`,
+          .join("\n")}\n${verdict === null ? "" : `  verdict: ${verdict}\n`}`,
   );
   // `chain.ok` is not the whole verdict, and ADR-0374's own Option B rejection says why: a full fold
   // over a sound chain answers `ok: true`, so a pass whose stored **anchor** is a finding reads as a
@@ -82,7 +104,24 @@ async function runVerify(argv: readonly string[]): Promise<number> {
   // verdict over a set it did not read is the claim ADR-0372 is about. `proveScopeIntegrity` grades
   // the same condition `unproven` rather than `compromised`, for the same reason and with a third
   // answer available to it that an exit code does not have.
-  return report.chain.ok && !anchorAuditHasFindings(report.anchors) ? 0 : 1;
+  // The truncation check joins the conjunction, and it is the one of the three that this command
+  // did not compute at all. A fold cannot see truncation and the anchor audit deliberately does not
+  // call a witness the chain fails to reach a *disagreement* (that is this check's subject), so the
+  // condition separating "nothing happened" from "the history was destroyed" fell between them:
+  // measured live, a scope with a checkpoint at sequence 7 and zero entries printed `witness 7`
+  // beside `signatures: valid (0 checked)` and exited 0 saying OK.
+  //
+  // `examinedNothing` deliberately does **not** join it. A scope with no witness and no entries is a
+  // question nobody can answer from these two tables — a new tenant and a tenant whose chain *and*
+  // checkpoints were deleted are byte-identical here — so it is named in the output and exits 0,
+  // because failing it would fail every scope before its first audited request and the repo's exit
+  // vocabulary has no third value (2 is a usage error). ADR-0375's open end 2 is what would close
+  // it, and it needs the chain's memory of a prior witness.
+  return report.chain.ok &&
+    !anchorAuditHasFindings(report.anchors) &&
+    !report.truncation.truncated
+    ? 0
+    : 1;
 }
 
 async function runReplayCommand(argv: readonly string[]): Promise<number> {

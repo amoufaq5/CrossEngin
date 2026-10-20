@@ -12,7 +12,9 @@ import type { PgConnection, UnreadableRow } from "@crossengin/kernel-pg";
 import {
   anchorAuditHasFindings,
   auditAnchors,
+  chainTruncation,
   formatAnchorAudit,
+  type ChainTruncationCheck,
   type AnchorAuditReport,
 } from "./anchor-audit.js";
 import { verifyAuditAnchors, type AuditAnchorReport } from "./audit-anchor.js";
@@ -116,23 +118,10 @@ export const INTEGRITY_VERDICTS = ["verified", "unproven", "compromised"] as con
 export type IntegrityVerdict = (typeof INTEGRITY_VERDICTS)[number];
 
 /**
- * Whether entries the chain was already committed to have gone missing from its end.
- *
- * Hash chains detect modification and removal from the *middle* — both break a link. They do not
- * detect **truncation**: lopping entries off the tail leaves a shorter, perfectly-linked chain, and
- * `verifyChainSuffix` returns valid on an empty suffix. So the newest entries, including the most
- * recent verdict, could be deleted and every signature check would still pass.
- *
- * A checkpoint is the external witness that closes this. Once one exists at sequence N, the chain
- * must still hold an entry at N or beyond; a shorter chain has lost history it was committed to.
- * Before the first checkpoint there is nothing to compare against, which is why running the
- * checkpoint scheduler alongside this one is not optional.
+ * Re-exported from `anchor-audit.ts`, which owns the witness this check compares and now owns the
+ * check (see `chainTruncation` there for why, and for the caller it was missing).
  */
-export interface ChainTruncationCheck {
-  readonly checkpointSequence: number | null;
-  readonly tailSequence: number | null;
-  readonly truncated: boolean;
-}
+export type { ChainTruncationCheck } from "./anchor-audit.js";
 
 export interface IntegrityProofReport {
   /** Tenant id, or `null` for the platform chain. */
@@ -331,13 +320,7 @@ export async function proveScopeIntegrity(
   // manufacture a finding: `truncated` needs `tail < witness`, so an append in the window only ever
   // clears the check and a delete in the window is a truncation that really happened.
   const tail = await deps.logStore.tail(scope);
-  const truncation: ChainTruncationCheck = {
-    checkpointSequence: anchorAudit.witnessSequence,
-    tailSequence: tail?.sequenceNumber ?? null,
-    truncated:
-      anchorAudit.witnessSequence !== null &&
-      (tail === null || tail.sequenceNumber < anchorAudit.witnessSequence),
-  };
+  const truncation = chainTruncation(anchorAudit.witnessSequence, tail?.sequenceNumber ?? null);
 
   const audit = await deps.audit.listAnchoredForScope(scope, { limit: deps.auditRowLimit });
   const anchors: AuditAnchorReport = verifyAuditAnchors(
