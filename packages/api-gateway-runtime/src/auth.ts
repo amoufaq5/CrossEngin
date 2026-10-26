@@ -153,10 +153,93 @@ export async function verifyBearerJwt(input: {
   return { outcome: "authenticated", jwt };
 }
 
-export interface ParseAuthHeaderResult {
-  readonly scheme: AuthScheme | null;
-  readonly token: string | null;
-  readonly raw: string | null;
+/**
+ * The query parameter `api_key_query` is recognised from.
+ *
+ * One spelling and not a set, and the asymmetry with the two `indistinguishable` schemes is
+ * deliberate: reserving `?api_key=` commits only to never *accepting* it, which is already
+ * `AUTH_SCHEME_SUPPORT`'s declared decision, so a client using some other spelling is no worse off
+ * than before this existed. Reserving an `Authorization` auth-scheme token for HMAC would be the
+ * opposite — a partial commitment whose unreserved half is served anonymously.
+ */
+export const API_KEY_QUERY_PARAM = "api_key";
+
+/**
+ * What `parseAuthHeader` found, as a discriminated union — so a reader cannot take the *scheme* and
+ * leave the fact that a credential was presented.
+ *
+ * It was `{scheme: AuthScheme | null, token: string | null, raw: string | null}`, whose last two
+ * arms differed only in `raw`: a presented-but-unrecognised header set it and an absent one did not.
+ * `raw` had **zero readers** in this package (measured on the committed tree: no `.raw` outside the
+ * tests, and `ctx.parsedAuth` was read at exactly one site), so both arms recorded
+ * `parse_auth_credential` reason `no_credential` and `authenticate` outcome `pass` reason
+ * `no_credential_skipped` — a request that presented an `Authorization` header was recorded as
+ * having presented none, and an operator debugging it went to check a client that was working.
+ *
+ * `token` is non-nullable on the one arm that has it, which is the other half: the authenticate
+ * stage used to test `parsed.token === null` alongside `parsed.scheme === null` and fold both into
+ * the anonymous path.
+ */
+export type ParseAuthHeaderResult =
+  | {
+      /** A credential in a scheme this gateway can name — served or refused, which the support map decides. */
+      readonly kind: "credential";
+      readonly scheme: AuthScheme;
+      readonly token: string;
+    }
+  | {
+      /**
+       * An `Authorization` header in no scheme this gateway serves. The **residual** verdict, and
+       * the one that covers an attempt in either `indistinguishable` scheme: it is deliberately
+       * wider than any per-scheme arm, because what makes it safe is that nothing credential-shaped
+       * in this position falls through it.
+       */
+      readonly kind: "unrecognized";
+      /**
+       * The RFC 9110 `auth-scheme` token the caller used, or `null` when the header carried none.
+       *
+       * It replaces the `raw` header this arm used to carry, and the replacement is this
+       * increment's own class caught on its own fix: `raw` was the field whose **zero readers**
+       * made a presented credential read as absent, and an arm that carried it again and still
+       * reported only `kind` would have reproduced that one field over. The scheme token is the
+       * half an operator needs — *a client is sending `CE-HMAC-SHA256`* is the diagnosis that was
+       * missing — and it is the half that is **not** the credential: everything after the first
+       * `SP` is.
+       *
+       * `null` is therefore load-bearing rather than a convenience. A header with no space has no
+       * auth-scheme, so its whole value may be the credential, and `authSchemeToken` refuses it
+       * rather than reporting a prefix of a secret.
+       */
+      readonly schemeToken: string | null;
+    }
+  | { readonly kind: "absent" };
+
+/** RFC 9110 `token = 1*tchar`, which is the whole grammar of an `auth-scheme`. */
+const TCHAR_TOKEN_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+/**
+ * Long enough for every registered scheme and every plausible vendor one (`Negotiate` is 9,
+ * `CE-HMAC-SHA256` is 14); the grammar bounds a `token` nowhere and a log line is bounded
+ * everywhere, so something has to.
+ */
+const MAX_AUTH_SCHEME_TOKEN = 40;
+
+/**
+ * The `auth-scheme` token of an `Authorization` header value, or `null` when there is none to read.
+ *
+ * Three refusals and each closes a way a credential could reach a log line. **No space** means no
+ * auth-scheme (RFC 9110 §11.6.2: `credentials = auth-scheme [ 1*SP … ]`), so the value is
+ * potentially a bare token and nothing is reported. A first word outside `tchar` is not a `token`
+ * and so is not an auth-scheme, which keeps a crafted value from smuggling control bytes or
+ * newlines into a log line. And an over-long first word is refused rather than **truncated**,
+ * because a truncated prefix of a secret is still a prefix of a secret.
+ */
+export function authSchemeToken(headerValue: string): string | null {
+  const space = headerValue.indexOf(" ");
+  if (space <= 0) return null;
+  const candidate = headerValue.slice(0, space);
+  if (candidate.length > MAX_AUTH_SCHEME_TOKEN) return null;
+  return TCHAR_TOKEN_RE.test(candidate) ? candidate : null;
 }
 
 export function parseAuthHeader(request: IncomingRequest): ParseAuthHeaderResult {
@@ -165,20 +248,62 @@ export function parseAuthHeader(request: IncomingRequest): ParseAuthHeaderResult
     const trimmed = header.trim();
     const lower = trimmed.toLowerCase();
     if (lower.startsWith("bearer ")) {
-      return { scheme: "bearer_jwt", token: trimmed.slice(7).trim(), raw: trimmed };
+      return { kind: "credential", scheme: "bearer_jwt", token: trimmed.slice(7).trim() };
     }
     if (lower.startsWith("basic ")) {
-      return { scheme: "basic", token: trimmed.slice(6).trim(), raw: trimmed };
+      return { kind: "credential", scheme: "basic", token: trimmed.slice(6).trim() };
     }
   }
   const apiKeyHeader = request.headers["x-api-key"];
   if (apiKeyHeader !== undefined) {
-    return { scheme: "api_key_header", token: apiKeyHeader.trim(), raw: apiKeyHeader.trim() };
+    return { kind: "credential", scheme: "api_key_header", token: apiKeyHeader.trim() };
   }
+  // An **empty** value stays `absent`, and that is not an oversight: ADR-0365 settled it for every
+  // query parameter here, because a form serialises an unset field as `?k=`, so an empty value is
+  // nothing supplied rather than something malformed. A review asked for presence-recognition
+  // across all shapes; half of that is refused by this rule, and the two tests pinning it say so in
+  // their own titles.
+  //
+  // A **repeated** parameter is the other half and the rule does not reach it: an array means the
+  // caller did supply a credential, in a shape this gateway will not serve, and letting it fall
+  // through to `absent` → anonymous 201 is the "partial wire commitment whose unreserved half is
+  // silently anonymous again" that `auth-resolution.ts` refuses `hmac_signature` for — the same
+  // rule, applied inconsistently one scheme over. So it is recognised, and the value is
+  // deliberately **not** carried: nothing may use a refused scheme's credential, and a credential
+  // in a URL is the exposure the refusal is about, so putting it on the parse result would hand it
+  // to whatever records one.
+  const apiKeyQuery = request.query[API_KEY_QUERY_PARAM];
+  if (typeof apiKeyQuery === "string" && apiKeyQuery.length > 0) {
+    return { kind: "credential", scheme: "api_key_query", token: apiKeyQuery };
+  }
+  if (Array.isArray(apiKeyQuery) && apiKeyQuery.some((v) => v.length > 0)) {
+    return { kind: "credential", scheme: "api_key_query", token: "" };
+  }
+  // The residual comes **before** `mtls`, and that ordering is the whole of what "the message named
+  // nothing" means. `x-api-key` was already ahead of it before this change — a request with an
+  // unrecognised `Authorization` *and* an `x-api-key` resolved the api key — and the generalisation
+  // is that a verdict meaning "nothing recognised this" must not outrank something that did.
+  //
+  // But an unrecognised `Authorization` header *is* the message naming something, so it must
+  // outrank a property of the connection. With `mtls` first, `Authorization: Negotiate x` on a
+  // cert-forwarding edge answered `mtls`: the caller asked to authenticate one way and was
+  // authenticated another, silently — which is the shape this whole increment exists to refuse, and
+  // which the comment below used to claim could not happen while the code above it did it.
   if (header !== undefined) {
-    return { scheme: null, token: null, raw: header.trim() };
+    return { kind: "unrecognized", schemeToken: authSchemeToken(header.trim()) };
   }
-  return { scheme: null, token: null, raw: null };
+  // `mtls` is **last**, and the order is load-bearing rather than arbitrary: an edge performing
+  // mutual TLS sets `clientCertSha256` on *every* request it forwards, so checking it first would
+  // make such a deployment refuse every request as `mtls` — including ones carrying a perfectly
+  // good JWT. It is the one recognising position that is a property of the connection rather than
+  // of the message, so it answers only when the message named nothing at all: no `Authorization`
+  // header, no `x-api-key`, no `?api_key=`. Unreachable today — `clientCertSha256` has no producer
+  // and the shipped Caddyfile has no `tls` directive — so this is the specification being made
+  // consistent rather than a live refusal changing.
+  if (request.clientCertSha256 !== null) {
+    return { kind: "credential", scheme: "mtls", token: request.clientCertSha256 };
+  }
+  return { kind: "absent" };
 }
 
 export interface ResolvePrincipalInput {

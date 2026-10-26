@@ -9544,7 +9544,7 @@ export const META_GATEWAY_PIPELINE_EXECUTIONS: TableDefinition = {
       type: "TEXT",
       notNull: true,
       check:
-        "auth_outcome IN ('anonymous', 'authenticated', 'credential_malformed', 'credential_not_found', 'invalid_signature', 'expired_token', 'not_yet_valid_token', 'audience_mismatch', 'issuer_mismatch', 'tenant_mismatch', 'principal_not_found', 'principal_disabled', 'principal_locked', 'scope_insufficient', 'mfa_required', 'weak_tls_rejected')",
+        "auth_outcome IN ('anonymous', 'authenticated', 'credential_malformed', 'credential_not_found', 'invalid_signature', 'expired_token', 'not_yet_valid_token', 'audience_mismatch', 'issuer_mismatch', 'tenant_mismatch', 'principal_not_found', 'principal_disabled', 'principal_locked', 'scope_insufficient', 'mfa_required', 'weak_tls_rejected', 'scheme_not_supported', 'credential_unrecognized')",
     },
     {
       name: "route_match_outcome",

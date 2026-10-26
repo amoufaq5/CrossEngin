@@ -1,8 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   AUTH_OUTCOMES,
+  AUTH_OUTCOME_SUCCEEDS,
   AUTH_SCHEMES,
+  AUTH_SCHEME_SUPPORT,
+  AUTH_SCHEME_TREATMENTS,
   AUTH_SUCCESS_OUTCOMES,
+  RECOGNISABLE_AUTH_SCHEMES,
+  SERVED_AUTH_SCHEMES,
+  authSchemeTreatment,
   ParsedAuthCredentialSchema,
   ResolvedPrincipalSchema,
   SCHEMES_REQUIRING_HTTPS,
@@ -40,9 +46,17 @@ describe("constants", () => {
   it("has 8 auth schemes", () => {
     expect(AUTH_SCHEMES).toHaveLength(8);
   });
-  it("has 16 auth outcomes", () => {
-    expect(AUTH_OUTCOMES).toHaveLength(16);
+  it("has 18 auth outcomes", () => {
+    expect(AUTH_OUTCOMES).toHaveLength(18);
     expect(AUTH_OUTCOMES).toContain("tenant_mismatch");
+  });
+
+  // ADR-0384 appended rather than inserted, so an already-migrated deployment's `auth_outcome`
+  // CHECK differs from the catalog's by two trailing members and the emitted SQL moves nowhere
+  // else. `pg-value-set-domains.ts` compares the two as *sets*, so order is not what that rule
+  // reads — the order matters to the SQL byte-identity the reconciler compares.
+  it("appends the two ADR-0384 members at the end, in order", () => {
+    expect(AUTH_OUTCOMES.slice(-2)).toEqual(["scheme_not_supported", "credential_unrecognized"]);
   });
   it("STRONG_AUTH_SCHEMES includes bearer_jwt + mtls + hmac_signature", () => {
     expect(STRONG_AUTH_SCHEMES.size).toBe(3);
@@ -120,6 +134,7 @@ describe("resolveAuth", () => {
       expectedAudience: "api.crossengin.io",
       clockSkewSeconds: 60,
       hmacSignatureMaxAgeSeconds: 300,
+      signatureVerified: true,
     });
     expect(r.outcome).toBe("weak_tls_rejected");
   });
@@ -134,6 +149,7 @@ describe("resolveAuth", () => {
       expectedAudience: "api.crossengin.io",
       clockSkewSeconds: 60,
       hmacSignatureMaxAgeSeconds: 300,
+      signatureVerified: true,
     });
     expect(r.outcome).toBe("authenticated");
   });
@@ -148,6 +164,7 @@ describe("resolveAuth", () => {
       expectedAudience: "api.crossengin.io",
       clockSkewSeconds: 60,
       hmacSignatureMaxAgeSeconds: 300,
+      signatureVerified: true,
     });
     expect(r.outcome).toBe("expired_token");
   });
@@ -162,6 +179,7 @@ describe("resolveAuth", () => {
       expectedAudience: "api.crossengin.io",
       clockSkewSeconds: 60,
       hmacSignatureMaxAgeSeconds: 300,
+      signatureVerified: true,
     });
     expect(r.outcome).toBe("not_yet_valid_token");
   });
@@ -176,6 +194,7 @@ describe("resolveAuth", () => {
       expectedAudience: "api.crossengin.io",
       clockSkewSeconds: 60,
       hmacSignatureMaxAgeSeconds: 300,
+      signatureVerified: true,
     });
     expect(r.outcome).toBe("issuer_mismatch");
   });
@@ -190,11 +209,12 @@ describe("resolveAuth", () => {
       expectedAudience: "other.api",
       clockSkewSeconds: 60,
       hmacSignatureMaxAgeSeconds: 300,
+      signatureVerified: true,
     });
     expect(r.outcome).toBe("audience_mismatch");
   });
 
-  it("returns credential_malformed when scheme not allowed", () => {
+  it("returns scheme_not_supported when scheme not allowed", () => {
     const r = resolveAuth({
       credential: baseJwt,
       schemeAllowed: false,
@@ -204,8 +224,9 @@ describe("resolveAuth", () => {
       expectedAudience: "api.crossengin.io",
       clockSkewSeconds: 60,
       hmacSignatureMaxAgeSeconds: 300,
+      signatureVerified: true,
     });
-    expect(r.outcome).toBe("credential_malformed");
+    expect(r.outcome).toBe("scheme_not_supported");
   });
 
   it("returns anonymous for anonymous scheme", () => {
@@ -228,6 +249,7 @@ describe("resolveAuth", () => {
       expectedAudience: null,
       clockSkewSeconds: 60,
       hmacSignatureMaxAgeSeconds: 300,
+      signatureVerified: true,
     });
     expect(r.outcome).toBe("anonymous");
   });
@@ -255,6 +277,7 @@ describe("resolveAuth", () => {
       expectedAudience: null,
       clockSkewSeconds: 60,
       hmacSignatureMaxAgeSeconds: 300,
+      signatureVerified: true,
     });
     expect(r.outcome).toBe("expired_token");
   });
@@ -357,5 +380,244 @@ describe("isStrongAuthScheme / schemeRequiresHttps / isAuthSuccess", () => {
     expect(isAuthSuccess("authenticated")).toBe(true);
     expect(isAuthSuccess("anonymous")).toBe(true);
     expect(isAuthSuccess("expired_token")).toBe(false);
+  });
+});
+
+describe("AUTH_SCHEME_SUPPORT", () => {
+  it("is total over AUTH_SCHEMES and nothing else", () => {
+    expect(Object.keys(AUTH_SCHEME_SUPPORT).sort()).toEqual([...AUTH_SCHEMES].sort());
+  });
+
+  it("is frozen, so a reader cannot be handed a mutated treatment", () => {
+    expect(Object.isFrozen(AUTH_SCHEME_SUPPORT)).toBe(true);
+  });
+
+  it("every treatment is a declared member", () => {
+    for (const scheme of AUTH_SCHEMES) {
+      expect(AUTH_SCHEME_TREATMENTS).toContain(AUTH_SCHEME_SUPPORT[scheme].treatment);
+    }
+  });
+
+  /**
+   * The biconditional is the fence, in both directions. A scheme with a recognising position and no
+   * refusal is half of this increment's defect (four schemes were recognisable from the request and
+   * served anonymously); a refusal naming no position is the other half (a denial no request can
+   * ever receive, because nothing recognises it).
+   */
+  it("recognisedFrom is null exactly for the indistinguishable schemes", () => {
+    for (const scheme of AUTH_SCHEMES) {
+      const support = AUTH_SCHEME_SUPPORT[scheme];
+      expect(support.recognisedFrom === null).toBe(support.treatment === "indistinguishable");
+    }
+  });
+
+  it("every reason is prose and none merely restates its own key", () => {
+    for (const scheme of AUTH_SCHEMES) {
+      const support = AUTH_SCHEME_SUPPORT[scheme];
+      expect(support.reason.length).toBeGreaterThan(30);
+      expect(support.reason).not.toBe(support.treatment);
+      expect(support.reason).not.toBe(scheme);
+    }
+  });
+
+  it("the two served schemes are the two the runtime authenticates", () => {
+    expect(SERVED_AUTH_SCHEMES).toEqual(["bearer_jwt", "api_key_header"]);
+  });
+
+  /**
+   * Two, and both for the same stated reason: no wire position has been *chosen* for them here, so
+   * reserving one in order to refuse it would be a partial commitment, and a client using the
+   * spelling we did not reserve is served anonymously — the defect restated one spelling over.
+   */
+  it("bearer_opaque and hmac_signature are the indistinguishable schemes", () => {
+    const indistinguishable = AUTH_SCHEMES.filter(
+      (s) => AUTH_SCHEME_SUPPORT[s].treatment === "indistinguishable",
+    );
+    expect([...indistinguishable].sort()).toEqual(["bearer_opaque", "hmac_signature"]);
+  });
+
+  /**
+   * The finding that moved `hmac_signature` off `refused`: the repo's one HMAC wire format is
+   * `SIGNATURE_HEADER_NAME` (`packages/sdk/src/webhooks.ts:251`) over `crypto/hmac.ts`'s
+   * `t=<unix>,v1=<hex>`, and it authenticates a *payload*. `PIPELINE_STAGES` reserves
+   * `validate_request_signature` for exactly that, so reading it as a principal credential would
+   * conflate request authentication with message authenticity.
+   */
+  it("hmac_signature's reason names the payload-versus-principal conflation", () => {
+    const reason = AUTH_SCHEME_SUPPORT.hmac_signature.reason;
+    expect(reason).toContain("validate_request_signature");
+    expect(reason).toContain("payload");
+  });
+
+  it("anonymous is the only scheme that is not a credential", () => {
+    const notCredentials = AUTH_SCHEMES.filter(
+      (s) => AUTH_SCHEME_SUPPORT[s].treatment === "not_a_credential",
+    );
+    expect(notCredentials).toEqual(["anonymous"]);
+  });
+
+  it("the three refused schemes are named", () => {
+    const refused = AUTH_SCHEMES.filter((s) => AUTH_SCHEME_SUPPORT[s].treatment === "refused");
+    expect([...refused].sort()).toEqual(["api_key_query", "basic", "mtls"]);
+  });
+
+  /**
+   * ADR-0301's argv rule one transport over. `api_key_query` is the one refused scheme whose
+   * *implementation* would be the regression — `query` is already on `IncomingRequest`, so it is a
+   * three-line change — and before this increment nothing anywhere in the repo recorded why it had
+   * not been made. The assertion is on the reason because the reason is the deliverable.
+   */
+  it("api_key_query's refusal records that the implementation is the regression", () => {
+    const reason = AUTH_SCHEME_SUPPORT.api_key_query.reason;
+    expect(reason).toContain("access logs");
+    expect(reason).toContain("x-api-key");
+  });
+
+  it("bearer_opaque's reason records why a token-shape test would grant rather than refuse", () => {
+    expect(AUTH_SCHEME_SUPPORT.bearer_opaque.reason).toContain("grant");
+  });
+
+  it("RECOGNISABLE_AUTH_SCHEMES is served plus refused and excludes the other three", () => {
+    expect([...RECOGNISABLE_AUTH_SCHEMES].sort()).toEqual(
+      ["api_key_header", "api_key_query", "basic", "bearer_jwt", "mtls"].sort(),
+    );
+    expect(RECOGNISABLE_AUTH_SCHEMES).not.toContain("anonymous");
+    expect(RECOGNISABLE_AUTH_SCHEMES).not.toContain("bearer_opaque");
+    expect(RECOGNISABLE_AUTH_SCHEMES).not.toContain("hmac_signature");
+  });
+
+  it("authSchemeTreatment answers the map", () => {
+    expect(authSchemeTreatment("bearer_jwt")).toBe("served");
+    expect(authSchemeTreatment("basic")).toBe("refused");
+    expect(authSchemeTreatment("hmac_signature")).toBe("indistinguishable");
+    expect(authSchemeTreatment("bearer_opaque")).toBe("indistinguishable");
+    expect(authSchemeTreatment("anonymous")).toBe("not_a_credential");
+  });
+
+  /**
+   * Both of this repo's existing scheme sets are asserted against the new map rather than beside
+   * it: `STRONG_AUTH_SCHEMES` names two schemes this gateway refuses (`mtls`, `hmac_signature`),
+   * which is coherent — strength is a property of the scheme and serving is a property of this
+   * deployment — and the assertion pins that they are *allowed* to disagree, so a later reader does
+   * not "fix" one against the other.
+   */
+  it("STRONG_AUTH_SCHEMES deliberately includes schemes this gateway does not serve", () => {
+    const strongUnserved = [...STRONG_AUTH_SCHEMES].filter(
+      (s) => AUTH_SCHEME_SUPPORT[s].treatment !== "served",
+    );
+    expect([...strongUnserved].sort()).toEqual(["hmac_signature", "mtls"]);
+  });
+});
+
+describe("AUTH_OUTCOME_SUCCEEDS", () => {
+  it("is total over AUTH_OUTCOMES and nothing else", () => {
+    expect(Object.keys(AUTH_OUTCOME_SUCCEEDS).sort()).toEqual([...AUTH_OUTCOMES].sort());
+  });
+
+  it("is frozen", () => {
+    expect(Object.isFrozen(AUTH_OUTCOME_SUCCEEDS)).toBe(true);
+  });
+
+  /**
+   * The derivation is the fence, and the direction matters: before ADR-0384 `AUTH_SUCCESS_OUTCOMES`
+   * was a hand-written `Set` of two, so a member added to `AUTH_OUTCOMES` alone typechecked and
+   * joined the refusing side in silence. Deriving it makes a new member a compile error at the map
+   * until it says which side it is on, which is `PROOF_VERSION_COVERAGE`'s shape (ADR-0351).
+   */
+  it("AUTH_SUCCESS_OUTCOMES is exactly the map's true members", () => {
+    expect([...AUTH_SUCCESS_OUTCOMES].sort()).toEqual(
+      AUTH_OUTCOMES.filter((o) => AUTH_OUTCOME_SUCCEEDS[o]).sort(),
+    );
+    expect([...AUTH_SUCCESS_OUTCOMES].sort()).toEqual(["anonymous", "authenticated"]);
+  });
+
+  it("both ADR-0384 members refuse", () => {
+    expect(isAuthSuccess("scheme_not_supported")).toBe(false);
+    expect(isAuthSuccess("credential_unrecognized")).toBe(false);
+  });
+});
+
+describe("resolveAuth — the signature premise", () => {
+  const now = new Date("2026-05-16T10:30:00Z");
+  const input = (overrides: Partial<Parameters<typeof resolveAuth>[0]>) => ({
+    credential: baseJwt,
+    schemeAllowed: true,
+    tlsAcceptable: true,
+    signatureVerified: true,
+    now,
+    expectedIssuer: "https://sso.acme.com",
+    expectedAudience: "api.crossengin.io",
+    clockSkewSeconds: 60,
+    hmacSignatureMaxAgeSeconds: 300,
+    ...overrides,
+  });
+
+  /**
+   * The arm that takes the trap out. Before it, this exact input — fresh claims, correct issuer and
+   * audience, and a `tokenSha256` that is a *digest* rather than a signature — answered
+   * `authenticated`, which is what made wiring the function worse than leaving it unwired
+   * (ADR-0336).
+   */
+  it("refuses invalid_signature when the caller has not verified one", () => {
+    const r = resolveAuth(input({ signatureVerified: false }));
+    expect(r.outcome).toBe("invalid_signature");
+    expect(r.reason).toBe("signature_not_verified_by_caller");
+  });
+
+  it("answers anonymous for an absent credential even with no signature verified", () => {
+    const r = resolveAuth(
+      input({
+        credential: {
+          ...baseJwt,
+          scheme: "anonymous",
+          tokenSha256: null,
+          jwtIssuer: null,
+          jwtAudience: [],
+          jwtSubject: null,
+          jwtExpiresAt: null,
+          jwtNotBefore: null,
+          jwtScope: [],
+        },
+        signatureVerified: false,
+        expectedIssuer: null,
+        expectedAudience: null,
+      }),
+    );
+    expect(r.outcome).toBe("anonymous");
+  });
+
+  // The TLS floor outranks the signature premise: a weak channel is a fact about the connection and
+  // is true whatever the credential turns out to be.
+  it("weak TLS outranks the signature premise", () => {
+    const r = resolveAuth(input({ tlsAcceptable: false, signatureVerified: false }));
+    expect(r.outcome).toBe("weak_tls_rejected");
+  });
+
+  // And the scheme allow-list outranks it too, for the reason the runtime's stage orders the same
+  // way: there is nothing to learn from examining a credential in a scheme this gateway will not
+  // accept whatever it says.
+  it("a disallowed scheme outranks the signature premise", () => {
+    const r = resolveAuth(input({ schemeAllowed: false, signatureVerified: false }));
+    expect(r.outcome).toBe("scheme_not_supported");
+    expect(r.reason).toBe("scheme_bearer_jwt_not_allowed");
+  });
+
+  it("an expired token still reports expiry once the signature premise holds", () => {
+    const r = resolveAuth(input({ now: new Date("2026-05-16T12:00:00Z") }));
+    expect(r.outcome).toBe("expired_token");
+  });
+
+  // Every outcome this function can return is a declared member, which is what `pipeline.ts`'s
+  // `z.enum(AUTH_OUTCOMES)` and the catalogued CHECK both require of anything that reaches a row.
+  it("never returns an outcome outside the enum", () => {
+    const results = [
+      resolveAuth(input({})),
+      resolveAuth(input({ signatureVerified: false })),
+      resolveAuth(input({ schemeAllowed: false })),
+      resolveAuth(input({ tlsAcceptable: false })),
+    ];
+    for (const r of results) {
+      expect(AUTH_OUTCOMES).toContain(r.outcome);
+    }
   });
 });

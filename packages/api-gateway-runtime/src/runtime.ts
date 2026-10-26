@@ -1,4 +1,5 @@
 import {
+  AUTH_SCHEME_SUPPORT,
   DEFAULT_SECURITY_HEADERS,
   type AuthOutcome,
   type IdempotencyOutcome,
@@ -13,6 +14,10 @@ import {
 import { sha256 } from "@crossengin/crypto";
 
 import { type OutgoingResponse, outgoingResponseFromJson } from "./adapters.js";
+import {
+  servedAuthSchemesFor,
+  type AuthSchemeServingInput,
+} from "./auth-scheme-survey.js";
 import {
   computeResponseRedaction,
   computeResponseRedactionForRecords,
@@ -292,15 +297,77 @@ export class GatewayRuntime {
       outcome: "pass",
       startedAt,
       completedAt: this.now(),
-      reason: parsed.scheme === null ? "no_credential" : `scheme_${parsed.scheme}`,
+      // Three reasons for three findings, where the first two used to share `no_credential`. The
+      // stage still passes for all three: *what* was presented is the parse's answer and *whether
+      // it is accepted* is the next stage's, which is the split the pipeline's stage list declares.
+      reason:
+        parsed.kind === "absent"
+          ? "no_credential"
+          : parsed.kind === "unrecognized"
+            ? "credential_in_unrecognized_scheme"
+            : `scheme_${parsed.scheme}`,
     });
     return null;
+  }
+
+  /**
+   * The challenge a scheme-refusal 401 carries.
+   *
+   * RFC 9110 §15.5.2 requires at least one challenge on a 401 and
+   * `ProblemDetailsResponseSchema.superRefine` refuses a 401 whose `wwwAuthenticate` extension is
+   * missing, so one is mandatory and omitting it is not available. What is wrong with the default
+   * (`Bearer realm="crossengin", error="invalid_token"`) on *these* arms is the `error` parameter:
+   * RFC 6750 §3.1 defines `invalid_token` for a bearer token that was **presented** and rejected,
+   * and a request refused for its scheme presented none — so the default asserts a fact about a
+   * credential that does not exist. The default stays correct, and stays, on the JWT verification
+   * arms, which do reject a presented token.
+   *
+   * It is a constant rather than a function of `authSchemeServing`, and that is a decision a test of
+   * mine refuted first: rendering `Bearer` only when a JWKS is configured leaves a deployment
+   * serving only api keys with *nothing* to challenge with, and both ways out are worse — a
+   * `CrossEngin-ApiKey` auth-scheme would be a syntactically valid challenge a client cannot
+   * satisfy, because this gateway reads api keys from `x-api-key` and would refuse the
+   * `Authorization` form (ADR-0334: a remedy that cannot work is worse than none), and the
+   * RFC-6750-flavoured default would be back. So the challenge names the one HTTP authentication
+   * scheme this binary can serve, and what *this deployment* serves goes in the `detail`, where a
+   * credential that is not an HTTP auth scheme can be named at all.
+   */
+  private authChallenge(): string {
+    return 'Bearer realm="crossengin"';
+  }
+
+  /**
+   * Which of the two served schemes this *deployment* can actually authenticate, read off the
+   * runtime's own fields rather than re-derived.
+   *
+   * It is a getter on the instance so a boot survey and the request path cannot disagree: the
+   * alternative — a caller passing the same two booleans it passed to the options — is two
+   * derivations of one fact, and ADR-0361's finding is that two readers agreeing is not evidence
+   * either is right.
+   */
+  get authSchemeServing(): AuthSchemeServingInput {
+    return {
+      jwtVerifierConfigured: this.jwksProvider !== null,
+      opaqueLookupConfigured: this.opaqueTokenLookup !== null,
+    };
+  }
+
+  /**
+   * The served schemes as a sentence for a 401's `detail`.
+   *
+   * It names what this deployment accepts rather than what it refused, because that is the half the
+   * caller can act on — and it is the deployment's list and not the binary's, so a request refused
+   * because no JWKS is configured is not told to present a JWT.
+   */
+  private servedSchemeList(): string {
+    const served = servedAuthSchemesFor(this.authSchemeServing);
+    return served.length === 0 ? "no credential scheme" : served.join(", ");
   }
 
   private async stageAuthenticate(ctx: PipelineState, rec: PipelineRecorder): Promise<ProblemEnvelope | null> {
     const startedAt = this.now();
     const parsed = ctx.parsedAuth;
-    if (parsed === undefined || parsed.scheme === null || parsed.token === null) {
+    if (parsed === undefined || parsed.kind === "absent") {
       ctx.authOutcome = "anonymous";
       rec.record({
         stage: "authenticate",
@@ -311,10 +378,74 @@ export class GatewayRuntime {
       });
       return null;
     }
+    if (parsed.kind === "unrecognized") {
+      // The residual refusal, and the one that closes the live defect: before it, `?api_key=`,
+      // a client certificate and any `Authorization` scheme but `Bearer`/`Basic` resolved
+      // `scheme: null` and were served **anonymously** — a request carrying
+      // `Authorization: CE-HMAC-SHA256 …` traversed all 17 stages and answered 201 on a route
+      // declaring no required scope.
+      ctx.authOutcome = "credential_unrecognized";
+      const env = authenticationRequired({
+        reason: `the Authorization header names no scheme this deployment accepts; it serves ${this.servedSchemeList()}`,
+        wwwAuthenticate: this.authChallenge(),
+        correlationId: ctx.request.correlationId ?? undefined,
+      });
+      rec.record({
+        stage: "authenticate",
+        outcome: "deny",
+        startedAt,
+        completedAt: this.now(),
+        // The auth-scheme **token** goes in the recorded reason and never in the response: it is
+        // the half an operator needs and the half that is not the credential, which is what
+        // `authSchemeToken` establishes by refusing a header that carries no `SP`. It is on the
+        // record rather than in the body because the body is read by the client that sent it, and
+        // telling a caller which of its own schemes we failed to recognise buys them nothing.
+        reason:
+          parsed.schemeToken === null
+            ? "credential_in_unrecognized_scheme"
+            : `credential_in_unrecognized_scheme_${parsed.schemeToken}`,
+        problemTypeUri: env.body.type,
+        responseStatus: env.body.status,
+      });
+      return env;
+    }
+    const support = AUTH_SCHEME_SUPPORT[parsed.scheme];
+    if (support.treatment !== "served") {
+      // Derived from the map rather than from a list of unsupported schemes beside it, which is
+      // ADR-0288's maintained-list shape: before this, `basic` alone reached a named refusal — the
+      // only unserved scheme the parser happened to emit — and the register recorded that as all
+      // five being "honestly named".
+      ctx.authOutcome = "scheme_not_supported";
+      const env = authenticationRequired({
+        reason: `auth scheme ${parsed.scheme} is not accepted here: ${support.reason}`,
+        wwwAuthenticate: this.authChallenge(),
+        correlationId: ctx.request.correlationId ?? undefined,
+      });
+      rec.record({
+        stage: "authenticate",
+        outcome: "deny",
+        startedAt,
+        completedAt: this.now(),
+        reason: `scheme_unsupported_${parsed.scheme}`,
+        problemTypeUri: env.body.type,
+        responseStatus: env.body.status,
+      });
+      return env;
+    }
     if (parsed.scheme === "bearer_jwt") {
       if (this.jwksProvider === null) {
-        ctx.authOutcome = "credential_not_found";
-        const env = authenticationRequired({ reason: "no JWKS provider configured", correlationId: ctx.request.correlationId ?? undefined });
+        // `scheme_not_supported` and not `credential_not_found`, which is what this arm recorded:
+        // nothing looked the credential up, so "not found" is a claim about a lookup that never
+        // happened — ADR-0331's distinction, failing in the direction that blames the caller. From
+        // the caller's position this deployment does not accept bearer tokens, and the *reason*
+        // carries the operator's remedy, which is a configuration flag and not a different
+        // credential.
+        ctx.authOutcome = "scheme_not_supported";
+        const env = authenticationRequired({
+          reason: `auth scheme bearer_jwt is not accepted here: no JWKS provider is configured, so no signature can be verified; this deployment serves ${this.servedSchemeList()}`,
+          wwwAuthenticate: this.authChallenge(),
+          correlationId: ctx.request.correlationId ?? undefined,
+        });
         rec.record({
           stage: "authenticate",
           outcome: "deny",
@@ -380,8 +511,17 @@ export class GatewayRuntime {
     }
     if (parsed.scheme === "api_key_header") {
       if (this.opaqueTokenLookup === null) {
-        ctx.authOutcome = "credential_not_found";
-        const env = authenticationRequired({ reason: "no opaque token lookup configured", correlationId: ctx.request.correlationId ?? undefined });
+        // The same correction as the JWKS arm one scheme over, and unreachable from
+        // `apps/operate-server`, which passes `wiring.opaqueTokenLookup` unconditionally from a
+        // `principals.ts` that always builds one. Corrected rather than deleted because this
+        // runtime is a library: `buildOperateGateway` forwards the option only when it is present,
+        // so another caller can reach it.
+        ctx.authOutcome = "scheme_not_supported";
+        const env = authenticationRequired({
+          reason: `auth scheme api_key_header is not accepted here: no opaque-token lookup is configured, so no key can be resolved; this deployment serves ${this.servedSchemeList()}`,
+          wwwAuthenticate: this.authChallenge(),
+          correlationId: ctx.request.correlationId ?? undefined,
+        });
         rec.record({
           stage: "authenticate",
           outcome: "deny",
@@ -396,7 +536,16 @@ export class GatewayRuntime {
       const lookup = await this.opaqueTokenLookup.lookup(ctx.request, parsed.token);
       if (lookup === null) {
         ctx.authOutcome = "credential_not_found";
-        const env = authenticationRequired({ reason: "api key not recognized", correlationId: ctx.request.correlationId ?? undefined });
+        // Same `error`-parameter correction as the scheme refusals, found in this increment's own
+        // post-fix measurement rather than reasoned: this arm rejects an **api key**, not a bearer
+        // token, so the default challenge's RFC 6750 `error="invalid_token"` was asserting a fact
+        // about a credential family the request did not use. The JWT verification arm above keeps
+        // the default, where it is exactly what RFC 6750 §3.1 defines it for.
+        const env = authenticationRequired({
+          reason: "api key not recognized",
+          wwwAuthenticate: this.authChallenge(),
+          correlationId: ctx.request.correlationId ?? undefined,
+        });
         rec.record({
           stage: "authenticate",
           outcome: "deny",
@@ -422,9 +571,17 @@ export class GatewayRuntime {
       });
       return null;
     }
-    ctx.authOutcome = "credential_malformed";
+    // Unreachable while `SERVED_AUTH_SCHEMES` is exactly the two schemes with an arm above, which is
+    // what `runtime-auth-schemes.test.ts`'s "the stage and the support map agree" asserts in both
+    // directions — the fence the type system cannot give, because `support.treatment === "served"`
+    // does not narrow `parsed.scheme`. A third served scheme declared in `AUTH_SCHEME_SUPPORT` and
+    // not implemented here lands on this line and **fails closed**, which is the only safe
+    // disposition: the alternative, falling through to the served path, would authenticate a scheme
+    // nothing verified.
+    ctx.authOutcome = "scheme_not_supported";
     const env = authenticationRequired({
-      reason: `unsupported auth scheme ${parsed.scheme}`,
+      reason: `auth scheme ${parsed.scheme} is declared served and has no authenticator in this gateway; this deployment serves ${this.servedSchemeList()}`,
+      wwwAuthenticate: this.authChallenge(),
       correlationId: ctx.request.correlationId ?? undefined,
     });
     rec.record({
@@ -432,7 +589,7 @@ export class GatewayRuntime {
       outcome: "deny",
       startedAt,
       completedAt: this.now(),
-      reason: `scheme_unsupported_${parsed.scheme}`,
+      reason: `scheme_declared_served_without_authenticator_${parsed.scheme}`,
       problemTypeUri: env.body.type,
       responseStatus: env.body.status,
     });

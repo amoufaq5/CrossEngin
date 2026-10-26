@@ -1,5 +1,6 @@
 export * from "./adapters.js";
 export * from "./auth.js";
+export * from "./auth-scheme-survey.js";
 export * from "./dispatcher.js";
 export * from "./pipeline-runner.js";
 export * from "./problems.js";

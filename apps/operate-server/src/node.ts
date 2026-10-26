@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { hostname } from "node:os";
 
 import type { PipelineExecution } from "@crossengin/api-gateway";
+import { formatAuthSchemeSurvey } from "@crossengin/api-gateway-runtime";
 import {
   PostgresIdempotencyStore,
   PostgresPipelineExecutionStore,
@@ -3839,6 +3840,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     ...(rateLimitChecker !== undefined ? { rateLimitChecker } : {}),
     ...(idempotencyStore !== undefined ? { idempotencyStore } : {}),
   });
+  // ADR-0384. Read off the live runtime rather than from the flags, so the line and the request
+  // path cannot disagree about which credentials this deployment accepts (ADR-0361). Said either
+  // way, including when there is nothing to report: the thing to confirm here is a *refusal*, which
+  // is harder to confirm by trying it than a capability is — before this, trying it answered 200.
+  console.info(`[auth] ${formatAuthSchemeSurvey(gateway.runtime.authSchemeServing)}`);
   if (rateLimitChecker !== undefined && options.rateLimitPolicies !== null) {
     const policySurvey = surveyRoutePolicies(options.rateLimitPolicies, gateway.routes.list());
     // Said before the first request, because an undeclared policy is a *refusal* at request time and
