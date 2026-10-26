@@ -40,6 +40,29 @@ const SERVED_SCHEME_GATE: Readonly<
 const isGatedScheme = (scheme: AuthScheme): scheme is keyof typeof SERVED_SCHEME_GATE =>
   Object.hasOwn(SERVED_SCHEME_GATE, scheme);
 
+/**
+ * What each gate is, in the words an operator would search the deployment for.
+ *
+ * Keyed on the **gate** and not on the scheme, so the sentence names the thing that is missing
+ * rather than a thing that merely sounds like it: `api_key_header` is gated on an opaque-token
+ * lookup, and calling that "no verifier configured" sends an operator whose api-key path is dark to
+ * look for a JWKS — ADR-0334's *a remedy that cannot work is worse than none*, inside the boot line
+ * this increment exists to add. Separate from `SERVED_SCHEME_GATE` for the reason the refusal
+ * reasons are separate from the treatments: one map says which fact decides and the other what the
+ * fact is called, and a gate added to the first without the second is a compile error here rather
+ * than a sentence naming the wrong remedy.
+ *
+ * Latent today and deliberately fixed anyway: `operate-server` reaches only the one-scheme case,
+ * because `principals.ts` types `opaqueTokenLookup` non-optional and `server.ts` passes it
+ * unconditionally, so `api_key_header` is always configured there and the clause only ever names
+ * `bearer_jwt`. That is exactly why the wrong noun would have survived — the one reachable state
+ * happens to be the one where "verifier" is right.
+ */
+const GATE_SUBJECT: Readonly<Record<keyof AuthSchemeServingInput, string>> = Object.freeze({
+  jwtVerifierConfigured: "no JWKS verifier configured",
+  opaqueLookupConfigured: "no opaque-token lookup configured",
+});
+
 /** The schemes this deployment can authenticate: served by the binary **and** configured here. */
 export function servedAuthSchemesFor(
   input: AuthSchemeServingInput,
@@ -86,14 +109,24 @@ export function formatAuthSchemeSurvey(input: AuthSchemeServingInput): string {
   const served = servedAuthSchemesFor(input);
   const refused = authSchemesByTreatment("refused");
   const indistinguishable = authSchemesByTreatment("indistinguishable");
+  // One clause per unconfigured scheme, each naming *its own* missing fact. Not one clause listing
+  // them, which was the first shape: with two it read "bearer_jwt and api_key_header **is** served
+  // ... and **has** no verifier configured" — a plural subject under a singular verb, and the wrong
+  // noun for whichever of the two is not gated on a verifier.
   const unconfigured = AUTH_SCHEMES.filter(
     (s) => AUTH_SCHEME_SUPPORT[s].treatment === "served" && !served.includes(s),
+  ).map((s) =>
+    isGatedScheme(s)
+      ? `${s} is served by this binary and has ${GATE_SUBJECT[SERVED_SCHEME_GATE[s]]}`
+      : // Unreachable while `SERVED_SCHEME_GATE` covers every served scheme, which its companion
+        // test asserts: an ungated scheme is reported *served* by `servedAuthSchemesFor`, so it
+        // cannot also be in this list. Written out rather than asserted away, because a scheme that
+        // reached here would otherwise be dropped from the line entirely.
+        `${s} is served by this binary and is not configured here`,
   );
   const sentences = [
     `auth schemes: serving ${joinNames([...served])}`,
-    ...(unconfigured.length > 0
-      ? [`${joinNames([...unconfigured])} is served by this binary and has no verifier configured`]
-      : []),
+    ...unconfigured,
     `refusing ${joinNames([...refused])} by name`,
     `${joinNames([...indistinguishable])} name no position on the wire, so a request in either is` +
       ` refused as an unrecognized credential rather than by scheme`,

@@ -115,11 +115,31 @@ describe("formatAuthSchemeSurvey", () => {
    */
   it("names a served scheme whose verifier is not configured", () => {
     const line = formatAuthSchemeSurvey(API_KEY_ONLY);
-    expect(line).toContain("bearer_jwt is served by this binary and has no verifier configured");
+    expect(line).toContain("bearer_jwt is served by this binary and has no JWKS verifier configured");
+  });
+
+  /**
+   * Each unconfigured scheme names *its own* missing fact, which is what the single joined clause
+   * could not do: `api_key_header` is gated on an opaque-token lookup, so reporting it as "no
+   * verifier configured" would send an operator to look for a JWKS (ADR-0334).
+   *
+   * Unreachable from `operate-server` — `principals.ts` types `opaqueTokenLookup` non-optional and
+   * `server.ts` passes it unconditionally, so `api_key_header` is always configured there — which
+   * is exactly why it is asserted here: the one reachable state is the one where the wrong noun
+   * happens to read correctly, so nothing else would ever have caught it.
+   */
+  it("names the right missing fact per scheme, with no plural-subject clause", () => {
+    const line = formatAuthSchemeSurvey(NEITHER);
+    expect(line).toContain("bearer_jwt is served by this binary and has no JWKS verifier configured");
+    expect(line).toContain(
+      "api_key_header is served by this binary and has no opaque-token lookup configured",
+    );
+    // The shape the joined clause produced, and the reason it is gone.
+    expect(line).not.toContain("bearer_jwt and api_key_header is served");
   });
 
   it("omits the unconfigured clause when both verifiers are present", () => {
-    expect(formatAuthSchemeSurvey(BOTH)).not.toContain("no verifier configured");
+    expect(formatAuthSchemeSurvey(BOTH)).not.toContain("is served by this binary and has");
   });
 
   it("says 'none' rather than an empty gap when nothing is served", () => {

@@ -509,3 +509,45 @@ the rename is free whenever the first one arrives. And two sentences overstate: 
 "every existing reader keeps working" is true of **one** non-test reader which itself has none, and
 `formatAuthSchemeSurvey` prints "refusing … mtls by name" for a refusal no deployment can reach —
 the map's reason says so and the line does not.
+
+### Addendum 2: the boot line named the wrong missing thing, found by running it
+
+Exercising `formatAuthSchemeSurvey` across the four configurations — which nothing had done, because
+the tests pin one string per case and `operate-server` only reaches one case — showed the
+unconfigured clause joining every unconfigured scheme into **one sentence with one noun**:
+
+```
+bearer_jwt and api_key_header is served by this binary and has no verifier configured
+```
+
+Two defects in one clause. A plural subject under a singular verb, and — the one that matters —
+**the wrong noun for `api_key_header`**, which is gated on an opaque-token lookup and not on a
+verifier, so an operator whose api-key path was dark would go looking for a JWKS. That is
+ADR-0334's *a remedy that cannot work is worse than none* **inside the boot line this increment
+added to end exactly that class of silence**.
+
+Both are **unreachable from `operate-server`** and are fixed anyway. `principals.ts` types
+`opaqueTokenLookup` non-optional, builds one unconditionally and `server.ts:387` passes it, so
+`api_key_header` is always configured there and the clause only ever names `bearer_jwt` — for which
+"verifier" is correct. **That is precisely why it would have survived: the one reachable state is
+the one where the wrong noun reads right.** The fix is `GATE_SUBJECT`, a total map keyed on the
+**gate** rather than the scheme, so a sentence naming the wrong remedy is a compile error — the same
+argument `SERVED_SCHEME_GATE`'s own comment makes one level in, applied to the sentence that reports
+it. One clause per scheme, each naming its own fact:
+
+```
+bearer_jwt is served by this binary and has no JWKS verifier configured
+api_key_header is served by this binary and has no opaque-token lookup configured
+```
+
+The test for it asserts the unreachable two-scheme case deliberately, and says in its own comment why
+a reachable-only suite could never have caught this.
+
+**And the probe that found it was wrong first**, which is worth recording because it is this run's
+own class landing on a verification: the first pass called the formatter from plain `node` with
+`{ jwksConfigured, opaqueLookupConfigured }`, and the real field is `jwtVerifierConfigured`, so all
+four calls read `undefined`, two configurations printed identical lines, and the apparent finding was
+"`jwtVerifierConfigured` does nothing". A JS call into a typed function is ADR-0362's *type
+annotation standing in for a check* with the annotation removed — the compiler was available and was
+not asked. The real defect was found on the second pass, after reading the interface rather than
+guessing it.
