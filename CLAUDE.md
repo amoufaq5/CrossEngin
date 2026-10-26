@@ -2140,6 +2140,77 @@ type errors.
   ADR-0362's annotation-standing-in-for-a-check — with a non-vacuity assertion beside it, so
   narrowing the remit by hand cannot retire the fence while keeping it green.
 
+  ADR-0384 is the first increment of the register's **P1** tier, and the class is **a credential
+  presented and recorded as absent**. `AUTH_SCHEMES` declares eight schemes and the request path
+  served **five** of them anonymously: `bearer_opaque` with no matcher, `basic`, `mtls` and
+  `hmac_signature` all fell through `authenticate` to the **no-credential arm**, so a request that
+  presented a credential was stamped `authOutcome: "anonymous"` — byte-identical to one that
+  presented nothing — and then served. Measured before designing, which is what refuted the
+  register: `?api_key=ce_live_…` answered **201** against a route requiring a principal.
+  **`basic` is the exception that makes the shape legible**: it was the one unserved scheme the
+  parser could produce, it *did* reach a refusal arm, and that arm stored
+  `authOutcome: "credential_malformed"` — a claim about the *caller's* credential, false of a
+  perfectly well-formed one — with `scheme_unsupported_basic` as the stage **reason**, which is a
+  free-text field and not a modelled outcome. So the register's *"the refusal is honest and
+  named"* was true of one scheme in five and honest in neither half, and what read as a documented
+  limitation was a column unable to separate *nobody authenticated* from *a credential was offered,
+  not understood, and ignored*: the first is a public request, the second a client that believes it
+  is authenticated and is not. The contract had modelled the decision and modelled it with the
+  wrong vocabulary — *unimplemented scheme* is a fact about **this build**, and
+  `credential_malformed` is a fact about the caller.
+  The rule is that **recognising a credential and accepting one are different acts**, so a scheme
+  this deployment does not serve must be *recognised and refused* rather than unrecognised.
+  `AUTH_SCHEME_SUPPORT` is a total map over `AUTH_SCHEMES`, so a ninth scheme is a compile error
+  rather than a silent anonymous, and `RECOGNISABLE_AUTH_SCHEMES` / `SERVED_AUTH_SCHEMES` are
+  derived from it rather than restated. **`indistinguishable` is the decision rather than a hedge,
+  and its line is *recognisability* and not implementedness** — which is the distinction the
+  obvious reading gets backwards, and the two members are not the two one would guess.
+  `hmac_signature` has no `Authorization` auth-scheme token chosen for it, so committing to one
+  would reserve half a surface and serve the unreserved half anonymously, and the repo's one HMAC
+  wire format authenticates a **payload** rather than a principal (stage 12
+  `validate_request_signature` exists for exactly that, so reading the header as a credential would
+  conflate the two); `bearer_opaque` is claimed by `bearer_jwt`'s own `Bearer ` prefix, where a
+  token-shape test would **grant** rather than refuse, since the only opaque lookup available
+  matches whole api-key strings — a capability decision and not a parser one. Both are declared
+  with their reason instead of given an arm that cannot fire, ADR-0334's *a remedy that cannot work
+  is worse than none* applied to a refusal. **`mtls` is `refused`**, and that asymmetry is the
+  point: its recognising field exists (`clientCertSha256`) and only its *producer* is missing, so
+  the arm is right and merely unreachable until a terminator populates it. A fourth treatment,
+  `not_a_credential`, holds `anonymous` — the value recorded when nothing was presented, which is
+  neither served nor refused.
+  `credential_unrecognized` is the residual, and it is the half a scheme list cannot reach: an
+  `Authorization` header whose token names no scheme at all used to be indistinguishable from an
+  absent header.
+  Three things were sharper than the defect. The boot line reads off
+  `gateway.runtime.authSchemeServing` and **not off the flags**, so the line and the request path
+  cannot disagree about which credentials this deployment accepts (ADR-0361) — said either way,
+  including when there is nothing to report, because what wants confirming here is a *refusal*,
+  which is harder to confirm by trying it than a capability is. **The catalog had to move with
+  it**: `pg-value-set-domains.ts` declares `auth_outcome` as `mirrors`, which asserts equality in
+  both directions, so the rule failed `[contract_exceeds_catalog]` until the CHECK named the two
+  new values — and the declaration itself needed no edit, because it names the *ref* and not the
+  members, which is the property that rule was built for. And **the residual arm sat after
+  `mtls`**, whose own comment claimed it *"may only answer when the message named nothing"* while
+  sitting ahead of it, so `Authorization: Negotiate x` plus a forwarded certificate answered
+  `mtls` — a comment describing an ordering the code did not have, which is this file's most-found
+  documentation class, found by an adversarial pass rather than by the author.
+  One review finding is **refused with its evidence**: `?api_key=` with an empty value stays
+  *absent*, because a form serialises an unset field as `?k=` and two existing tests assert exactly
+  that with the reason in their titles — ADR-0365's established rule rather than an oversight. A
+  *repeated* parameter is the half that was real and is recognised now, carrying none of its values.
+  And the increment's **own deletion argument was wrong in the direction that understates the dead
+  code**, found while writing it rather than by looking: it claimed `exp`/`nbf`/`iss`/`aud` are all
+  duplicated by `verifyBearerJwt`, and the quartet does not survive reading both guards. For
+  `exp`/`nbf` the two spellings are the same shape and both permissive about an absent claim; for
+  `iss`/`aud` they are **opposite** — `resolveAuth` keys on *the deployment's expectation*, so a
+  token naming no issuer against a configured one is `issuer_mismatch`, while `verifyBearerJwt`
+  keys on *the token's own claim*, so a token carrying neither is `authenticated` whatever the
+  deployment declared, and the expectation is **never absent** (defaulted at `runtime.ts:138-139`).
+  So the dead code is the correct one and the deletion argument is stronger, not weaker — recorded
+  as that ADR's top open end with its measurement rather than fixed there, because the reachable
+  population is a *foreign* token under `--jwks-url`, both claims are OPTIONAL in RFC 7519, and
+  refusing one that works today is a behaviour change rather than a free tightening.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -2871,14 +2942,58 @@ packages exist at only one layer, noted below where that is true.
 ### Request edge
 
 - **`api-gateway`** — contracts for the 17-stage per-request pipeline (`receive` →
-  `emit_audit`) with 6 stage outcomes, 8 auth schemes × 16 auth outcomes, route matching +
+  `emit_audit`) with 6 stage outcomes, 8 auth schemes × **18** auth outcomes, route matching +
   version negotiation + sunset, idempotency records, content/encoding/language negotiation,
   RFC 9457 problem types, CORS and default security headers.
+  **`AUTH_SCHEME_SUPPORT` says which of the eight this build serves, and it is a total map**
+  (ADR-0384) — so a ninth scheme is a compile error rather than a scheme the request path silently
+  treats as anonymous, which is what four of them were. Four `AUTH_SCHEME_TREATMENTS` —
+  `served` (2: `bearer_jwt`, `api_key_header`), `refused` (3: `basic`, `api_key_query`, `mtls` —
+  recognised on the wire and denied by name), `indistinguishable` (2) and `not_a_credential` (1,
+  `anonymous`, which is the value recorded when nothing was presented and so is not a credential to
+  serve or refuse). **`indistinguishable` is the member that earns its place**, and its two members
+  are the ones nothing on the wire can separate — not the ones that are merely unimplemented, which
+  is the distinction to keep: `hmac_signature` has no `Authorization` auth-scheme token chosen for
+  it, so giving it a refusal arm would reserve half a surface and leave the unreserved half served
+  anonymously *and* would conflate a payload signature with a principal credential (the repo's one
+  HMAC wire format authenticates a payload, which is why stage 12 `validate_request_signature`
+  exists); and `bearer_opaque` is claimed by `bearer_jwt`'s own `Bearer ` prefix, where a
+  token-shape test would **grant** rather than refuse, because the only opaque lookup available
+  matches whole api-key strings — a capability decision, not a parser one. `mtls` is **refused**
+  rather than indistinguishable, because its recognising field exists (`clientCertSha256`) and only
+  its *producer* is missing, so the arm is correct and unreachable until a terminator populates it.
+  Each carries its reason rather than an arm that cannot fire (ADR-0334).
+  `RECOGNISABLE_AUTH_SCHEMES` and
+  `SERVED_AUTH_SCHEMES` are **derived** from the map and never restated, which is what makes the
+  literal pin on the second one a fence rather than a second spelling. `resolveAuth` and
+  `ParsedAuthCredentialSchema` are **kept and callerless on purpose**: ADR-0337's test for a deletion
+  is *a second spelling of live code* and this is the opposite — four of nine clauses are duplicated
+  by the runtime, two are unique (the scheme allow-list, now superseded by the map, and an HMAC
+  freshness window with no path), and **two are stricter here than on the request path** (see the
+  `iss`/`aud` entry under *What's actually left*). The schema is also the only place the repo writes
+  down what an mtls or hmac credential consists of — a specification of code that does not exist,
+  with no structural reference anywhere, so deleting it would be free and would destroy it.
 - **`api-gateway-runtime`** — that pipeline as real middleware. EdDSA JWT verification with
   iss/aud/exp/nbf and a JWT-vs-header tenant cross-check, opaque-token matching, body
   parsing, handler dispatch, handler 4xx/5xx → deny/error mapping, classification-driven
   response redaction (including a registry derived straight from a manifest), security
   headers, and a schema-valid `PipelineExecution` per request.
+  **A credential this build does not serve is recognised and refused, where it used to be
+  unrecognised and served** (ADR-0384). `authenticate` had no arm for an unserved scheme, so
+  `bearer_opaque` with no matcher, `basic`, `mtls` and `hmac_signature` reached the **no-credential
+  path** and were recorded `anonymous` — the value a request presenting nothing gets — and then
+  served: measured, `Authorization: Basic …` answered **200** against a route requiring a
+  principal. `schemeFromAuthorization` reads `AUTH_SCHEME_SUPPORT`, and the **ordering is
+  load-bearing**: the residual (`credential_unrecognized`, an `Authorization` token naming no
+  scheme at all) sits *before* `mtls`, because `mtls` is recognised from a forwarded certificate
+  rather than from the message, so with the residual last a `Negotiate` header plus a certificate
+  answered `mtls` — which the `mtls` branch's own comment said could not happen. `API_KEY_QUERY_PARAM`
+  is one spelling and not a set, on the stated ground that reserving `?api_key=` commits only to
+  never *accepting* it; an **empty** value stays absent (a form serialises an unset field as `?k=`,
+  ADR-0365) while a **repeated** one is recognised carrying none of its values, since two values are
+  a client that cannot be answered. `authSchemeServing` is exposed off the runtime so the boot line
+  reads the live object rather than the flags (ADR-0361), and `formatAuthSchemeSurvey` is said either
+  way — a *refusal* is harder to confirm by trying it than a capability is.
   **A thrown handler is a 500 whose body names nothing, with the message in the recorded stage
   reason** (ADR-0359), where the mapping was **inverted**: `gatewayTimeout({reason:
   err.message.slice(0, 480)})` put the detail in the client's RFC 9457 `detail` under a **504** —
@@ -6817,6 +6932,27 @@ opened them.
 
 **Load-bearing**
 
+- **`verifyBearerJwt` guards `iss` and `aud` as *present and wrong*, so a token carrying neither is
+  `authenticated` whatever the deployment declared** (ADR-0384's top open end, found while writing
+  that increment's deletion argument rather than by looking for it). `typeof jwt.payload.iss ===
+  "string" && …` and `aud !== undefined && !audOk` at `auth.ts:142-151`: absence passes both. The
+  expectation is **never absent** on the request path — `runtime.ts:138-139` defaults
+  `jwtIssuer`/`jwtAudience` to `https://crossengin.io` / `https://api.crossengin.io`, so there is
+  always something the token failed to match — and **the correct spelling already exists twice in the
+  repo, both dead**: `resolveAuth` keys on `expectedIssuer !== null` (`auth-resolution.ts:429-437`)
+  and `sso/src/oidc.ts` sits in a package with zero importers. ADR-0369's class on an authorization
+  input, and the reason ADR-0384's *"`exp`/`nbf`/`iss`/`aud` are duplicated by the runtime"* is wrong:
+  `exp`/`nbf` really are the same shape in both spellings (both permissive about absence, so both
+  equally weak), while these two are **opposite**, one reading the token and one reading the
+  configuration. Bounded, which is why it is an open end and not that increment: the in-repo mint
+  emits both (`token-mint.ts:263-264`) and `--credential-login` is mutually exclusive with
+  `--jwks-url`, so the reachable population is a **foreign** token from an external IdP. Tightening
+  is therefore **not free** — both claims are OPTIONAL in RFC 7519 §4.1.1/§4.1.3, so a deployment
+  whose IdP omits `aud` is refused on every request after the change, which is ADR-0338's premise
+  read the other way (something *does* work today). The decision is refuse versus report at boot with
+  the measured count, as ADR-0357 chose for the cursor; and note `exp`'s absence is the sharper
+  member of the pair either way, since a token with no `exp` never expires.
+
 - **A sweep survives the row it exists to find, and what is left of it** (ADR-0373 closed ADR-0372's
   Q2). Measured by calling the rule over the committed tree before and after, which is the only
   figure worth carrying because it is the one the rule produces: **82 sites needing a declaration
@@ -9449,9 +9585,33 @@ three make the rest honest, cheap or verifiable.
 10. **No outbound webhook delivery**, so a tenant cannot subscribe to any platform event — and with
     the signal bridge unregistered the platform has neither event ingress nor egress. Cheapest item
     in the tier: the HMAC primitive exists and the drain loop is the mechanism.
-11. **Five of eight declared auth schemes are denied at runtime**, including both strong schemes
-    other than JWT. `bearer_opaque`, `api_key_query`, `basic`, `mtls` and `hmac_signature` all fall
-    through to `scheme_unsupported_*`. The refusal is honest and named; `hmac_signature` is cheap.
+11. ~~**Five of eight declared auth schemes are denied at runtime.**~~ — **the refusal half is
+    closed by ADR-0384, and this entry was wrong about four of its five schemes.** *"The refusal is
+    honest and named"* was true of **`basic` alone** — the only unserved scheme the parser could
+    even produce — and it was honest in neither half: `scheme_unsupported_basic` was the recorded
+    stage **reason**, never an `AuthOutcome` (there was no such member), and the `authOutcome` it
+    stored was **`credential_malformed`**, a claim about the *caller's* credential that is false of
+    a perfectly well-formed one. The other four were not denied at all: `api_key_query`, `mtls` and
+    `hmac_signature` had no reader, so they fell through `authenticate` to the **no-credential
+    arm** and were recorded `anonymous` — byte-identical to a request presenting nothing — and then
+    served, while `bearer_opaque` was worse than unnamed, being classified as `bearer_jwt` and
+    reported as a signature failure for a scheme never implemented. Measured before designing:
+    `Authorization: Basic …` answered 401, and `?api_key=…` answered **201**. So the column could
+    not separate *nobody authenticated* from *a credential was offered, not understood, and
+    ignored*, which is the one distinction an operator reading it needs. Naming a scheme in a
+    constant is not refusing it on the wire. Closed by `AUTH_SCHEME_SUPPORT`, a total
+    map over `AUTH_SCHEMES` with `scheme_not_supported` and `credential_unrecognized` as two new
+    outcomes — and by a third treatment, `indistinguishable`, for the two schemes that cannot be
+    recognised at all (`hmac_signature` reserves no `Authorization` token, so committing to one
+    would reserve half a surface and serve the other half anonymously; `mtls`'s recognising field
+    has no producer in `deploy/`). *"`hmac_signature` is cheap"* is **refuted and inverted**: it is
+    the **dearest** of the unimplemented schemes — no key-id→secret store exists (`meta.crypto_keys`
+    holds no private material and `meta.users`' ADR-0358 columns are a scrypt *password* hash), no
+    key-id→principal mapping, `rawBody` reachable only through a cast, no canonical-message
+    decision, and a choice between stage 5 and stage 12 — while `mtls` is dearest in *deployment*
+    terms. What is left is **implementation**, which is a scheme-by-scheme product decision and not
+    one increment: the refusals are now reachable and recorded, so a client learns it was refused
+    rather than being served as the public.
 12. **Reporting and search do not execute**: both packages are imported by manifest validation
     alone, the three shipped reports are hand-built pages, and across 51+ entities the only
     find-a-record mechanism is the ILIKE whose cost is item 1.
@@ -9825,6 +9985,40 @@ method is that a stale figure misleads.
    on the wrong question, which no figure-checking catches because both numbers are real questions.
    A pointer into a list goes stale when the list is reordered, and nothing in this repo compares the
    two.
+   **ADR-0384 adds three members and the first is the only one of the class so far that was load-bearing
+   for an authorization decision.** (a) The register's *"the refusal is honest and named"* was true of
+   **one scheme in five** and named `scheme_unsupported_*`, which is a free-text stage **reason** and
+   has never been an `AUTH_OUTCOMES` member — the modelled outcome beside it was
+   `credential_malformed`, false of a well-formed credential. So a documented limitation was in fact
+   four schemes served as the public and one denied under a lie about the caller, and a reader
+   trusting the sentence would have gone looking for the refusal's wording rather than for its
+   absence. **An earlier draft of this very entry over-corrected it to "named a refusal that did not
+   exist"**, which a `git log -S` found false in one command, so the correction needed correcting
+   before it was pushed: the string *is* in the tree's history, as a reason rather than an outcome,
+   and a reader grepping the over-correction would have concluded the opposite of what it meant.
+   The ADR itself had the distinction right throughout; the compression into this file is where it
+   was lost, which is this entry's own class at one remove — **a summary of a correct document can be
+   the thing that goes stale.** And it happened **twice in the same sitting, differently**: the first
+   draft of this file's package-map entry recorded *"three `AUTH_SCHEME_TREATMENTS`"* over a map that
+   has **four**, and assigned `mtls` to `indistinguishable` when it is `refused` — inverting the one
+   distinction that member exists to draw, since `mtls`'s recognising field exists and only its
+   producer is missing while `bearer_opaque`, the real second member, cannot be separated from
+   `bearer_jwt` on the wire at all. Caught by running `node -e` over the built map rather than by
+   re-reading the ADR, which is the general lesson: **a census is checkable and prose about a census
+   is not, so check the census.** (b) A
+   comment on the `mtls` branch asserted it *"may only answer when the message named nothing"* while
+   that branch sat **ahead** of the residual arm, so the comment described an ordering the code did
+   not have — this file's most-found documentation shape, and the one instance here with a live
+   consequence. (c) That ADR's own Alternatives claimed `exp`/`nbf`/`iss`/`aud` were all duplicated
+   by `verifyBearerJwt`, which is **two of four**, and the undetected half is a real weakening of the
+   request path (see *What's actually left*). All three were found by measuring a sentence that was
+   about to be committed rather than by a survey, which is the argument for measuring one before
+   repeating it — and (c) was found by writing the *deletion argument for the dead code*, so the
+   habit that pays is justifying a decision in prose until the justification contradicts itself.
+   And a fourth, this increment's own: the Alternatives paragraph first cited its new open question as
+   *"open question 4"* when the row had landed **third**, which is this entry's own off-by-one being
+   committed into the ADR that documents it — fixed by citing the question **by its heading**, which
+   is immune to reordering and is the general remedy this entry had not named.
 2. **Six concepts are modelled several times over, two with non-nesting member sets.** Data
    classification has five declarations — four identical and one, in `data-lineage`, **disjoint past
    two members**, so the moment anything bridges the kernel's classification into the lineage graph
