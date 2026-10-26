@@ -6294,11 +6294,38 @@ module half-built from two trees. That produced **three phantom failures** once 
 policy assertion reading `'INSERT'` for an `'ALL'` policy and two `operate-server` CLI tests
 expecting a refusal that did not throw — none of which reproduced when those packages were run
 alone, before *or* after the change. So: reproduce a sweep failure in isolation before believing it,
-and check `pgrep -af "pnpm -r"` is empty before starting one. This is ADR-0307's lesson in a third
-form — running vitest is not running the type checker, running vitest is not running the build, and
-running two sweeps is not running one.
-There **is** a top-level `lint` script (`turbo run lint`) and it passes **vacuously** —
-ESLint has not been migrated to v9 flat config. Ignore lint unless asked.
+and check nothing else is sweeping before starting one — **with a `/proc` scan and not with
+`pgrep -af "pnpm -r"`**, which is what this paragraph used to say and is the very trap the
+`next build` rule twenty lines below documents: the pattern matches the *waiting shell's own command
+line*, so the check reports hits that are all pollers. Measured during ADR-0382's increment, where
+`pgrep` still reported two matches for a build that had already finished and both were polling
+shells. This is ADR-0307's lesson in a third form — running vitest is not running the type checker,
+running vitest is not running the build, and running two sweeps is not running one.
+
+**There is a top-level `lint` script and it is a hard red, not a vacuous pass** (ADR-0382). This
+file said it "passes **vacuously** — ESLint has not been migrated to v9 flat config", and **both
+halves were wrong**. Measured: `pnpm lint` **exits 1** in 4.9 s, because `next lint` with no config
+**prompts interactively** (`? How would you like to configure ESLint?`) and the non-TTY read cancels
+it, so turbo reports `Failed: @crossengin/operate-web#lint`. And the v9 flat config **does exist** —
+`packages/config/eslint/base.mjs` is a real `tseslint.config(js.configs.recommended,
+...recommendedTypeChecked, …)` with `projectService: true`, exported as `"./eslint/base"`, with
+`eslint ^9` / `@eslint/js ^9` / `typescript-eslint ^8` installed. The real reasons it is useless are
+that **nothing references it** (grep `config/eslint` → 0 hits) and **89 of 90 members have no lint
+task**; no `eslint.config.*` or `.eslintrc*` exists outside `node_modules`. So lint is still to be
+ignored, for a different and sharper reason: a CI job running it is red on arrival, which is why
+ADR-0382's workflow has no lint job.
+
+**`pnpm -r <script>` is not turbo and bypasses `dependsOn`** (ADR-0382). `turbo.json` declares
+`test`/`typecheck`/`lint` as `dependsOn: ["^build"]` and the *root* scripts are turbo — but
+`pnpm -r typecheck`'s log carries **0** `build$` lines, **0** cache hits, and the string `turbo`
+appears in neither the build nor the typecheck log. So the `pnpm -r build && pnpm -r typecheck &&
+pnpm -r test` ordering above is enforced **only by the `&&`**, and the three figures are independent
+and additive (149 s + 131 s + 200 s measured on 4 vCPU). The build is a hard prerequisite nothing
+enforces: `dist/` is gitignored, 385 of 767 test files import an `@crossengin/*` package, and
+decisively *every* package's `vitest.config.ts` is
+`import { vitestPreset } from "@crossengin/testing/vitest"`, which resolves to `dist/` — so on a
+fresh checkout `pnpm -r test` cannot load its own configs for any of the 88 packages until
+`@crossengin/testing` is built.
 
 **Run `pnpm -r build` before trusting a consumer's tests after a contract change.**
 Packages resolve each other through `dist/`, so `pnpm --filter <consumer> test` runs
@@ -6312,8 +6339,14 @@ checker; here, it was not running the build.
 `npx prettier --write` uses the workspace's width. Most of `packages/*/src` is not
 Prettier-clean and there is no `format:check`; don't bulk-format.
 
-`apps/operate-web` is a Next.js app outside the vitest workspace: verify it with
-`npx next build` (and `npx tsc --noEmit`) from `apps/operate-web`.
+`apps/operate-web` is a Next.js app outside the vitest **workspace**, and that is the only sweep it
+is outside: **`pnpm -r build` already runs its `next build` and `pnpm -r typecheck` already runs its
+`tsc -p tsconfig.json --noEmit`** (both confirmed in the sweep logs — `apps/operate-web build$ next
+build … ✓ Generating static pages (17/17)`, and `typecheck$ … Done`), so running them by hand after
+a sweep verifies nothing the sweep did not. ADR-0382 measured it; this file used to say to verify it
+separately, which was redundant rather than wrong. Run them by hand when you want the app checked
+**without** paying 280 s of workspace build and typecheck — that is what the two commands are for:
+`npx next build` and `npx tsc --noEmit` from `apps/operate-web`.
 **Run only one `next build` at a time too** (ADR-0364), for the `pnpm -r` rule's reason one app
 over: `.next/` is shared mutable state, so a second build started while the first is tracing
 fails in `collectBuildTraces` on a missing `_not-found/page.js.nft.json` — a phantom failure
@@ -9630,7 +9663,10 @@ method is that a stale figure misleads.
    `tenant-deletion-routes.ts:33` and `deletion-pipeline.ts:427`, so the pair that justifies the
    retirement ordering is stale in three places at once;
    `ABAC_GRANT_POSITIONS` counted at eight when it is nine; the callerless declarations counted at
-   16 when the array holds 15; "no top-level lint script" when one exists and passes vacuously; and
+   16 when the array holds 15; "no top-level lint script" when one exists — and the correction that
+   replaced it, *"it passes vacuously because ESLint has not been migrated to v9 flat config"*, was
+   **wrong in both halves** and stood for four increments until ADR-0382 ran the command: it exits 1,
+   and the flat config exists and is referenced by nothing. A correction is not a measurement; and
    the compose telling an operator "there is no rekey executor yet" after ADR-0349 shipped one.
    Six further items were **already closed** and listed as open: ADR-0307's `failed`-is-both-
    terminal-and-compensatable (resolved by deriving `CLOSED_INSTANCE_STATUSES` from the transition
