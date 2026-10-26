@@ -3940,16 +3940,35 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   ADR-0336 declares why, per store, rather than wiring them. **There is no incident lifecycle surface
   in the deployed binary at all** — no `/incidents` route anywhere, and `PersistentIncidentEngine` is
   constructed only by `PostgresIncidentDeclarer`, which calls `declare` / `findOpenFor` / `load` /
-  `cancelIfUntriaged` and never `assignRole`, `changeSeverity`, `note`, `transition` or
-  `attachPostmortem`. Two consequences are live rather than theoretical: **`human_owned` is
-  unreachable in every deployment**, since `cancelIfUntriaged` declines only when the status is not
-  `declared` and reaching `triaged` requires on-call roles no route assigns, so ADR-0326's
-  "an alert wrongly closed is silence" arm never fires; and **sev1 and sev2 incidents cannot be closed
-  at all**, because `IncidentRecordSchema` refuses `closed` without a `postmortemId` for every
-  severity with `postmortemRequired` — which is every grade the three escalators declare at — while
-  the refinement above it refuses any status past `declared` for those grades without
-  `publiclyVisible: true`, i.e. a status page this platform does not have. `declare → cancel` is the
-  whole reachable lifecycle. `appendPagedNote` (ADR-0327) is the paged timeline
+  `cancelIfUntriaged` and never `assignRole`, `changeSeverity`, `transition` or
+  `attachPostmortem` — those five `PersistentIncidentEngine` wrappers have **zero callers**, and the
+  engine is constructed at exactly one non-test site. **`notePage` is the exception and this file
+  used to miss it**: it is a second reachable writer (reached from `node.ts`), writing a timeline
+  entry and no status, which `incident-note.ts` calls "the second writer" in so many words. The
+  reachable lifecycle, **derived** from the status writers rather than asserted, is
+  `{declared → cancelled}` — **1 of `INCIDENT_TRANSITIONS`' 12 edges and 2 of its 8 statuses** —
+  and `triaged` is unreachable because `DeclareIncidentInput` has no `roleAssignments` field at all,
+  so the 3 roles it needs (5 at sev1) cannot be supplied by the one thing that declares.
+  Two consequences, and **this file had the first one backwards** (corrected by measurement while
+  scoping register P1.7). **`human_owned` is unreachable in every deployment** — that part holds,
+  since `cancelIfUntriaged` declines on `status !== "declared"` — but the arm that therefore never
+  fires is ADR-0326's **noise** arm, not its "silence" one: `closeOutClosesAlert` answers **false**
+  for `human_owned`, so what a deployment cannot reach is *leaving the alert up*, and every
+  deployment gets the close-out ADR-0326 calls correct (cancel the record, close the alert).
+  **There is no wrong answer here today**; the cost is that a human cannot contest the declarer's
+  judgement, and an increment written from the old prose would have chased a paging defect that does
+  not exist. And **sev1 and sev2 incidents cannot be closed**, because `IncidentRecordSchema` refuses
+  `closed` without a `postmortemId` for every severity with `postmortemRequired` **and** refuses any
+  status past `declared`-or-`cancelled` without `publiclyVisible: true`, i.e. a status page this
+  platform does not have — `publiclyVisible` has **zero readers workspace-wide**, and the
+  `cancelled` exemption in that second refinement is *why* the one reachable edge exists. The clause
+  "every grade the three escalators declare at" is **refuted**: the SLO escalator declares at
+  **sev3** on two of its four thresholds (`slow-burn`, `latency-ticket`), and sev3 is
+  `postmortemRequired: false, requiresStatusPage: false` — **a sev3 SLO incident is closeable.** It
+  is also bounded in a way "live rather than theoretical" overstated: `deploy/docker-compose.yml`
+  passes **none** of `--slo-config`, `--integrity-proof-config` or `--deletion-escalation-config`,
+  so **no shipped deployment declares an incident at all**, which is why P1.7 is correctly a P1.
+  `appendPagedNote` (ADR-0327) is the paged timeline
   note's writer and **never throws** — the page has already gone out and the incident is already
   durable, so raising would turn a successful escalation into an error — retrying a lost revision race
   three times before reporting `revision_conflict`. `findById` throws on an unparseable row rather than
@@ -8008,29 +8027,47 @@ opened them.
   only after a build) or text-parsing another package's source. Two lists without a both-ways
   comparison is ADR-0288's shape; comparing them from disk in both directions, the way
   `pg-record-retention.ts` does, is the follow-up.
-- **There is no incident lifecycle surface, and two of its consequences are live** (ADR-0336). No
-  `/incidents` route exists anywhere in `apps/`, and `PersistentIncidentEngine` is constructed only by
-  `PostgresIncidentDeclarer`, which calls `declare` / `findOpenFor` / `load` / `cancelIfUntriaged` and
-  never `assignRole`, `changeSeverity`, `note`, `transition` or `attachPostmortem`. So
-  **`human_owned` is unreachable in every deployment** — `cancelIfUntriaged` declines only when the
-  status is not `declared`, reaching `triaged` requires on-call roles no route assigns, and
-  ADR-0326's "an alert wrongly closed is silence" arm therefore never fires — and **sev1 and sev2
-  incidents cannot be closed at all**, since `IncidentRecordSchema` refuses `closed` without a
-  `postmortemId` for every severity with `postmortemRequired`, which is every grade the three
-  escalators declare at, while the refinement above it refuses any status past `declared` for those
-  grades without `publiclyVisible: true` — a status page this platform does not have.
-  `declared → cancelled` is the whole reachable lifecycle. `lifecycle-prerequisites.test.ts` pins both
-  couplings from the contracts, so a close route added later fails there naming the reason rather than
-  at the first sev1. Three further facts sit under it: **there is no runbook** (no
-  `Runbook`/`RunbookDefinition` contract anywhere, no `meta.runbooks` table, so `runbookId` is free
-  TEXT naming an external document and nothing executes a step); `PostgresCustomerCommsStore`'s table
-  is platform-wide with **no tenant-scoped read path** while `affected_tenants` is one of its
-  audiences, so a tenant cannot be shown the row; and the schema refuses `publishedAt` later than
-  `breachNotificationDeadlineAt`, so **a late GDPR 72-hour breach notification is unrepresentable** and
-  `isBreachNotificationTimely` can never answer `false` for a record that parsed — the one fact a
-  regulator asks for is the one this table cannot hold. All of it reported and untouched: contracts
-  edits with cross-package consumers, and changing one forces a workspace rebuild before any
-  consumer's tests mean anything (ADR-0329).
+- **There is no incident lifecycle surface, and six of this entry's own clauses were wrong** (ADR-0336;
+  re-measured while scoping register P1.7, and the corrections are the useful part). The core holds:
+  no `/incidents` route exists anywhere in `apps/`, nothing in `apps/operate-web` mentions an
+  incident, five of `PersistentIncidentEngine`'s wrappers have **zero callers**, and the **derived**
+  reachable lifecycle is `{declared → cancelled}` — **1 of 12 edges, 2 of 8 statuses** — with
+  `triaged` unreachable because `DeclareIncidentInput` carries no `roleAssignments` field.
+  What was wrong: **`note` is reachable** (`notePage` ← `node.ts`, a second writer that writes a
+  timeline entry and no status); **`human_owned`'s consequence was stated backwards** —
+  `closeOutClosesAlert` answers `false` for it, so the arm that never fires is ADR-0326's *noise*
+  arm, every deployment gets the close-out that ADR calls correct, and **there is no wrong answer
+  today**, only the inability of a human to contest the declarer; **"every grade the three
+  escalators declare at" is refuted**, because the SLO escalator declares at **sev3** on two of four
+  thresholds and sev3 is `postmortemRequired: false, requiresStatusPage: false`, so **a sev3 SLO
+  incident is closeable**; the `publiclyVisible` refinement exempts **`cancelled`** as well as
+  `declared`, which is *why* the one reachable edge exists; and **"live rather than theoretical" was
+  an overstatement** — the shipped compose passes none of `--slo-config`,
+  `--integrity-proof-config` or `--deletion-escalation-config`, so no shipped deployment declares an
+  incident at all.
+  **`lifecycle-prerequisites.test.ts` does not pin what this entry claimed**, and it is the *third*
+  instance of ADR-0351's and ADR-0374's shape: its postmortem block is sound with a non-vacuity
+  guard, while the second block — titled *"which no route in this repo performs"* — asserts only
+  fixture properties and duplicates the block above it, so **nothing asserts that no route assigns a
+  role**; and `it("covers the grades the escalators declare at")` **reads no escalator**, which is
+  precisely how the sev3 refutation above survived until somebody ran it.
+  The three further facts are two corrections and one widening. **There is a runbook contract**:
+  `RunbookSpecSchema` exists in `packages/dr` with a real consumer in `dr-readiness.ts`, and
+  `runbookId` is **not** free TEXT — it is regex-bound to that package's pattern by name. The real
+  shape is sharper: **`RunbookSpec` has no steps**, only a `storageUri`, while `RunbookStepRecord`
+  needs them, so nothing can execute one because there is nothing to execute. The comms gap is
+  **wider** than stated — `META_INCIDENTS` is *also* platform-wide with no `tenant_id`, no `rls` and
+  no policies, so a tenant cannot be shown the incident either, not merely the communication. And
+  the GDPR 72-hour clause is **not ADR-0372's class**: `incident_communications_breach_window_check`
+  exists in the catalog, so the row is refused `23514` **by the database** and there is no commit for
+  a parse to sit beyond — ADR-0372's own proof that its defect was a pure contract one was that *no
+  migration was owed*, and here one is, behind `--allow-loosening`. What survives, and is sharper
+  than the original claim: the predicate has **two** `false` arms and the refinement refuses both, so
+  `isBreachNotificationTimely` is **constant `true`** for any parsed record, with zero non-test
+  callers — and this is already on file as **ADR-0372's open question 3**, which this register
+  re-raised twice without crediting it. All still reported and untouched: contracts edits with
+  cross-package consumers, and changing one forces a workspace rebuild before any consumer's tests
+  mean anything (ADR-0329).
 - ~~**`GatewayReplayer` has no caller**~~ — **closed by ADR-0337**, which is why this entry is kept
   rather than deleted: it was ADR-0336's open end and `operate-server replay` is the caller, so
   `--gateway-execution-capture` no longer writes rows only a test reads. The `rate_limit_decisions`
@@ -9323,17 +9360,40 @@ three make the rest honest, cheap or verifiable.
    naming the work**. So invoices never go overdue, inventory is never decremented, depreciation is
    never posted, month-end never closes. 17 need an entity-store runtime layer the packs lack; 8
    are third-party integrations with no client here.
-7. **No incident route exists**, so `human_owned` is unreachable and every auto-declared incident
-   is permanently uncloseable — `declared → cancelled` is the whole reachable lifecycle. Covered in
-   detail above; three coupled gaps sit under it (no `Runbook` table, no tenant-scoped comms read
-   path, the status-page presumption).
+7. **No incident route exists**, so an auto-declared sev1 or sev2 is permanently uncloseable and
+   `declared → cancelled` is the whole reachable lifecycle — **1 of 12 edges**, derived from the
+   status writers. Re-measured: six of this item's supporting clauses were wrong and the
+   corrections are above, the two that change the work being that **`human_owned`'s consequence was
+   backwards** (the arm that never fires is the *noise* arm, so there is no wrong answer today, only
+   a human unable to contest the declarer) and that **a sev3 SLO incident *is* closeable**, because
+   the SLO escalator declares at sev3 on two of four thresholds. Bounded: the shipped compose
+   declares **no** escalation flag, so no deployment declares an incident at all. The runbook gap is
+   not an absent contract but **`RunbookSpec` having no steps**, and the comms gap is wider — the
+   incident table is platform-wide too. The decisions that are not evidence-decidable: whether
+   `requiresStatusPage` relaxes, a status page gets built, or `publiclyVisible` becomes an
+   attestation; whether `meta.incidents` gains a `tenant_id`.
 8. **Nothing detects an Article 12(3) deadline breach, and no route lists pending requests.**
-   `isOverdue` and `daysUntilDeadline` have zero callers outside their tests, the store has three
-   status-filtered queries and none on `deadline_at`, and there is no
-   `GET /v1/platform/deletion-requests`. A stalled sweep escalates a `sev2` and a tampered proof a
-   paging `sev1`, so **the one condition that is an actual regulatory breach is the one with no
-   detector** — and the schema refuses a completed record past its deadline, so a late completion
-   cannot even be recorded.
+   `isOverdue` and `daysUntilDeadline` have zero non-test callers and **no inline second spelling**
+   (a clean grep, which matters because both names collide with live predicates in `dr` and
+   `forensics`). Three corrections. The store's "none on `deadline_at`" is wrong in a useful way:
+   `dueForExecution` already does `WHERE status = 'verified' ORDER BY deadline_at, request_id` with
+   a doc comment naming Article 12(3), so the deadline is **already the scheduler's priority key**
+   and what is missing is a *predicate*, not a mention — and `idx_gdpr_deletion_deadline` on that
+   column **has no reader**, so the sweep's index is already paid for. The last clause is
+   **refuted**: ADR-0372 deleted that refusal, for the measured reason that the parse sat past the
+   commit, so one late deletion was permanently unreadable *and stopped every other audit*. And
+   sharper than the entry: **`submitted` and `deferred` are read by no query in the workspace** —
+   two of the four pending statuses, with `submitted` the likeliest real breach path. Two
+   constraints on any sweep: the Art 12(3) two-month **extension is inexpressible after submission**
+   (`deadline_at` appears in no `transition` SET clause) and `deferred`, its natural home with
+   `deferredUntil`/`deferralReason`, **has no producer** — so a naive sweep reports a lawfully
+   extended request as a breach. Beside it, `GET .../stranded` passes `olderThan = now`, so the SQL
+   matches **every** `in_progress` row and the window is applied downstream, one tombstone read per
+   row behind what reads as a cheap list; and both `onDeadlineBreach` wirings are `console.error`
+   with the **same string written twice**. The grade is the decision evidence cannot make, and
+   `DeadlineBreach`'s own doc comment already argues against `sev1` ("no page can fix it"), which
+   points at the **approaching** case as the escalatable one — exactly what `daysUntilDeadline`
+   computes and nothing calls.
 9. **SAML, OIDC and SCIM are contracts-only**: `@crossengin/sso` has zero importers, no runtime or
    pg sibling, five tables declared `unbuilt_subsystem`, and the gateway's auth schemes do not
    include `saml` or `oidc`, so there is no pipeline position for one. Normally a procurement gate.
