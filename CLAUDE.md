@@ -4857,10 +4857,16 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   data classes and a prose `description` — and **no field of any kind that describes the work**, not
   even the `z.unknown()` slot an orchestration `Workflow` has, so there is nothing in a manifest to
   compile and a compiler would have zero valid inputs (ADR-0331's finding one notch more absolute).
+  The asymmetry is **understated**: `OrchestrationWorkflowSchema` has *three* such slots and
+  `ScheduledWorkflowSchema.action` is a **required** one beside a `schedule`, so the nearest existing
+  work-descriptor shape is already in the tree.
   What the manifest *owns* is how a run is **governed**, and `buildJobHandlerRegistry` reads the
-  ceiling, the backoff, the data classes and the failure strategy off the declaration and **refuses**
-  a provider that restates any of them, so the queue cannot disagree with the manifest a reviewer
-  approved. A `kind` provider is **expanded into one registration per declaration** rather than using
+  ceiling, the backoff, the data classes and the failure strategy off the declaration so the queue
+  cannot disagree with the manifest a reviewer approved. **It refuses a provider that restates
+  `retry`/`maxAttempts` and nothing else** — this file used to say "restates any of them", naming a
+  check that does not exist; the data classes and the failure strategy are **unexpressible** on
+  `JobHandlerProvider`, which is a stronger guarantee than a refusal and is why no refusal was
+  written for them, but it is not the guarantee the prose claimed. A `kind` provider is **expanded into one registration per declaration** rather than using
   `registerForKind`, because a kind registration carries one ceiling for twelve jobs that do not
   share one. All 25 declarations across the seven packs are tenant-domain ERP work — eight are
   third-party integrations with no client in this repo, the rest need `operate-runtime`'s entity store
@@ -8944,8 +8950,8 @@ by it**.
    first open question. What is left: **14 (pack, field) pairs on a deployment that has not set the
    secret**, no per-tenant-manifest survey, and `?sort=` on an unreadable field still accepted.
 3. **The shipped compose mounts no background subsystem, so nearly everything built since Phase 3
-   is off.** Measured against the committed tree: the `api` command passes **18 distinct** flags
-   (19 occurrences — `--ai-design-role` twice), not the six
+   is off.** Measured against the committed tree: the `api` command passes **20 distinct** flags
+   (21 occurrences — `--ai-design-role` twice), not the six
    on record, and `--platform-user-routes` is among them — ADR-0358 added it (with a `deploy/README.md`
    note that the page had told readers to POST to a route the stack did not serve), so that clause of
    this entry was **false**, and so is any claim that the operator provisioning path is unreachable on
@@ -9054,9 +9060,14 @@ by it**.
    declarations on `erp-core` (`{scheduled: 7, event: 7}`), `buildJobHandlerRegistry({providers: []})`
    answers `servedJobIds: []` with 14 unservable, and `JOB_HANDLER_PROVIDERS` ships empty. The two
    differ in *kind*, which is worth keeping: `--schedule-ms` is **harmful** (scheduled crons include
-   `*/15` and `*/30`, so ~149 pending rows per tenant per day accumulate for ever with no consumer)
-   and also raises `CliUsageError` without `--schedule-tenant` or `--schedule-all-tenants`, both
-   absent; `--workflow-workers` is merely **inert**, because `PostgresWorkflowDefinitionStore` has
+   `*/15` and `*/30`, so **148** pending rows per tenant per day — 149 on the 1st, when the monthly
+   depreciation run lands — accumulate for ever with no consumer) and also raises `CliUsageError`
+   without `--schedule-tenant` or `--schedule-all-tenants`, both absent. **Where that accumulation
+   comes from inverts the ordering this entry implies**: 144 of the 148 rows, **97.3%**, come from
+   the *two* third-party polling jobs, so serving every job P1.6 could plausibly serve would drain
+   about 4 of 148 and leave the flag just as harmful. Giving the jobs handlers is therefore not the
+   road to defaulting this flag on — the road is the two polling declarations, which need clients
+   that do not exist here. `--workflow-workers` is merely **inert**, because `PostgresWorkflowDefinitionStore` has
    exactly one non-test construction in the workspace and that call only *reads*, so
    `meta.workflow_definitions` is empty in every deployment by construction → `no_definitions` for
    the timer and activity workers, and `jobEngine` is supplied only when `servedJobIds` is non-empty →
@@ -9088,6 +9099,17 @@ by it**.
    compose connects as `POSTGRES_USER`, the same role that ran `migrate`, so the owner bypasses RLS.
    It stops holding the moment a deployment uses a least-privilege serving role, which is the
    configuration every other store in the repo is written for.
+   **Re-measured, and it is wider than one producer**: `insertPlannedRuns` is shared, so **all four**
+   enqueue producers are in that state, and one of them — the `userInvoked` path — is reachable over
+   HTTP through `POST /v1/meta/jobs/invoke`, which is the only HTTP-reachable member of the set. Two
+   things make it *latent* rather than live and both belong in the grade: the flag is absent from
+   every shipped compose, and `node.ts` already wires an `onError` naming `42501` with its remedy and
+   already probes queue visibility at boot — **but only under `--workflow-workers`, not under
+   `--schedule-ms`**, so the one flag that would hit it is the one flag the probe does not cover.
+   The fix is a platform write arm on the three queue tables in ADR-0332's pattern: four call sites,
+   cheaper than anything in P1.6, and the prerequisite for ever running this deployment as a
+   least-privilege role. The decision it needs from a human is which grant, and whether scoping the
+   *producer* is coherent while `claimDueJobs` stays deliberately cross-tenant.
 4. ~~**An Article 17 request naming one data subject erases the whole tenant.**~~ — **closed by
    ADR-0379**, which corrected this entry a third time and found that **the two readings it had
    settled on were both the wrong fix**. The mechanism is confirmed and the exposure is bounded:
@@ -9355,11 +9377,38 @@ three make the rest honest, cheap or verifiable.
    `package.json`, no upload route among `operate-server`'s 137 flags. Shared prerequisite for the
    Article 15 export bundle, the marketplace pack bundle, and the `object_storage` deletion
    subsystem every deployment must therefore declare `absent`.
-6. **All 25 declared jobs do nothing**, and the blocker is a contract gap rather than wiring:
-   `JobDeclaration` carries id, trigger, retry, concurrency, data classes and prose and **no field
-   naming the work**. So invoices never go overdue, inventory is never decremented, depreciation is
-   never posted, month-end never closes. 17 need an entity-store runtime layer the packs lack; 8
-   are third-party integrations with no client here.
+6. **All 25 declared jobs do nothing** — `JOB_HANDLER_PROVIDERS` ships empty and `servedJobIds` is
+   `[]` for all seven resolved packs, so invoices never go overdue, inventory is never decremented,
+   depreciation is never posted, month-end never closes. Re-measured, and the entry's **diagnosis is
+   refuted**: *"the blocker is a contract gap rather than wiring"* is false. The contract gap is
+   real — `JobDeclaration` has 13 fields and none names the work — and **it is not what blocks a
+   handler**: `store`, `notificationStore` (non-null on the shipped compose) and `manifest` are all
+   in scope at the `JOB_HANDLER_PROVIDERS` site, so **a handler needs zero contract changes**.
+   The counts, with their scopes, because the figure has drifted twice: **25** source declarations
+   summed across the seven packs (= distinct ids), **14** for `erp-core` (`{scheduled: 7, event: 7}`,
+   identical resolved — and the figure the shipped deployment cares about), **111** resolved and
+   summed. The 17/8 split is confirmed exactly and resolves three ways: **8** outbound third-party,
+   **12** business-write, **5** read-and-notify — and **on the shipped `erp-core` default not one job
+   has a pure-read handler**, because all five cheap ones are in packs the compose does not serve.
+   **This inverts the register's implied ordering on P0.3.** `--workflow-workers` is inert rather
+   than harmful and is safe to default on now (two of its three refusals are not this item at all,
+   but the absent `publish` caller). `--schedule-ms` is blocked by two things **neither of which is
+   this item**: the required `--schedule-tenant`/`--schedule-all-tenants` it raises without, and the
+   fact that **144 of 148 pending rows per tenant per day — 97.3% — come from the two third-party
+   polling jobs**. Closing P1.6 entirely would drain about 4 of 148.
+   **And what outranks the entry is a hazard in its own remedy: a job handler that performs a
+   business write writes *behind* the guards.** `runWriteEffects` and `runWriteGuards` have exactly
+   one caller each — the HTTP handler path — and `JobHandlerContext` carries no store and no
+   dispatcher, so a depreciation handler calling `store.create` bypasses `journalPostingGuard`, the
+   double-entry invariant ADR-0367 had just hardened, and a sales-order handler bypasses the
+   recognition GL effect. True of **12 of 25**, and **6 of core's 14**. So the entry's "17 need an
+   entity-store runtime layer" has the right count and the wrong requirement: those 12 need a
+   **handler layer** — a dispatch seam that runs the guards and the effects — which is larger than
+   either cheap option and is this item's real remainder. The two cheap options, ranked: a platform
+   write arm on the three queue tables (see the `42501` finding below), then four read-and-notify
+   handlers as a provider set, which would be the first non-empty `servedJobIds` in the repo's
+   history. A work descriptor on `JobDeclaration` is **refused for now** — it carries ADR-0329's
+   workspace-rebuild cost and unblocks neither the 8 nor the 12.
 7. **No incident route exists**, so an auto-declared sev1 or sev2 is permanently uncloseable and
    `declared → cancelled` is the whole reachable lifecycle — **1 of 12 edges**, derived from the
    status writers. Re-measured: six of this item's supporting clauses were wrong and the
