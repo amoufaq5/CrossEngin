@@ -46,17 +46,26 @@ describe("constants", () => {
   it("has 8 auth schemes", () => {
     expect(AUTH_SCHEMES).toHaveLength(8);
   });
-  it("has 18 auth outcomes", () => {
-    expect(AUTH_OUTCOMES).toHaveLength(18);
+  it("has 19 auth outcomes", () => {
+    expect(AUTH_OUTCOMES).toHaveLength(19);
     expect(AUTH_OUTCOMES).toContain("tenant_mismatch");
   });
 
-  // ADR-0384 appended rather than inserted, so an already-migrated deployment's `auth_outcome`
-  // CHECK differs from the catalog's by two trailing members and the emitted SQL moves nowhere
-  // else. `pg-value-set-domains.ts` compares the two as *sets*, so order is not what that rule
-  // reads — the order matters to the SQL byte-identity the reconciler compares.
-  it("appends the two ADR-0384 members at the end, in order", () => {
-    expect(AUTH_OUTCOMES.slice(-2)).toEqual(["scheme_not_supported", "credential_unrecognized"]);
+  // ADR-0384 and ADR-0386 appended rather than inserted, so an already-migrated deployment's
+  // `auth_outcome` CHECK differs from the catalog's by trailing members only and the emitted SQL
+  // moves nowhere else. `pg-value-set-domains.ts` compares the two as *sets*, so order is not what
+  // that rule reads — the order matters to the SQL byte-identity the reconciler compares.
+  //
+  // Both this and the length above failed when ADR-0386 appended its member, which is the whole
+  // reason they are written as literals: an outcome added without widening
+  // `meta.gateway_pipeline_executions.auth_outcome` would otherwise reach a deployment as a `23514`
+  // on the first request that produced it.
+  it("appends the three added members at the end, in order", () => {
+    expect(AUTH_OUTCOMES.slice(-3)).toEqual([
+      "scheme_not_supported",
+      "credential_unrecognized",
+      "required_claim_absent",
+    ]);
   });
   it("STRONG_AUTH_SCHEMES includes bearer_jwt + mtls + hmac_signature", () => {
     expect(STRONG_AUTH_SCHEMES.size).toBe(3);

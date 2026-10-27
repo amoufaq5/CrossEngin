@@ -390,6 +390,7 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
           jwksProvider: options.jwt.jwksProvider,
           jwtIssuer: options.jwt.issuer,
           jwtAudience: options.jwt.audience,
+          requiredJwtClaims: options.jwt.requiredClaims,
         }
       : {}),
     ...(options.allocator !== undefined ? { allocator: options.allocator } : {}),

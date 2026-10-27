@@ -9,6 +9,7 @@ import {
   type PrincipalResolver,
   type PrincipalResolverInput,
   type PrincipalRoles,
+  type RequiredJwtClaim,
 } from "@crossengin/api-gateway-runtime";
 import { isEd25519PublicKeyBase64 } from "@crossengin/crypto";
 
@@ -268,6 +269,16 @@ export interface JwtVerifyConfig {
   readonly jwksProvider: JwksProvider;
   readonly issuer: string;
   readonly audience: string;
+  /**
+   * Which claims a token must carry, beyond matching when it carries them (ADR-0386).
+   *
+   * **Required**, so the one call site that builds this cannot omit it and inherit the permissive
+   * behaviour: before this existed each guard was *present and wrong*, so a token with no `exp`, no
+   * `iss` and no `aud` verified as `authenticated`. A deployment that relaxes one declares it with
+   * `--jwt-optional-claim`, and the declaration is the relaxation rather than the requirement, so
+   * silence is strict.
+   */
+  readonly requiredClaims: ReadonlySet<RequiredJwtClaim>;
 }
 
 /** Parses a `kid:base64key` spec (the kid is everything before the first `:`). */

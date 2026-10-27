@@ -13,6 +13,9 @@ import { describe, expect, it } from "vitest";
 import {
   API_KEY_QUERY_PARAM,
   InMemoryJwksProvider,
+  REQUIRED_JWT_CLAIMS,
+  REQUIRED_JWT_CLAIM_COSTS,
+  type RequiredJwtClaim,
   authSchemeToken,
   buildOpaqueCredentialMatcher,
   parseAuthHeader,
@@ -37,7 +40,13 @@ function buildJwt(opts: {
   iss?: string;
   aud?: string | readonly string[];
   sub?: string;
-  exp?: number;
+  /**
+   * `string` as well as `number`, because a wire JWT is JSON and a minter can put a string here —
+   * which is the case the usability check exists for. Typing it `number` would make the one token
+   * shape that exercises that check unbuildable, so the fixture could not be written and the hazard
+   * would stay theoretical.
+   */
+  exp?: number | string;
   nbf?: number;
 }): string {
   const header = base64UrlEncode(
@@ -112,19 +121,38 @@ describe("parseJwt", () => {
 describe("verifyBearerJwt", () => {
   const issuer = "https://issuer.example";
   const audience = "https://api.crossengin.io";
+  /** Derived, not listed: a fourth required claim is covered by every test below without an edit. */
+  const ALL_CLAIMS: ReadonlySet<RequiredJwtClaim> = new Set(REQUIRED_JWT_CLAIMS);
+  /** The pre-ADR-0386 behaviour, kept nameable so the new tests can assert against it. */
+  const NO_CLAIMS: ReadonlySet<RequiredJwtClaim> = new Set();
 
-  async function makeJwksAndToken(opts: { exp?: number; nbf?: number; aud?: string | readonly string[]; iss?: string } = {}) {
+  /**
+   * `omit` bypasses the `??` defaults below, which is the only way to build a token that *lacks* a
+   * claim: `opts.iss ?? issuer` cannot express absence, since passing `undefined` substitutes the
+   * default. `buildJwt` then drops the key, because `JSON.stringify` omits an `undefined` value --
+   * so the wire form really has no such claim rather than a null one.
+   */
+  async function makeJwksAndToken(
+    opts: {
+      exp?: number | string;
+      nbf?: number;
+      aud?: string | readonly string[];
+      iss?: string;
+      omit?: readonly RequiredJwtClaim[];
+    } = {},
+  ) {
     const kp = generateEd25519Keypair();
     const kid = ed25519PublicKeyFingerprint(kp.publicKeyBase64).slice(0, 16);
     const jwks = new InMemoryJwksProvider({ keys: [{ kid, publicKeyBase64: kp.publicKeyBase64 }] });
+    const omitted = (c: RequiredJwtClaim) => opts.omit?.includes(c) === true;
     const token = buildJwt({
       privateKeyBase64: kp.privateKeyBase64,
       publicKeyBase64: kp.publicKeyBase64,
       kid,
-      iss: opts.iss ?? issuer,
-      aud: opts.aud ?? audience,
+      iss: omitted("iss") ? undefined : (opts.iss ?? issuer),
+      aud: omitted("aud") ? undefined : (opts.aud ?? audience),
       sub: USER,
-      exp: opts.exp ?? NOW_SECONDS + 3_600,
+      exp: omitted("exp") ? undefined : (opts.exp ?? NOW_SECONDS + 3_600),
       nbf: opts.nbf,
     });
     return { jwks, token, kp };
@@ -138,6 +166,7 @@ describe("verifyBearerJwt", () => {
       opts: {
         expectedIssuer: issuer,
         expectedAudience: audience,
+        requiredClaims: ALL_CLAIMS,
         clockSkewSeconds: 30,
         nowSeconds: NOW_SECONDS,
       },
@@ -150,7 +179,7 @@ describe("verifyBearerJwt", () => {
     const result = await verifyBearerJwt({
       token,
       jwks,
-      opts: { expectedIssuer: issuer, expectedAudience: audience, clockSkewSeconds: 30, nowSeconds: NOW_SECONDS },
+      opts: { expectedIssuer: issuer, expectedAudience: audience, requiredClaims: ALL_CLAIMS, clockSkewSeconds: 30, nowSeconds: NOW_SECONDS },
     });
     expect(result.outcome).toBe("expired_token");
   });
@@ -160,7 +189,7 @@ describe("verifyBearerJwt", () => {
     const result = await verifyBearerJwt({
       token,
       jwks,
-      opts: { expectedIssuer: issuer, expectedAudience: audience, clockSkewSeconds: 30, nowSeconds: NOW_SECONDS },
+      opts: { expectedIssuer: issuer, expectedAudience: audience, requiredClaims: ALL_CLAIMS, clockSkewSeconds: 30, nowSeconds: NOW_SECONDS },
     });
     expect(result.outcome).toBe("not_yet_valid_token");
   });
@@ -170,7 +199,7 @@ describe("verifyBearerJwt", () => {
     const result = await verifyBearerJwt({
       token,
       jwks,
-      opts: { expectedIssuer: issuer, expectedAudience: audience, clockSkewSeconds: 30, nowSeconds: NOW_SECONDS },
+      opts: { expectedIssuer: issuer, expectedAudience: audience, requiredClaims: ALL_CLAIMS, clockSkewSeconds: 30, nowSeconds: NOW_SECONDS },
     });
     expect(result.outcome).toBe("audience_mismatch");
   });
@@ -180,7 +209,7 @@ describe("verifyBearerJwt", () => {
     const result = await verifyBearerJwt({
       token,
       jwks,
-      opts: { expectedIssuer: issuer, expectedAudience: audience, clockSkewSeconds: 30, nowSeconds: NOW_SECONDS },
+      opts: { expectedIssuer: issuer, expectedAudience: audience, requiredClaims: ALL_CLAIMS, clockSkewSeconds: 30, nowSeconds: NOW_SECONDS },
     });
     expect(result.outcome).toBe("issuer_mismatch");
   });
@@ -191,7 +220,7 @@ describe("verifyBearerJwt", () => {
     const result = await verifyBearerJwt({
       token: tampered,
       jwks,
-      opts: { expectedIssuer: issuer, expectedAudience: audience, clockSkewSeconds: 30, nowSeconds: NOW_SECONDS },
+      opts: { expectedIssuer: issuer, expectedAudience: audience, requiredClaims: ALL_CLAIMS, clockSkewSeconds: 30, nowSeconds: NOW_SECONDS },
     });
     expect(result.outcome).toBe("invalid_signature");
   });
@@ -207,7 +236,7 @@ describe("verifyBearerJwt", () => {
     const result = await verifyBearerJwt({
       token: fake,
       jwks: new InMemoryJwksProvider({ keys: [] }),
-      opts: { expectedIssuer: issuer, expectedAudience: audience, clockSkewSeconds: 30, nowSeconds: NOW_SECONDS },
+      opts: { expectedIssuer: issuer, expectedAudience: audience, requiredClaims: ALL_CLAIMS, clockSkewSeconds: 30, nowSeconds: NOW_SECONDS },
     });
     expect(result.outcome).toBe("credential_malformed");
   });
@@ -217,9 +246,101 @@ describe("verifyBearerJwt", () => {
     const result = await verifyBearerJwt({
       token,
       jwks: new InMemoryJwksProvider({ keys: [] }),
-      opts: { expectedIssuer: issuer, expectedAudience: audience, clockSkewSeconds: 30, nowSeconds: NOW_SECONDS },
+      opts: { expectedIssuer: issuer, expectedAudience: audience, requiredClaims: ALL_CLAIMS, clockSkewSeconds: 30, nowSeconds: NOW_SECONDS },
     });
     expect(result.outcome).toBe("credential_not_found");
+  });
+
+  /**
+   * The defect ADR-0386 closes, measured before the fix: all three guards were `present && wrong`,
+   * so a token carrying none of the three verified as `authenticated` -- it never expired, named no
+   * issuer, and named no audience, and the only thing established was that a key in the JWKS had
+   * signed it. On a shared IdP key set that is cross-application replay with no expiry.
+   *
+   * Each case is asserted twice, against the strict set and against the empty one, because the
+   * second arm is what the old behaviour was: without it these tests would pass for a build that
+   * required nothing, which is the state they exist to refuse.
+   */
+  describe("a required claim that is absent", () => {
+    for (const claim of REQUIRED_JWT_CLAIMS) {
+      it(`refuses required_claim_absent when ${claim} is missing, and authenticates when not required`, async () => {
+        const { jwks, token } = await makeJwksAndToken({ omit: [claim] });
+        const base = { expectedIssuer: issuer, expectedAudience: audience, clockSkewSeconds: 30, nowSeconds: NOW_SECONDS };
+
+        const strict = await verifyBearerJwt({ token, jwks, opts: { ...base, requiredClaims: ALL_CLAIMS } });
+        expect(strict.outcome).toBe("required_claim_absent");
+        expect(strict.reason).toBe(`${claim} is absent or not usable`);
+
+        const relaxed = await verifyBearerJwt({ token, jwks, opts: { ...base, requiredClaims: NO_CLAIMS } });
+        expect(relaxed.outcome).toBe("authenticated");
+      });
+    }
+
+    it("refuses a token carrying none of the three, naming the first in a fixed order", async () => {
+      const { jwks, token } = await makeJwksAndToken({ omit: REQUIRED_JWT_CLAIMS });
+      const result = await verifyBearerJwt({
+        token,
+        jwks,
+        opts: { expectedIssuer: issuer, expectedAudience: audience, requiredClaims: ALL_CLAIMS, clockSkewSeconds: 30, nowSeconds: NOW_SECONDS },
+      });
+      expect(result.outcome).toBe("required_claim_absent");
+      // Reported in `REQUIRED_JWT_CLAIMS` order rather than the payload's, so the reason is stable
+      // across two tokens missing the same set.
+      expect(result.reason).toBe("exp is absent or not usable");
+    });
+
+    it("relaxes per claim, so accepting one absence does not accept the others", async () => {
+      const base = { expectedIssuer: issuer, expectedAudience: audience, clockSkewSeconds: 30, nowSeconds: NOW_SECONDS };
+      const only = new Set<RequiredJwtClaim>(["aud"]);
+
+      const { jwks: j1, token: noExp } = await makeJwksAndToken({ omit: ["exp"] });
+      expect((await verifyBearerJwt({ token: noExp, jwks: j1, opts: { ...base, requiredClaims: only } })).outcome)
+        .toBe("authenticated");
+
+      const { jwks: j2, token: noAud } = await makeJwksAndToken({ omit: ["aud"] });
+      expect((await verifyBearerJwt({ token: noAud, jwks: j2, opts: { ...base, requiredClaims: only } })).outcome)
+        .toBe("required_claim_absent");
+    });
+
+    /**
+     * Presence is not `!== undefined`, and this is the case that forced the distinction: `exp:
+     * "soon"` is present, so a presence check admits it, and then `typeof exp === "number"` is false
+     * so the expiry comparison is skipped -- a token with an unenforceable expiry, authenticated.
+     * Requiring a claim and requiring it to be usable cannot be two checks.
+     */
+    it("refuses a required claim present in a form its own guard cannot use", async () => {
+      const { jwks, token } = await makeJwksAndToken({ exp: "soon" });
+      const base = { expectedIssuer: issuer, expectedAudience: audience, clockSkewSeconds: 30, nowSeconds: NOW_SECONDS };
+
+      expect((await verifyBearerJwt({ token, jwks, opts: { ...base, requiredClaims: ALL_CLAIMS } })).outcome)
+        .toBe("required_claim_absent");
+      // The old behaviour, pinned so the hazard is legible: unrequired, a string `exp` is simply
+      // never compared.
+      expect((await verifyBearerJwt({ token, jwks, opts: { ...base, requiredClaims: NO_CLAIMS } })).outcome)
+        .toBe("authenticated");
+    });
+
+    it("never puts the claim's own value in the reason", async () => {
+      const { jwks, token } = await makeJwksAndToken({ exp: "tell-nobody" });
+      const result = await verifyBearerJwt({
+        token,
+        jwks,
+        opts: { expectedIssuer: issuer, expectedAudience: audience, requiredClaims: ALL_CLAIMS, clockSkewSeconds: 30, nowSeconds: NOW_SECONDS },
+      });
+      expect(result.reason).not.toContain("tell-nobody");
+    });
+
+    it("declares a cost for every claim it can require, and requires no claim it cannot cost", () => {
+      expect([...REQUIRED_JWT_CLAIMS].sort()).toEqual(Object.keys(REQUIRED_JWT_CLAIM_COSTS).sort());
+      for (const claim of REQUIRED_JWT_CLAIMS) {
+        const cost = REQUIRED_JWT_CLAIM_COSTS[claim];
+        expect(cost.length).toBeGreaterThan(40);
+        // A cost that merely restates its key tells an operator nothing.
+        expect(cost).not.toBe(claim);
+      }
+      // `nbf` is deliberately absent: its absence means *valid from issuance*, which is coherent.
+      expect(REQUIRED_JWT_CLAIMS).not.toContain("nbf" as RequiredJwtClaim);
+    });
   });
 });
 

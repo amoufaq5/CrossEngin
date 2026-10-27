@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import type { IncomingRequest, ResolvedPrincipal } from "@crossengin/api-gateway";
 import {
   InMemoryPrincipalResolver,
@@ -579,5 +581,91 @@ describe("buildClassifiedFieldIndex — over the real packs", () => {
       "retail_admin",
       "store_manager",
     ]);
+  });
+});
+
+/**
+ * `buildOperateGateway` forwards its options to `GatewayRuntime` **one named field at a time**, and
+ * that list is a maintained list — the shape CLAUDE.md records as having been wrong three times
+ * (ADR-0288). It was wrong a fourth time here: ADR-0386 added `requiredJwtClaims`, the caller passed
+ * it, and this function dropped it, so `--jwt-optional-claim` printed a relaxed boot line while the
+ * verifier still required every claim.
+ *
+ * Nothing could have caught that except a live request. The drop is invisible three ways at once:
+ * the caller passes its JWT options inside a conditional **spread**, which bypasses TypeScript's
+ * excess-property check; the field is optional on `GatewayRuntimeOptions`; and its default is the
+ * *strict* set, so the dropped declaration produced a safe wrong answer rather than a crash.
+ *
+ * So this fences the list rather than the field: every option this function accepts and the runtime
+ * also accepts must appear in the forwarding literal. Read as text, because the question is about
+ * *this function's source* and no type can ask it — a forwarded field is syntactically identical to
+ * an absent one from the type system's point of view.
+ */
+describe("buildOperateGateway's option forwarding", () => {
+  const source = readFileSync(new URL("./compile.ts", import.meta.url), "utf8");
+
+  /** The field names declared on an interface, by name, from the source. */
+  function interfaceFields(text: string, name: string): readonly string[] {
+    const start = text.indexOf(`export interface ${name} `);
+    expect(start, `interface ${name} not found`).toBeGreaterThan(-1);
+    const open = text.indexOf("{", start);
+    let depth = 0;
+    let end = open;
+    for (let i = open; i < text.length; i += 1) {
+      if (text[i] === "{") depth += 1;
+      else if (text[i] === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          end = i;
+          break;
+        }
+      }
+    }
+    const body = text.slice(open, end);
+    return [...body.matchAll(/^\s{2}readonly (\w+)\??:/gm)].map((m) => m[1] as string);
+  }
+
+  it("forwards every option it shares with the runtime", () => {
+    const accepted = interfaceFields(source, "OperateGatewayOptions");
+    expect(accepted.length).toBeGreaterThan(8);
+
+    // The `new GatewayRuntime({...})` argument, which is where a dropped field is dropped.
+    const ctor = source.indexOf("new GatewayRuntime({");
+    expect(ctor).toBeGreaterThan(-1);
+    const literal = source.slice(ctor, source.indexOf("});", ctor));
+
+    // Options this function deliberately does not hand on, each with the reason it does not.
+    const notForwarded: Readonly<Record<string, string>> = Object.freeze({
+      // Consumed by the compile step itself rather than passed to the runtime.
+      store: "the compiler builds handlers over it; the runtime never sees a store",
+      allocator: "same: a handler dependency, not a runtime option",
+      settingsStore: "same",
+      operationsForEntity: "read by the redaction registry the compiler builds",
+      sensitiveFieldPolicy: "same",
+      abac: "same",
+      manifestRoleDirectory: "same",
+    });
+
+    const dropped = accepted.filter(
+      (f) => !new RegExp(`\\b${f}\\b`).test(literal) && !(f in notForwarded),
+    );
+    expect(
+      dropped,
+      `these options reach buildOperateGateway and are not forwarded to GatewayRuntime; either ` +
+        `forward them or declare why in notForwarded above`,
+    ).toEqual([]);
+  });
+
+  /**
+   * The non-vacuity half: without it, a regex that stopped matching anything would report zero
+   * dropped fields and pass. ADR-0351's lesson — a test that documents a hazard and checks nothing.
+   */
+  it("actually reads the forwarding literal, so the check above is not vacuous", () => {
+    const ctor = source.indexOf("new GatewayRuntime({");
+    const literal = source.slice(ctor, source.indexOf("});", ctor));
+    expect(literal).toContain("jwtIssuer");
+    expect(literal).toContain("jwtAudience");
+    expect(literal).toContain("requiredJwtClaims");
+    expect(interfaceFields(source, "OperateGatewayOptions")).toContain("requiredJwtClaims");
   });
 });

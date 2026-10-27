@@ -1,5 +1,6 @@
 import { generateEd25519Keypair, signEd25519 } from "@crossengin/crypto";
 import { InMemoryEntityStore } from "@crossengin/operate-runtime";
+import { REQUIRED_JWT_CLAIMS } from "@crossengin/api-gateway-runtime";
 import { describe, expect, it } from "vitest";
 
 import type { RawHttpRequest } from "./http.js";
@@ -48,6 +49,7 @@ function makeServer(): OperateHttpServer {
     jwksProvider: buildJwksProvider([{ kid: KID, publicKeyBase64: keypair.publicKeyBase64 }]),
     issuer: ISS,
     audience: AUD,
+    requiredClaims: new Set(REQUIRED_JWT_CLAIMS),
   };
   return buildOperateHttpServer({
     manifest,

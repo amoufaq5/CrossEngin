@@ -23,6 +23,7 @@ import {
   type OpaqueTokenLookup,
   type PrincipalResolver,
   type PrincipalRoles,
+  type RequiredJwtClaim,
   type RateLimitChecker,
   type RedactedOperation,
   type ResponseRecordShape,
@@ -975,6 +976,18 @@ export interface OperateGatewayOptions extends OperateRuntimeOptions {
   readonly jwksProvider?: JwksProvider;
   readonly jwtIssuer?: string;
   readonly jwtAudience?: string;
+  /**
+   * Which JWT claims a token must carry, beyond matching when it carries them (ADR-0386).
+   *
+   * Declared here because this function forwards **one named field at a time**, so an option absent
+   * from this interface is dropped in silence — and the caller passes its JWT options inside a
+   * conditional spread, which bypasses TypeScript's excess-property check, so nothing said so. That
+   * is how `--jwt-optional-claim` came to print a relaxed boot line while the verifier required all
+   * three: the field reached `buildOperateGateway` and stopped here, and `GatewayRuntime`'s own
+   * default is the strict set, so the drop produced a *safe* wrong answer and was invisible to every
+   * test. Found only by a live request.
+   */
+  readonly requiredJwtClaims?: ReadonlySet<RequiredJwtClaim>;
 }
 
 export interface OperateServer extends CompiledOperateServer {
@@ -1002,6 +1015,7 @@ export function buildOperateGateway(
     ...(options.jwksProvider !== undefined ? { jwksProvider: options.jwksProvider } : {}),
     ...(options.jwtIssuer !== undefined ? { jwtIssuer: options.jwtIssuer } : {}),
     ...(options.jwtAudience !== undefined ? { jwtAudience: options.jwtAudience } : {}),
+    ...(options.requiredJwtClaims !== undefined ? { requiredJwtClaims: options.requiredJwtClaims } : {}),
     ...(options.clock !== undefined ? { clock: options.clock } : {}),
   });
   return { ...compiled, runtime };

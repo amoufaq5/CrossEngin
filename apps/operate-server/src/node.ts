@@ -3,7 +3,11 @@ import { readFile } from "node:fs/promises";
 import { hostname } from "node:os";
 
 import type { PipelineExecution } from "@crossengin/api-gateway";
-import { formatAuthSchemeSurvey } from "@crossengin/api-gateway-runtime";
+import {
+  REQUIRED_JWT_CLAIMS,
+  REQUIRED_JWT_CLAIM_COSTS,
+  formatAuthSchemeSurvey,
+} from "@crossengin/api-gateway-runtime";
 import {
   PostgresIdempotencyStore,
   PostgresPipelineExecutionStore,
@@ -674,7 +678,21 @@ async function resolveJwtConfig(
   } else {
     jwksProvider = buildJwksProvider(specs);
   }
-  return { config: { jwksProvider, issuer: options.jwtIssuer, audience: options.jwtAudience }, poller };
+  // Derived from the flag by subtraction, so the *default* is every claim and the declaration is
+  // what removes one. `REQUIRED_JWT_CLAIMS` is the only list; the CLI already refused any name
+  // outside it, so nothing here can relax a claim this binary does not know how to require.
+  const requiredClaims = new Set(
+    REQUIRED_JWT_CLAIMS.filter((c) => !options.jwtOptionalClaims.includes(c)),
+  );
+  return {
+    config: {
+      jwksProvider,
+      issuer: options.jwtIssuer,
+      audience: options.jwtAudience,
+      requiredClaims,
+    },
+    poller,
+  };
 }
 
 interface ResolvedStores {
@@ -3845,6 +3863,24 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // way, including when there is nothing to report: the thing to confirm here is a *refusal*, which
   // is harder to confirm by trying it than a capability is — before this, trying it answered 200.
   console.info(`[auth] ${formatAuthSchemeSurvey(gateway.runtime.authSchemeServing)}`);
+  // ADR-0386. Said either way, including when nothing is relaxed, because the thing an operator has
+  // to be able to confirm is a *requirement* -- and before this every one of these guards was
+  // `present && wrong`, so a token carrying none of the three verified as `authenticated`. A relaxed
+  // claim names its own cost rather than only its name: `--jwt-optional-claim exp` is a decision
+  // whose consequence (the token never expires) is the part worth reading back.
+  if (options.jwtOptionalClaims.length === 0) {
+    console.info(
+      `[auth] jwt claims required: ${REQUIRED_JWT_CLAIMS.join(", ")} — a token omitting any of them is` +
+        ` refused required_claim_absent`,
+    );
+  } else {
+    const relaxed = REQUIRED_JWT_CLAIMS.filter((c) => options.jwtOptionalClaims.includes(c));
+    const still = REQUIRED_JWT_CLAIMS.filter((c) => !options.jwtOptionalClaims.includes(c));
+    console.warn(
+      `[auth] jwt claims required: ${still.length > 0 ? still.join(", ") : "none"}; RELAXED by` +
+        ` --jwt-optional-claim: ${relaxed.map((c) => `${c} (${REQUIRED_JWT_CLAIM_COSTS[c]})`).join("; ")}`,
+    );
+  }
   if (rateLimitChecker !== undefined && options.rateLimitPolicies !== null) {
     const policySurvey = surveyRoutePolicies(options.rateLimitPolicies, gateway.routes.list());
     // Said before the first request, because an undeclared policy is a *refusal* at request time and

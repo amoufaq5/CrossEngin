@@ -93,11 +93,68 @@ export class InMemoryJwksProvider implements JwksProvider {
   }
 }
 
+/**
+ * The JWT claims whose **absence** this gateway can be made to refuse, and what each absence costs.
+ *
+ * Three and not four: `nbf`'s absence means *valid from issuance*, which is coherent and is what
+ * most minters emit, so there is nothing to refuse. The other three are each a guarantee silently
+ * dropped, and the costs differ enough that an operator relaxing one must not be taken to have
+ * relaxed the others — which is why the relaxation is declared per claim rather than as a boolean.
+ *
+ * A map rather than a list because the reason is the deliverable: this exists to be rendered into a
+ * boot line and a refusal, and a fourth claim added here must say what its absence costs before it
+ * can be required.
+ */
+export const REQUIRED_JWT_CLAIM_COSTS: Readonly<Record<"exp" | "iss" | "aud", string>> =
+  Object.freeze({
+    exp: "the token never expires, so --session-token-ttl and membership revocation bound nothing for it",
+    iss: "nothing establishes which issuer minted it beyond the JWKS holding its key",
+    aud: "nothing establishes which relying party it was minted for, so a token issued for another application sharing this key set is accepted here",
+  });
+
+export type RequiredJwtClaim = keyof typeof REQUIRED_JWT_CLAIM_COSTS;
+
+export const REQUIRED_JWT_CLAIMS: readonly RequiredJwtClaim[] = Object.freeze(
+  Object.keys(REQUIRED_JWT_CLAIM_COSTS) as RequiredJwtClaim[],
+);
+
+/**
+ * Whether a claim is present **in a form the guard that reads it can use** — which is what
+ * "present" has to mean here, and `!== undefined` is not it.
+ *
+ * Each predicate is exactly the type test its own guard below performs, and that correspondence is
+ * the whole point: `exp: "soon"` is not `undefined`, so a presence check would admit it, and then
+ * `typeof exp === "number"` is false so the expiry comparison is skipped — a token with an
+ * unenforceable expiry, verified as `authenticated`. The same holds for a numeric `iss` and for an
+ * `aud` that is an object. So requiring a claim and requiring it to be *usable* cannot be two
+ * checks, or the first would hand the second a value it silently ignores: the defect this increment
+ * closes, one step further in.
+ *
+ * A map so a fourth required claim must state its own usable form rather than inherit
+ * `!== undefined`, which is the permissive answer.
+ */
+const CLAIM_IS_USABLE: Readonly<Record<RequiredJwtClaim, (v: unknown) => boolean>> = Object.freeze({
+  exp: (v) => typeof v === "number",
+  iss: (v) => typeof v === "string",
+  // Both RFC 7519 §4.1.3 forms, matching the `audOk` computation below.
+  aud: (v) => typeof v === "string" || Array.isArray(v),
+});
+
 export interface JwtVerificationOptions {
   readonly expectedIssuer: string;
   readonly expectedAudience: string;
   readonly clockSkewSeconds: number;
   readonly nowSeconds: number;
+  /**
+   * Which claims must be **present**, beyond being correct when present.
+   *
+   * Required and not optional, so no call site can forget it: before this existed every guard was
+   * `present && wrong`, so a token carrying none of the three verified as `authenticated` — and an
+   * optional field defaulting to *require nothing* would be that defect restated as a default
+   * (ADR-0364's rule, ADR-0341's `abacAttributes` shape). A caller that means *require nothing*
+   * passes an empty set and has said so.
+   */
+  readonly requiredClaims: ReadonlySet<RequiredJwtClaim>;
 }
 
 export interface JwtVerificationResult {
@@ -132,6 +189,27 @@ export async function verifyBearerJwt(input: {
   const signatureBase64 = Buffer.from(base64UrlDecode(jwt.signatureB64)).toString("base64");
   if (!verifyEd25519(publicKey, signatureBase64, signedPayload)) {
     return { outcome: "invalid_signature", reason: "ed25519 signature did not verify" };
+  }
+  // Absence is checked **before** the three present-and-wrong guards below, and the ordering is the
+  // decision rather than a style: a token missing a required claim cannot be compared, so running
+  // the comparison first would answer `authenticated` for it — which is precisely the defect. Each
+  // guard below therefore means *present and wrong*, and this one means *not present at all*, and
+  // the two are different facts with different remedies (ADR-0384).
+  //
+  // Checked after the signature, not before, because an unsigned token establishes nothing at all
+  // and reporting a missing claim for it would describe the shape of a credential this gateway has
+  // not yet decided to believe — `rbacCheck`'s reason for evaluating an obligation only after the
+  // role check (ADR-0340).
+  for (const claim of REQUIRED_JWT_CLAIMS) {
+    if (!input.opts.requiredClaims.has(claim)) continue;
+    if (!CLAIM_IS_USABLE[claim](jwt.payload[claim])) {
+      // The claim's own value is deliberately not in the reason: it reaches a log line and a
+      // `StageResult.reason`, and a claim from an unverified-by-policy token is caller-controlled
+      // (ADR-0367's rule, ADR-0373's `unreadableDetail`). "absent or not usable" rather than
+      // "absent", because one branch covers both and claiming the narrower fact would be wrong for
+      // a token carrying `exp: "soon"`.
+      return { outcome: "required_claim_absent", reason: `${claim} is absent or not usable` };
+    }
   }
   if (typeof jwt.payload.exp === "number" && jwt.payload.exp + input.opts.clockSkewSeconds < input.opts.nowSeconds) {
     return { outcome: "expired_token", reason: "exp is in the past" };

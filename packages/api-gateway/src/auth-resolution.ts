@@ -194,6 +194,22 @@ export const AUTH_OUTCOMES = [
    * the pre-ADR-0384 record said `no_credential` for a request that carried an Authorization header.
    */
   "credential_unrecognized",
+  /**
+   * A JWT verified against this deployment's JWKS and does **not carry a claim this deployment
+   * requires** — distinct from the three mismatch outcomes, which say a claim is present and wrong.
+   *
+   * Its own member because every alternative is a lie about one of the three. `expired_token` for a
+   * token with no `exp` asserts an expiry that was never set; `issuer_mismatch` and
+   * `audience_mismatch` assert a comparison that never happened. ADR-0384's rule read one layer in:
+   * conflating *absent* with *wrong* is how `credential_malformed` came to describe an unimplemented
+   * scheme. It also separates the two remedies a reader needs to tell apart — an IdP that omits a
+   * claim is a configuration to fix at the minter, where a wrong claim is a token minted for
+   * somebody else.
+   *
+   * Appended for `scheme_not_supported`'s reason: the 18 members a deployment's `auth_outcome` CHECK
+   * already admits keep their order, so the emitted SQL moves only by this addition.
+   */
+  "required_claim_absent",
 ] as const;
 export type AuthOutcome = (typeof AUTH_OUTCOMES)[number];
 
@@ -227,6 +243,7 @@ export const AUTH_OUTCOME_SUCCEEDS: Readonly<Record<AuthOutcome, boolean>> = Obj
   weak_tls_rejected: false,
   scheme_not_supported: false,
   credential_unrecognized: false,
+  required_claim_absent: false,
 });
 
 export const AUTH_SUCCESS_OUTCOMES: ReadonlySet<AuthOutcome> = new Set(

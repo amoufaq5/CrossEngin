@@ -5,6 +5,7 @@ import {
   type DeclaredRateLimitPolicy,
   type RateLimitPolicyDeclaration,
 } from "@crossengin/api-gateway-pg";
+import { REQUIRED_JWT_CLAIMS } from "@crossengin/api-gateway-runtime";
 import { REGIONS } from "@crossengin/residency";
 import {
   SENSITIVE_DATA_CLASSIFICATIONS,
@@ -122,6 +123,15 @@ export interface ServeOptions {
   readonly jwksRefreshMs: number | null;
   readonly jwtIssuer: string | null;
   readonly jwtAudience: string | null;
+  /**
+   * JWT claims this deployment will accept a token **without**, declared per claim.
+   *
+   * The relaxation is what is declared, so the default is strict: before ADR-0386 every claim guard
+   * was *present and wrong*, so a token carrying none of `exp`/`iss`/`aud` verified as
+   * `authenticated`. Per claim and not one boolean because the three costs differ, and an operator
+   * who must accept one absence has not thereby accepted the others.
+   */
+  readonly jwtOptionalClaims: readonly string[];
   /**
    * Mounts `POST /v1/auth/token`, which turns a password into a session token the gateway's own
    * JWKS stage verifies. Needs a Postgres store, `CREDENTIAL_PEPPER` and
@@ -570,6 +580,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let jwksRefreshMs: number | null = null;
   let jwtIssuer: string | null = null;
   let jwtAudience: string | null = null;
+  const jwtOptionalClaims: string[] = [];
   let credentialLogin = false;
   let sessionTokenTtl: number | null = null;
   let loginLockoutAttempts: number | null = null;
@@ -762,6 +773,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       i += consumed();
     } else if (arg === "--jwt-issuer" || arg.startsWith("--jwt-issuer=")) {
       jwtIssuer = takeValue(arg, next, "--jwt-issuer");
+      i += consumed();
+    } else if (arg === "--jwt-optional-claim" || arg.startsWith("--jwt-optional-claim=")) {
+      jwtOptionalClaims.push(takeValue(arg, next, "--jwt-optional-claim"));
       i += consumed();
     } else if (arg === "--jwt-audience" || arg.startsWith("--jwt-audience=")) {
       jwtAudience = takeValue(arg, next, "--jwt-audience");
@@ -1920,6 +1934,29 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     throw new CliUsageError("--jwt-issuer and --jwt-audience are required when a JWKS is configured");
   }
 
+  if (jwtOptionalClaims.length > 0) {
+    // Refused for an unknown name rather than ignored, because the flag's whole effect is to
+    // *remove* a check: a typo would be read as "relaxed nothing", which is the safe answer by
+    // accident and silently not the one the operator asked for.
+    const unknown = jwtOptionalClaims.filter((c) => !(REQUIRED_JWT_CLAIMS as readonly string[]).includes(c));
+    if (unknown.length > 0) {
+      throw new CliUsageError(
+        `--jwt-optional-claim: unknown claim(s) ${unknown.join(", ")}; this binary can relax only ` +
+          `${REQUIRED_JWT_CLAIMS.join(", ")} (nbf is never required, because its absence means valid from issuance)`,
+      );
+    }
+    // Refused when nothing verifies a JWT at all, on the rule that a flag which is silently inert
+    // is worse than absent: an operator who relaxed a claim believes they changed what is accepted.
+    // Both token paths verify through the same guards -- `--credential-login` mints and verifies its
+    // own, a JWKS verifies a foreign one -- so either makes the flag live.
+    if (!credentialLogin && jwksKeys.length === 0 && jwksFile === null && jwksUrl === null) {
+      throw new CliUsageError(
+        "--jwt-optional-claim requires --credential-login or a JWKS (--jwks-key/--jwks-file/--jwks-url): " +
+          "with neither, no JWT is verified and relaxing a claim changes nothing",
+      );
+    }
+  }
+
   if (credentialLogin) {
     // The minted token asserts `iss` and `aud`, and the verifier beside it checks both. Without
     // them the runtime falls back to `https://crossengin.io` / `https://api.crossengin.io`, so a
@@ -1983,6 +2020,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     jwksRefreshMs,
     jwtIssuer,
     jwtAudience,
+    jwtOptionalClaims,
     credentialLogin,
     sessionTokenTtl,
     loginLockoutAttempts,

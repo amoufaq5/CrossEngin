@@ -29,6 +29,8 @@ import {
 import {
   type JwksProvider,
   parseAuthHeader,
+  REQUIRED_JWT_CLAIMS,
+  type RequiredJwtClaim,
   resolvePrincipalForCredential,
   verifyBearerJwt,
 } from "./auth.js";
@@ -75,6 +77,15 @@ export interface GatewayRuntimeOptions {
   readonly jwksProvider?: JwksProvider;
   readonly jwtIssuer?: string;
   readonly jwtAudience?: string;
+  /**
+   * Which JWT claims must be present, beyond being correct when present.
+   *
+   * Defaults to **all three** (`exp`, `iss`, `aud`), which is the fail-closed direction and the one
+   * every conformant OIDC or RFC 9068 minter satisfies — so a caller that forgets this gets the
+   * strict behaviour rather than the pre-ADR-0386 one. A deployment that must accept a token
+   * omitting one declares that, per claim.
+   */
+  readonly requiredJwtClaims?: ReadonlySet<RequiredJwtClaim>;
   readonly clockSkewSeconds?: number;
   readonly opaqueTokenLookup?: OpaqueTokenLookup;
   readonly clock?: { now(): Date };
@@ -121,6 +132,7 @@ export class GatewayRuntime {
   private readonly jwksProvider: JwksProvider | null;
   private readonly jwtIssuer: string;
   private readonly jwtAudience: string;
+  private readonly requiredJwtClaims: ReadonlySet<RequiredJwtClaim>;
   private readonly clockSkewSeconds: number;
   private readonly opaqueTokenLookup: OpaqueTokenLookup | null;
   private readonly clock: { now(): Date };
@@ -137,6 +149,7 @@ export class GatewayRuntime {
     this.jwksProvider = opts.jwksProvider ?? null;
     this.jwtIssuer = opts.jwtIssuer ?? "https://crossengin.io";
     this.jwtAudience = opts.jwtAudience ?? "https://api.crossengin.io";
+    this.requiredJwtClaims = opts.requiredJwtClaims ?? new Set(REQUIRED_JWT_CLAIMS);
     this.clockSkewSeconds = opts.clockSkewSeconds ?? 30;
     this.opaqueTokenLookup = opts.opaqueTokenLookup ?? null;
     this.clock = opts.clock ?? { now: () => new Date() };
@@ -464,6 +477,7 @@ export class GatewayRuntime {
         opts: {
           expectedIssuer: this.jwtIssuer,
           expectedAudience: this.jwtAudience,
+          requiredClaims: this.requiredJwtClaims,
           clockSkewSeconds: this.clockSkewSeconds,
           nowSeconds,
         },
