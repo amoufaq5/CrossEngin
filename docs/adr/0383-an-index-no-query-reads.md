@@ -558,3 +558,73 @@ it.
   evaluated before a policy.
 - ADR-0144, ADR-0143, ADR-0166 — the fold, the typeahead and the extension.
 - ADR-0330, ADR-0331, ADR-0334, ADR-0336, ADR-0337, ADR-0340, ADR-0349, ADR-0352, ADR-0362, ADR-0372.
+
+## Addendum: verified live, and one refinement the maps needed
+
+This increment shipped with *"not verified live"* recorded against it, and every Postgres
+measurement in its prose attributed to the review that took it. That gap is now closed, on PG 16.13
+(Ubuntu 16.13-0ubuntu0.24.04.1), with a 60,000-row `public.patient` fixture carrying two accented
+rows among unaccented filler.
+
+**The index is used, which is the claim the whole increment rests on and which nobody had shown.**
+The review measured a sequential scan against a *bare-column* index; what was never demonstrated is
+that a GIN index on `public.ce_unaccent(fam)` is read by the predicate that names the same
+expression. It is:
+
+| the predicate | plan | time |
+|---|---|---|
+| `public.ce_unaccent(fam) ILIKE public.ce_unaccent('%angstrom%')` | `Bitmap Index Scan on patient_fam_utrgm` | **0.157 ms** |
+| `unaccent(fam) ILIKE unaccent('%angstrom%')` (pre-increment) | `Seq Scan`, `Rows Removed by Filter: 59999` | **23.388 ms** |
+
+149× on this fixture. The figures differ from the review's 129.6/1.95 ms because the fixture and the
+search term differ; they are not a reproduction of that pair and are not offered as one. The row it
+returned is `Ångström`, found through an **unaccented** term, so the fold is doing its job *through
+the index* rather than being applied after it.
+
+**All five probe states were driven against a real catalog**, and the two maps' disagreement — the
+reason there are two — holds live:
+
+| state | how it was produced | `ANSWERS_TRUSTED` | `ADMITS_INDEX` |
+|---|---|---|---|
+| `matches` | the function as `CREATE_SEARCH_FUNCTION_SQL` writes it | true | true |
+| `body_differs` | body replaced with `SELECT lower($1)` | **false** | **true** |
+| `volatility_differs` | same body declared `STABLE` | **true** | **false** |
+| `created` | absent, then `ensureSearchFunction` | true | true |
+| `dictionary_absent` | the dictionary dropped *after* the function was created | false | false |
+
+`body_differs` and `volatility_differs` disagree in **opposite** directions, measured, which is the
+decision this ADR argued for and could not previously demonstrate.
+
+**The refinement: `absent` and `dictionary_absent` are separated by *when* the dictionary went
+missing, and the first attempt at this test got it wrong.** Dropping the function and the extension
+and then calling `ensureSearchFunction` answers **`absent`**, not `dictionary_absent` — because
+`'public.unaccent'::regdictionary` is a *constant cast*, resolved at parse time, so the `CREATE
+FUNCTION` itself is refused and the create's `catch` arm reports `absent` with the error. The
+`dictionary_absent` arm is reached only when the dictionary disappears **after** the function
+exists, and what makes that reachable is worth knowing: `DROP EXTENSION unaccent` **succeeds with no
+`CASCADE` and does not drop the function**, because a string-bodied `LANGUAGE sql` function records
+no dependency on a dictionary named inside it. Verified both ways, including that calling the
+surviving function then raises `text search dictionary "public.unaccent" does not exist`. So the
+map's `dictionary_absent` comment is correct and its *window* is narrower than a reader would
+assume, and the conservative `false` it carries is right for a different reason than the obvious
+one: the function is already there, so nothing will re-create it.
+
+**The privilege regression is confirmed, including the one Postgres behaviour this ADR attributed to
+the review rather than measuring.** As a `serving_nocreate` role holding `CONNECT` and
+`USAGE ON SCHEMA public` and *not* `CREATE`:
+
+```
+role: { current_user: 'serving_nocreate', can_create: false }
+CREATE EXTENSION IF NOT EXISTS unaccent;   -> OK
+CREATE EXTENSION IF NOT EXISTS pg_trgm;    -> OK
+probe: absent | admitsIndex = false | refuses = true
+detail: permission denied for schema public
+```
+
+Both extension statements **succeed** for a role that cannot create a function, which is exactly why
+they establish nothing about this privilege and why the boot line says so rather than reasoning from
+them. The refusal fires, and its line names the privilege, the driver's own message, the statement to
+run and both remedies.
+
+Throwaway databases (`adr0383_live`, `adr0383_body`, `adr0383_dict`, `adr0383_priv`) and the
+`serving_nocreate` role were dropped afterwards; the cluster was left running.

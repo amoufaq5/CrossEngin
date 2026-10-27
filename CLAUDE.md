@@ -22,8 +22,11 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 20,185 tests**, all green, no
-type errors.
+**87 packages + 3 apps, 146 meta-schema tables, 20,439 tests**, all green, no
+type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
+when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
+sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
+report; `apps/operate-web` has none).
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
 - **Phase 3** (ADR-0077, P1–P8: serving app → distributed workers → web renderer
@@ -2211,6 +2214,84 @@ type errors.
   population is a *foreign* token under `--jwks-url`, both claims are OPTIONAL in RFC 7519, and
   refusing one that works today is a behaviour change rather than a free tightening.
 
+  ADR-0382, ADR-0383 and ADR-0385 are the rest of that P1 batch, run as parallel increments over
+  disjoint files, and the three classes are worth keeping apart.
+
+  **ADR-0382's class is a rule nothing runs.** `strategy/ci.ts` modelled triggers, budgets and a
+  topological sort with no reader; there was no `.github/workflows` and no `core.hooksPath`, so the
+  twelve workspace rules — each written to make a class of defect a test failure *the moment it
+  lands* — were a failure nobody would see until somebody chose to look, and this file's
+  never-`--no-verify` instruction described a guardrail that did not exist. `auditCiWorkflow`
+  compares the shipped YAML against `CI_PIPELINE` in **both** directions, `pg-record-retention.ts`'s
+  rule, because a one-way comparison is what ADR-0288's maintained list was made of. Three things
+  were sharper than the gap. **The budget could be given a real event rather than dropped**:
+  `fitsBudget` had nothing behind it, and the answer was to measure each command
+  (`CI_MEASURED_STEP_SECONDS`), derive `targetMinutes` from the measurement, and fence the map
+  against the declared steps both ways — so it fires on a new command step, refused until measured,
+  and on a re-measurement past the ceiling. The reviewer's own remedy, `timeout-minutes: 10`, is
+  **refused on measurement**: the job's wall clock is install plus the suite, install is unmeasured
+  by that ADR's own account, and 10 against an 8.78-minute suite would red the first green pull
+  request on install latency — a CI that fails on arrival teaches people to ignore it. **The hook's
+  own advice was the violation**, telling a developer to use `--no-verify`, and a fence reads the
+  hook body so it cannot return as a comment. And **`prepare` overwriting `core.hooksPath` beats not
+  installing only if nothing is overwritten**, so the logic is a script that declines on a foreign
+  path and says so, reads its own marker before writing, and whose documented escape **persists
+  across a reinstall** — the reversibility the first draft claimed and did not have.
+
+  **ADR-0383's class is an index no query reads.** The predicate emitted
+  `unaccent(<col>::text) ILIKE …` and the DDL indexed the bare column, so every `?q=` and
+  `[contains]` filter was a sequential scan — **129.6 ms against 1.95 ms** at 60k rows, issued per
+  keystroke — while two comments asserted opposite things and the predicate's was the wrong one.
+  `public.ce_unaccent(text)` is named by the predicate *and* the index expression, so they agree by
+  construction. Two results outrank the fix. **Two total maps over the seven probe states, not
+  one**, because `body_differs` is `false` for *are existing answers trustworthy* and `true` for
+  *can a new index be built* — an index can be created from a replaced body and is built from the
+  wrong output — so one map had to drop one of those facts, which is what made the boot line wrong
+  in **both** directions rather than merely understating. And `CREATE FUNCTION` and never
+  `CREATE OR REPLACE`: replacing a body an index was built from leaves the index holding the old
+  body's output with no error and no reindex, so the binary would be the thing that corrupted it —
+  and the probe **cannot** tell the harmful case from the harmless one, because neither `pg_proc`
+  nor `pg_index` carries a modification timestamp. The refusal lives in
+  `ensureColumnStoreExtensions` for three measured reasons, not as a preference: that function has
+  no store parameter so a throw inside `ensureSearchFunction` would refuse `--store pg`, which names
+  the wrapper nowhere; `applyTenantManifestSchema` calls this one and never `ensureSearchExtension`,
+  so a refusal there could not reach the per-tenant applier at all; and it runs outside that
+  applier's transaction, which is what makes it a refusal rather than an abort into ADR-0314's JSONB
+  fallback. The stated cost is a **privilege regression** — `CREATE` on schema `public`, which the
+  two `CREATE EXTENSION IF NOT EXISTS` statements above it do not establish, because they
+  short-circuit before the privilege check — **measured as a non-owner afterwards**, where both
+  statements succeed for a role that cannot create a function, so they establish nothing about that
+  privilege and the boot line says so rather than reasoning from them. The live pass also produced
+  the measurement the increment rested on and had never taken: a GIN index on
+  `public.ce_unaccent(fam)` really is **read** by the predicate naming it, `Bitmap Index Scan` at
+  0.157 ms against a `Seq Scan` at 23.388 ms over 60k rows, returning an accented row through an
+  unaccented term. And it refined the maps' own vocabulary: **`absent` and `dictionary_absent` are
+  separated by *when* the dictionary went missing**, because a `regdictionary` constant cast is
+  resolved at parse time (so losing it first refuses the `CREATE` itself) while
+  `DROP EXTENSION unaccent` needs no `CASCADE` and leaves the function standing (so losing it after
+  is the narrower state the arm is actually for).
+
+  **ADR-0385's class is a badge that counts what nothing can show.** The nav badge counted unread
+  in-app notices while `markNoticeRead` and `markReadThrough` had **zero callers**, no page listed
+  notifications, and `/inbox` is the *approvals* inbox over entity records. So the one surface that
+  made `--read-state-routes` landable was the missing one, which is why ADR-0376 withheld that flag
+  on measurement rather than on a default decision: mounting it would have replaced a *decaying*
+  approximation with a true count nothing could reduce. The design decision is that **the badge and
+  the page cannot disagree, because there is one number** — a module-level store read through
+  `useSyncExternalStore`, the idiom `lib/subscription.ts` already uses to cross a 402 from the API
+  layer to the chrome, published from **one** effect rather than three call sites and carrying the
+  figure rather than a staleness signal. The residual window is named rather than papered over, and
+  its reason is a measurement: publishing an optimistic zero after `markAll` would be **wrong**
+  rather than eager, because `isUnread` fails open on an unparseable `queuedAt`, so a successful
+  `markReadThrough` does not imply zero unread. The reviewer's prescribed fix for the second
+  finding was **the wrong shape and refused**: a fourth `NoticeReadState` keyed on the failure would
+  be a value `noticeReadState()` can never return, a modelled value with no producer, so the
+  *sentence* is keyed on the failure kind and the dot and label stay properties of the row. And the
+  increment's own verification found the thing that bounds it: commenting out the page's publish
+  line leaves both `tsc` and `next build` green, because `operate-web` sets no `noUnusedLocals`, so
+  **this fix is fenced by nothing** — which is register P1.3's remaining half, now measured from
+  the inside.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -2659,14 +2740,38 @@ packages exist at only one layer, noted below where that is true.
   `resolvedClassifiedFields` in `@crossengin/kernel/ddl` is the one answer for "as the served table
   has them".
 - **`config`** — shared TypeScript / ESLint / Prettier config bases. No `src/`.
-- **`testing`** — the shared `vitestPreset`, the eleven workspace rules under `strategy/`, and
-  `pg-bind-arity.ts`. That last one is deliberately **not** under `strategy/`: those rules read the
-  workspace from disk and answer one question per run, while `assertBindArity(sql, params)` is a
-  per-statement predicate a fake calls on the statement in front of it, and it needs the runtime
-  parameter array no static scan can have (ADR-0370). It answers the one thing a fake
-  `PgConnection` cannot learn by interpreting SQL — whether the statement references exactly
-  `{1..params.length}` — and it is the floor for all nine shared `test-fakes.ts` modules that fake
-  a connection.
+- **`testing`** — the shared `vitestPreset`, the twelve workspace rules under `strategy/`,
+  `ci.ts` + `ci-workflow.ts`, and `pg-bind-arity.ts`. That last one is deliberately **not** a
+  `strategy/` rule: those read the workspace from disk and answer one question per run, while
+  `assertBindArity(sql, params)` is a per-statement predicate a fake calls on the statement in front
+  of it, and it needs the runtime parameter array no static scan can have (ADR-0370). It answers the
+  one thing a fake `PgConnection` cannot learn by interpreting SQL — whether the statement
+  references exactly `{1..params.length}` — and it is the floor for all nine shared `test-fakes.ts`
+  modules that fake a connection.
+  **`ci.ts` and `ci-workflow.ts` are the rules about how the rules run** (ADR-0382), and they sit
+  beside the twelve rather than among them because their subject is `.github/` and `.githooks/`
+  rather than the workspace's source. `auditCiWorkflow` compares the shipped YAML against
+  `CI_PIPELINE` **in both directions** (`pg-record-retention.ts`'s shape), so a step added to one
+  and not the other is a finding and not drift; `CI_MEASURED_STEP_SECONDS` keys a measured figure
+  per command with `targetMinutes` **derived** from it, and `measuredStepDisagreements` fences the
+  map against the declared command steps both ways — which is what gives `fitsBudget` two real
+  events (a new command step, refused until measured; a re-measurement past the ceiling) where
+  before it had none. What the budget check **cannot** see is an existing step getting slower, and
+  that is stated at the site rather than implied away. A `timeout-minutes` ceiling is refused with
+  its measurement: the job's wall clock is install plus the suite, install is unmeasured, and a
+  10-minute cap against an 8.78-minute suite would red the first green pull request on install
+  latency. A fence also reads the **hook body** for `--no-verify`, because the hook's own first
+  draft advised it — and a comment explaining the fence does not satisfy the fence.
+  The workflow runs **Workspace rules before Build**, and that ordering is sound only because of the
+  property this directory already rests on: these rules read the workspace from **disk as text** and
+  import no workspace package, so they need no `dist/`. Verified rather than assumed —
+  `packages/testing` has **zero** real `@crossengin/*` imports (the ~20 occurrences are inside
+  fixture strings, and `vitest.config.ts` imports its own preset relatively), and its one workspace
+  dependency is `@crossengin/config`, which has no `src/` and no build output. So a fresh checkout
+  answers every rule after `pnpm install` alone, which is what lets them be the **first** thing CI
+  runs rather than something gated behind ~150 s of build — and it is why
+  *"a rule that is green only after a build is not a rule"* is an ordering constraint and not only a
+  statement about trustworthiness.
 
 ### Serving a manifest (the Operate stack)
 
@@ -2789,7 +2894,38 @@ packages exist at only one layer, noted below where that is true.
   neither default is correct — `[]` loses every diagnosis and "all fields" gives the wrong
   instruction.
 - **`operate-runtime-pg`** — Postgres `EntityStore` implementations plus the serving-side
-  stores. **`ListSqlAdapter.columnExpr` answers a `ColumnExpr` and no longer `string | null`**
+  stores.
+  **`public.ce_unaccent(text)` is the one accent fold, named by the predicate and by the index**
+  (ADR-0383). Before it, `buildListSql` emitted `unaccent(<col>::text) ILIKE …` while
+  `emitEntityTableDdl` indexed the bare column, so the trigram GIN index this store creates for
+  every text column was read by nothing and every `?q=` and `[contains]` filter was a sequential
+  scan — 129.6 ms against 1.95 ms at 60k rows, per keystroke. `search-function.ts` owns the body,
+  the probe and **two** total maps over the seven states, and the two maps are the design rather
+  than duplication: `SEARCH_FUNCTION_ANSWERS_TRUSTED` asks whether existing answers are
+  trustworthy, `SEARCH_FUNCTION_ADMITS_INDEX` whether a *new* index can be built, and they disagree
+  on `body_differs` — an index can be created from a replaced body and is built from the wrong
+  output — so one map would have to drop one of those facts. `CREATE FUNCTION` and never
+  `CREATE OR REPLACE`, because replacing a body an index was built from leaves the index holding the
+  old output with no error and no reindex, and the probe **cannot** separate the harmful case from
+  the harmless one, since neither `pg_proc` nor `pg_index` carries a modification timestamp.
+  `ensureColumnStoreExtensions` provisions it and **refuses** on `ADMITS_INDEX === false`: there and
+  not in `ensureSearchFunction`, because that function has no store parameter so a throw inside it
+  would refuse `--store pg` (which names the wrapper nowhere), because
+  `applyTenantManifestSchema` calls this one and never `ensureSearchExtension`, and because it runs
+  **outside** that applier's transaction — which is what makes it a refusal rather than an abort
+  into ADR-0314's JSONB fallback. `=== false` and not `!== true`, so `unreadable` warns:
+  collapsing `null` into `false` would discard the *nothing was established* distinction the map
+  encodes (ADR-0331) and refuse on an unestablished fact (ADR-0334). The stated cost is a
+  **privilege regression** — `CREATE` on schema `public`, which the two
+  `CREATE EXTENSION IF NOT EXISTS` statements above it do not establish because they short-circuit
+  before the privilege check. `SEARCH_FUNCTION_PROBE_MATCH` and `SEARCH_FUNCTION_PRESENT_ROW` are
+  exported from that module because **three** hand-rolled fakes reach this path and three
+  hand-written rows would be three chances to model a state the probe reads differently
+  (ADR-0332's `FEATURE_FLAG_COLUMN_NAMES`); the matcher is load-bearing rather than convenient,
+  since a fake's `{rows: []}` fallback is exactly how a real database reports *this function does
+  not exist*, so a fake that stops matching reads `absent` and the refusal fires in every test on
+  the path — measured at **80 failures across three files**.
+  **`ListSqlAdapter.columnExpr` answers a `ColumnExpr` and no longer `string | null`**
   (ADR-0359), because `null` meant *encrypted at rest*, *not a column* and *unsafe field name* and
   all three were handled identically: `buildListSql` dropped the predicate and the `WHERE` became
   `tenant_id = $1` alone. `buildListSql` returns `unserveable` beside the SQL and the two stores
@@ -5712,12 +5848,28 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   same increment, where it was `pathname.startsWith("/platform") && !pathname.startsWith(…)` —
   an exclusion list that every new platform page has to be added to, and which lights two links at
   once when it is not.
+  **`/notifications` lists the viewer's notices and can clear them** (ADR-0385), which is what made
+  `--read-state-routes` landable: `markNoticeRead` and `markReadThrough` had zero callers, so the
+  nav badge counted a set nothing could reduce. **The badge and the page are one number**, carried
+  by a module-level store read through `useSyncExternalStore` — the idiom `lib/subscription.ts`
+  already uses to cross a 402 from the API layer to the chrome — published from **one** effect over
+  the loaded partition rather than from each call site, and carrying the figure rather than a
+  staleness signal, so the two cannot disagree. A null partition publishes nothing, so the degraded
+  arm leaves the sidebar's own fallback alone. The window after `markAll` is deliberate and its
+  reason is measured: an optimistic zero there would be **wrong** rather than eager, because
+  `isUnread` fails open on an unparseable `queuedAt`, so a successful `markReadThrough` does not
+  imply zero unread. The per-row sentence is keyed on the **failure kind** and not on a fourth
+  `NoticeReadState`, which would be a value `noticeReadState()` can never return.
   It still has **zero tests**, so it is outside the sweep — though no longer outside every strategy
   rule: `entity-field-aperture.ts` (ADR-0361) walks it through a local fs walk, because that member
   has no `src/` and is therefore invisible to the other nine, and it is where 25 of the class's
   `.fields` reads live (all on the `UiEntitySchema` that `ui-schema.ts` produces, and so all
   downstream of the one raw reader that decides what the client sees at all),
   and the login and console flows are verified by `tsc`, `next build` and a live run.
+  **What that absence costs is now measured rather than asserted** (ADR-0385): commenting out the
+  notifications page's one publish line leaves both `tsc` and `next build` green, because this app
+  sets no `noUnusedLocals`, so the orphaned import is not even a warning — a UI fix here is fenced
+  by nothing, and ADR-0382's CI runs no test for this member because there is none to run.
 
 ## Cross-cutting invariants
 
@@ -9463,13 +9615,46 @@ Advertised capability with no reachable code path, or delivered at a cost that m
 Nothing here gives a wrong answer, which is why it sits below P0. Ordered by leverage — the first
 three make the rest honest, cheap or verifiable.
 
-1. **Every list search is an unindexed table scan and a comment asserts the opposite.**
-   `list-sql.ts` emits `unaccent(<col>::text) ILIKE …` while `entity-ddl.ts` indexes the bare
-   column; the predicate's comment claims a plain-column GIN index still accelerates it and the DDL
-   comment two files away notes `unaccent` is not IMMUTABLE. Measured on PG 16.13 at 60k rows:
-   **129.6 ms sequential vs 1.95 ms** without the wrapper — 66×, so ~2 s per request at 1M rows,
-   issued per keystroke from the shipped search box, over an index no query reads. Days, and the
-   evidence is already taken.
+1. ~~**Every list search is an unindexed table scan and a comment asserts the opposite.**~~ —
+   **closed by ADR-0383**, and every figure in this entry reproduced: `unaccent(<col>::text) ILIKE
+   …` against an index on the bare column, **129.6 ms sequential vs 1.95 ms** on PG 16.13 at 60k
+   rows, with the predicate's comment claiming a plain-column GIN index accelerates it and the DDL
+   comment two files away noting `unaccent` is not IMMUTABLE. `public.ce_unaccent(text)` is the
+   IMMUTABLE wrapper, named by the predicate **and** by the index expression so the two agree by
+   construction. What the entry did not have: **two** total maps over the seven probe states rather
+   than one, because `body_differs` is `false` for *are existing answers trustworthy* and `true`
+   for *can a new index be built* — an index can be created from a replaced body and is built from
+   the wrong output — so one map would have to drop one of those facts, which is what made the boot
+   line wrong in **both** directions. And the wrapper is **refused** at boot from
+   `ensureColumnStoreExtensions`, the one place both column-store call sites pass through, which
+   `applyTenantManifestSchema` reaches and `ensureSearchExtension` does not. The stated cost is a
+   **privilege regression**: provisioning needs `CREATE` on schema `public`, which the two
+   `CREATE EXTENSION IF NOT EXISTS` statements above it do not establish, because they short-circuit
+   before the privilege check. `=== false` and not `!== true`, so `unreadable` warns rather than
+   refusing (ADR-0331's *nothing was established, so nothing is claimed*). **Not verified live** —
+   every Postgres measurement in it is the review's, attributed as such. What remains is ADR-0383's
+   own open ends: `SEARCH_EXTENSION_SERVES` still has no reader, an exact `pg_depend` enumeration of
+   the indexes a `DROP FUNCTION` would refuse over is named by dependency rather than listed, and
+   `?q=`'s reach on a confined session is bounded by `texticlike`'s `proleakproof = false` rather
+   than by the wrapper.
+   **Verified live afterwards** (ADR-0383's addendum), which closed that increment's own
+   *not-verified-live* gap and produced the measurement nobody had taken: the review measured a
+   sequential scan against a *bare-column* index, and what was never shown is that a GIN index on
+   `public.ce_unaccent(fam)` is **read** by the predicate naming the same expression. On PG 16.13 at
+   60k rows it is — `Bitmap Index Scan` at **0.157 ms** against a `Seq Scan` at **23.388 ms**
+   removing 59,999 rows — and the row it returns is `Ångström`, found through an *unaccented* term,
+   so the fold works through the index rather than after it. All five probe states were driven
+   against a real catalog and the two maps disagree in **opposite** directions as designed
+   (`body_differs` false/true, `volatility_differs` true/false). One refinement: **`absent` and
+   `dictionary_absent` are separated by *when* the dictionary went missing** — gone first, the
+   `'public.unaccent'::regdictionary` constant cast is resolved at parse time so the `CREATE
+   FUNCTION` is itself refused and the state is `absent`; gone *after*, the function survives
+   (because `DROP EXTENSION unaccent` needs no `CASCADE`: a string-bodied `LANGUAGE sql` function
+   records no dependency on a dictionary named inside it) and the state is `dictionary_absent`. The
+   privilege regression reproduced as a non-owner, **including the short-circuit this file had
+   attributed to the review rather than measured**: both `CREATE EXTENSION IF NOT EXISTS` statements
+   succeed for a role that cannot create a function, which is precisely why they establish nothing
+   about that privilege.
 2. **Eight manifest sections are read by nothing — but they are not *authored*, and the headline
    this entry gave is inverted.** The core fact holds: `integrations`, `files`, `reports`,
    `dashboards`, `customWidgets`, `theme`, `i18n` and `search` are merged across lineage, committed
@@ -9497,12 +9682,28 @@ three make the rest honest, cheap or verifiable.
    `surveyAbacObligations`, so ADR-0340's by-name boot refusal cannot see a declared obligation no
    deployment can discharge. Those are genuinely authored, validated, hashed and discarded. (Partly
    P2 item 14's third clause, from the other end.)
-3. **No CI, no git hook, no smoke, e2e, load or migration test** — while `strategy/ci.ts` models
-   triggers, budgets and a topological sort with no reader. No `.github/workflows`, no
-   `core.hooksPath`, so the twelve rules and 20,136 tests run only when a human types `pnpm -r test`,
-   and this file's instruction never to use `--no-verify` describes a guardrail that does not
-   exist. `operate-web` has **zero tests** against 15 pages and 34 unfenced `fetch` sites — the
-   serialized-body boundary that shipped a broken console button for an hour (ADR-0335).
+3. **The CI and hook halves are closed by ADR-0382; the test-kind half is not.** There is a
+   `.github/workflows/ci.yml`, a `.githooks/pre-commit` installed by a non-clobbering
+   `install-hooks.sh` behind `prepare`, and `auditCiWorkflow` comparing the shipped YAML against
+   `CI_PIPELINE` in **both** directions — so the twelve rules and the whole suite now run without a
+   human typing anything, and this file's never-`--no-verify` instruction describes something real.
+   Three things the entry did not have. The **budget could be given a real event** rather than
+   dropped: `CI_MEASURED_STEP_SECONDS` keys a figure per command, `targetMinutes` derives from it,
+   and a both-ways fence refuses a new command step until it is measured — while
+   `timeout-minutes: 10` is **refused on measurement**, because the job's wall clock is install plus
+   the suite and 10 against an 8.78-minute suite would red the first green PR on install latency.
+   The hook's **own advice was the violation**: it told a developer to use `--no-verify`, which
+   CLAUDE.md forbids by name, and a fence now reads the hook body so the advice cannot return as a
+   comment. And `CI_STEP_KINDS` was **deleted** rather than tied to the union — a new export with
+   one reader that asserted the constant equals its own literal, where ADR-0337's keep-it rule is
+   about *pre-existing* symbols.
+   What is left is the part this entry bundled and that the increment deliberately did not take:
+   **no smoke, e2e, load or migration test**, and `operate-web` still has **zero** tests against 18
+   pages and its unfenced `fetch` sites — the serialized-body boundary that shipped a broken console
+   button for an hour (ADR-0335), and which ADR-0385 measured again from the other side: commenting
+   out that increment's one publish line leaves both `tsc` and `next build` green, because
+   `operate-web` sets no `noUnusedLocals`, so **a UI fix there is fenced by nothing**. The honest
+   next step for this item is a test runner for that app, not more rules.
 4. **GDPR Article 15 access and Article 20 portability have no code path at all**, against fifteen
    increments of Article 17. `@crossengin/data-lineage` has zero importers, its six tables are
    declared `unbuilt_subsystem`, there is no SAR route, store, scheduler or flag, and
@@ -9631,14 +9832,23 @@ three make the rest honest, cheap or verifiable.
     `/platform/users` + `/platform/users/[id]` + a Members panel provision people, move their
     status, grant and revoke memberships and set a first password, and `/account` is the
     self-service change. Nothing else here moved: no workflow view, no report builder, no incident
-    surface, no deletion-request surface, no preferences page — **and no notifications page**, which
-    ADR-0376 established while trying to default `--read-state-routes` on: `listNotifications` is
-    reached only by `Sidebar.tsx`'s badge fallback and by `/setup` (filtered to design-review
-    decisions), `markNoticeRead` and `markReadThrough` are **callerless**, and `/inbox` is the
-    *approvals* inbox over entity records rather than a notification inbox. So the nav badge counts a
-    set the UI neither displays nor can clear, which is why that flag is withheld rather than
-    defaulted; the page plus a mark-read affordance is the smallest piece that makes it landable, and
-    it is the one UI gap whose server surface is already built and waiting.
+    surface, no deletion-request surface, no preferences page. **The notifications page is closed by
+    ADR-0385**, which is the one UI gap whose server surface was already built and waiting:
+    `/notifications` lists the viewer's notices, marks one read and marks read through a watermark,
+    so `markNoticeRead` and `markReadThrough` have callers and the nav badge counts a set a reader
+    can clear. That makes `--read-state-routes` landable, which is what ADR-0376 withheld it on —
+    mounting it earlier would have replaced a *decaying* approximation with a true count nothing
+    could reduce, a number that only goes up (ADR-0334).
+    Two things in it are worth carrying. The badge and the page **cannot disagree, because there is
+    one number**: a module-level store read through `useSyncExternalStore`, copying
+    `lib/subscription.ts`'s idiom, published from **one** effect rather than three call sites, and
+    carrying the figure rather than a staleness signal. And the residual window is named rather than
+    papered over — `markOne` publishes in the same React commit, while `markAll` follows one refetch,
+    because publishing an optimistic zero there would be **wrong** rather than eager: `isUnread`
+    fails open on an unparseable `queuedAt`, so a successful `markReadThrough` does not imply zero
+    unread. One open question rode along: that page's **list** is granted by `--ai-design-role` while
+    its read state is granted by `--read-state-role`, so narrowing either half-breaks it in opposite
+    ways, latent only because both sets are measured identical on the shipped compose.
     ADR-0369 made `/account`'s
     **Other roles** field populate for the first time at a cost of **zero** web changes — it reads
     `UiViewer.roles`, which `ui-schema.ts` has always built from the full list, so it had rendered
