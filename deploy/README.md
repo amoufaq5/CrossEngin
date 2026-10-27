@@ -266,7 +266,7 @@ Keep a single `platform_admin` API key only for the console. See
 `operate-server --help` for the full flag surface (SLO enforcement, audit chain,
 checkpoints, billing, marketplace, etc.) — add the flags you want to the `api` command.
 
-Three things the boot log tells you about this deployment's exposure, which are worth
+Four things the boot log tells you about this deployment's exposure, which are worth
 reading once after the first `up`:
 
 - **`[auth] api-key specs: …`** — where the specs came from. A spec's token *is* a
@@ -286,6 +286,13 @@ reading once after the first `up`:
   the same response just withheld. `erp-core` has one such field
   (`Employee.work_email`, `pii`), so this line says `plaintext_disclosing` until
   `CURSOR_ENCRYPTION_SECRET` is set, and names the field either way.
+- **`[read-state] per-viewer notification read state mounted for roles: …`** — who gets a
+  real unread count. This is not an exposure line but a *silence* line, and it is here
+  because the failure is invisible from the UI: the client catches a refusal and falls back
+  to counting recent notices, so a role that is not on this line renders a plausible badge
+  that cannot tell read from unread. The compose grants `erp_admin` and `platform_admin`: the
+  role the bootstrap below actually hands out, and the erp-core role that same walkthrough names
+  for somebody who is meant to *use* the ERP. A third needs another `--read-state-role`.
 
 ### The UI has a login
 
@@ -394,6 +401,7 @@ and what is not:
 | **Platform → Users → one user** | **Set their password.** This is the route that did not exist before ADR-0364 and the reason onboarding needed a shell. It cannot be aimed at yourself. |
 | **Platform → Design Reviews** | Approve or reject a manifest the Architect designed, with a field-level diff. This page used to 404: the routes behind it mount on `--design-review`, which the compose did not pass. It does now, via `--require-design-review`. The diff covers five of the manifest's sixteen sections and has **no `jobs` and no `views` layer**, so read it as "what entities, roles, permissions and classifications changed", not as the whole change. |
 | **AI Studio** (`/setup`) | Describe a business in prose and have the Architect design a manifest for it. Activating one **merges it over this deployment's pack** — before ADR-0368 it replaced the pack outright, so a design with four entities took the other forty-seven away from that tenant. Activation now requires a platform reviewer's approval. It does **not** create typed Postgres tables on `--store pg`; the new entities live in the shared JSONB record table. |
+| **Notifications** (`/notifications`) | Every in-app notice this deployment delivered to you, each marked read, unread or **Unknown**, with per-notice and mark-all-read. The sidebar badge points here and nowhere else — it used to hang off AI Studio, which renders only review decisions and digests, so a badge counting every unread notice led to a page showing a subset of them. A digest's rendered body and a decision's notes are still read in AI Studio; this page links there. |
 | **/account** | Change your own password. Needs the current one, so it is the one credential act that needs no grant. |
 
 Four things it deliberately does **not** do, so you know where the edges are:
@@ -576,6 +584,33 @@ docker compose logs api | grep '\[notify\]'
 
 A channel you configured but that is missing from that line is reported on the next line with what
 it still needs. A half-configured channel is never guessed at.
+
+**Read state and the inbox badge.** `--read-state-routes` plus `--read-state-role erp_admin`
+and `--read-state-role platform_admin` are on the `api` command, so **Notifications** shows
+each notice as read or unread and the sidebar badge is the server's real per-viewer unread
+count. Without them the page still lists everything — the list needs no read-state route —
+and it says what is missing, naming the flag; the badge falls back to counting notices from
+the last seven days, which cannot tell read from unread.
+
+Two properties of that count are stated rather than implied, because both read as bugs
+otherwise. It is **per viewer and per recipient**: a credential naming no person resolves to
+nobody, so an api-key without its fourth field sees an empty list and a 403 from the read-state
+routes. And it is a **floor**: one answer examines the newest page of your notices rather than
+the whole table, so it renders `N+` when there is more behind it, and notices past that window
+are marked `Unknown` rather than assumed read. Marking one read works regardless — that request
+names the notice directly.
+
+The grant is per role and the boot line names the roles it was given, which is the thing to
+check when somebody's badge **disagrees with the Notifications page**: a membership carrying a
+role that is not on that line is silently on the approximation, and the page says so in a banner
+while the badge cannot. It is *not* the thing to check for a badge that looks **out of date** —
+the badge follows a mark-read within the session, because the page publishes the server's figure
+and the nav reads that one number rather than keeping its own. The remaining way to see a number
+behind the page is a notice **delivered** while the page is open: nothing polls, so a refresh is
+what picks it up. The routes gate access to a principal's *own* row, so the roles
+above are about who gets an answer rather than about who can read somebody else's;
+`--read-state-backfill-role` is the one that grants something stronger (marking a whole backlog
+read in one call) and is deliberately not a default.
 
 **Per-user preferences.** Until you add `--preference-routes` plus at least one
 `--preference-role`, every user's notification preferences are the built-in defaults for ever, so
@@ -856,7 +891,7 @@ docker compose logs -f api
 
 The first build takes 10–20 minutes on 2 A1 cores. Then read the boot lines the
 [Going to production (auth)](#going-to-production-auth) section lists — `[auth]` twice,
-`[pg]` and `[cursor]` — and create your first tenant and user with
+`[pg]`, `[cursor]` and `[read-state]` — and create your first tenant and user with
 [Create your first tenant](#create-your-first-tenant) and
 [Create your first user](#create-your-first-user). There is no sign-up page and no
 forgot-password, so you create the first account yourself — five `curl` calls against

@@ -553,9 +553,22 @@ it does, that cron line is the deployment's real recovery point.
 
 The shipped `docker-compose.yml` passes the request path, the login, the identity surface and the
 AI Architect — `--platform-admin`, `--platform-user-routes`, `--credential-login`,
-`--credential-admin-role`, `--idempotency-store pg` and `--ai-design` — plus two that used to be in
-the table below and are now defaults: `--notification-drain-ms 15000` (nothing is delivered without
-it, in-app notices included) and `--tenant-status-gate`. Neither is in the table.
+`--credential-admin-role`, `--idempotency-store pg` and `--ai-design` — plus **two** that used to be
+rows in the table below and are now defaults: `--notification-drain-ms 15000` (nothing is delivered
+without it, in-app notices included) and `--tenant-status-gate`.
+
+A third is a default and was **never** in that table, which is worth saying rather than quietly
+lumping with the other two:
+`--read-state-routes --read-state-role erp_admin --read-state-role platform_admin` is what makes the
+console's **Notifications** page and its unread badge show real per-viewer read state rather than a
+count of recent notices. It was not an available flag you could have turned on and left off — it was
+withheld, on the stated ground that the console had no page able to display what the badge counted,
+so turning it on would have replaced a decaying approximation with a true number nothing could
+reduce. That page exists now, so the flag is on. None of the three is in the table.
+
+The read-state grant is per role and the boot line names the roles it was given — a membership
+carrying a role that is not on that line falls back to the approximation silently, so add another
+`--read-state-role` line for each role your people actually hold.
 
 What is still off is the rest of what **recurs**: no job fires, no timer fires and no audit row is
 anchored until you say so.

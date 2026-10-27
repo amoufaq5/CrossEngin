@@ -17,8 +17,10 @@ import { LOGIN_PATH } from "@/lib/session";
  * 401 whose own handler is a redirect to the page the user is already looking at.
  *
  * A client component in the root layout rather than a route group: a route group does not
- * escape the root layout either, so it would be a 15-page move for the same one-line
- * decision, and moving those pages is what would cost them their static prerendering.
+ * escape the root layout either, so it would move every page in the app for the same one-line
+ * decision, and moving those pages is what would cost them their static prerendering. (The
+ * count that used to be here went stale the first time a page landed; the argument never
+ * depended on it.)
  */
 export function AppChrome({ children }: { children: ReactNode }): ReactElement {
   const pathname = usePathname();

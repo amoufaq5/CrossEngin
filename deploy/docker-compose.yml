@@ -360,28 +360,40 @@ services:
       # an operator read said the channel was registered and nothing said it would never be sent.
       - --notification-drain-ms
       - "15000"
-      # NOT HERE, DELIBERATELY: `--read-state-routes --read-state-role <r>`. It was a default in a
-      # draft of this file and the measurement took it back out, which is worth the paragraph
-      # because the flag looks like a free win and is not.
+      # Per-viewer notification read state: POST /v1/notifications/{id}/read, the read-through
+      # watermark, and the unread count the sidebar badge renders. Withheld from this file in
+      # ADR-0376 on one stated ground -- "it is blocked on a SURFACE and not on a default decision:
+      # a notifications page plus a mark-read affordance, and then this flag on the same day" --
+      # and that page is `/notifications` in `operate-web`, so the argument is spent rather than
+      # overruled. Without the flag every badge fetch answers
+      # `404 no route for GET /v1/notifications/unread` and the client falls back to counting
+      # notices from the last seven days, which cannot tell read from unread.
       #
-      # Mounting it does work: every badge fetch in `operate-web` answers 404 today
-      # (`no route for GET /v1/notifications/unread`, measured) and the client falls back to a
-      # recency approximation over the last 50 notices, where with the flag it answers 200 with the
-      # real per-viewer count (also measured, through a session minted by the bootstrap below).
-      # What has no surface is CLEARING it: `markNoticeRead` and `markReadThrough` exist in
-      # `operate-web/lib/notifications.ts` with ZERO consumers, no page lists notifications at all
-      # (`/inbox` is the approvals inbox over entity records, a different subject), and the badge
-      # counts unread in_app notices. So the flag would replace a decaying approximation with a true
-      # count that nothing in the UI can ever reduce -- a number that only goes up is not
-      # information, and a remedy that cannot work is worse than naming none (ADR-0334).
+      # It is ONE surface and TWO flags because the grant has no default: `readStateRoles` starts
+      # empty, so `--read-state-routes` alone mounts routes that refuse every request and says so
+      # at boot (`is on with no --read-state-role: every request will be refused`).
       #
-      # It is blocked on a SURFACE and not on a default decision: a notifications page plus a
-      # mark-read affordance, and then this flag on the same day. The boot log names the granted
-      # roles when a deployment does pass it. Note also that the base grant protects nothing --
-      # `resolveViewer` takes the viewer from the credential unconditionally and a body naming one
-      # is refused, so the role check gates a principal's access to its own row (ADR-0364 made that
-      # argument for /v1/account/password needing no grant); the backfill role is the one that does.
+      # BOTH roles, which is the same shape as --ai-design-role above and for a measured reason.
+      # The flag is repeatable and additive (it replaces no default), and the boot line NAMES the
+      # granted roles because a console user whose membership carries a role not on that line is
+      # silently back on the approximation. The bootstrap in `.env.example` grants
+      # `primaryRole: "platform_admin"` and no secondary roles, so that is the one login a fresh
+      # deployment has; `erp_admin` is the role that same file tells you to name for somebody who
+      # is meant to USE the ERP, and it is the role /setup's designer holds. Naming one would leave
+      # the other quietly approximating.
       #
+      # `--read-state-backfill-role` is deliberately NOT here. It is additive on top of these (the
+      # CLI refuses a backfill role that is not also granted above) and it marks a whole backlog
+      # read in one call, which is a go-live migration rather than a default. It is also the one
+      # grant here that gates something: `resolveViewer` takes the viewer from the credential
+      # unconditionally and a body naming one is refused, so the roles above gate a principal's
+      # access to its OWN row (ADR-0364 made that argument for /v1/account/password needing no
+      # grant) while the backfill role gates writing somebody's whole history read.
+      - --read-state-routes
+      - --read-state-role
+      - erp_admin
+      - --read-state-role
+      - platform_admin
       # Enforce `meta.tenants.status` on every request: a suspended, archived or pending_deletion
       # tenant is read-only and a deleted one is refused. `/v1/platform` routes are exempt, because
       # the gate answers for the tenant a request ACTS ON and a platform route acts on the

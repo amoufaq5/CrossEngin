@@ -2,11 +2,17 @@
 // carried has expired or been rejected, so the browser goes back to the login form carrying
 // where it was as the `?next=`.
 //
-// Every fetch in this app reaches here. There are 33 call sites across six modules, but they
-// funnel through exactly six error paths — `checkResponse` in lib/api.ts, one `throwProblem`
-// or `throwDesignError` each in lib/platform.ts, lib/design.ts, lib/reviews.ts and
-// lib/notifications.ts, and the inline throw in lib/schema.ts — so one call in each is the
-// whole coverage. Nothing is left commented as a gap.
+// Every fetch in this app that can meet a 401 reaches here, and it does so through exactly six
+// error paths — `checkResponse` in lib/api.ts, one `throwProblem` or `throwDesignError` each in
+// lib/platform.ts, lib/design.ts, lib/reviews.ts and lib/notifications.ts, and the inline throw in
+// lib/schema.ts — so one call in each is the whole coverage. Nothing is left commented as a gap.
+// (`lib/users.ts` imports lib/platform.ts's `throwProblem` rather than spelling a seventh;
+// `app/account/page.tsx` reads the problem body itself, because on that one path a 401 is three
+// different facts and the shared reaction answers only two of them.)
+//
+// Deliberately no count of call sites here. This comment used to carry one and it was stale —
+// a figure in a comment is volatile by construction, and the content is *which paths exist*,
+// which a reader can check against the list above.
 
 import { LOGIN_PATH, NEXT_PARAM, safeNextPath } from "@/lib/session";
 

@@ -20,9 +20,12 @@ export function ShellBar() {
 
   /**
    * The only caller of `/api/auth/logout`. A full document load afterwards for the same
-   * reason the login does one: the module-level schema, reference-label and subscription
-   * caches have no invalidation, so a client-side navigation would leave the signed-out
-   * principal's entity list and role on screen. The navigation runs whether or not the POST
+   * reason the login does one: **no module-level cache in `lib/` has any invalidation**, so a
+   * client-side navigation would leave the signed-out principal's entity list and role on
+   * screen. Stated as the property and not only as the roster, because the roster grows —
+   * today it is the schema, the reference labels, the subscription problem and the unread
+   * badge count, and the fourth arrived without this comment being read. The navigation runs
+   * whether or not the POST
    * succeeded — a sign-out that reports a failure and leaves the user looking at their data
    * is the worse of the two outcomes, and the cookie is `httpOnly` so this is the only
    * mechanism there is.

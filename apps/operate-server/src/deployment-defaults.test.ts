@@ -55,6 +55,22 @@ function valueAfter(args: readonly string[], flag: string): string | null {
   return args[i + 1] ?? null;
 }
 
+/**
+ * Every value of a REPEATABLE flag, in order. Separate from `valueAfter` rather than replacing it:
+ * `valueAfter` answers for the single-valued flags and reading only the first occurrence of a
+ * repeatable one is how `--ai-design-role` came to be passed half way (`cli.ts` replaces the
+ * default rather than adding to it, so naming one role dropped the other).
+ */
+function valuesAfter(args: readonly string[], flag: string): readonly string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] !== flag) continue;
+    const v = args[i + 1];
+    if (v !== undefined) out.push(v);
+  }
+  return out;
+}
+
 describe("the api command's shape", () => {
   const args = apiCommandArgs();
 
@@ -77,34 +93,91 @@ describe("the api command's shape", () => {
   });
 });
 
-describe("the default that was measured and then withdrawn", () => {
+describe("the default that was withdrawn and is now earned", () => {
   const args = apiCommandArgs();
 
-  it("does not mount the read-state routes, because nothing can clear what they count", () => {
-    // This is the only *absence* fenced here, and it is fenced because the flag reads as a free
-    // win: mounting it demonstrably works (404 → 200 with the real per-viewer count, measured
-    // through a session minted by the documented bootstrap) and the badge it feeds becomes
-    // monotonically increasing for ever, because `markNoticeRead` and `markReadThrough` have zero
-    // consumers in `operate-web`, no page lists notifications at all, and `/inbox` is the approvals
-    // inbox over entity records — a different subject. A true count nothing can reduce is worse
-    // than the decaying approximation it replaces (ADR-0334).
+  it("mounts the read-state routes, because a page can now display what they count", () => {
+    // This describe used to fence the *absence*, on one stated ground: the flag "is blocked on a
+    // SURFACE and not on a default decision — a notifications page plus a mark-read affordance, and
+    // then this flag on the same day." That page is `/notifications`, so the argument expired rather
+    // than being overruled, and the absence turned into this presence on the same day as ADR-0376
+    // predicted it would.
     //
-    // So this assertion is a note to the next person, not a judgement about the flag: when a
-    // notifications page with a mark-read affordance lands, both of these come out and the pairing
-    // assertion goes back in.
-    expect(args).not.toContain("--read-state-routes");
-    expect(args).not.toContain("--read-state-role");
+    // Without the flag `GET /v1/notifications/unread` answers `404 no route for …` and the badge
+    // falls back to counting notices from the last seven days — a figure that cannot tell read from
+    // unread.
+    expect(args).toContain("--read-state-routes");
   });
 
-  it("is withdrawn on the surface and not on the grant, which protects nothing either way", () => {
+  it("pairs the routes with at least one role, because the grant has no default", () => {
+    // The pairing, and it is structural rather than stylistic: `readStateRoles` starts as `[]` in
+    // `cli.ts`, so `--read-state-routes` alone mounts routes that refuse every request —
+    // `[read-state] --read-state-routes is on with no --read-state-role: every request will be
+    // refused`. Mounted-and-refusing is worse than absent, because the client's catch renders a
+    // plausible badge either way.
+    expect(valuesAfter(args, "--read-state-role").length).toBeGreaterThan(0);
+  });
+
+  it("grants the role the documented bootstrap actually hands out", () => {
+    // The measurement that earned the default, read from `.env.example` rather than restated here,
+    // so changing the bootstrap's role without changing this grant fails. The boot line NAMES the
+    // granted roles precisely because a membership carrying a role not on it is silently back on the
+    // approximation — so the grant has to cover the one login a fresh deployment has.
+    const env = readFileSync(resolve(here, "../../../deploy/.env.example"), "utf8");
+    const m = /"primaryRole"\s*:\s*"([a-z_]+)"/.exec(env);
+    expect(m, ".env.example's bootstrap grants no primaryRole").not.toBeNull();
+    const bootstrapRole = m?.[1] ?? "";
+    expect(bootstrapRole).not.toBe("");
+    expect(valuesAfter(args, "--read-state-role")).toContain(bootstrapRole);
+  });
+
+  it("grants exactly the roles .env.example claims the command grants", () => {
+    // Two roles and not one, the same shape as `--ai-design-role` on this command: `platform_admin`
+    // reaches 0 of erp-core's 255 (entity, operation) pairs, so `.env.example` tells a reader to
+    // name an erp-core role for somebody who is meant to USE the ERP — and that person's badge is
+    // the one this surface exists for.
+    //
+    // Read from disk, in BOTH directions, because the first version of this test read the
+    // bootstrap's role from `.env.example` (above) and then HARDCODED this one while its comment
+    // said the file named it — so the half most likely to drift was the half nothing compared.
+    // `.env.example` does not merely mention the role: it restates this command's own grant line
+    // inside a backtick span, which is a CLAIM ABOUT THIS ARTIFACT, so the honest fence is set
+    // equality against the artifact. A third role added to the compose and not to the doc fails
+    // here, which is what the doc's own "A THIRD role needs another `--read-state-role` line"
+    // sentence promises a reader.
+    //
+    // Extracted from backticked spans and never from the raw prose: that same sentence writes the
+    // flag with NO value after it, so a scan over the prose would read the word "line" as a role
+    // name. A span carrying the flag alone yields no pair — a structural discriminator rather than
+    // a list of words to ignore.
+    const env = readFileSync(resolve(here, "../../../deploy/.env.example"), "utf8");
+    const claimed = new Set<string>();
+    for (const span of env.match(/`[^`\n]*`/g) ?? []) {
+      for (const m of span.matchAll(/--read-state-role\s+([a-z][a-z0-9_]*)/g)) {
+        const role = m[1];
+        if (role !== undefined && role !== "") claimed.add(role);
+      }
+    }
+    // Vacuity guard: an extraction that found nothing would otherwise demand the command grant
+    // nothing, which is a failure with a misleading message rather than a pass — but it is still
+    // worth naming, because the cause is a doc edit and not a compose one.
+    expect(
+      claimed.size,
+      ".env.example no longer restates the command's --read-state-role grant",
+    ).toBeGreaterThan(0);
+    expect([...valuesAfter(args, "--read-state-role")].sort()).toEqual([...claimed].sort());
+  });
+
+  it("does not grant the backfill role, which is the one that gates something", () => {
     // `resolveViewer` takes the viewer from `principal.principalId` unconditionally and
-    // `bodyNamesAViewer` refuses a body naming one, so `allowedRoles` gates a principal's access to
-    // its *own* row — ADR-0364's argument for `/v1/account/password` needing no grant. Read from
-    // disk so the claim is checked against the code rather than restated: the backfill role is the
-    // one that gates something, and it has its own set.
+    // `bodyNamesAViewer` refuses a body naming one, so the roles above gate a principal's access to
+    // its *own* row — ADR-0364's argument for `/v1/account/password` needing no grant. The backfill
+    // role is different in kind: it marks a whole backlog read in one call. Read from disk so the
+    // distinction is checked against the code rather than restated.
     const src = readFileSync(resolve(here, "./read-state-routes.ts"), "utf8");
     expect(src).toContain("principal.principalId");
     expect(src).toContain("backfillRoles");
+    expect(args).not.toContain("--read-state-backfill-role");
   });
 });
 

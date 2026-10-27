@@ -6,7 +6,13 @@ import { useEffect, useMemo, useState } from "react";
 
 import { FINANCE_ROLES } from "@/lib/aging";
 import { useInbox } from "@/lib/inbox";
-import { fetchUnreadCount, listNotifications, recentDecisionCount } from "@/lib/notifications";
+import {
+  fetchUnreadCount,
+  listNotifications,
+  recentNoticeCount,
+  reportUnreadBadgeCount,
+  useUnreadBadgeCount,
+} from "@/lib/notifications";
 import { accessibleEntities, entityByName, featureEnabled, groupByModule, roleLabel, useSchema } from "@/lib/schema";
 
 /**
@@ -63,25 +69,43 @@ export function Sidebar() {
   const { items: inboxItems } = useInbox(inboxEnabled ? schema : null);
   const inboxCount = inboxItems.length;
 
-  // The badge asks "how many notices have you not seen", and the server can finally answer it:
-  // per-user read state (rows + a watermark) scoped to the calling credential. The recency
-  // approximation stays as the fallback and is not dead code — a deployment that has not mounted
-  // the read-state routes answers 404, and a nav badge must degrade rather than disappear.
+  // The badge asks "how many notices have you not seen", and the server can answer it: per-user read
+  // state (rows + a watermark) scoped to the calling credential. The recency approximation stays as
+  // the fallback and is not dead code — a deployment that has not mounted the read-state routes
+  // answers 404, and a nav badge must degrade rather than disappear.
   //
-  // The two figures differ in subject: the server counts every unread in-app notice, which is a
-  // superset of the review decisions recency was counting. That is the question the badge was
-  // approximating, so the superset is the better answer, not a widening.
-  const [decisionCount, setDecisionCount] = useState(0);
+  // What moved is WHICH LINK it hangs off, and that was the defect rather than either figure. It
+  // used to sit on "AI Studio" → /setup, which renders review decisions and digests; the server's
+  // figure counts every unread in-app notice, a strict superset. Measured live on three delivered
+  // notices (a review decision, a digest with no rendered copy, an `invoice.overdue`): the badge
+  // read **3** and /setup rendered **1**, with no surface anywhere for the other two. The fallback
+  // concealed it, because `recentDecisionCount` skipped exactly the notices /setup does not render,
+  // so it also read 1 — the approximate badge equalled the items behind the link and the accurate
+  // one did not.
+  //
+  // Now it points at /notifications, which lists every in_app notice and can clear them, so the
+  // badge's subject IS the page's subject on both paths. The fallback counts every recent notice for
+  // the same reason — a floor over the right subject, where the old narrow count would read zero for
+  // a tenant whose only notices are not decisions.
+  //
+  // The figure is READ from a module-level store and not held here, because this component does not
+  // remount: `AppChrome` renders it in the root layout, so the effect below runs once per document
+  // load and a count in component state could only ever go up within a session. Marking everything
+  // read left the page showing 0 beside a badge still showing the old number — the badge disagreeing
+  // with the page it points at. `/notifications` publishes the server's figure whenever it has one,
+  // so there is one number rather than two. See `useUnreadBadgeCount`.
+  const publishedUnread = useUnreadBadgeCount();
+  const unreadCount = publishedUnread ?? 0;
 
   useEffect(() => {
     let alive = true;
     fetchUnreadCount("in_app")
-      .then((count) => alive && setDecisionCount(count.unread))
+      .then((count) => alive && reportUnreadBadgeCount(count.unread))
       .catch(() =>
         listNotifications({ channel: "in_app", limit: 50 })
-          .then((page) => alive && setDecisionCount(recentDecisionCount(page.data)))
+          .then((page) => alive && reportUnreadBadgeCount(recentNoticeCount(page.data)))
           // A failed fetch renders no badge — never an error in the nav.
-          .catch(() => alive && setDecisionCount(0)),
+          .catch(() => alive && reportUnreadBadgeCount(0)),
       );
     return () => {
       alive = false;
@@ -134,6 +158,25 @@ export function Sidebar() {
             )}
           </Link>
         )}
+        {/* Not behind `inboxEnabled`: that flag gates the APPROVALS inbox, which is entity records
+            awaiting a workflow transition — a different subject that shares no code and no table
+            with the notification stack. Gating this on it would hide a person's notices because a
+            tenant turned off approvals. */}
+        <Link
+          href="/notifications"
+          className={`mb-2 flex items-center rounded-lg px-3 py-2 text-sm font-medium transition ${
+            pathname === "/notifications"
+              ? "border-l-2 border-brand bg-brand-50 font-semibold text-brand-700"
+              : "text-ink-muted hover:bg-surface-soft hover:text-ink"
+          }`}
+        >
+          Notifications
+          {unreadCount > 0 && (
+            <span className="ml-auto rounded-full bg-ink px-2 py-0.5 text-[11px] font-semibold text-white">
+              {unreadCount}
+            </span>
+          )}
+        </Link>
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}
@@ -237,20 +280,17 @@ export function Sidebar() {
           >
             Billing
           </Link>
+          {/* No badge here any more. /setup renders review decisions and digests — its own
+              content — and a count of every unread in-app notice was never a count of those. */}
           <Link
             href="/setup"
-            className={`flex items-center rounded-lg px-3 py-1.5 text-sm transition ${
+            className={`block rounded-lg px-3 py-1.5 text-sm transition ${
               pathname === "/setup"
                 ? "border-l-2 border-brand bg-brand-50 font-semibold text-brand-700"
                 : "text-ink-muted hover:bg-surface-soft hover:text-ink"
             }`}
           >
             AI Studio
-            {decisionCount > 0 && (
-              <span className="ml-auto rounded-full bg-ink px-2 py-0.5 text-[11px] font-semibold text-white">
-                {decisionCount}
-              </span>
-            )}
           </Link>
         </div>
 
