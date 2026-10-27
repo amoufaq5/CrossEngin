@@ -4,6 +4,7 @@ export * from "./flake.js";
 export * from "./budgets.js";
 export * from "./fixtures.js";
 export * from "./ci.js";
+export * from "./ci-workflow.js";
 export * from "./typecheck-config.js";
 export * from "./pg-column-coverage.js";
 export * from "./pg-storeless-tables.js";

@@ -1,0 +1,46 @@
+# The workspace's only CI pipeline.
+#
+# This file is NOT the declaration — `CI_PIPELINE` in
+# packages/testing/src/strategy/ci.ts is, and
+# packages/testing/src/strategy/ci-workflow.ts compares the two in both
+# directions on every test run. A step added here and not there, or there and
+# not here, is a test failure naming the step. Read that constant's doc comment
+# before changing anything below: it carries the measurement behind the step
+# order, the Node pin and the nine-minute budget.
+#
+# Deliberately three top-level keys and nothing else. A `concurrency:` or
+# `permissions:` block would be config the fence does not cover, and the fence's
+# claim is that every line in this file that executes anything is declared.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Workspace rules
+        run: pnpm --filter @crossengin/testing test
+      - name: Build
+        run: pnpm -r build
+      - name: Typecheck
+        run: pnpm -r typecheck
+      - name: Test
+        run: pnpm -r test

@@ -1,0 +1,65 @@
+#!/bin/sh
+#
+# The workspace rules, before the commit that breaks one.
+#
+# ADR-0382. This is the only hook in the repository and it runs one command:
+#
+#     pnpm --filter @crossengin/testing test
+#
+# Around ten seconds warm on a 4-vCPU host (2026-10-26) — comfortably inside the
+# range nobody bypasses, which is the whole reason it needs no narrowing and no
+# fast path. The cold figure is ~46 s and does not apply to a repeat-use hook.
+#
+# Deliberately NO file or test count here. One shipped and was stale on arrival —
+# it carried the package's pre-increment 19 files / 663 tests while the increment
+# that wrote it took the package to 20 / 716, and the review pass that corrected
+# that took it to 723, moving the figure twice in one commit. A count in a
+# comment is stale by construction; re-derive it by running the command above,
+# which prints both. (CLAUDE.md's P3 item 1 is this class, and its own method for
+# the ADR-0373 figures is to say "re-derive" rather than to quote.)
+#
+# It deliberately does NOT run the sweeps: `pnpm -r build` ~149 s, `pnpm -r
+# typecheck` ~131 s, `pnpm -r test` ~200 s, all measured at 01fda10 and all
+# carried in `CI_MEASURED_STEP_SECONDS` rather than only here. And the test sweep
+# is meaningless before a fresh build anyway — packages resolve each other
+# through gitignored `dist/`, so a sweep against a stale one is ADR-0307's
+# conditional green. CI runs all four, in that order.
+#
+# It also does not narrow by path, and that is a correctness point rather than
+# laziness: every rule in `packages/testing/src/strategy/` reads the *whole*
+# workspace from disk, so a change anywhere — the catalog, a store's SQL, a
+# pack's manifest, `deploy/docker-compose.yml` — can break one. A path filter
+# would skip exactly the edits the rules exist to catch.
+#
+# What it checks is the WORKING TREE, not the index. For the ordinary
+# `git add -A && git commit` that is the same thing; for a partial stage it is
+# not, and the CI sweep is the backstop. Checking the index honestly would mean
+# materialising it in a temporary worktree, which costs more than the hook does.
+#
+# Installed by `sh .githooks/install-hooks.sh`, which the root `prepare` script
+# runs. That script declines rather than overwriting a `core.hooksPath` pointing
+# somewhere else, and reads `crossengin.hooks` so a clone that opts out stays
+# opted out; its comment carries both measurements. `.git/hooks` held zero
+# non-`.sample` files when this landed, so nothing is displaced.
+set -e
+
+if ! command -v pnpm >/dev/null 2>&1; then
+  echo "pre-commit: pnpm is not on PATH, so the workspace rules cannot run." >&2
+  echo "            Put pnpm on PATH — a GUI git client often has its own, and" >&2
+  echo "            runs hooks with a leaner environment than your shell." >&2
+  echo "            Or decline the hook for this clone, deliberately and for good:" >&2
+  echo "              git config crossengin.hooks off" >&2
+  echo "              git config --unset core.hooksPath" >&2
+  echo "            which survives the next pnpm install, and which CI backstops." >&2
+  # Fail rather than pass: a hook that quietly does nothing for an unknown
+  # fraction of commits is worse than none at all (ADR-0334), and the two
+  # remedies above are what make failing actionable instead of merely
+  # obstructive. Deliberately NOT `--no-verify`, which CLAUDE.md forbids by name
+  # and which an earlier version of this message recommended — a hook telling a
+  # developer to break the project's own rule is the shape of advice nobody
+  # should take, and the real escape is the two-line opt-out, because it is a
+  # decision about this clone rather than a per-commit bypass.
+  exit 1
+fi
+
+exec pnpm --filter @crossengin/testing test
