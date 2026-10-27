@@ -11,6 +11,8 @@ import {
   emitJoinTableDdl,
   emitUniqueIndexDdl,
   onDeleteClause,
+  SUPERSEDED_TRIGRAM_SUFFIX,
+  TRIGRAM_INDEX_SUFFIX,
   UNIQUE_WITHHELD_REASONS,
   uniqueIndexFields,
   uniqueWithheldFor,
@@ -64,24 +66,41 @@ describe("emitEntityTableDdl", () => {
     expect(sql).not.toContain(`"sku" IS 'crossengin`);
   });
 
-  it("emits a plain-column trigram GIN index for each plaintext text/varchar column", () => {
+  it("emits a ce_unaccent expression trigram GIN index for each plaintext text/varchar column", () => {
     expect(sql).toContain(
-      'CREATE INDEX IF NOT EXISTS "widget_sku_trgm" ON "tenant_app"."widget" USING gin ("sku" gin_trgm_ops);',
+      'CREATE INDEX IF NOT EXISTS "widget_sku_utrgm" ON "tenant_app"."widget"' +
+        ' USING gin (public.ce_unaccent("sku"::text) gin_trgm_ops);',
     );
   });
 
-  it("uses a plain column trigram index, not a functional unaccent() index", () => {
-    expect(sql).not.toContain("unaccent(");
+  it("emits no bare-column trigram index, which could not serve the folded predicate", () => {
+    // The replaced assertion was titled "uses a plain column trigram index, not a functional
+    // unaccent() index" and asserted `not.toContain("unaccent(")` — the defect written down as the
+    // specification (ADR-0372's class). The premise it rested on is still true and is in
+    // `search-function.ts`: raw `unaccent()` cannot back an index. The conclusion was wrong,
+    // because the predicate folds accents, so a bare-column index serves nothing this binary
+    // emits. Asserted on the index's own shape rather than on the absence of a substring, so an
+    // index on a *different* expression cannot satisfy it.
+    expect(sql).not.toContain('gin ("sku" gin_trgm_ops)');
+    expect(sql).not.toContain('"widget_sku_trgm"');
+  });
+
+  it("names the function schema-qualified, which is what pins the dictionary", () => {
+    // Unqualified, the body's `'unaccent'::regdictionary` resolves from the caller's search_path at
+    // inlining time — measured, it answers `ext2.unaccent` under `search_path = ext2, public` — so
+    // an unqualified call would make the IMMUTABLE declaration false rather than merely unproven.
+    expect(sql).toContain("public.ce_unaccent(");
+    expect(sql).not.toContain("gin (ce_unaccent(");
   });
 
   it("does not trigram-index numeric columns", () => {
-    expect(sql).not.toContain('"price_trgm"');
-    expect(sql).not.toContain('"cost_trgm"');
+    expect(sql).not.toContain('"price_utrgm"');
+    expect(sql).not.toContain('"cost_utrgm"');
   });
 
   it("does not trigram-index an encrypted (BYTEA) column", () => {
     // ssn is phi → stored BYTEA, so no trigram index despite its text field type.
-    expect(sql).not.toContain('"widget_ssn_trgm"');
+    expect(sql).not.toContain('"widget_ssn_utrgm"');
   });
 });
 
@@ -519,19 +538,38 @@ describe("emitEntityTableDdl — trigram indexes", () => {
   const sql = emitEntityTableDdl(columnPlanForEntity(TEXTY, { schema: "app" })).join("\n");
 
   it("indexes TEXT and VARCHAR columns", () => {
-    expect(sql).toContain('"label" gin_trgm_ops');
-    expect(sql).toContain('"code" gin_trgm_ops');
+    expect(sql).toContain('public.ce_unaccent("label"::text) gin_trgm_ops');
+    expect(sql).toContain('public.ce_unaccent("code"::text) gin_trgm_ops');
   });
 
   it("skips CHAR(n), which gin_trgm_ops does not accept", () => {
     // bpchar is not binary-coercible to text; indexing it fails outright, and a
     // country_code field made pack-erp-core unbootable on this store.
-    expect(sql).not.toContain('"country" gin_trgm_ops');
+    expect(sql).not.toContain('"country"::text) gin_trgm_ops');
   });
 
   it("skips encrypted and non-text columns", () => {
-    expect(sql).not.toContain('"secret" gin_trgm_ops');
-    expect(sql).not.toContain('"count" gin_trgm_ops');
+    expect(sql).not.toContain('"secret"::text) gin_trgm_ops');
+    expect(sql).not.toContain('"count"::text) gin_trgm_ops');
+  });
+
+  it("writes the ::text cast even on a TEXT column, so the index and the predicate are one spelling", () => {
+    // Redundant for TEXT — Postgres elides the no-op cast and stores `ce_unaccent(label)` — and
+    // written anyway because `searchFunctionCall` is shared with `list-sql.ts`, which is what makes
+    // the index and the predicate the same expression by construction rather than by two authors
+    // agreeing. Measured: the cast-bearing predicate reaches both the cast-bearing and the
+    // cast-free stored form (`Index Cond: (ce_unaccent(tx) ~~* …)` from
+    // `gin (ce_unaccent(tx::text) …)`).
+    expect(sql).toContain('ce_unaccent("label"::text)');
+  });
+
+  it("uses a suffix the superseded bare-column index cannot collide with", () => {
+    // Load-bearing: the emitter writes `CREATE INDEX IF NOT EXISTS`, so reusing `_trgm` would find
+    // the old bare-column index on every already-applied deployment, no-op, and leave the fix
+    // landing on fresh databases only.
+    expect(TRIGRAM_INDEX_SUFFIX).not.toBe(SUPERSEDED_TRIGRAM_SUFFIX);
+    expect(TRIGRAM_INDEX_SUFFIX.endsWith(SUPERSEDED_TRIGRAM_SUFFIX)).toBe(false);
+    expect(sql).toContain(`"place_label${TRIGRAM_INDEX_SUFFIX}"`);
   });
 });
 

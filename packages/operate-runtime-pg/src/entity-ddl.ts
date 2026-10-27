@@ -7,6 +7,7 @@ import {
   type EntityTablePlan,
   type JoinTablePlan,
 } from "./column-plan.js";
+import { searchFunctionCall } from "./search-function.js";
 
 /**
  * The isolation predicate every served entity table carries.
@@ -40,9 +41,29 @@ function isTrigramIndexable(col: { sqlType: string; encryptAtRest: boolean }): b
   return t === "TEXT" || t.startsWith("VARCHAR");
 }
 
+/**
+ * The suffix of the **superseded** bare-column trigram index, kept only so the probe that reports
+ * one can scope itself to indexes this emitter wrote.
+ *
+ * Nothing emits it any more: a bare-column index cannot serve `searchFunctionCall(...) ILIKE …`,
+ * which is the only substring predicate in the workspace, so every one of them was dead on arrival
+ * (measured: `idx_scan = 0` after 15 queries of exactly that shape, over 272 such indexes on
+ * resolved `erp-core`).
+ */
+export const SUPERSEDED_TRIGRAM_SUFFIX = "_trgm";
+
+/**
+ * The suffix of the expression index that **does** serve the predicate.
+ *
+ * A different suffix is load-bearing rather than cosmetic: the emitter writes
+ * `CREATE INDEX IF NOT EXISTS`, so reusing `_trgm` would find the old bare-column index on every
+ * already-applied deployment, no-op, and leave the fix landing on fresh databases only.
+ */
+export const TRIGRAM_INDEX_SUFFIX = "_utrgm";
+
 /** Deterministic trigram index name, capped at Postgres's 63-char identifier limit. */
 function trigramIndexName(table: string, column: string): string {
-  const name = `${table}_${column}_trgm`;
+  const name = `${table}_${column}${TRIGRAM_INDEX_SUFFIX}`;
   return name.length <= MAX_IDENTIFIER_LEN ? name : name.slice(0, MAX_IDENTIFIER_LEN);
 }
 
@@ -316,16 +337,40 @@ export function emitEntityTableDdl(plan: EntityTablePlan): string[] {
     stmts.push(`COMMENT ON COLUMN ${qualified}.${quoteIdent(col.column)} IS '${directives.join("; ")}';`);
   }
 
-  // Trigram GIN index per plaintext text column, accelerating the `contains`
-  // (ILIKE '%…%') substring filter. A *plain* column index (`gin (<col>
-  // gin_trgm_ops)`), NOT a functional `unaccent(<col>)` index — unaccent() is
-  // not IMMUTABLE and can't back an index. Requires the pg_trgm extension
-  // (provisioned by the store's ensureSchema).
+  // Trigram GIN index per plaintext text column, accelerating the `contains` (ILIKE '%…%')
+  // substring filter and the `?q=` OR group.
+  //
+  // On `searchFunctionCall(col::text)` and **not** on the bare column, which is the correction: the
+  // predicate folds accents, a bare-column index cannot serve a folded predicate, and the two were
+  // written independently. ADR-0144's own Decision is right that `unaccent()` cannot back an index
+  // and its Consequences then claim substring search "is … index-accelerated" eleven lines later;
+  // it was not, on any deployment, for either store. `ce_unaccent` is the IMMUTABLE wrapper that
+  // makes the expression indexable -- see `search-function.ts` for why the dictionary is pinned and
+  // what the declaration costs.
+  //
+  // The `::text` cast is written here even though it is redundant for a TEXT column, because the
+  // index is usable only by a predicate whose expression tree matches, and keeping one spelling
+  // (`searchFunctionCall`) shared with `list-sql.ts` is what makes that true by construction rather
+  // than by two authors agreeing. Both forms were measured to match: Postgres normalises a VARCHAR
+  // column's implicit coercion to the same `(col)::text` the predicate writes, and elides the
+  // no-op cast on a TEXT column, so `Index Cond: (ce_unaccent((vc)::text) ~~* …)` and
+  // `Index Cond: (ce_unaccent(tx) ~~* …)` are both reached from the cast-bearing predicate.
+  //
+  // Requires pg_trgm (provisioned by `ensureColumnStoreExtensions`, which both column-store call
+  // sites reach) **and** the function -- which is provisioned by `ensureSearchFunction`, reached by
+  // the boot path alone. `applyTenantManifestSchema` calls `ensureColumnStoreExtensions` and never
+  // `ensureSearchExtension`, so on that path this statement names a function nothing provisioned and
+  // the first one aborts the applier's transaction. An earlier version of this comment read
+  // "provisioned by `ensureSearchFunction`, which `ensureSearchExtension` calls before either store
+  // serves", which is true of the boot path and false of the per-tenant one -- ADR-0362's class, in
+  // the comment above the statement that depends on it. See `search-extension.ts` for why the
+  // wrapper belongs in both provisioners, and ADR-0383's open questions for the half not yet landed.
   for (const col of plan.columns) {
     if (!isTrigramIndexable(col)) continue;
     const idxName = trigramIndexName(plan.table, col.column);
+    const indexed = searchFunctionCall(`${quoteIdent(col.column)}::text`);
     stmts.push(
-      `CREATE INDEX IF NOT EXISTS ${quoteIdent(idxName)} ON ${qualified} USING gin (${quoteIdent(col.column)} gin_trgm_ops);`,
+      `CREATE INDEX IF NOT EXISTS ${quoteIdent(idxName)} ON ${qualified} USING gin (${indexed} gin_trgm_ops);`,
     );
   }
 

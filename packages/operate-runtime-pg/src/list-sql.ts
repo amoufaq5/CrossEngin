@@ -7,6 +7,7 @@ import {
   type ListValueType,
 } from "@crossengin/operate-runtime";
 
+import { searchFunctionCall } from "./search-function.js";
 import { isDatetimeComparable } from "./temporal-sql.js";
 
 /**
@@ -159,6 +160,44 @@ export interface ListSqlAdapter {
   comparableValue?(field: string, text: string): boolean;
   /** SQL expression for the stable id tiebreaker column. */
   readonly idExpr: string;
+  /**
+   * How this store folds accents in the substring predicate -- which decides whether a trigram
+   * index can serve it, and so is a property of the store rather than of the query.
+   *
+   * Optional, and absent means {@link searchFunctionCall}, the IMMUTABLE wrapper the entity DDL
+   * builds its index from. That direction is deliberate: an absent declaration errs toward
+   * *correct and slower* rather than *fast and unindexable*, which is ADR-0340's ordering argument
+   * -- a store that forgets to declare pays a constant factor, where the opposite default would
+   * silently make its predicate unable to reach any index.
+   *
+   * A store overrides it only when it has **no trigram index to match**, and the override's cost
+   * and its return are both measured on PG 16.13 over a 200,000-row partition. The wrapper cannot
+   * be inlined -- index matching requires the query to present the wrapper call that the index
+   * stores, so inlining and index matching are mutually exclusive by construction -- so it costs a
+   * SQL-function call per row, about 0.77 microseconds. Where the index applies that is paid back
+   * many times over (a 4-field `?q=` matching nothing: **153.6 ms -> 0.2 ms**). Where no index
+   * exists it is pure cost: on `meta.operate_entity_records`, which declares one btree on
+   * `(tenant_id, entity)` and no GIN index of any kind, the same query goes **170.1 ms -> 715.5
+   * ms**. So the document store declares `rawFoldCall`, the raw pinned form, which is itself
+   * faster than the one-argument `unaccent` it replaces (42.4 ms against 58.0 ms single-field,
+   * because the dictionary OID is resolved once rather than looked up by name per call).
+   *
+   * **Whatever gives that store an index must change this in the same increment**, because the
+   * override is what makes its predicate unindexable -- and that is the one thing a reader of this
+   * field has to know.
+   */
+  foldText?(exprSql: string): string;
+}
+
+/**
+ * The fold this store declared, or the indexable default.
+ *
+ * One reader, so the `contains` predicate and the `?q=` OR group cannot fold differently within one
+ * query -- which would make a row match through one surface and not the other.
+ */
+function foldOf(adapter: ListSqlAdapter): (exprSql: string) => string {
+  const declared = adapter.foldText;
+  return declared === undefined ? searchFunctionCall : (sql) => declared.call(adapter, sql);
 }
 
 
@@ -321,11 +360,26 @@ function filterPredicate(
   }
   const value = Array.isArray(filter.value) ? (filter.value[0] ?? "") : (filter.value as string);
   if (op === "contains") {
-    // case- and accent-insensitive substring (typeahead). Both sides are folded
-    // with unaccent() so "jose" matches "José"; ILIKE handles case. The value is
-    // bound (never interpolated); its LIKE metacharacters act as wildcards (fine
-    // for search). A plain-column pg_trgm GIN index still accelerates this.
-    return { sql: `unaccent(${expr}::text) ILIKE ('%' || unaccent(${bind(params, value)}) || '%')` };
+    // Case- and accent-insensitive substring (typeahead). Both sides are folded, so "jose" matches
+    // "José"; ILIKE handles case. The value is bound (never interpolated); its LIKE metacharacters
+    // act as wildcards (fine for search).
+    //
+    // Through `searchFunctionCall` rather than `unaccent(...)` directly, and the comment this
+    // replaces is why: it claimed "A plain-column pg_trgm GIN index still accelerates this", which
+    // was **false**. A bare-column index cannot serve an accent-folded predicate, and
+    // `entity-ddl.ts` emitted exactly that -- so the 272 trigram indexes resolved `erp-core`
+    // creates were read by nothing: measured on PG 16.13, `idx_scan = 0` on every one of them after
+    // running this exact shape fifteen times. On the real `employee` table at 200,000 rows a
+    // one-field typeahead goes from a `Seq Scan` with `Rows Removed by Filter: 199800` at 79.7 ms
+    // to a `Bitmap Index Scan` at 3.42 ms, as the table owner.
+    //
+    // `foldOf` and not `searchFunctionCall` directly, because a store with no trigram index to
+    // match declares the raw fold instead -- see `ListSqlAdapter.foldText` for the figure that
+    // forced that, and `search-function.ts` for why an IMMUTABLE declaration needs a fence.
+    const fold = foldOf(adapter);
+    const folded = fold(`${expr}::text`);
+    const needle = fold(bind(params, value));
+    return { sql: `${folded} ILIKE ('%' || ${needle} || '%')` };
   }
   if (!comparableValue(adapter, filter.field, String(value))) {
     // A constant, because no typed value compares to a word: `?amount[gt]=n/a` and
@@ -512,7 +566,13 @@ export function buildListSql(
     const exprs = resolved.flatMap((r) => (r.expr.kind === "sql" ? [r.expr.sql] : []));
     if (exprs.length > 0) {
       const p = bind(params, query.search.term);
-      const ors = exprs.map((expr) => `unaccent(${expr}::text) ILIKE ('%' || unaccent(${p}) || '%')`);
+      // One fold with the `contains` predicate above and with the index `entity-ddl.ts` emits,
+      // which is what lets this group be served by a `BitmapOr` over them rather than by the
+      // sequential scan it was: on the real `employee` table at 200,000 rows, a 4-field group goes
+      // from 156.2 ms to 4.81 ms, and from 153.6 ms to 0.2 ms when the needle matches nothing.
+      const fold = foldOf(adapter);
+      const needle = fold(p);
+      const ors = exprs.map((expr) => `${fold(`${expr}::text`)} ILIKE ('%' || ${needle} || '%')`);
       where.push(`(${ors.join(" OR ")})`);
     } else {
       for (const r of resolved) {

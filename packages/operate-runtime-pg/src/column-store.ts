@@ -58,6 +58,11 @@ import {
   type UniqueWithheld,
 } from "./entity-ddl.js";
 import { resolveRecordId } from "./records.js";
+import {
+  SEARCH_FUNCTION_ADMITS_INDEX,
+  ensureSearchFunction,
+  searchFunctionLine,
+} from "./search-function.js";
 import { withTenantContext } from "./tenant-context.js";
 
 /**
@@ -79,6 +84,34 @@ export async function ensureColumnStoreExtensions(
   if (needsPgcrypto) await ensurePgcryptoExtension(conn);
   await conn.query("CREATE EXTENSION IF NOT EXISTS unaccent;");
   await conn.query("CREATE EXTENSION IF NOT EXISTS pg_trgm;");
+  // The IMMUTABLE wrapper is a prerequisite of this store's **DDL**, not only of its query builder:
+  // `emitEntityTableDdl`'s trigram index expression names `public.ce_unaccent(text)`, so in a state
+  // the function cannot back an index every `CREATE INDEX … gin (…)` raises — uncaught in
+  // `ensureSchema`'s loop on this path, and inside one transaction on the per-tenant path, where an
+  // abort routes the tenant to the JSONB fallback and ADR-0314's "their data is in a different place
+  // than they think".
+  //
+  // Here and deliberately **not** in `ensureSearchFunction`: that function takes a connection and
+  // nothing else, so a throw inside it could not be conditioned on the store and would refuse
+  // `--store pg`, which names `ce_unaccent` nowhere (ADR-0352's refusing-a-deployment-that-works).
+  // This is also the one place **both** column-store call sites pass through —
+  // `applyTenantManifestSchema` calls this and never `ensureSearchExtension` — and it runs outside
+  // that function's transaction, which is what makes this a refusal rather than an abort.
+  //
+  // `=== false` and not `!== true`, which is the one decision here. `false` is the three **measured**
+  // states where the `CREATE INDEX` raises (`absent`, `volatility_differs`, `dictionary_absent`);
+  // `null` is `unreadable`, which `SEARCH_FUNCTION_ADMITS_INDEX` documents as *nothing was
+  // established, so nothing is claimed* (ADR-0331), and collapsing it into `false` would discard the
+  // distinction that map exists to encode and refuse on an unestablished fact — ADR-0334's
+  // `missing`-versus-`unreachable`, as `proof-version-probe.ts` applies it. It costs little either
+  // way: the probe reaches `unreadable` only when the catalog read *throws*, and the next statement
+  // is this store's own DDL on the same connection. `body_differs` is `true` here on purpose — an
+  // index *can* be built from a replaced body, and that it would be built from the wrong output is
+  // `SEARCH_FUNCTION_ANSWERS_TRUSTED`'s finding rather than a DDL refusal.
+  const search = await ensureSearchFunction(conn);
+  if (SEARCH_FUNCTION_ADMITS_INDEX[search.state] === false) {
+    throw new Error(searchFunctionLine(search));
+  }
 }
 
 /**

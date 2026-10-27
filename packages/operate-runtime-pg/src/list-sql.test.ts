@@ -1,7 +1,8 @@
-import { MIN_POSTGRES_MAJOR } from "@crossengin/kernel-pg";
+import { MIN_POSTGRES_MAJOR, type PgConnection } from "@crossengin/kernel-pg";
 import { encodeKeyset, type ListQuery, type ListValueType } from "@crossengin/operate-runtime";
 import { describe, expect, it } from "vitest";
 
+import { listPageOp } from "./entity-ops.js";
 import {
   buildListSql,
   columnUnavailable,
@@ -16,6 +17,7 @@ import {
   type ListSqlAdapter,
   type UnserveableListSurface,
 } from "./list-sql.js";
+import { rawFoldCall, SEARCH_DICTIONARY, SEARCH_FUNCTION_BODY } from "./search-function.js";
 
 // A JSONB-style adapter: fields read from `document ->> 'field'`, text compares.
 const adapter: ListSqlAdapter = {
@@ -170,7 +172,8 @@ describe("buildListSql — filters", () => {
       params,
     );
     expect(parts.where).toBe(
-      "tenant_id = $1 AND unaccent(document ->> 'name'::text) ILIKE ('%' || unaccent($2) || '%')",
+      "tenant_id = $1 AND public.ce_unaccent(document ->> 'name'::text) ILIKE" +
+        " ('%' || public.ce_unaccent($2) || '%')",
     );
     expect(params).toEqual(["tenant-1", "acme"]);
   });
@@ -198,7 +201,9 @@ describe("buildListSql — filters", () => {
       params,
     );
     expect(parts.where).toBe(
-      "tenant_id = $1 AND (unaccent(document ->> 'name'::text) ILIKE ('%' || unaccent($2) || '%') OR unaccent(document ->> 'notes'::text) ILIKE ('%' || unaccent($2) || '%'))",
+      "tenant_id = $1 AND (public.ce_unaccent(document ->> 'name'::text) ILIKE" +
+        " ('%' || public.ce_unaccent($2) || '%') OR public.ce_unaccent(document ->> 'notes'::text)" +
+        " ILIKE ('%' || public.ce_unaccent($2) || '%'))",
     );
     expect(params).toEqual(["tenant-1", "milk"]); // one bound value shared across the OR
   });
@@ -206,7 +211,9 @@ describe("buildListSql — filters", () => {
   it("skips unresolved columns in a search and drops an all-unknown search", () => {
     const p1: unknown[] = [];
     const some = buildListSql(query({ search: { term: "x", fields: ["name", "unknown"] } }), adapter, [], p1);
-    expect(some.where).toBe("(unaccent(document ->> 'name'::text) ILIKE ('%' || unaccent($1) || '%'))");
+    expect(some.where).toBe(
+      "(public.ce_unaccent(document ->> 'name'::text) ILIKE ('%' || public.ce_unaccent($1) || '%'))",
+    );
     const p2: unknown[] = [];
     const none = buildListSql(query({ search: { term: "x", fields: ["unknown"] } }), adapter, [], p2);
     expect(none.where).toBe("");
@@ -480,7 +487,9 @@ describe("buildListSql — numeric filters", () => {
   it("still substring-matches a numeric field through the rendered cast", () => {
     const params: unknown[] = [];
     const parts = buildListSql(query({ filters: [{ field: "amount", op: "contains", value: "10" }] }), NUM, [], params);
-    expect(parts.where).toBe(`unaccent(${AMOUNT}::text) ILIKE ('%' || unaccent($1) || '%')`);
+    expect(parts.where).toBe(
+      `public.ce_unaccent(${AMOUNT}::text) ILIKE ('%' || public.ce_unaccent($1) || '%')`,
+    );
   });
 
   it("leaves a text filter on the same adapter untouched", () => {
@@ -547,5 +556,115 @@ describe("nullDroppedSortComponents", () => {
   it("drops a key named in the sort but absent from the cursor without inventing a component", () => {
     const out = nullDroppedSortComponents({ k: ["MRN-1"], id: "rec_1" }, sort, dropped);
     expect(out.k).toEqual([null]);
+  });
+});
+
+describe("ListSqlAdapter.foldText — the declared accent fold", () => {
+  const raw: ListSqlAdapter = {
+    ...adapter,
+    foldText: (sql) => rawFoldCall(sql),
+  };
+
+  it("defaults to the indexable wrapper when the store declares nothing", () => {
+    // The direction is deliberate: an absent declaration errs toward correct-and-slower, never
+    // toward fast-and-unindexable (ADR-0340's ordering argument).
+    const params: unknown[] = [];
+    const parts = buildListSql(query({ filters: [{ field: "name", op: "contains", value: "x" }] }), adapter, [], params);
+    expect(parts.where).toContain("public.ce_unaccent(");
+  });
+
+  it("uses the declared fold on the contains predicate", () => {
+    const params: unknown[] = [];
+    const parts = buildListSql(query({ filters: [{ field: "name", op: "contains", value: "x" }] }), raw, [], params);
+    expect(parts.where).toBe(
+      "public.unaccent('public.unaccent'::regdictionary, document ->> 'name'::text) ILIKE" +
+        " ('%' || public.unaccent('public.unaccent'::regdictionary, $1) || '%')",
+    );
+    expect(parts.where).not.toContain("ce_unaccent");
+  });
+
+  it("uses the declared fold on the ?q= OR group, and both sides of each disjunct", () => {
+    const params: unknown[] = [];
+    const parts = buildListSql(query({ search: { term: "x", fields: ["name", "notes"] } }), raw, [], params);
+    expect(parts.where).not.toContain("ce_unaccent");
+    // Two disjuncts, each folding the column and the needle: four calls.
+    expect(parts.where.split("public.unaccent(").length - 1).toBe(4);
+  });
+
+  it("folds both surfaces the same way within one query", () => {
+    // One `foldOf` reader, because a `contains` filter and a `?q=` group folding differently would
+    // make a row match through one surface and not the other.
+    const params: unknown[] = [];
+    const parts = buildListSql(
+      query({ filters: [{ field: "name", op: "contains", value: "a" }], search: { term: "b", fields: ["notes"] } }),
+      raw,
+      [],
+      params,
+    );
+    expect(parts.where).not.toContain("ce_unaccent");
+    expect(parts.where.split("public.unaccent(").length - 1).toBe(4);
+  });
+
+  it("pins the same dictionary in both folds, so the two stores agree about which rows match", () => {
+    expect(rawFoldCall("x")).toContain(`'${SEARCH_DICTIONARY}'::regdictionary`);
+    expect(SEARCH_FUNCTION_BODY).toContain(`'${SEARCH_DICTIONARY}'::regdictionary`);
+  });
+
+  it("binds the needle exactly once however the fold is declared", () => {
+    for (const a of [adapter, raw]) {
+      const params: unknown[] = [];
+      buildListSql(query({ search: { term: "milk", fields: ["name", "notes"] } }), a, [], params);
+      expect(params).toEqual(["milk"]);
+    }
+  });
+});
+
+describe("the real document-store adapter's fold", () => {
+  /**
+   * Driven through `listPageOp` rather than through a synthetic adapter, because the claim being
+   * fenced is about the adapter `entity-ops.ts` really builds — and before this, every `foldText`
+   * test used a hand-written one, so the shipped `--store pg` fold was asserted by nothing. The
+   * claim is load-bearing twice over: `searchFunctionLine`'s dependents clause tells an operator
+   * that `--store pg` is unaffected in every state of `public.ce_unaccent`, and `ADR-0383` calls the
+   * declaration the one thing without which the increment is incomplete.
+   */
+  async function documentStoreWhere(q: ListQuery): Promise<string> {
+    let seen = "";
+    const tx = {
+      query: (async (sql: string) => {
+        seen = sql;
+        return { rows: [], rowCount: 0 };
+      }) as PgConnection["query"],
+      transaction: (async <T,>(fn: (t: PgConnection) => Promise<T>) => fn(tx)) as PgConnection["transaction"],
+      withAdvisoryLock: (() => {
+        throw new Error("unused");
+      }) as unknown as PgConnection["withAdvisoryLock"],
+      close: (async () => undefined) as PgConnection["close"],
+    } as PgConnection;
+    await listPageOp(tx, "meta.operate_entity_records", "t1", "Vendor", q);
+    return seen;
+  }
+
+  it("names public.ce_unaccent nowhere, which is what makes --store pg unaffected by its state", async () => {
+    const sql = await documentStoreWhere(
+      query({ filters: [{ field: "name", op: "contains", value: "x" }], search: { term: "y", fields: ["notes"] } }),
+    );
+    expect(sql).not.toContain("ce_unaccent");
+    // Not a vacuous absence: the raw pinned two-argument form is there, four times — the column and
+    // the needle of each of the two surfaces.
+    expect(sql.split(`public.unaccent('${SEARCH_DICTIONARY}'::regdictionary,`).length - 1).toBe(4);
+  });
+
+  it("would name it if the declaration were dropped, so the assertion above is not vacuous", () => {
+    // The same two surfaces built through the default fold, which is what `entity-ops.ts` would get
+    // by deleting its one `foldText` line. Four wrapper calls where the real store has none.
+    const params: unknown[] = [];
+    const parts = buildListSql(
+      query({ filters: [{ field: "name", op: "contains", value: "x" }], search: { term: "y", fields: ["notes"] } }),
+      adapter,
+      ["tenant_id = $1"],
+      params,
+    );
+    expect(parts.where.split("public.ce_unaccent(").length - 1).toBe(4);
   });
 });

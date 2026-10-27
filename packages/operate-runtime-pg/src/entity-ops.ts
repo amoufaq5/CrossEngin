@@ -17,6 +17,7 @@ import {
   sqlColumn,
   type ListSqlAdapter,
 } from "./list-sql.js";
+import { rawFoldCall } from "./search-function.js";
 import { guardedTimestamptzCast } from "./temporal-sql.js";
 import { mergeRecord, resolveRecordId, type DocumentRow } from "./records.js";
 
@@ -58,6 +59,14 @@ export async function listPageOp(
   const valueTypes = query.valueTypes;
   const valueTypeOf = (field: string): ListValueType => valueTypes?.get(field) ?? "text";
   const adapter: ListSqlAdapter = {
+    // No trigram index exists on `meta.operate_entity_records` — it declares one btree on
+    // `(tenant_id, entity)` and no GIN index of any kind — and `pg_trgm` is created nowhere for this
+    // store, so the wrapper's per-row call would be pure cost: measured 170.1 ms -> 715.5 ms for a
+    // 4-field `?q=` matching nothing over 200,000 rows. `rawFoldCall` is still the pinned
+    // two-argument form, and is itself faster than the one-argument `unaccent` it replaces
+    // (42.4 ms against 58.0 ms single-field). Whatever gives this store an index must delete this
+    // line in the same increment, because it is what makes the predicate unindexable.
+    foldText: (sql) => rawFoldCall(sql),
     columnExpr: (field) => {
       // The JSONB store holds plaintext, so there is no encryption arm here: a field it cannot
       // express is one whose name cannot be interpolated into a JSON path at all. Note what it

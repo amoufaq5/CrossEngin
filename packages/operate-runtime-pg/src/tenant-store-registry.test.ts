@@ -19,6 +19,7 @@ import {
   ColumnMappedEntityStore,
   encryptedEntityNames,
 } from "./column-store.js";
+import { SEARCH_FUNCTION_PRESENT_ROW, SEARCH_FUNCTION_PROBE_MATCH } from "./search-function.js";
 import { tenantSchemaName } from "./tenant-schema.js";
 import type { TenantSchemaApplication } from "./tenant-schema-apply.js";
 import {
@@ -58,6 +59,13 @@ function capturePg(): Captured {
       sqls.push(sql);
       calls.push({ sql, params: params ?? [] });
       if (sql.includes("pg_catalog.format_type")) return { rows: live, rowCount: live.length };
+      // Models the search function as present. Needed because the fallback below is `{rows: []}`,
+      // which is how a real database reports *this function does not exist*, so without it
+      // `ensureColumnStoreExtensions` refuses and every test here exercises that refusal rather than
+      // the registry (ADR-0363). One shared row and matcher, not a third hand-written pair.
+      if (sql.includes(SEARCH_FUNCTION_PROBE_MATCH)) {
+        return { rows: [SEARCH_FUNCTION_PRESENT_ROW], rowCount: 1 };
+      }
       return { rows: [], rowCount: 0 };
     }) as PgConnection["query"],
     transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) => fn(conn)) as PgConnection["transaction"],

@@ -12,6 +12,7 @@ import {
   DEFAULT_ENCRYPTION_KEY_REF,
   decimalSpecFromSqlType,
 } from "./column-store.js";
+import { SEARCH_FUNCTION_PRESENT_ROW, SEARCH_FUNCTION_PROBE_MATCH } from "./search-function.js";
 import { SET_EXTRA_SETTING_SQL } from "./tenant-context.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
@@ -67,6 +68,19 @@ function capturePg(
     // attempted" is only checkable against what actually reached the connection.
     const failure = fail?.(sql) ?? null;
     if (failure !== null) throw failure;
+    // The search-function probe, answered **before** the generic `SELECT` arm and matched on
+    // `to_regprocedure`, which no other statement in this store names.
+    //
+    // It needs its own arm rather than falling through: the generic arm hands back `initialRows`,
+    // which defaults to `[]`, and `[]` is exactly how a real database reports *the function does not
+    // exist* — `to_regprocedure` answers NULL rather than raising. So every `ensureSchema` test would
+    // be exercising the `absent` refusal instead of the schema DDL it is about, which is a fake
+    // answering a statement it cannot really serve (ADR-0363: the fake and the code agreeing with
+    // each other and with nothing else). A deployment reaches `matches` on its second boot and
+    // `created` on its first; `matches` is the state these tests mean.
+    if (sql.includes(SEARCH_FUNCTION_PROBE_MATCH)) {
+      return { rows: [SEARCH_FUNCTION_PRESENT_ROW], rowCount: 1 };
+    }
     if (sql.includes("SELECT") || sql.includes("RETURNING")) return { rows, rowCount: rows.length };
     if (sql.trimStart().startsWith("DELETE")) return { rows: [], rowCount: 1 };
     return { rows: [], rowCount: 1 };

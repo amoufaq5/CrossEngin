@@ -8,6 +8,7 @@ import {
   resolveTenantSchema,
   TENANT_SCHEMA_LOCK_SQL,
 } from "./tenant-schema-apply.js";
+import { SEARCH_FUNCTION_PRESENT_ROW, SEARCH_FUNCTION_PROBE_MATCH } from "./search-function.js";
 import { tenantSchemaName } from "./tenant-schema.js";
 
 const TENANT = "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8";
@@ -85,6 +86,18 @@ function capturePg(
       }
       if (sql.includes("pg_catalog.format_type")) {
         return { rows: introspectRows, rowCount: introspectRows.length };
+      }
+      // The search-function probe, matched on `to_regprocedure`, which no other statement on this
+      // path names. Answered as `matches`, which is the state a second activation is in.
+      //
+      // Needed because the fallback below is `{rows: []}`, and that is precisely how a real database
+      // reports *the function does not exist* — `to_regprocedure` answers NULL rather than raising.
+      // Without this arm `ensureColumnStoreExtensions` refuses before the transaction opens, so every
+      // test here would be exercising that refusal rather than the application it is about: a fake
+      // answering a statement it cannot really serve (ADR-0363). It sits after `failOn`, so a test
+      // that wants the refusal can still produce it.
+      if (sql.includes(SEARCH_FUNCTION_PROBE_MATCH)) {
+        return { rows: [SEARCH_FUNCTION_PRESENT_ROW], rowCount: 1 };
       }
       return { rows: [], rowCount: 0 };
     }) as PgConnection["query"],
