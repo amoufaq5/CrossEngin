@@ -2292,6 +2292,46 @@ report; `apps/operate-web` has none).
   **this fix is fenced by nothing** — which is register P1.3's remaining half, now measured from
   the inside.
 
+  ADR-0386 closes ADR-0384's top open end and the class is **a guard that only fires when the thing
+  it guards is there**. Every JWT claim check was `present && wrong`, so a token that *omitted* a
+  claim passed it — and the measurement widened the entry by one, because `exp` is in the same state
+  and is the worst member: a token with no expiry defeats `--session-token-ttl` and ADR-0381's
+  30-second revocation window outright, for that token, for ever. A token carrying **none** of the
+  three was `authenticated`, with the only established fact being that a key in this deployment's
+  JWKS had signed it, which for a shared IdP key set is cross-application replay with no expiry.
+  Three controls (wrong `iss`, wrong `aud`, expired `exp`) were correctly refused throughout, so the
+  present-and-wrong paths were always right and the absent ones were the whole defect.
+  The rule is that **a required claim is required, and *present* means usable by the guard that
+  reads it** — `exp: "soon"` is not `undefined`, so a presence check admits it and then
+  `typeof exp === "number"` is false and the comparison is skipped, which is the same hole one step
+  in; so `CLAIM_IS_USABLE`'s predicates *are* the guards' own type tests rather than a looser check
+  in front of them. `required_claim_absent` is a 19th outcome because every alternative is a lie
+  about one of the three (`expired_token` for a token with no `exp` asserts an expiry nobody set),
+  and because the remedies differ: an IdP omitting a claim is fixed at the minter, a wrong claim is
+  a token minted for somebody else. The exposure is bounded by three measurements and all three
+  matter: the expectation is **never** absent (the CLI refuses to boot without `--jwt-issuer` and
+  `--jwt-audience` whenever a JWKS is configured), the in-repo mint emits all three, and the shipped
+  compose has no JWKS — so the tightening is inert on every deployment this repository ships, and
+  the reachable population is a foreign token. `--jwt-optional-claim` is the hatch with the
+  **relaxation** declared rather than the requirement, per claim because the costs differ, and no
+  hatch at all is refused on a stated distinction: ADR-0340 could *count* its affected population at
+  zero where this one cannot.
+  **And the increment's own fix was dropped in a third package, caught only by a live request.** The
+  first live run had the strict arm right and the relaxed arm **also 401**, with the boot line
+  reading `required: iss, aud` while the request answered `required_claim_absent`:
+  `buildOperateGateway` forwards options to `GatewayRuntime` **one named field at a time** and
+  `requiredJwtClaims` was not among them. It was invisible three ways at once — the caller passes
+  its JWT options inside a conditional **spread**, which bypasses TypeScript's excess-property
+  check; the field is optional on `GatewayRuntimeOptions`; and its default there is the **strict**
+  set, so the drop produced a *safe* wrong answer rather than a crash. Unreachable by `tsc`, by 20k
+  tests and by every boot line, because the boot line reads the flag and the verifier read the
+  dropped option. ADR-0288's maintained list wrong for the **fourth** time, so the fence is over the
+  list and not the field: `compile.test.ts` reads `compile.ts` **as text** and asserts that every
+  option the function accepts and the runtime also accepts appears in the forwarding literal, with a
+  `notForwarded` map carrying a reason for each of the seven consumed by the compile step instead.
+  As text because no type can ask it — a forwarded field and an absent one are identical to the type
+  system.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -3078,7 +3118,7 @@ packages exist at only one layer, noted below where that is true.
 ### Request edge
 
 - **`api-gateway`** — contracts for the 17-stage per-request pipeline (`receive` →
-  `emit_audit`) with 6 stage outcomes, 8 auth schemes × **18** auth outcomes, route matching +
+  `emit_audit`) with 6 stage outcomes, 8 auth schemes × **19** auth outcomes, route matching +
   version negotiation + sunset, idempotency records, content/encoding/language negotiation,
   RFC 9457 problem types, CORS and default security headers.
   **`AUTH_SCHEME_SUPPORT` says which of the eight this build serves, and it is a total map**
@@ -3114,6 +3154,17 @@ packages exist at only one layer, noted below where that is true.
   parsing, handler dispatch, handler 4xx/5xx → deny/error mapping, classification-driven
   response redaction (including a registry derived straight from a manifest), security
   headers, and a schema-valid `PipelineExecution` per request.
+  **A JWT claim this deployment requires must be present, and *present* means usable by the guard
+  that reads it** (ADR-0386). Every claim check was `present && wrong`, so a token omitting `exp`,
+  `iss` or `aud` passed it — and a token carrying none of the three was `authenticated`, never
+  expiring, naming no issuer and no audience. `JwtVerificationOptions.requiredClaims` is
+  **required** so no call site can inherit the permissive behaviour, `CLAIM_IS_USABLE`'s predicates
+  *are* the three guards' own type tests (a presence check would admit `exp: "soon"` and then skip
+  its own comparison), and the absence check runs **after** the signature and **before** the
+  comparisons — after, because an unsigned token establishes nothing (ADR-0340's ordering); before,
+  because a token missing a claim cannot be compared. `REQUIRED_JWT_CLAIM_COSTS` carries each
+  absence's cost so the boot line reads one back, and `nbf` is deliberately unrequirable because its
+  absence means *valid from issuance*.
   **A credential this build does not serve is recognised and refused, where it used to be
   unrecognised and served** (ADR-0384). `authenticate` had no arm for an unserved scheme, so
   `bearer_opaque` with no matcher, `basic`, `mtls` and `hmac_signature` reached the **no-credential
@@ -7084,7 +7135,22 @@ opened them.
 
 **Load-bearing**
 
-- **`verifyBearerJwt` guards `iss` and `aud` as *present and wrong*, so a token carrying neither is
+- ~~**`verifyBearerJwt` guards `iss` and `aud` as *present and wrong*.**~~ — **closed by ADR-0386,
+  which widened it by one claim**: `exp` is in the same state and is the worst member, because a
+  token with no expiry defeats `--session-token-ttl` and ADR-0381's 30-second revocation window
+  outright, for that token, for ever. Measured before the fix, with three controls: a token with
+  **none** of `exp`/`iss`/`aud` was `authenticated`, the only established fact being that a key in
+  this deployment's JWKS had signed it. The rule is that *present* means **usable by the guard that
+  reads it** — `exp: "soon"` is not `undefined`, so a presence check admits it and then
+  `typeof exp === "number"` is false and the comparison is skipped, which is the same hole one step
+  in. `--jwt-optional-claim` is the hatch and the **relaxation** is what is declared, so silence is
+  strict; no hatch at all is refused for a stated reason, because ADR-0340 could *count* its
+  affected population at zero and the population here is real JWKS deployments, which this
+  repository cannot count. What remains is ADR-0386's own open ends, chiefly that
+  `GatewayRuntimeOptions.requiredJwtClaims` is still optional-with-a-safe-default, which is what
+  made that increment's own drop silent.
+  The original entry, kept because its measurements are what the fix rests on:
+  **`verifyBearerJwt` guards `iss` and `aud` as *present and wrong*, so a token carrying neither is
   `authenticated` whatever the deployment declared** (ADR-0384's top open end, found while writing
   that increment's deletion argument rather than by looking for it). `typeof jwt.payload.iss ===
   "string" && …` and `aud !== undefined && !audOk` at `auth.ts:142-151`: absence passes both. The
@@ -10229,6 +10295,18 @@ method is that a stale figure misleads.
    *"open question 4"* when the row had landed **third**, which is this entry's own off-by-one being
    committed into the ADR that documents it — fixed by citing the question **by its heading**, which
    is immune to reordering and is the general remedy this entry had not named.
+   **ADR-0386 adds a fifth and it is not a documentation member at all — it is the thing a stale
+   claim hides behind.** That increment's own fix was dropped by `buildOperateGateway`, which
+   forwards options to `GatewayRuntime` one named field at a time, and the drop was invisible three
+   ways at once: the caller passes its JWT options inside a conditional **spread**, which **bypasses
+   TypeScript's excess-property check**, so passing a field the target does not declare is not an
+   error; the field is optional on the target; and its default there was the **strict** value, so the
+   drop produced a *safe* wrong answer rather than a crash. The boot line read the flag and the
+   verifier read the dropped option, so the two disagreed in one process and **only a live HTTP
+   request could tell**. The lesson generalises past that file: **an optional field with a safe
+   default makes its own omission unobservable**, and the three mechanisms compose, so any of them
+   alone would have been caught. Worth knowing before adding an option to any forwarding list —
+   ADR-0288's shape, now wrong four times.
 2. **Six concepts are modelled several times over, two with non-nesting member sets.** Data
    classification has five declarations — four identical and one, in `data-lineage`, **disjoint past
    two members**, so the moment anything bridges the kernel's classification into the lineage graph

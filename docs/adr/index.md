@@ -1,10 +1,10 @@
 # ADR index
 
-380 records. Generated from the ADR files themselves — regenerate rather than
+381 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 301  **Proposed:** 79
+- **Accepted:** 302  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -392,3 +392,4 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0383](0383-an-index-no-query-reads.md) | An index no query reads | — | Accepted | 2026-10-26 |
 | [0384](0384-a-credential-presented-and-recorded-as-absent.md) | A credential presented and recorded as absent | — | Accepted | 2026-10-26 |
 | [0385](0385-a-badge-that-counts-what-nothing-can-show.md) | A badge that counts what nothing can show | — | Accepted | 2026-10-26 |
+| [0386](0386-a-required-claim-is-required.md) | A required claim is required | — | Accepted | 2026-10-27 |
