@@ -111,11 +111,53 @@ export function resolvedClassifiedFields(
   return classifiedFields(resolvedFields(entity, customTraits));
 }
 
+/**
+ * Field names the emitted table already has, which a declaration may therefore not use.
+ *
+ * One spelling, because `validateManifest` refuses these in a *manifest* and this module refuses
+ * them in a *resolution*, and two literals would eventually disagree about which names the store
+ * claims.
+ *
+ * **`emitEntityTableDdl` writes four columns of its own and the set holds two of them**, which is a
+ * measurement rather than a preference. `id` and `tenant_id` are **duplicated** — the emitted
+ * `CREATE TABLE` carries `"id" TEXT NOT NULL` beside `"id" TEXT`, three `"id"` tokens in one
+ * statement, and Postgres answers `42701 column "id" specified more than once`, so the manifest
+ * parses, validates, hashes and cannot be served at all. The first version of this comment said
+ * `tenant_id` was "refused earlier as a reserved prefix", and there is **no such refusal**: driven
+ * through `validateManifest` itself, `tenant_id` was accepted and emitted the same duplicate, so
+ * the sentence justifying a one-member set was the only thing keeping it at one.
+ *
+ * `created_at` and `updated_at` are **not** here and must not be, because `BUILT_IN_TRAIT_FIELDS`'
+ * `auditable` supplies exactly those two names — which is *why* the emitter **overrides** rather
+ * than duplicating them. That override is its own defect and a quieter one (a declared
+ * `created_at: text` replaces `TIMESTAMPTZ NOT NULL DEFAULT …`, so the table serves and the audit
+ * stamp becomes a caller-supplied column), and a name refusal is the wrong instrument for it: an
+ * own field colliding with a trait-supplied one is already refused, so the uncovered case is an own
+ * `created_at` on an entity *without* `auditable`, where what is wrong is the **type**. Register
+ * P2.12c.
+ */
+export const RESERVED_ENTITY_FIELD_NAMES: readonly string[] = ["id", "tenant_id"];
+
+/**
+ * Refuses an **own** field that is reserved or collides with one a trait supplies.
+ *
+ * The `traitFields` argument is what keeps provenance: the reserved-name test runs over
+ * `entity.fields` alone, so a trait-contributed field is never read as an own declaration. That is
+ * load-bearing rather than incidental — a caller that pre-expanded an entity into
+ * `{...entity, traits: [], fields: [...own, ...trait]}` to get the old side of a diff resolved
+ * against its own traits made this function throw `ReservedFieldNameError` for a trait supplying
+ * `id`, on a manifest `ManifestSchema` parses. `DiffContext.oldCustomTraits` exists so no caller
+ * has to fabricate that entity.
+ *
+ * A trait field that is itself reserved is `validateManifest`'s to refuse, not this function's:
+ * here there is no trait to name in the error and no index to point at, and the same trait reaches
+ * every entity carrying it.
+ */
 export function checkEntityFieldNames(entity: Entity, traitFields: readonly Field[]): void {
   const traitNames = new Set(traitFields.map((f) => f.name));
   for (const field of entity.fields) {
-    if (field.name === "id") {
-      throw new ReservedFieldNameError(entity.name, "id");
+    if (RESERVED_ENTITY_FIELD_NAMES.includes(field.name)) {
+      throw new ReservedFieldNameError(entity.name, field.name);
     }
     if (traitNames.has(field.name)) {
       throw new FieldNameCollisionError(

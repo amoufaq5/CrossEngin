@@ -640,6 +640,31 @@ export function assessDeadline(
  */
 export const DEADLINE_EXTENSION_REFUSALS = [
   /**
+   * Article 12(3) obliges the controller to **state** the reason, and whitespace states none.
+   *
+   * Checked first, and the ordering has a reason rather than a precedence: an input that cannot be
+   * represented is not worth comparing against the request's state, so measuring a blank reason
+   * against the three-month cap is work whose answer could not matter. The cost is the mirror case —
+   * an already-answered request with a blank reason reports the reason — and it is the lesser one,
+   * because that caller can see their own argument where they cannot see the row's status.
+   *
+   * It exists because the fifth refusal's reasoning applied to this field and the check did not.
+   * `planDeadlineExtension` validated five things and never the reason, while the contract requires
+   * `min(1)` paired with the instant — so `""` passed the plan, the `UPDATE` **committed all three
+   * columns**, and the `RETURNING` row was refused by the schema for ever. Measured live as a
+   * non-owner: `read()` throws from then on, and `transition()` throws **before it builds any
+   * SQL**, so the request can never reach `in_progress`, `completed` or `rejected` again and the
+   * Article 17 erasure for that data subject is unreachable through this store. `extendDeadline`
+   * cannot recover it either, since its own first act is that `read()`. The sweep loses the request
+   * entirely — it reaches `onUnreadableRequest` and never `examined`.
+   *
+   * It is **stricter than the schema**, deliberately: `.min(1)` does not trim, so `"   "` is a
+   * representable row and a reader must stay able to read back anything a writer could have
+   * written (ADR-0373's forward-compatibility rule). The place to refuse an unstated reason is
+   * therefore the write path, not the parse.
+   */
+  "reason_not_stated",
+  /**
    * The request has already been answered. Extending the deadline of a completed or rejected request
    * would move the line a settled fact is judged against, which is the one edit that can turn a
    * recorded breach into a recorded compliance (ADR-0323's tampered scope, in a second record).
@@ -711,6 +736,13 @@ export function planDeadlineExtension(
   request: GdprDeletionRequest,
   input: DeadlineExtensionInput,
 ): DeadlineExtensionPlan {
+  if (input.deadlineExtensionReason.trim().length === 0) {
+    return {
+      ok: false,
+      refusal: "reason_not_stated",
+      detail: "Article 12(3) obliges the controller to state the reason for the extension",
+    };
+  }
   if (ARTICLE_12_ANSWER_INSTANT[request.status] !== "unanswered") {
     return {
       ok: false,

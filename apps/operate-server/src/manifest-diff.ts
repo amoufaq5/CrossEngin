@@ -25,6 +25,7 @@ export type DiffWarningCode =
   | "classification_raised"
   | "relation_removed"
   | "relation_cascade_added"
+  | "relation_kind_changed"
   | "role_removed"
   | "lifecycle_changed";
 
@@ -176,36 +177,130 @@ interface EntityLayer {
 }
 
 /**
- * The sections the detail layers below analyse, so the census must not overrule them on impact.
+ * The nine view fields the five detail layers fill — what the census asks a layer about.
+ *
+ * A `Pick` of the view rather than its own interface, so an extractor below cannot read a field the
+ * view does not carry; and `compare` spreads this exact object into its return value, so what
+ * decides the suppression below **is** what the reviewer is shown rather than a second derivation
+ * of it.
+ */
+export type SectionDetailCounts = Pick<
+  ManifestDiffView,
+  | "entitiesAdded"
+  | "entitiesRemoved"
+  | "entitiesModified"
+  | "fieldChanges"
+  | "permissionChanges"
+  | "relationChanges"
+  | "rolesAdded"
+  | "rolesRemoved"
+  | "lifecycleChanges"
+>;
+
+/**
+ * Which detail layer reads each section, as the function that counts what that layer reported.
  *
  * `manifestSectionChangeMayWithhold` is deliberately coarse and over-reporting — the kernel says so
  * at its definition, and tells a consumer to *map* it rather than re-derive a judgement. Mapping it
- * straight onto `impact` was measured wrong in five places: adding an **optional field** changes the
- * `entities` section, `entities` is `served`, so the census answers *may withhold* and the view
- * reported `breaking` for a change `entityLayer` had correctly called additive. Where a layer reads
- * a section its verdict is strictly better informed, so the census upgrades impact only for the
- * sections no layer reads — which is exactly where the register's defect lives (a removed job, a
- * narrowed view, `meta.extends`).
+ * straight onto `impact` was measured wrong: adding an **optional field** changes the `entities`
+ * section, `entities` is `served`, so the census answers *may withhold* and the view reported
+ * `breaking` for a change `entityLayer` had correctly called additive. So where a layer reads a
+ * section its verdict is better informed and the census must not overrule it.
  *
- * Declared beside the layers rather than derived, because a layer is a function and which sections
- * it reads is not a question any text scan can answer soundly. It is fenced **behaviourally**
- * instead: `manifest-diff.test.ts` drives a representative *withholding* change per section named
- * here and asserts a detail layer reported it, so a section declared covered and not covered fails
- * rather than silently suppressing its own census upgrade. Withholding deliberately — a probe whose
- * change answers `mayWithhold: false` would pass whether or not the layer covered the section,
- * since the census would not have upgraded anyway.
+ * What this map gets right that a `ReadonlySet` of the five covered sections did not: **a silent
+ * layer is not a verdict.** A layer covers only part of its section, so suppressing per *section*
+ * let the census be overruled by a layer that had seen nothing — an absence of information read as
+ * a judgement of `additive` (ADR-0372's rule, inside one predicate). Measured against the committed
+ * tree, five withholding changes across four of the five covered sections read `additive` with
+ * every layer silent: an `abac` obligation added to a `list` grant (a **permanent 503** for a
+ * tenant whose deployment declares no evaluator — ADR-0340 refuses an undischargeable obligation at
+ * boot), a role losing its `inherits`, `unique: true` added to a field (a real index since
+ * ADR-0360, so a create that would collide answers 409 where it used to succeed — and on a table
+ * already holding duplicates the index is *refused and reported*, which is the guarantee silently
+ * absent rather than the rows becoming unwritable), and a lifecycle transition retargeted or
+ * re-sourced. All five are `breaking` now, and the four controls whose layer *did* speak are
+ * unmoved: an optional field added stays `additive` (`fieldChanges: 1`), a lifecycle **state** added
+ * stays `additive` (`lifecycleChanges: 1`), a widened `list` grant stays `additive`
+ * (`permissionChanges: 1`), and a removed field, a cascading relation and a removed role stay
+ * `breaking` on their own warnings.
  *
- * Mutation-checked both ways rather than assumed: adding `jobs` here fails 2 tests (the membership
- * fence, and a removed job dropping from `breaking` to `additive` — the exact failure mode a stale
- * entry has), and dropping `permissions` fails 3, two of them tests that predate this set.
+ * A total map and not a set of five, so a section added to `ManifestSchema` is a compile error that
+ * must say which layer reads it — and the entry *is* the reader, so the stale-entry hazard a
+ * hand-maintained membership list carries (ADR-0288, wrong four times) cannot arise: a section
+ * declared covered by a layer that reports nothing suppresses nothing.
+ *
+ * Two costs, both stated rather than discovered later. A **cosmetic** change inside a covered
+ * section that its layer cannot see now reads `breaking` — measured, a role's `description` moving
+ * is one — which is the same cost every *uncovered* section already pays, since the kernel's own
+ * doc gives `roles` as its example of a change that may only have moved a label; it is in the safe
+ * direction, because a reviewer who looks at an over-reported diff loses time where one who was not
+ * shown a removal loses the data. And the granularity is the **section**, not the member: a change
+ * that adds an optional field to one entity *and* `unique: true` to another reads `additive`,
+ * because `entityLayer` spoke about the first. Closing that means matching the census's member keys
+ * against the layer's details, which is refused on measurement — three of the five sections align
+ * (`entities`, `permissions` and `roles` all key by the name their layer reports) and two cannot:
+ * `workflows` keys by workflow name while `lifecycleLayer` reports by **entity**, so a per-member
+ * rule would regress the lifecycle-state control above, and `relations` is `unkeyed_array` with no
+ * member keys at all.
+ *
+ * Declared beside the layers rather than derived, because a layer is a function and which fields it
+ * fills is not a question any text scan can answer soundly. It is fenced **behaviourally** instead:
+ * `manifest-diff.test.ts` drives a representative *withholding* change per covered section and
+ * asserts both that its extractor counts what the layer reported and that an unchanged pair counts
+ * zero. Withholding deliberately — a probe whose change answers `mayWithhold: false` would pass
+ * whether or not the layer covered the section, since the census would not have upgraded anyway.
+ *
+ * Declaration order is `MANIFEST_SECTION_NAMES`', so the twelve `null`s read as a census of what no
+ * layer reaches rather than as omissions.
+ *
+ * Mutation-checked three ways rather than assumed. Restoring the unconditional suppression — the
+ * `ReadonlySet` behaviour — fails **6** tests, the five silent-layer members plus the stated cost.
+ * Pointing one extractor at the wrong view field (`workflows` at `relationChanges`) fails **3**,
+ * one of them `lifecycle > reports an added state as additive`, which predates this map: a stale
+ * entry is a test failure rather than a section that silently suppresses its own census upgrade for
+ * every change. And giving an uncovered section an extractor (`jobs`) fails the both-directions
+ * fence, which is the ADR-0288 hazard a membership list carries.
  */
-export const SECTIONS_WITH_DETAIL_LAYERS: ReadonlySet<ManifestSectionName> = new Set([
-  "entities",
-  "relations",
-  "roles",
-  "permissions",
-  "workflows",
-]);
+export const SECTION_DETAIL_LAYER: {
+  readonly [S in ManifestSectionName]: ((details: SectionDetailCounts) => number) | null;
+} = {
+  meta: null,
+  entities: (d) =>
+    d.entitiesAdded.length +
+    d.entitiesRemoved.length +
+    d.entitiesModified.length +
+    d.fieldChanges.length,
+  traits: null,
+  relations: (d) => d.relationChanges.length,
+  roles: (d) => d.rolesAdded.length + d.rolesRemoved.length,
+  permissions: (d) => d.permissionChanges.length,
+  workflows: (d) => d.lifecycleChanges.length,
+  integrations: null,
+  jobs: null,
+  files: null,
+  reports: null,
+  dashboards: null,
+  views: null,
+  customWidgets: null,
+  theme: null,
+  i18n: null,
+  search: null,
+};
+
+/**
+ * Whether the census's verdict on this change stands, or a better-informed layer has judged it.
+ *
+ * Three answers collapsed into one boolean, and the middle one is the fix: the change cannot
+ * withhold (the census is silent), no layer reads the section (the census is the only reading there
+ * is), or a layer reads it and **said nothing**, which is an absence of information rather than a
+ * verdict of `additive` — so the census still decides.
+ */
+function censusDecidesImpact(change: SectionChangeView, details: SectionDetailCounts): boolean {
+  if (!change.mayWithhold) return false;
+  const layer = SECTION_DETAIL_LAYER[change.section];
+  if (layer === null) return true;
+  return layer(details) === 0;
+}
 
 function kernelEntityLayer(active: Manifest, next: Manifest): EntityLayer {
   const diff = computeManifestDiff(active, next);
@@ -413,12 +508,24 @@ function grantMap(permissions: EntityPermissionSet | undefined): ReadonlyMap<str
   for (const [fieldName, field] of Object.entries(permissions.fields ?? {})) {
     if (field.read !== undefined) map.set(`fields.${fieldName}.read`, grantRoles(field.read));
     if (field.update !== undefined) map.set(`fields.${fieldName}.update`, grantRoles(field.update));
+    // The third arm, which this map did not read for the two increments after ADR-0348 added it:
+    // a narrowed `create` is who may **set** a field at registration, so without it a reviewer was
+    // shown a `permissions` section change with no detail naming the field. Read directly and
+    // never through `fieldWriteGrant`'s `create ?? update` fallback — resolving the fallback would
+    // report an inherited `update` grant twice and a declared `create` grant not at all, which is
+    // the mistake `surveyAbacObligations` already avoids one position over.
+    if (field.create !== undefined) map.set(`fields.${fieldName}.create`, grantRoles(field.create));
   }
   return map;
 }
 
 // A widened grant on a destructive operation deserves a reviewer's attention; the terminal
 // segment covers plain `update`/`delete` and field-level `fields.<f>.update` alike.
+//
+// `create` is deliberately **not** destructive, at either scope, and that is ADR-0348's asymmetry
+// rather than an omission: a principal supplying a value already knows it, so widening who may set
+// a field discloses nothing, while widening who may *change* one lets a value be destroyed by
+// someone who cannot read it. A narrowing is breaking either way — it arrives as `revoked`.
 function isDestructiveOperation(operation: string): boolean {
   const segments = operation.split(".");
   const terminal = segments[segments.length - 1] ?? operation;
@@ -679,6 +786,37 @@ function compare(active: Manifest, next: Manifest): ManifestDiffView {
       });
       continue;
     }
+    // The kind is compared **before** `onDelete`, because `relationLabel` is `from.field → to` and
+    // so is identical for `many_to_one` and `one_to_many` over the same triple — the one kind flip
+    // that keeps its label, which made it invisible to this layer *and* to the census, since
+    // `relations` is `unkeyed_array` and a same-count content change answers `mayWithhold: false`.
+    // Measured: it read `additive` with no detail and no warning.
+    //
+    // What it costs is measured too, and is not what it looks like: the foreign key does **not**
+    // move, because the column comes from the field's `reference` type rather than from this
+    // declaration. Only `many_to_one` binds a column on `from` — a `one_to_many`'s `field` names an
+    // inverse collection — so `relationDeleteIndex` drops the relation and
+    // `entity-ddl.ts`'s `onDeleteFor?.(col.field) ?? "restrict"` reverts the key to RESTRICT. A
+    // declared CASCADE or SET NULL is silently lost, which makes a parent delete that used to
+    // succeed start failing, and `boot-schema-targets.ts` re-weights the Article 17 delete order on
+    // the same index. Validation also stops requiring `field` to exist on `from`.
+    //
+    // A kind flip involving `many_to_many` cannot reach here at all, its label being
+    // `left ↔ right`, so it already arrives as a removal plus an addition.
+    if (previous.kind !== relation.kind) {
+      relationChanges.push({
+        change: "modified",
+        label,
+        detail: `kind ${previous.kind} → ${relation.kind}`,
+      });
+      breaking.push({
+        code: "relation_kind_changed",
+        impact: "breaking",
+        message: `Relation ${label} changes from ${previous.kind} to ${relation.kind} — only many_to_one carries its onDelete, so the foreign key reverts to RESTRICT.`,
+        entities: relationEntities(relation),
+      });
+      continue;
+    }
     const from = relationOnDelete(previous);
     const to = relationOnDelete(relation);
     if (from === to) continue;
@@ -748,6 +886,20 @@ function compare(active: Manifest, next: Manifest): ManifestDiffView {
     detail: delta.detail,
   }));
 
+  // Built once and spread into the view below, so the object `censusDecidesImpact` reads is the
+  // object the reviewer is shown — there is no second assembly of these nine fields to drift.
+  const details: SectionDetailCounts = {
+    entitiesAdded: entities.added,
+    entitiesRemoved: entities.removed,
+    entitiesModified: modified,
+    fieldChanges,
+    permissionChanges,
+    relationChanges,
+    rolesAdded,
+    rolesRemoved,
+    lifecycleChanges,
+  };
+
   const changed =
     warnings.length > 0 ||
     entities.added.length > 0 ||
@@ -763,25 +915,18 @@ function compare(active: Manifest, next: Manifest): ManifestDiffView {
 
   return {
     comparable: true,
-    // A section whose change can withhold something a request currently gets is breaking even when
-    // no detail layer saw it -- which is the point: before this, a removed job read `none`.
+    // A section whose change can withhold something a request currently gets is breaking unless a
+    // detail layer actually reported on it -- which is the point twice over: before ADR-0388 a
+    // removed job read `none`, and before this a withholding change inside a *covered* section read
+    // `additive` whenever that section's layer was silent.
     impact:
-      breaking.length > 0 ||
-      sectionChanges.some((c) => c.mayWithhold && !SECTIONS_WITH_DETAIL_LAYERS.has(c.section))
+      breaking.length > 0 || sectionChanges.some((c) => censusDecidesImpact(c, details))
         ? "breaking"
         : changed
           ? "additive"
           : "none",
     warnings,
-    entitiesAdded: entities.added,
-    entitiesRemoved: entities.removed,
-    entitiesModified: modified,
-    fieldChanges,
-    permissionChanges,
-    relationChanges,
-    rolesAdded,
-    rolesRemoved,
-    lifecycleChanges,
+    ...details,
     sectionChanges,
     counts: {
       added: entities.added.length,

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { Entity, Trait } from "@crossengin/types/meta-schema";
-import { FieldNameCollisionError, UnsupportedDiffChangeError } from "../ddl/errors.js";
+import {
+  FieldNameCollisionError,
+  ReservedFieldNameError,
+  UnsupportedDiffChangeError,
+} from "../ddl/errors.js";
 import { computeManifestDiff } from "./diff.js";
 import { diffManifestSections } from "./sections.js";
 import type { Manifest } from "./types.js";
@@ -174,6 +178,74 @@ describe("computeManifestDiff over a custom trait", () => {
     );
     const after = traited([{ name: "stamp", type: { kind: "text" } }]);
     expect(() => computeManifestDiff(before, after)).toThrow(FieldNameCollisionError);
+  });
+
+  /**
+   * The regression the fabricated-entity form of this fix carried, and the reason
+   * `DiffContext.oldCustomTraits` exists instead.
+   *
+   * Pre-expanding the old entity into `{...entity, traits: [], fields: [...own, ...trait]}` was the
+   * cheap way to resolve it against its own traits, and it destroyed provenance: with trait fields
+   * sitting in `fields`, `computeEntityDiff`'s own `checkEntityFieldNames` read them as own
+   * declarations and threw `ReservedFieldNameError` for a trait supplying `id`. Measured on that
+   * form: `ManifestSchema.parse` succeeds, `validateManifest` accepted it (it does not any more —
+   * see the validator rule), and `computeManifestDiff` went from answering cleanly to throwing.
+   * The consumer then degraded the **whole** entity layer to a name-level comparison, so an
+   * unrelated own-field change on another entity went from `entitiesModified: ["Patient"]` to `[]`.
+   */
+  it("does not read a trait-supplied field as an own declaration", () => {
+    const idTrait = (extra: Trait["fields"]): Manifest =>
+      manifest(
+        [
+          {
+            name: "Patient",
+            traits: ["stamped"],
+            fields: [{ name: "label", type: { kind: "text" } }, ...extra],
+          },
+        ],
+        [{ name: "stamped", fields: [{ name: "id", type: { kind: "text" } }] }],
+      );
+    const before = idTrait([{ name: "doomed", type: { kind: "text" } }]);
+    const after = idTrait([]);
+    const diff = computeManifestDiff(before, after);
+    expect(diff.modifiedEntities[0]?.diff.removedFields).toEqual(["doomed"]);
+    expect(diff.destructive).toBe(true);
+  });
+
+  it("still refuses an own field named `id`, which is a declaration", () => {
+    const own = manifest([
+      { name: "Patient", fields: [{ name: "id", type: { kind: "text" } }] },
+    ]);
+    expect(() => computeManifestDiff(own, own)).toThrow(ReservedFieldNameError);
+  });
+
+  /**
+   * The case one `customTraits` list cannot express at all: the old entity names a trait the old
+   * manifest declares and the new one does not, having dropped the trait from the entity too. With
+   * one list the old side resolved against `next.traits`, where the trait is absent, and
+   * `expandTraits` threw `UnknownTraitError`.
+   */
+  it("resolves the old side against a trait only the old manifest declares", () => {
+    const before = traited([{ name: "stamp", type: { kind: "text" } }]);
+    const after = manifest([
+      { name: "Patient", fields: [{ name: "label", type: { kind: "text" } }] },
+    ]);
+    const diff = computeManifestDiff(before, after);
+    expect(diff.modifiedEntities[0]?.diff.removedFields).toEqual(["stamp"]);
+    expect(diff.destructive).toBe(true);
+  });
+
+  /**
+   * Indexes resolve from the old side's own traits too, which is the half a fields-only comparison
+   * would miss: `computeResolvedIndexes` reads a trait's `indexed` fields and its references.
+   */
+  it("resolves the old side's trait-contributed indexes against its own traits", () => {
+    const diff = computeManifestDiff(
+      traited([{ name: "stamp", type: { kind: "text" }, indexed: true }]),
+      traited([{ name: "stamp", type: { kind: "text" } }]),
+    );
+    expect(diff.modifiedEntities[0]?.diff.removedIndexes).toEqual([{ columns: ["stamp"] }]);
+    expect(diff.modifiedEntities[0]?.diff.addedIndexes).toEqual([]);
   });
 
   /**

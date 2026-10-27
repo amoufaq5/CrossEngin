@@ -749,6 +749,69 @@ describe("the extension", () => {
     }
   });
 
+  it("refuses a reason that states nothing, including whitespace", () => {
+    // The hole this closed: `""` passed the plan, the store's UPDATE committed all three columns,
+    // and the RETURNING row was refused by `GdprDeletionRequestSchema` for ever — so `read()` threw
+    // from then on and `transition()` threw before building any SQL, making the Article 17 erasure
+    // for that data subject unreachable through the store. Whitespace is included because `.min(1)`
+    // does not trim, so `"   "` was accepted end to end and stored as the Article 12(3) reason.
+    for (const why of ["", " ", "   ", "\t", "\n"]) {
+      expect(
+        planDeadlineExtension(requestIn("verified"), {
+          deadlineAt: "2026-07-20T00:00:00.000Z",
+          deadlineExtendedAt: at,
+          deadlineExtensionReason: why,
+        }),
+        JSON.stringify(why),
+      ).toMatchObject({ refusal: "reason_not_stated" });
+    }
+  });
+
+  it("refuses the reason before it reads the request's state", () => {
+    // An input that cannot be represented is not worth comparing against state, so an
+    // already-answered request with a blank reason reports the reason. The mirror of the ordering
+    // test above, and the lesser cost: this caller can see their own argument.
+    expect(
+      planDeadlineExtension(requestIn("completed"), {
+        deadlineAt: "2026-07-20T00:00:00.000Z",
+        deadlineExtendedAt: at,
+        deadlineExtensionReason: "",
+      }),
+    ).toMatchObject({ refusal: "reason_not_stated" });
+  });
+
+  it("admits nothing the stored record cannot represent", () => {
+    // The converse of `every refusal has a producer`, which nothing asserted: that fence proves no
+    // member is unreachable, and this one proves no *admitted* input produces a row the schema
+    // refuses — which is the direction the blank reason escaped through. Every field the extension
+    // writes is applied to the record and the result re-parsed.
+    const request = requestIn("verified");
+    const inputs: { readonly deadlineExtensionReason: string }[] = [
+      { deadlineExtensionReason: "complexity of the request" },
+      { deadlineExtensionReason: "x" },
+      { deadlineExtensionReason: " padded but stating something " },
+    ];
+    for (const partial of inputs) {
+      const input = {
+        deadlineAt: "2026-07-20T00:00:00.000Z",
+        deadlineExtendedAt: at,
+        ...partial,
+      };
+      expect(planDeadlineExtension(request, input), partial.deadlineExtensionReason).toEqual({
+        ok: true,
+      });
+      // The row the store's UPDATE would commit, re-parsed exactly as its RETURNING is.
+      expect(() =>
+        GdprDeletionRequestSchema.parse({
+          ...request,
+          deadlineAt: input.deadlineAt,
+          deadlineExtendedAt: input.deadlineExtendedAt,
+          deadlineExtensionReason: input.deadlineExtensionReason,
+        }),
+      ).not.toThrow();
+    }
+  });
+
   it("refuses an extension recorded before the request arrived", () => {
     expect(
       planDeadlineExtension(requestIn("verified"), {
@@ -776,7 +839,13 @@ describe("the extension", () => {
   it("every refusal has a producer", () => {
     // A vocabulary member nothing can emit reads as coverage it does not provide.
     const produced = new Set<string>();
-    const cases: { request: GdprDeletionRequest; to: string; at: string }[] = [
+    const cases: {
+      request: GdprDeletionRequest;
+      to: string;
+      at: string;
+      why?: string;
+    }[] = [
+      { request: requestIn("verified"), to: "2026-07-20T00:00:00.000Z", at, why: "  " },
       { request: requestIn("completed"), to: "2026-07-20T00:00:00.000Z", at },
       {
         request: requestIn("verified", {
@@ -795,7 +864,7 @@ describe("the extension", () => {
       const plan = planDeadlineExtension(c.request, {
         deadlineAt: c.to,
         deadlineExtendedAt: c.at,
-        deadlineExtensionReason: reason,
+        deadlineExtensionReason: c.why ?? reason,
       });
       if (!plan.ok) produced.add(plan.refusal);
     }

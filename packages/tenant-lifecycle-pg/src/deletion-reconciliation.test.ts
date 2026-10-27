@@ -33,6 +33,7 @@ import {
   DeletionRequestCommittedUnreadable,
   PostgresDeletionRequestStore,
   REQUEST_COLUMNS,
+  type DeadlineRequestPage,
   type UnreadableRequestRow,
 } from "./deletion-request-store.js";
 import {
@@ -319,6 +320,29 @@ function readableRow(stored: StoredTombstone): ScanRow {
   return { kind: "record", id: stored.record.id, stored };
 }
 
+/** One row of a deadline read, readable or refused — `ScanRow`'s shape for the other sweep. */
+type RequestRow =
+  | { readonly kind: "record"; readonly record: GdprDeletionRequest }
+  | { readonly kind: "refused"; readonly refused: UnreadableRequestRow };
+
+function readableRequestRow(record: GdprDeletionRequest): RequestRow {
+  return { kind: "record", record };
+}
+
+function refusedRequestRow(refused: UnreadableRequestRow): RequestRow {
+  return { kind: "refused", refused };
+}
+
+/** The limit applied over the rows, so `rowsRead` counts refused rows as the store's does. */
+function deadlinePage(rows: readonly RequestRow[], limit?: number): DeadlineRequestPage {
+  const page = limit === undefined ? [...rows] : rows.slice(0, Math.max(1, Math.trunc(limit)));
+  return {
+    records: page.flatMap((r) => (r.kind === "record" ? [r.record] : [])),
+    unreadable: page.flatMap((r) => (r.kind === "refused" ? [r.refused] : [])),
+    rowsRead: page.length,
+  };
+}
+
 function refusedRow(id: string, detail = "approvedBy: custom"): ScanRow {
   return { kind: "refused", id, detail };
 }
@@ -363,6 +387,15 @@ function harness(
     /** What `rejectedAfterDeadline` returns — refusals recorded past their deadline. */
     readonly lateRefusals?: readonly GdprDeletionRequest[];
     readonly lateRefusalUnreadable?: readonly UnreadableRequestRow[];
+    /**
+     * The two reads' row lists, readable and refused interleaved in query order.
+     *
+     * `scanRows`' shape, and present for its reason: the pair above cannot express a page that
+     * fills its limit *and* holds a refused row, because the fake applies the limit over the rows
+     * and those two lists are independent of each other.
+     */
+    readonly unansweredRows?: readonly RequestRow[];
+    readonly lateRefusalRows?: readonly RequestRow[];
     /**
      * The targets whose `transition` commits and cannot read the row back.
      *
@@ -430,21 +463,34 @@ function harness(
     // The Article 12(3) pass's two reads. Separate counters, because the pass's `complete` is a
     // conjunction over both and a fake that answered one call for both could not express a page cut
     // on only one of them.
-    unanswered: async (
-      onUnreadable: (row: UnreadableRequestRow) => void,
-      limit?: number,
-    ): Promise<readonly GdprDeletionRequest[]> => {
+    //
+    // Each **applies the limit over one ordered row list**, readable and refused rows interleaved,
+    // which `scanAll` above already did and these two did not. Without it the composed case — a
+    // page that fills its limit *and* holds an unreadable row — was inexpressible in the fake, so
+    // the one shape `complete` was wrong about could not be written down: the fake ignored the
+    // limit and drew the refused rows from an independent list, which would have agreed with a
+    // caller deriving the coverage claim the same wrong way (`scanAll`'s own note, two methods up).
+    unanswered: async (limit?: number): Promise<DeadlineRequestPage> => {
       unansweredCalls.push(limit);
-      for (const row of behaviour.unansweredUnreadable ?? []) onUnreadable(row);
-      return behaviour.unanswered ?? [];
+      return deadlinePage(
+        behaviour.unansweredRows ??
+          [
+            ...(behaviour.unanswered ?? []).map(readableRequestRow),
+            ...(behaviour.unansweredUnreadable ?? []).map(refusedRequestRow),
+          ],
+        limit,
+      );
     },
-    rejectedAfterDeadline: async (
-      onUnreadable: (row: UnreadableRequestRow) => void,
-      limit?: number,
-    ): Promise<readonly GdprDeletionRequest[]> => {
+    rejectedAfterDeadline: async (limit?: number): Promise<DeadlineRequestPage> => {
       lateRefusalCalls.push(limit);
-      for (const row of behaviour.lateRefusalUnreadable ?? []) onUnreadable(row);
-      return behaviour.lateRefusals ?? [];
+      return deadlinePage(
+        behaviour.lateRefusalRows ??
+          [
+            ...(behaviour.lateRefusals ?? []).map(readableRequestRow),
+            ...(behaviour.lateRefusalUnreadable ?? []).map(refusedRequestRow),
+          ],
+        limit,
+      );
     },
   } as unknown as PostgresDeletionRequestStore;
   const tombstones = {
@@ -1268,6 +1314,37 @@ describe("auditDeadlines", () => {
     // And on the other read alone, which a single counter could not express.
     const refusals = harness({ lateRefusals: [LATE_REFUSAL] });
     expect((await refusals.reconciler.auditDeadlines(1)).complete).toBe(false);
+  });
+
+  it("derives the bounded reading from rows read, not records returned", async () => {
+    // The composed case, and the one the old fake could not express: a page that fills its limit
+    // where one of its rows is unreadable. Derived from the records, the count was short of the
+    // limit and a cut page claimed the table had ended — measured live at 3 of 6 rows read with
+    // `complete: true`, which also dropped the page-cut clause from the operator's line. A refused
+    // row is a row.
+    const page = await harness({
+      unansweredRows: [
+        readableRequestRow(BREACHED),
+        refusedRequestRow({ requestId: "dreq_unreadable01", detail: "verificationMethod" }),
+      ],
+    }).reconciler.auditDeadlines(2);
+    expect(page.examined).toBe(1);
+    expect(page.unreadable).toBe(1);
+    expect(page.complete).toBe(false);
+  });
+
+  it("counts the rows it could not represent, so a clean page is both lists empty", async () => {
+    // `{examined: 0, complete: true, findings: []}` is byte-identical to a healthy deployment with
+    // no pending requests, which is what this page reported for a page where nothing was
+    // assessable. `TombstoneSweepPage` carries the count and says exactly that; this one had
+    // dropped it.
+    const page = await harness({
+      unansweredRows: [refusedRequestRow({ requestId: "dreq_unreadable01", detail: "status" })],
+      lateRefusalRows: [refusedRequestRow({ requestId: null, detail: "request_id" })],
+    }).reconciler.auditDeadlines(50);
+    expect(page.examined).toBe(0);
+    expect(page.findings).toEqual([]);
+    expect(page.unreadable).toBe(2);
   });
 
   it("forwards an unreadable row from both reads and keeps assessing the rest", async () => {

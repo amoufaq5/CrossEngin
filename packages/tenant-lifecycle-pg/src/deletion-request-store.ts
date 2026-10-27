@@ -1,4 +1,10 @@
-import { readRows, textIdentity, unreadableDetail, type PgConnection } from "@crossengin/kernel-pg";
+import {
+  readRows,
+  readRowsWithUnreadable,
+  textIdentity,
+  unreadableDetail,
+  type PgConnection,
+} from "@crossengin/kernel-pg";
 import {
   GdprDeletionRequestSchema,
   UNANSWERED_DELETION_REQUEST_STATUSES,
@@ -274,6 +280,44 @@ function readRequestRows(
     (row) => textIdentity(row, "request_id"),
     (unreadable) => onUnreadable({ requestId: unreadable.identity, detail: unreadable.detail }),
   );
+}
+
+/**
+ * One page of a deadline sweep: the records, the rows the contract refused, and **how many rows the
+ * query returned**.
+ *
+ * `TombstoneScanPage`'s shape minus its cursor, and `readRowsWithUnreadable` rather than
+ * `readRows` — ADR-0373's **verifier** arm, which these two reads declined and should not have. The
+ * third field is the one that matters and the reason is that sweep's rule, written down there: *a
+ * refused row is a row.* It occupies a position in the ordering, so a coverage claim derived from
+ * the records alone reads a cut page as the end of the table whenever anything on it was
+ * unreadable — measured, 3 of 6 rows read and `complete: true`, which also omitted the page-cut
+ * clause from the operator's log line.
+ *
+ * Returning the refused rows instead of taking a reporter is the other half of following that
+ * sibling: a sweep is a verifier, so what happened to a refused row is the *caller's* decision made
+ * once, and the count cannot then be derived from a different set than the one the caller saw.
+ */
+export interface DeadlineRequestPage {
+  readonly records: readonly GdprDeletionRequest[];
+  readonly unreadable: readonly UnreadableRequestRow[];
+  readonly rowsRead: number;
+}
+
+function deadlineRequestPage(rows: readonly Record<string, unknown>[]): DeadlineRequestPage {
+  const read = readRowsWithUnreadable(rows, rowToDeletionRequest, (row) =>
+    textIdentity(row, "request_id"),
+  );
+  return {
+    records: read.records,
+    unreadable: read.unreadable.map((row) => ({
+      requestId: row.identity,
+      detail: row.detail,
+    })),
+    // The rows the query returned, readable or not — never `records.length`, which is what made the
+    // coverage claim wrong.
+    rowsRead: rows.length,
+  };
 }
 
 function isoOf(value: unknown): string {
@@ -590,18 +634,16 @@ export class PostgresDeletionRequestStore {
    * is a row an operator wants to see while a breach is a row a sweep wants to report. One query,
    * two readings, and the standing is computed by `assessDeadline` rather than by a `WHERE`.
    */
-  async unanswered(
-    onUnreadable: UnreadableRowReporter,
-    limit = 100,
-  ): Promise<readonly GdprDeletionRequest[]> {
+  async unanswered(limit = 100): Promise<DeadlineRequestPage> {
+    const bounded = Math.max(1, Math.min(500, Math.trunc(limit)));
     return this.conn.transaction(async (tx) => {
       await tx.query("SELECT set_config('app.platform_audit', 'on', true)");
       const result = await tx.query<Record<string, unknown>>(
         `SELECT ${REQUEST_COLUMNS.join(", ")} FROM ${this.table}
           WHERE status = ANY($1::text[]) ORDER BY deadline_at, request_id LIMIT $2`,
-        [[...UNANSWERED_DELETION_REQUEST_STATUSES], Math.max(1, Math.min(500, Math.trunc(limit)))],
+        [[...UNANSWERED_DELETION_REQUEST_STATUSES], bounded],
       );
-      return readRequestRows(result.rows, onUnreadable);
+      return deadlineRequestPage(result.rows);
     });
   }
 
@@ -627,19 +669,17 @@ export class PostgresDeletionRequestStore {
    * `rejected_at`, so a seventh status answering through that column fails there and names this
    * query rather than silently falling outside every sweep.
    */
-  async rejectedAfterDeadline(
-    onUnreadable: UnreadableRowReporter,
-    limit = 100,
-  ): Promise<readonly GdprDeletionRequest[]> {
+  async rejectedAfterDeadline(limit = 100): Promise<DeadlineRequestPage> {
+    const bounded = Math.max(1, Math.min(500, Math.trunc(limit)));
     return this.conn.transaction(async (tx) => {
       await tx.query("SELECT set_config('app.platform_audit', 'on', true)");
       const result = await tx.query<Record<string, unknown>>(
         `SELECT ${REQUEST_COLUMNS.join(", ")} FROM ${this.table}
           WHERE status = 'rejected' AND rejected_at > deadline_at
           ORDER BY rejected_at DESC, request_id LIMIT $1`,
-        [Math.max(1, Math.min(500, Math.trunc(limit)))],
+        [bounded],
       );
-      return readRequestRows(result.rows, onUnreadable);
+      return deadlineRequestPage(result.rows);
     });
   }
 

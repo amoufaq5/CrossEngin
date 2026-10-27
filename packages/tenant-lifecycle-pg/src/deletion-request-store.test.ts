@@ -767,7 +767,7 @@ describe("unanswered", () => {
     // `in_progress` and `completed` as literals, which is how `submitted` and `deferred` came to be
     // read by no query in the workspace — a derived set cannot omit a new status by forgetting.
     const { conn, calls } = fakePg([rowOf({ status: "submitted", verification_method: null, verified_at: null, verified_by: null })]);
-    await new PostgresDeletionRequestStore(conn).unanswered(collector().report);
+    await new PostgresDeletionRequestStore(conn).unanswered();
     const select = calls.find((c) => c.sql.includes("status = ANY"));
     expect(select).toBeDefined();
     expect(select?.params[0]).toEqual([...UNANSWERED_DELETION_REQUEST_STATUSES]);
@@ -780,7 +780,7 @@ describe("unanswered", () => {
     // furthest from their deadline before it drops a breach. Reversing it would make a bounded
     // sweep silent about exactly the rows it exists to find.
     const { conn, calls } = fakePg();
-    await new PostgresDeletionRequestStore(conn).unanswered(collector().report);
+    await new PostgresDeletionRequestStore(conn).unanswered();
     const select = calls.find((c) => c.sql.includes("status = ANY"));
     expect(select?.sql).toContain("ORDER BY deadline_at, request_id");
     expect(select?.sql).not.toContain("deadline_at DESC");
@@ -789,7 +789,7 @@ describe("unanswered", () => {
   it("elevates, clamps the limit, and filters on no deadline", async () => {
     const { conn, calls } = fakePg();
     const store = new PostgresDeletionRequestStore(conn);
-    await store.unanswered(collector().report, 9_999);
+    await store.unanswered(9_999);
     const select = calls.find((c) => c.sql.includes("status = ANY"));
     expect(select?.params[1]).toBe(500);
     expect(calls.some((c) => c.sql.includes("app.platform_audit"))).toBe(true);
@@ -799,12 +799,14 @@ describe("unanswered", () => {
     expect(select?.sql).not.toContain("now()");
   });
 
-  it("reports a row it cannot represent and returns the rest of the page", async () => {
-    const { reported, report } = collector();
+  it("returns a row it cannot represent beside the rest of the page, and counts both", async () => {
+    // `readRowsWithUnreadable` rather than a reporter — ADR-0373's verifier arm, which this read
+    // declined. `rowsRead` is what the coverage claim is derived from: 2 rows read, 1 represented.
     const { conn } = fakePg([unreadableRow("verified", "dreq_unreadable01"), rowOf()]);
-    const page = await new PostgresDeletionRequestStore(conn).unanswered(report);
-    expect(page).toHaveLength(1);
-    expect(reported.map((r) => r.requestId)).toEqual(["dreq_unreadable01"]);
+    const page = await new PostgresDeletionRequestStore(conn).unanswered();
+    expect(page.records).toHaveLength(1);
+    expect(page.unreadable.map((r) => r.requestId)).toEqual(["dreq_unreadable01"]);
+    expect(page.rowsRead).toBe(2);
   });
 });
 
@@ -823,28 +825,26 @@ describe("rejectedAfterDeadline", () => {
     // two columns anywhere — `auditCompleted` walks `completed` and `unanswered` walks the four
     // waiting statuses, so a refusal recorded past its deadline was covered by neither.
     const { conn, calls } = fakePg([rejectedLate]);
-    const page = await new PostgresDeletionRequestStore(conn).rejectedAfterDeadline(
-      collector().report,
-    );
+    const page = await new PostgresDeletionRequestStore(conn).rejectedAfterDeadline();
     const select = calls.find((c) => c.sql.includes("rejected_at >"));
     expect(select?.sql).toContain("status = 'rejected'");
     expect(select?.sql).toContain("rejected_at > deadline_at");
     expect(select?.sql).toContain("ORDER BY rejected_at DESC, request_id");
     // No clock parameter at all: both operands are stored, so the finding does not drift.
     expect(select?.params).toEqual([100]);
-    expect(page).toHaveLength(1);
-    expect(page[0]?.rejectedAt).toBe("2026-11-05T00:00:00.000Z");
+    expect(page.records).toHaveLength(1);
+    expect(page.records[0]?.rejectedAt).toBe("2026-11-05T00:00:00.000Z");
   });
 
-  it("reports a row it cannot represent and returns the rest of the page", async () => {
-    const { reported, report } = collector();
+  it("returns a row it cannot represent beside the rest of the page, and counts both", async () => {
     const { conn } = fakePg([
       { ...rejectedLate, request_id: "dreq_unreadable01", rejected_reason: null },
       rejectedLate,
     ]);
-    const page = await new PostgresDeletionRequestStore(conn).rejectedAfterDeadline(report);
-    expect(page).toHaveLength(1);
-    expect(reported.map((r) => r.requestId)).toEqual(["dreq_unreadable01"]);
+    const page = await new PostgresDeletionRequestStore(conn).rejectedAfterDeadline();
+    expect(page.records).toHaveLength(1);
+    expect(page.unreadable.map((r) => r.requestId)).toEqual(["dreq_unreadable01"]);
+    expect(page.rowsRead).toBe(2);
   });
 });
 
@@ -913,6 +913,15 @@ describe("extendDeadline", () => {
 
   it("refuses every plan refusal by name, before any statement", async () => {
     const cases: { row: Record<string, unknown>; input: typeof EXTENSION; refusal: string }[] = [
+      // The sixth member, and the only one whose subject is the input rather than the state, so
+      // the row and both instants here are otherwise entirely valid — which is what makes it
+      // evidence that the reason is checked *first*. Whitespace rather than `""`, because that is
+      // the form `.min(1)` admits and the one that was stored as the Article 12(3) reason.
+      {
+        row: rowOf(),
+        input: { ...EXTENSION, deadlineExtensionReason: "   " },
+        refusal: "reason_not_stated",
+      },
       {
         row: rowOf({ status: "completed", completed_at: "2026-10-05T00:00:00.000Z", completion_sha256: SHA, tombstone_id: TOMB, in_progress_at: "2026-10-03T00:00:00.000Z" }),
         input: EXTENSION,

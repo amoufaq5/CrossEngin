@@ -84,11 +84,18 @@ export interface TombstoneSweepPage {
  * `findings` is declared `unknown[]` because this layer **counts** them and never renders one: each
  * finding's sentence has exactly one producer, the reconciler's required `onDeadlineFinding`, and a
  * second renderer here would be the duplicated log line that increment converged (ADR-0288). The
- * three fields beside it are the half a reader cannot infer from the findings — how far the sweep
- * looked, whether it reached the end, and the horizon it judged against.
+ * four fields beside it are the half a reader cannot infer from the findings — how far the sweep
+ * looked, how much of it it could not read, whether it reached the end, and the horizon it judged
+ * against.
+ *
+ * `unreadable` is `TombstoneSweepPage`'s field and this mirror had dropped it with the page it
+ * mirrors: a sweep where nothing was assessable reported `{examined: 0, complete: true, findings:
+ * []}`, which is byte-identical to a healthy deployment with no pending requests. A clean page is
+ * one where **both** lists are empty, not the findings alone.
  */
 export interface DeadlineSweepPage {
   readonly examined: number;
+  readonly unreadable: number;
   readonly complete: boolean;
   readonly warningDays: number;
   readonly findings: readonly unknown[];
@@ -617,8 +624,14 @@ export class DeletionScheduler {
   /**
    * The Article 12(3) sweep (ADR-0387), on its own hourly-by-default cadence.
    *
-   * Two index-ordered reads: the unanswered requests ordered by the deadline in force, and the
-   * refusals recorded after theirs. The findings leave through the reconciler's own reporter as it
+   * Two reads: the unanswered requests ordered by the deadline in force, and the refusals recorded
+   * after theirs. Neither is index-*ordered*, which this comment used to claim — measured on
+   * PG 16.13 at 60k rows, both sort, the waiting read is a sequential scan plus a sort at a small
+   * waiting population (`idx_gdpr_deletion_deadline` reports `idx_scan = 0` there, so after
+   * ADR-0387 that index still has no reader on a deployment with a handful of pending requests),
+   * and `rejected_at` carries no index at all. The separate, more frequent cadence rests on the
+   * per-row tombstone re-hash the completed audit does and this pass does not; it does not rest on
+   * the SQL, whose heap reads are the same order as that audit's. The findings leave through the reconciler's own reporter as it
    * assesses each row, so this method's whole product is the coverage — which is why it reports
    * even when the page is clean, and why a reconciler offering no `auditDeadlines` reports nothing
    * at all rather than an empty page (ADR-0331: nothing was established, so nothing is claimed).
@@ -637,8 +650,10 @@ export class DeletionScheduler {
    *
    * A configured value must be a positive integer; anything else falls back to the derived cadence
    * rather than to off, because off is the condition this pass exists to end and silently restoring
-   * it is the wrong direction to fail in. The CLI validates the flag, so the fallback is reachable
-   * only from a direct constructor caller.
+   * it is the wrong direction to fail in. **No flag sets it** — `deadlineEveryTicks` has zero
+   * producers, so the cadence on every deployment is the derived one and the malformed-value arm is
+   * reachable only from a direct constructor caller. That is stronger than the claim this comment
+   * used to make, which was that the CLI validated a flag; there is none to validate.
    */
   private deadlineEveryTicks(): number {
     const configured = this.opts.deadlineEveryTicks;

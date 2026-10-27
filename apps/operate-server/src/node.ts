@@ -4264,6 +4264,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         onDeadlineSweep: (page) =>
           console.error(
             `[deletion] article 12(3) sweep: examined ${page.examined.toString()}` +
+              // Beside `examined` rather than folded into it, and printed even at zero: a page
+              // where nothing was assessable is not a page where nothing is late, and the two read
+              // identically without this (`examined 0, 0 finding(s)`).
+              `, ${page.unreadable.toString()} unreadable` +
               `, ${page.findings.length.toString()} finding(s)` +
               `, horizon ${page.warningDays.toString()}d` +
               `${page.complete ? "" : " (page cut — more requests than one page)"}`,

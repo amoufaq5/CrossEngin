@@ -2020,7 +2020,15 @@ describe("DeletionScheduler — a sweep that says it recovered (ADR-0329)", () =
   });
 });
 
-function deadlineReconciler(behaviour: { throws?: boolean; findings?: number; complete?: boolean } = {}): {
+function deadlineReconciler(
+  behaviour: {
+    throws?: boolean;
+    findings?: number;
+    complete?: boolean;
+    examined?: number;
+    unreadable?: number;
+  } = {},
+): {
   readonly reconciler: StrandedReconcilerLike;
   readonly calls: (number | undefined)[];
 } {
@@ -2033,7 +2041,8 @@ function deadlineReconciler(behaviour: { throws?: boolean; findings?: number; co
         calls.push(limit);
         if (behaviour.throws === true) throw new Error("the database is gone");
         return {
-          examined: 3,
+          examined: behaviour.examined ?? 3,
+          unreadable: behaviour.unreadable ?? 0,
           complete: behaviour.complete ?? true,
           warningDays: 7,
           findings: Array.from({ length: behaviour.findings ?? 0 }, () => ({})),
@@ -2091,7 +2100,32 @@ describe("the Article 12(3) sweep", () => {
         pages.push(page);
       },
     }).runOnce();
-    expect(pages[0]).toEqual({ examined: 3, complete: true, warningDays: 7, findings: [] });
+    expect(pages[0]).toEqual({
+      examined: 3,
+      unreadable: 0,
+      complete: true,
+      warningDays: 7,
+      findings: [],
+    });
+  });
+
+  it("forwards a page where nothing was assessable, which reads as clean without the count", async () => {
+    // `{examined: 0, findings: []}` is byte-identical to a healthy deployment with no pending
+    // requests, so the count beside it is what separates "nothing is late" from "nothing could be
+    // read". `TombstoneSweepPage` carries it; this mirror had dropped it.
+    const pages: DeadlineSweepPage[] = [];
+    await new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: deadlineReconciler({ examined: 0, unreadable: 3, findings: 0 }).reconciler,
+      intervalMs: 3_600_000,
+      scheduler: fakeScheduler(),
+      onDeadlineSweep: (page) => {
+        pages.push(page);
+      },
+    }).runOnce();
+    expect(pages[0]?.examined).toBe(0);
+    expect(pages[0]?.findings).toEqual([]);
+    expect(pages[0]?.unreadable).toBe(3);
   });
 
   it("honours a configured tick multiple", async () => {

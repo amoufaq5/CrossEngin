@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 20,570 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 20,615 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -2239,6 +2239,13 @@ report; `apps/operate-web` has none).
   installing only if nothing is overwritten**, so the logic is a script that declines on a foreign
   path and says so, reads its own marker before writing, and whose documented escape **persists
   across a reinstall** — the reversibility the first draft claimed and did not have.
+  **The hook is installed by `prepare`, which runs on `pnpm install`, so a checkout that installed
+  *before* ADR-0382 landed never gets it and nothing notices** — measured in ADR-0388's addendum,
+  where `git config core.hooksPath` was empty in a long-lived container and a commit went through
+  with the hook sitting in `.githooks/` unexecuted. `sh .githooks/install-hooks.sh` is the one-line
+  repair and is exactly what `prepare` would have run. Moot on a fresh container and this run's own
+  inert-mechanism class on a persistent one, so **check `git config core.hooksPath` before trusting
+  that the hook ran**: a clean commit is not evidence that it did.
 
   **ADR-0383's class is an index no query reads.** The predicate emitted
   `unaccent(<col>::text) ILIKE …` and the DDL indexed the bare column, so every `?q=` and
@@ -2380,6 +2387,50 @@ report; `apps/operate-web` has none).
   **derived** from the scheduler's own interval (hourly) and defaulted **on**, which is the opposite
   of `auditEveryTicks` and for a stated reason: there off is the status quo, and here off *is* the
   defect.
+  **And then an adversarial pass found twelve things, one of them worse than the defect the
+  increment closed** (ADR-0387's addendum). `planDeadlineExtension` validated five facts and **not
+  the reason**, while the contract requires `min(1)` paired with the instant — so `""` passed the
+  plan, the `UPDATE` committed all three columns, and the `RETURNING` row was refused by the schema
+  from then on: `read()` throws for ever and `transition()` throws **before building any SQL**, so
+  the request can never reach a terminal status again and **the Article 17 erasure for that data
+  subject is unreachable through the store**. The request also leaves the sweep entirely. It is the
+  shape the **fifth** refusal exists to prevent, in that refusal's own words, and
+  `DeadlineExtensionRefused`'s doc asserted the guarantee that failed. `reason_not_stated` is the
+  sixth member, checked **first** (an input that cannot be represented is not worth comparing
+  against state) and **trimmed**, because `.min(1)` does not trim so `"   "` stored as the Article
+  12(3) reason. Why nothing caught it is the reusable half: the totality fence asserts no refusal is
+  unreachable and **nothing asserted the converse** — that no *admitted* input produces a row the
+  schema refuses — which is the direction it escaped through, and the one store test covering the
+  class used a row shape that `UPDATE` can never write.
+  The second pair is the coverage claim wrong in the reassuring direction twice: `complete` came
+  from the **readable** record count, so one unreadable row on a full page made a cut sweep claim it
+  reached the end (3 of 6 rows read, `complete: true`, page-cut clause dropped from the log line),
+  and the page carried no unreadable count, so a page where *nothing* was assessable read
+  `{examined: 0, complete: true, findings: []}` — byte-identical to a healthy deployment with no
+  pending requests. The sibling sweep had solved both and written the rule down (`TombstoneScanPage`
+  carries `rowsRead` because **a refused row is a row**), so the fix follows it rather than
+  inventing: `DeadlineRequestPage {records, unreadable, rowsRead}` through
+  `readRowsWithUnreadable`, which is ADR-0373's **verifier** arm these two reads had declined.
+  **And the fake could not express the defect** — it ignored the limit and drew refused rows from an
+  independent list, so a full page holding an unreadable row was inexpressible, while `scanAll`'s
+  own fake two methods up already modelled the limit over one interleaved list and says in its
+  comment why. Three claim corrections ride along, all measured: *"the remedy exists"* is **false**
+  (`extendDeadline` has one hit in the workspace, its own definition — so the sweep names a
+  condition whose remedy has no surface, ADR-0334 one layer out, and it is the ADR's first open
+  question rather than a quiet rewording), *"two index-ordered reads"* is false (both sort,
+  `rejected_at` has no index, and `idx_gdpr_deletion_deadline` reports `idx_scan = 0` at a small
+  waiting population), and the swap mutation fails **8** tests rather than 7.
+  **Both fixes are verified live** as a non-owner, and the P0's useful half is not the three columns
+  staying untouched but the two lines after it — `read()` and `transition(in_progress)` both answer
+  OK, where pre-fix both threw for ever, so what the run shows is that the data subject's **erasure
+  is still reachable**, which is what the defect destroyed. The coverage half found something no unit
+  test can: with one unreadable row among six, three of four limits are **exact** (where the
+  adversarial pass measured all four dishonest) and the fourth is **sound but conservative** — at the
+  limit, `rowsRead < bounded` declines to claim completeness in the one case where the claim would
+  have been true, because a `LIMIT n` read that returns n rows cannot tell *exactly n* from *more
+  than n*. Pre-existing semantics, the safe direction (ADR-0372: never claim a reading nobody took),
+  and the `n + 1` fetch that would make it exact is a different change. **At the limit the honest
+  answer and the exact answer differ**, which is worth knowing before someone "fixes" the fourth row.
 
   **ADR-0388's class is a comparison whose aperture is narrower than the artifact it compares** —
   ADR-0361's class one level out, from a field list to a whole manifest. The reviewer's
@@ -2412,13 +2463,110 @@ report; `apps/operate-web` has none).
   recording: mapping `manifestSectionChangeMayWithhold` straight onto `impact` was **measured wrong
   in five places**, because adding an *optional field* changes the `entities` section, `entities` is
   `served`, so the coarse census answers *may withhold* and overrode `entityLayer`'s correct
-  `additive`. `SECTIONS_WITH_DETAIL_LAYERS` suppresses the upgrade for the five sections a layer
-  reads — declared beside the layers because a layer is a function and which sections it reads is
-  not a question any text scan can answer soundly, and fenced **behaviourally** with a
-  representative *withholding* change per section (withholding deliberately: a probe answering
-  `mayWithhold: false` would pass whether or not the layer covered the section). Mutation-checked
-  both ways: adding `jobs` fails 2 tests and dropping `permissions` fails 3, two of them tests that
-  predate the set.
+  `additive`. So the census is suppressed where a layer reads the section — declared beside the
+  layers because a layer is a function and which sections it reads is not a question any text scan
+  can answer soundly, and fenced **behaviourally** with a representative *withholding* change per
+  section (withholding deliberately: a probe answering `mayWithhold: false` would pass whether or
+  not the layer covered the section).
+  **And then an adversarial pass found that suppression was the right idea at the wrong
+  granularity, which is ADR-0388's addendum.** `SECTIONS_WITH_DETAIL_LAYERS` suppressed per
+  **section** while a layer covers only part of its section, so the census was overruled by a layer
+  that had seen nothing — an absence of information read as a verdict of `additive`, ADR-0372's
+  class inside one predicate. Measured, **five** withholding changes across four of the five
+  covered sections read `additive` with every layer silent: `abac: "own_rows"` added to a `list`
+  grant (the sharpest — ADR-0340 refuses an undischargeable obligation **at boot**, so for a tenant
+  whose deployment declares no evaluator that is a permanent 503 approved as additive), a role
+  losing its `inherits`, `unique: true` added to a field, and a transition retargeted or
+  re-sourced. `SECTION_DETAIL_LAYER` is a **total map over all 17 sections** to the function that
+  counts what its layer reported, `null` for the twelve no layer reads — so **the entry is the
+  reader** and a stale membership entry cannot arise — over a `Pick` of the view that `compare`
+  **spreads into its return value**, so what decides the suppression is what the reviewer is shown.
+  Two costs are stated rather than discovered later: a **cosmetic** change a layer cannot see now
+  reads `breaking` (a role's `description` moving), which is the cost every *uncovered* section
+  already pays and is the safe direction; and the granularity stays the section, so a change
+  speaking about one member and withholding on another reads `additive`. Per-member matching is
+  **refused on measurement** — three of five sections align and two cannot, since `workflows` keys
+  by workflow name while `lifecycleLayer` reports by **entity** (a per-member rule would regress the
+  lifecycle-state control) and `relations` has no member keys at all.
+  Two gaps in the *layers* came out of the same pass. `grantMap` **never read the third field-grant
+  arm** — ADR-0348 added `FieldPermission.create` two increments earlier — so a narrowed `create`
+  grant produced no `PermissionChange` at all; the census fix recovered the *verdict* and the
+  **detail** was still missing, and it is read directly rather than through `fieldWriteGrant`'s
+  `create ?? update` fallback, which would report an inherited `update` grant twice and a declared
+  `create` grant not at all. And **one relation kind flip keeps its label**: `relationLabel` is
+  `from.field → to`, identical for `many_to_one` and `one_to_many`, while `relationOnDelete`
+  compares only the delete rule and `relations` is `unkeyed_array`, where a same-count content
+  change answers `mayWithhold: false` — so the flip read `additive` with no detail and no warning.
+  The kind is compared before `onDelete` now, with `relation_kind_changed`; a `many_to_many` flip
+  needs no arm, since `{kind, left, right}` is the whole of that member and the label carries all
+  three. **The first draft of that warning said the wrong thing and measuring it is what caught
+  it**: the flip does *not* move the foreign key, which comes from the field's `reference` type —
+  what only `many_to_one` does is bind a column on `from`, so `relationDeleteIndex` drops the
+  relation and `onDeleteFor?.(col.field) ?? "restrict"` reverts the key to RESTRICT, silently losing
+  a declared CASCADE or SET NULL (a parent delete that used to succeed starts failing) and
+  re-weighting the Article 17 delete order off the same index. One suspicion was **refuted** and
+  recorded for that reason: `relationOnDelete` answering `null` for a `many_to_many` is complete
+  rather than a gap, since that member has no content outside its label.
+  **A fourth defect was in the increment's own work**: ADR-0388 added `sectionChanges` to the view
+  and to the web mirror and left `design-review-routes.ts`' `ManifestDiffViewLike` — the structural
+  mirror that is what the *route's type* says a reviewer gets — untouched. The field still reached
+  the wire, because the route is `return { diff: diffManifests(…) }` and `JSON.stringify` serializes
+  own properties rather than declared ones, which is why nothing broke; the cost is that
+  `ManifestDiffer` is an **injection seam**, so a differ omitting the census typechecked, and both
+  route stubs in the app were in that state. ADR-0386's class on the surface this ADR exists to fix,
+  and already on file as its own open question (*"four mirrors of one view shape, compared by
+  nothing"*) with a live member nobody had looked for. The field is **required** on the mirror, which
+  found the second stub immediately, and the general fence is
+  `AssertNever<Exclude<keyof ManifestDiffView, keyof ManifestDiffViewLike>>`, because assignability
+  only proves the real view has *at least* the mirror's fields. An array of that `Exclude` would
+  **not** be a fence — `[]` is assignable to `"sectionChanges"[]` as readily as to `never[]` — so the
+  constraint has to fail at the alias.
+  Mutation-checked six ways: restoring the unconditional suppression fails 6 tests, pointing
+  `workflows`' extractor at `relationChanges` fails 3 (one a lifecycle test that predates the map),
+  giving `jobs` an extractor fails the both-directions fence, dropping the `create` arm fails 2,
+  dropping the kind comparison fails 1, and renaming the mirror's `sectionChanges` is a compile
+  error naming the field plus both stubs and `node.ts`. **Three of the probes behind that addendum were wrong before
+  they were right, all the same way**: a manifest carrying a key the schema strips, or one it
+  refuses, answers `comparable: false` with every count zero — byte-identical to an unchanged
+  manifest but for that flag — so a probe over `diffManifests` must prove its own mutation parsed,
+  and those tests assert `comparable` first. **A fourth instance landed one test later**, in the
+  response-body test written to close finding 4: this route file's own fixtures carry no
+  `manifestVersion`, so the real differ refused them and the assertion read `[]` — *the probe had
+  not parsed*, not *the census is absent*. Written down because the remedy has to be a check in the
+  test rather than a sentence in the file: the author had just written the sentence.
+  **And the kernel half of that pass found the sharpest thing in the increment: this ADR's own trait
+  fix carried a regression, by the mechanism the fix introduced.** `resolvedAgainstOwnTraits`
+  pre-expanded the old entity and handed on `{...entity, traits: [], fields: [...resolved]}` — and
+  that `traits: []` is the defect, because `checkEntityFieldNames` then reads every
+  trait-contributed field as an **own** field, so a trait field named `id` collided with the
+  implicit key and raised for a manifest that had been accepted. **The fabrication destroyed trait
+  provenance, which is the fact that function reads, and the destruction *was* the regression** —
+  ADR-0361's fabricated entity one package over, inside the increment citing it. So the helper is
+  **deleted** and `DiffContext` carries `oldCustomTraits`: that function already owns a mechanism
+  for *which traits apply*, applying one list to both sides was the whole defect, and two lists keep
+  provenance rather than flattening it. The collision it surfaced is a **real manifest defect
+  nothing refused**: a field named `id` makes `columnPlanForEntity` plan the column while
+  `emitEntityTableDdl` already writes the implicit key, so one `CREATE TABLE` carries `"id"` twice
+  and Postgres answers `42701 column "id" specified more than once` — parsed, validated, hashed and
+  **unservable**. Refused at validation for both halves, at a measured cost of zero (**69 entities /
+  556 own fields / 0 custom traits** across the seven packs; **3 traits / 9 trait fields** in the four
+  compliance packs; `id` appears **0** times). Two refusals are argued from measurement and written
+  into the source: a tuple-exhaustiveness fence adds only the *addition* case (a rename already
+  errors three ways, and order and spelling are invisible to any type derived from the same schema),
+  and a fourth reach member splits three sections from five on an axis no reviewer acts on. The
+  under-asserting tests are the other half — the canonical-bytes test compared **72 of 77 sibling
+  pairs as `null`/`null`**, and rebuilt over a base carrying all seventeen sections it makes **272
+  substantive comparisons** and immediately caught two fixtures varying keys their schemas do not
+  retain. And **F9 is the comment correction with a consequence**: both non-served sentences said
+  "runtime" or "read by nothing", which three sections falsify (`reports`/`dashboards` through
+  `operate-server`'s boot survey, `customWidgets` through `architect-cli`, and `extends.ts`'s merge
+  reading all seventeen), so they say **request path** now — and that is why the sentence had to
+  start travelling, since `apps/operate-web` held a **fourth** copy keyed on the bare `reach` string,
+  that copy was the **live** one, and its two non-served sentences each dropped a different clause,
+  between them exactly the two facts separating `validated_only` from `unread`.
+  `ManifestSectionChange.reachNote` is sent and the client renders what it was sent, falling back to
+  the bare `reach` rather than to prose of its own: **a copy removed cannot drift where a copy fenced
+  can**, and saying less beats saying something false.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -2624,6 +2772,28 @@ packages exist at only one layer, noted below where that is true.
   provide, which is the same vacuity this file already records for `validateFiles`. Validation errors
   on ADR-0348's split, and vacuous today (0 reports and 0 dashboards in any pack), which is exactly
   when they cost nothing.
+  **And `validateEntities` refuses a field named `id` or `tenant_id`** (ADR-0388's addendum), own or
+  trait-contributed, over `RESERVED_ENTITY_FIELD_NAMES` in `ddl/resolution.ts` — one spelling, read
+  by the validator and by `ddl/diff.ts`'s `checkEntityFieldNames`. Not a style rule: the implicit
+  primary key is written by `emitEntityTableDdl` while `columnPlanForEntity` plans the declaration,
+  so one `CREATE TABLE` carries `"id" TEXT NOT NULL` *and* `"id" TEXT` and Postgres answers
+  **`42701 column "id" specified more than once`** — a manifest that parsed, validated, hashed and
+  **could not be served at all**. The trait half's message names its blast radius, since dropping
+  the field changes every entity carrying the trait. Validation errors on ADR-0348's split, and
+  measured vacuous before it was written (**0** occurrences across 69 entities / 556 own fields in
+  the seven packs and 9 trait fields in the four compliance packs), which is exactly when it costs
+  nothing — and the diff-side fix is needed independently, because `computeManifestDiff` runs on
+  *stored* manifests and one stored before the rule still carries the shape.
+  **`tenant_id` is the second member and its absence was held in place by a false comment**: the
+  set's own doc said *"only `id` today … `tenant_id` is refused earlier as a reserved prefix"*, and
+  no such refusal exists — driven through `validateManifest` rather than the emitter, `tenant_id`
+  was accepted and its `CREATE TABLE` carried the column twice (`ERROR: column "tenant_id"
+  specified more than once`, live on PG 16.13). The refusal is driven by `it.each` over the
+  constant now, so a third member cannot arrive the same way; and **`created_at`/`updated_at` are
+  asserted *not* reserved**, because `BUILT_IN_TRAIT_FIELDS`' `auditable` supplies exactly those
+  names and the emitter therefore **overrides** rather than duplicating them — which is its own,
+  quieter defect (the stamp becomes a caller-supplied column) and is register P2.12c, where what is
+  wrong is the type rather than the name.
   `resolvedClassifiedFields(entity, customTraits)` joins `resolvedFields` and `resolvedFieldNames` in
   `ddl/resolution.ts` as **the one answer to "which of this entity's fields are classified, as the
   served table has them"** (ADR-0361) — the reason `resolvedFields` is the one answer to "which fields
@@ -2640,7 +2810,12 @@ packages exist at only one layer, noted below where that is true.
   (served 9 / validated_only 5 / unread 3) is a *measured* claim about the committed tree and takes
   `served` wherever **any** key of the section is served, because under-reporting a reach is the
   dangerous direction; `MANIFEST_SECTION_REACH_MEANINGS` is keyed by **reach** and not by section, so
-  there are three sentences to keep true rather than seventeen. `MANIFEST_SECTION_MEMBER_KEYING` is
+  there are three sentences to keep true rather than seventeen — and since ADR-0388's addendum
+  `ManifestSectionChange.reachNote` **sends** the sentence rather than letting a consumer key on the
+  reach, which is the map's first non-test reader and the fix for the *fourth* copy of those three
+  strings: `apps/operate-web` held one keyed on the bare `reach` string, that copy was the live one,
+  and its two non-served sentences each dropped a different clause. A copy removed cannot drift where
+  a copy fenced can. `MANIFEST_SECTION_MEMBER_KEYING` is
   declared rather than probed from `ManifestSchema.shape`, for a compile-time obligation a probe
   cannot give and because `named_array` has to know the key property is `name`; the cost is drift,
   which `manifestSectionMemberKeyingsMatchSchema` closes by running that probe in the test and
@@ -2656,11 +2831,18 @@ packages exist at only one layer, noted below where that is true.
   `computeEntityDiff` applied it to **both** sides, so the *old* entity was resolved against the
   *new* trait definitions. Measured through the reviewer's own diff view, a trait field retyped,
   removed, or weakened `phi` → `internal` each answered `impact: none` with every count zero while
-  `columnPlanForEntity` genuinely gains, loses or retypes that column. `resolvedAgainstOwnTraits`
-  pre-expands the old entity against `old.traits` and hands on an entity carrying `traits: []`, so
-  the diff's own `expandTraits` contributes nothing and `fields` already holds the old resolution;
-  `checkEntityFieldNames` is called at the pre-expansion site because the diff's copy of it then has
-  an empty trait list and could no longer catch an own-field/trait-field collision on the old side.
+  `columnPlanForEntity` genuinely gains, loses or retypes that column. **`DiffContext.oldCustomTraits`
+  is how, and the first spelling was a regression** (ADR-0388's addendum): `resolvedAgainstOwnTraits`
+  pre-expanded the old entity and handed on `{...entity, traits: [], fields: [...resolved]}`, whose
+  `traits: []` made `checkEntityFieldNames` read every trait-contributed field as an **own** field —
+  so a trait field named `id` collided with the implicit key and raised for a manifest that had been
+  accepted. **The fabrication destroyed trait provenance, which is the fact that function reads.**
+  The helper is deleted; `computeEntityDiff` resolves each side against its own list, because it
+  already owns a mechanism for *which traits apply* and applying one list to both sides was the whole
+  defect. `oldCustomTraits` is **optional, defaulting to `customTraits`**, so a future caller wanting
+  per-side resolution must pass it and the one-list behaviour is still what silence buys —
+  `manifest/diff.ts` is the only caller today, so the compiler cannot ask and the four trait tests in
+  `diff.test.ts` are the fence.
 - **`kernel-pg`** — the impure applier. `PgConnection` + `parsePgEnvConfig` + node-postgres
   binding, advisory-lock-gated per-statement migration application with `_meta_migrations`
   hash bookkeeping, preconditions, and the pgcrypto at-rest encryption stack (coverage report,
@@ -4124,7 +4306,19 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `anchoringWouldBury` shape). `planDeadlineExtension` is the extension's contract, with
   `ARTICLE_12_MAX_DEADLINE_MS` **extracted** from an inline `30 * 86_400_000 * 3.1` in the schema's
   own refinement so the validator and the extension cannot disagree about which extensions are
-  lawful.
+  lawful — and **six** refusals since ADR-0387's addendum, the sixth being `reason_not_stated`,
+  which closes the one input that committed a row and then could not be read. It validated five
+  facts and not the reason, while the contract requires `min(1)` paired with the instant, so `""`
+  passed, the `UPDATE` committed all three columns, and from then on `read()` threw and
+  `transition()` threw **before building any SQL** — the Article 17 erasure for that data subject
+  unreachable through the store, and the request gone from the sweep. Checked **first**, because an
+  input that cannot be represented is not worth comparing against state, and **trimmed**, because
+  `.min(1)` does not: `"   "` was stored as the Article 12(3) reason. It is deliberately stricter
+  than the schema, which must stay able to read back anything a writer could have written
+  (ADR-0373's rule), so the place to refuse an unstated reason is the write path and not the parse.
+  The test that owed it is the **converse** of `every refusal has a producer`: that one proves no
+  member is unreachable, and nothing proved no *admitted* input yields a row the schema refuses —
+  which is the direction this escaped through.
 - **`tenant-lifecycle-pg`** — also the tenant lifecycle **trail** (ADR-0335). `lifecycle-event-store.ts`
   is the first writer `meta.tenant_lifecycle_events` ever had, whose own `PLATFORM_RECORD_TABLES`
   comment says why it matters: *without it nothing in the database distinguishes a tenant that was
@@ -4255,7 +4449,22 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   **declared facts** rather than its name, so a seventh standing gets a sentence from the facts it
   is obliged to declare instead of falling through to a default nobody chose. `extendDeadline` is
   the one write path for Article 12(3)'s extension, with two guards in the `UPDATE` predicate
-  (ADR-0321's *the row is the lock*).
+  (ADR-0321's *the row is the lock*) — and **no caller in the workspace**, so the remedy the sweep's
+  findings name has a mechanism and no surface (ADR-0387's first open question).
+  **Both reads answer `DeadlineRequestPage {records, unreadable, rowsRead}` since ADR-0387's
+  addendum**, through `readRowsWithUnreadable` — ADR-0373's **verifier** arm, which these two reads
+  declined and should not have. `complete` is derived from `rowsRead` and never from the records,
+  because **a refused row is a row**: it holds a position in the ordering, so with one unreadable
+  row on a full page the record count is short of the limit and a cut page claimed the table had
+  ended (measured, 3 of 6 rows read with `complete: true`, which also dropped the page-cut clause
+  from the operator's line). `TombstoneScanPage` had solved this and written the rule down, so the
+  fix follows the sibling rather than inventing. The refused rows are returned rather than reported
+  through a reporter the reads take, which is the other half of following it: a sweep is a verifier,
+  so what happens to a refused row is the caller's decision made **once**, and the count cannot then
+  be derived from a different set than the one the reporter saw. `DeadlineAuditPage.unreadable` is
+  the other half of the coverage claim — a page where nothing was assessable read
+  `{examined: 0, complete: true, findings: []}`, byte-identical to a healthy deployment with no
+  pending requests — and a clean page is one where **both** lists are empty.
   **And `eraseSharedTablesWithin` is the second real erasure** (ADR-0329), which until then did not
   exist at all: **112 of the 143 `META_TABLES` carry a `tenant_id`** and nothing erased one of them,
   so every deployment declared `shared_tables: "absent"` and signed an Article 17 proof over a tenant
@@ -6099,6 +6308,16 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   saying `additive`. A client re-deriving a judgement the server already made, with a different rule,
   in an app with zero tests. `sectionChanges` is **optional** on the web mirror, so a server a build
   behind sends nothing and the page reads as it did.
+  **And the per-reach sentence is no longer written here** (ADR-0388's addendum): this file held a
+  `REACH_NOTE: Record<string, string>` keyed on the bare `reach` string, which was the **fourth**
+  copy of the kernel's three sentences and the only one a reviewer actually read — while the kernel's
+  own map had no non-test reader at all, so the live copy was the one nothing compared. Both of its
+  non-served sentences said "runtime" or "read by nothing", which three sections falsify, and each
+  dropped a different clause. It is deleted and `change.reachNote` renders instead, **falling back to
+  the bare `reach`** rather than to prose of this file's own: a server that predates the field shows
+  `validated_only` instead of a sentence, which is accurate and unprettified, where any local default
+  would be the copy coming back. Saying less beats saying something false — and a copy removed cannot
+  drift where a copy fenced can, which is the cheaper half of the four-mirrors question.
   It still has **zero tests**, so it is outside the sweep — though no longer outside every strategy
   rule: `entity-field-aperture.ts` (ADR-0361) walks it through a local fs walk, because that member
   has no `src/` and is therefore invisible to the other nine, and it is where 25 of the class's
@@ -6848,8 +7067,23 @@ and check nothing else is sweeping before starting one — **with a `/proc` scan
 `next build` rule twenty lines below documents: the pattern matches the *waiting shell's own command
 line*, so the check reports hits that are all pollers. Measured during ADR-0382's increment, where
 `pgrep` still reported two matches for a build that had already finished and both were polling
-shells. This is ADR-0307's lesson in a third form — running vitest is not running the type checker,
-running vitest is not running the build, and running two sweeps is not running one.
+shells. **The `/proc` scan has the same flaw unless it excludes itself**, measured in ADR-0388's
+addendum: a `for p in /proc/[0-9]*` loop matching `*"pnpm"*` reports its own shell and its subshell,
+because the pattern is in the scanner's own `cmdline` — two hits, both the scanner, on an idle tree.
+So the remedy is the *shape* of the check and not the tool: resolve each hit's PID before believing
+it, or compare against `$$`. This is ADR-0307's lesson in a third form — running vitest is not
+running the type checker, running vitest is not running the build, and running two sweeps is not
+running one.
+
+**Name a sweep log after its increment, and read its mtime before its contents.** The scratchpad
+accumulates these across sessions, so a bare `final-test.log` is a file some earlier increment
+already wrote: in ADR-0388's addendum a `tail` of one reported `packages/testing test: Failed` and
+`TEST exit 143` for a sweep whose test phase had not started, from **three weeks earlier** — the
+fourth instance of reading one process's output and attributing it to another, and the first where
+the stale content claimed a *failure* rather than a success. `stat -c %y` settles it in one command
+and the ADR-prefixed convention every earlier increment used (`0347-final-test.log`) prevents it
+outright. A pending `>` redirection leaves the previous file untouched until the command starts,
+which is exactly the window.
 
 **There is a top-level `lint` script and it is a hard red, not a vacuous pass** (ADR-0382). This
 file said it "passes **vacuously** — ESLint has not been migrated to v9 flat config", and **both
@@ -9944,10 +10178,29 @@ three make the rest honest, cheap or verifiable.
    entity against the *new* manifest's traits, so a trait field retyped, removed or weakened
    `phi` → `internal` each answered `impact: none` with every count zero — the covered five being
    silently wrong rather than merely narrow. `sectionChanges` now names every section the two
-   manifests differ on, so a reviewer is never shown `No changes` for a manifest that differs. What
+   manifests differ on, so a reviewer is never shown `No changes` for a manifest that differs.
+   **An adversarial pass then found three more, two of them in the covered five rather than in the
+   uncovered twelve** (ADR-0388's addendum): the suppression ran per *section* while a layer covers
+   only part of its section, so five withholding changes — an `abac` obligation on a `list` grant, a
+   role losing `inherits`, `unique: true` added, and a transition retargeted or re-sourced — read
+   `additive` with every layer silent; `grantMap` never read `FieldPermission.create`, two
+   increments after ADR-0348 added it; and `many_to_one` ⟷ `one_to_many` over one triple shares its
+   label, so a flip was invisible to both halves — **not** a flip "moving the foreign key", which is
+   this entry's own first draft and is measured false: only `many_to_one` binds a column, so the
+   flip makes `relationDeleteIndex` drop the relation and the key revert to RESTRICT, silently
+   losing a declared CASCADE or SET NULL. All three are closed and
+   the residual is the suppression's **granularity**, which is a section rather than a member and is
+   measured as unclosable uniformly.
+   **And this entry's own "read by no runtime" is the claim the kernel half corrected**: three of
+   the eight *are* read, just not on the request path — `reports` and `dashboards` by
+   `operate-server`'s ABAC obligation survey (`abac-obligations.ts:283,289`, a **boot refusal**
+   surface, so a declared obligation there is surveyed and reported) and `customWidgets` by
+   `architect-cli`'s manifest summary, with `extends.ts`'s merge reading all seventeen. The honest
+   axis is **request path**, which is what `MANIFEST_SECTION_REACH` measures and what its two
+   non-served sentences say now. So what
    remains of this entry is the **validated-only** half below — eight sections authored, hashed and
-   read by no runtime, three of them not even validated — plus its own last clause, the per-view and
-   per-report `permissions` override that nothing enforces. The original entry:
+   read by no *request path*, three of them not even validated — plus its own last clause, the
+   per-view and per-report `permissions` override that nothing enforces. The original entry:
    **Eight manifest sections are read by nothing — but they are not *authored*, and the headline
    this entry gave is inverted.** The core fact holds: `integrations`, `files`, `reports`,
    `dashboards`, `customWidgets`, `theme`, `i18n` and `search` are merged across lineage, committed
@@ -10359,6 +10612,22 @@ land with or before it.
     beside the 505 TEXT and 159 JSONB, and the one where the type is *furthest* from the contract —
     `TIMESTAMPTZ` admits two infinities and years to 294276 against `Iso8601`'s four digits, so the
     gap is not a refinement anybody chose but the full width of the type.
+12c. **A declared `created_at` or `updated_at` silently replaces the server's stamp**, found while
+    closing the `id` collision in ADR-0388's addendum and measured rather than reasoned. The
+    implicit-column class has **four** members and `emitEntityTableDdl` handles them in **two** ways:
+    `id` and `tenant_id` are **duplicated** (`"id" TEXT NOT NULL` beside `"id" TEXT`, three `"id"`
+    tokens in one statement) and so `42701`-unservable, while `created_at` and `updated_at` are
+    **overridden** — declaring `created_at: text` emits `"created_at" TEXT` *instead of*
+    `TIMESTAMPTZ NOT NULL DEFAULT date_trunc('milliseconds', now())`, so the table serves and the
+    audit stamp becomes a caller-supplied column with no default, against ADR-0360's own reading
+    that a `created_at` stamp is *the server writing a field, not the caller writing it*. `id` and
+    (as of that addendum) `tenant_id` are refused at validation; these two **cannot** be, because
+    `BUILT_IN_TRAIT_FIELDS`' `auditable` supplies exactly those two names — which is *why* the
+    emitter de-duplicates them — and an own field colliding with a trait-supplied one is already
+    refused, so the uncovered case is an own `created_at` on an entity **without** `auditable`.
+    Zero members across the seven packs (0 of 556 own fields, and 0 for all four names), so it is
+    reachable from an authored manifest alone. The fix is probably a *type* check rather than a name
+    refusal.
 13. **Four contracts admit or assert something structurally false**, each in a subsystem whose job
     is to be checkable: a **late GDPR 72-hour breach notification is unrepresentable** (the
     refinement and the CHECK both refuse `publishedAt` past the deadline, so
@@ -10569,6 +10838,46 @@ method is that a stale figure misleads.
    an entry's *reasoning* can survive its figures being wrong — ADR-0387's hazard analysis is
    correct about everything except whether the hazard can be reached — so a refutation is worth
    writing down beside the claim rather than deleting the claim, because the next reader needs both.
+   **ADR-0388's addendum adds a sixth member and it is the first whose subject is a *probe* rather
+   than a claim.** Three of the probes that found that addendum's defects were wrong before they
+   were right, all the same way: a manifest carrying a key `ManifestSchema` strips (`roles` on a
+   transition, `required` on a relation) or one it refuses (a field grant as a bare array rather
+   than `{roles: […]}`) answers `comparable: false` with every count zero — **byte-identical to an
+   unchanged manifest but for that one flag** — so each read as *no finding here* when the finding
+   was that the probe had not parsed. That is this file's own documented `diffManifests` trap,
+   walked into three times in one session by the author who had just written the paragraph
+   recording it, which is the sharper lesson: knowing a trap is not the same as having a check for
+   it. The remedy is mechanical and is in the tests — **assert the mutation parsed before asserting
+   anything about its diff** — and it generalises to any probe whose subject can answer "nothing
+   changed" for two different reasons.
+   **ADR-0387's addendum adds three more and they are the most costly kind — a claim an argument
+   rests on.** *"The remedy exists"* was the whole reason that increment shipped the extension
+   early rather than as a follow-up, and `extendDeadline` has **one** hit in the workspace: its own
+   definition. *"Two index-ordered reads"* justified the separate, more frequent cadence, and both
+   reads sort while `rejected_at` carries no index at all — the cadence survives on the per-row
+   tombstone re-hash, which is real, but not on the sentence given for it. And a doc asserted
+   *"the CLI validates the flag"* for a flag that **does not exist**, which makes the conclusion
+   stronger than the claim and the premise false. The rule the three sharpen: **a sentence carrying
+   an argument's weight is the one to measure first**, because a stale figure costs a reader a
+   correction while a stale premise costs an increment its justification — and all three were found
+   by an adversarial pass rather than by the author, who had the measurements to hand.
+   **The kernel half of that pass adds a seventh member, and it is the first where the stale prose
+   was *load-bearing for what a reviewer is told*.** `MANIFEST_SECTION_REACH_MEANINGS`' two
+   non-served sentences said "no **runtime** reads it" and "read by **nothing**", and three sections
+   falsify both — `reports` and `dashboards` are read by `operate-server`'s boot survey,
+   `customWidgets` by `architect-cli`'s summary, and `extends.ts`'s merge reads all seventeen — so
+   the honest axis is the **request path**, which is the one `MANIFEST_SECTION_REACH` measures and
+   the only one a reviewer acts on. What makes it a member of this entry rather than a wording fix
+   is where the live copy was: **`apps/operate-web` held a fourth copy of those three sentences**,
+   keyed on the bare `reach` string, and *that* was the one a reviewer read, while the kernel's map
+   had no non-test reader at all — so the four copies drifted with the only authoritative one
+   invisible. The remedy generalises past this field: where a sentence can be **sent**, sending it
+   beats fencing the copies, because a copy removed cannot drift. **And the same pass showed a type
+   fence blind one level in**: `AssertNever<Exclude<keyof A, keyof B>>` compares two shapes' own
+   keys and says nothing about what sits inside an array, so `reachNote` landed on
+   `ManifestSectionChange` and the route mirror's fence stayed `never` — exactly as it had for
+   `sectionChanges` itself one level out, two increments earlier. Each mirrored element shape owes
+   its own alias; no type can walk a type's nested arrays.
 2. **Six concepts are modelled several times over, two with non-nesting member sets.** Data
    classification has five declarations — four identical and one, in `data-lineage`, **disjoint past
    two members**, so the moment anything bridges the kernel's classification into the lineage graph

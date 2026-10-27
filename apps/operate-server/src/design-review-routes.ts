@@ -188,6 +188,43 @@ export interface ManifestDiffViewLike {
   readonly rolesAdded: readonly string[];
   readonly rolesRemoved: readonly string[];
   readonly lifecycleChanges: readonly { readonly entity: string; readonly detail: string }[];
+  /**
+   * **Required**, and that is the fence rather than a shape choice. ADR-0388 added this field to
+   * the differ's own view and to the web mirror and left this one untouched — so the route's type
+   * stopped describing its own response while the field still reached the wire (the view is passed
+   * by reference and serialized by own properties, which is why nothing broke). Worse, `ManifestDiffer`
+   * is an injection seam: a differ satisfying this mirror could omit the census entirely and
+   * typecheck, which is ADR-0386's class — an absent field whose omission is unobservable — and
+   * `STUB_DIFF` in this route's own test was exactly that. Optional here would have kept the
+   * hazard; required makes the compiler ask every differ, including the stubs.
+   *
+   * The **element** is fenced too, and separately, because the top-level fence cannot see it: an
+   * `Exclude<keyof ManifestDiffView, keyof ManifestDiffViewLike>` compares the view's own keys and
+   * says nothing about what sits inside an array. `reachNote` is the first field that proved it —
+   * it landed on `ManifestSectionChange` one commit after this mirror was written, and the
+   * top-level fence passed. So `assertSectionChangeMirrorIsComplete` in this route's test is the
+   * second `AssertNever`, over the element.
+   */
+  readonly sectionChanges: readonly {
+    readonly section: string;
+    readonly reach: string;
+    /**
+     * The kernel's own sentence for this reach, sent rather than looked up. `apps/operate-web` held
+     * a fourth copy of the three sentences keyed on the bare `reach` string, and that copy was the
+     * live one — the one a reviewer reads — while this map had no non-test reader at all. Sending
+     * it removes the copy instead of fencing it.
+     */
+    readonly reachNote: string;
+    readonly keying: string;
+    readonly presence: string;
+    readonly membersKeyed: boolean;
+    readonly added: readonly string[];
+    readonly removed: readonly string[];
+    readonly changed: readonly string[];
+    readonly countBefore: number;
+    readonly countAfter: number;
+    readonly mayWithhold: boolean;
+  }[];
   readonly counts: {
     readonly added: number;
     readonly removed: number;

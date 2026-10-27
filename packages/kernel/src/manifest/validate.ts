@@ -29,7 +29,11 @@ import {
 } from "@crossengin/views";
 import type { SearchManifest } from "@crossengin/search";
 import { BUILT_IN_TRAIT_FIELDS } from "../ddl/built-in-traits.js";
-import { resolvedFieldNames, resolvedFields } from "../ddl/resolution.js";
+import {
+  RESERVED_ENTITY_FIELD_NAMES,
+  resolvedFieldNames,
+  resolvedFields,
+} from "../ddl/resolution.js";
 import { WorkflowValidationError } from "../workflow/errors.js";
 import { validateWorkflow } from "../workflow/validate.js";
 import { ManifestValidationError } from "./errors.js";
@@ -177,6 +181,15 @@ function validateEntitiesTraitsRelations(manifest: Manifest): EntityIndex {
         `duplicate entity name '${entity.name}'`,
       );
     }
+    for (const [j, field] of entity.fields.entries()) {
+      if (RESERVED_ENTITY_FIELD_NAMES.includes(field.name)) {
+        throw new ManifestValidationError(
+          `entities[${i}].fields[${j}].name`,
+          `field '${entity.name}.${field.name}' is reserved: the store emits that column itself, ` +
+            `so a declaration of it is a duplicate column in the same CREATE TABLE — rename it`,
+        );
+      }
+    }
     entityNames.add(entity.name);
   }
 
@@ -192,6 +205,17 @@ function validateEntitiesTraitsRelations(manifest: Manifest): EntityIndex {
         `traits[${i}].name`,
         `duplicate trait name '${trait.name}'`,
       );
+    }
+    for (const [j, field] of trait.fields.entries()) {
+      if (RESERVED_ENTITY_FIELD_NAMES.includes(field.name)) {
+        throw new ManifestValidationError(
+          `traits[${i}].fields[${j}].name`,
+          `trait '${trait.name}' supplies field '${field.name}', which is reserved: the store ` +
+            `emits that column itself, so every entity carrying this trait emits a duplicate ` +
+            `column in the same CREATE TABLE — rename it in the trait, which changes every ` +
+            `entity carrying it`,
+        );
+      }
     }
     traitNames.add(trait.name);
   }

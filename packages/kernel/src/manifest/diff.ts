@@ -1,6 +1,5 @@
 import type { Entity, Trait } from "@crossengin/types/meta-schema";
 import { computeEntityDiff, type EntityDiff } from "../ddl/diff.js";
-import { checkEntityFieldNames, expandTraits } from "../ddl/resolution.js";
 import type { Manifest } from "./types.js";
 
 export interface ModifiedEntity {
@@ -15,6 +14,33 @@ export interface ManifestDiff {
   readonly destructive: boolean;
 }
 
+/**
+ * Which entities the next manifest adds, removes and modifies, **each side resolved against its
+ * own manifest's traits**.
+ *
+ * `computeEntityDiff` used to be handed one `customTraits` list, so the *old* entity resolved
+ * against the *new* trait definitions and a trait whose field moved came back identical on both
+ * sides. `oldCustomTraits` is the fix; what it buys, and what it does not, is worth stating
+ * exactly, because this function's own comment previously claimed more than it delivers.
+ *
+ * **A trait field the new definition no longer declares is closed here**: measured, that pair now
+ * answers `removedFields: ["stamp"]` with `destructive: true`, where it answered nothing before.
+ *
+ * **A trait field whose *type kind* changed is not closed here.** `computeFieldModification`
+ * refuses a changed type kind outright, so correct resolution turns a silent agreement into an
+ * `UnsupportedDiffChangeError` — which is honest, and is not a report. The consumer degrades past
+ * it: `apps/operate-server`'s `entityLayer` catches it locally and falls back to a name-level
+ * comparison over `entity.fields`, which is trait-blind, so the retyped trait field is still
+ * absent from `entitiesModified` and `fieldChanges`. What reports it is `diffManifestSections`,
+ * whose `traits` section change is `served` and `mayWithhold`. Worth being precise about the
+ * blast radius too, since the obvious fear is worse than the truth: the throw does **not** reach
+ * `diffManifests`' outer catch, so a reviewer is not shown "this is the first system for this
+ * tenant" — only the entity layer is degraded.
+ *
+ * **A classification change is reported by neither side of this function**, by design: it moves no
+ * column, so `computeFieldModification` does not compare it, and `diffManifestSections` is the
+ * half that carries it.
+ */
 export function computeManifestDiff(old: Manifest | null, next: Manifest): ManifestDiff {
   const oldEntities = old?.entities ?? [];
   const nextEntities = next.entities ?? [];
@@ -33,9 +59,7 @@ export function computeManifestDiff(old: Manifest | null, next: Manifest): Manif
       addedEntities.push(entity);
       continue;
     }
-    const diff = computeEntityDiff(resolvedAgainstOwnTraits(oldEntity, oldCustomTraits), entity, {
-      customTraits,
-    });
+    const diff = computeEntityDiff(oldEntity, entity, { customTraits, oldCustomTraits });
     if (entityDiffHasChanges(diff)) {
       modifiedEntities.push({ entity, diff });
     }
@@ -57,33 +81,6 @@ export function computeManifestDiff(old: Manifest | null, next: Manifest): Manif
     modifiedEntities,
     destructive,
   };
-}
-
-/**
- * The old entity with its traits already expanded, against **its own** manifest's trait set.
- *
- * `computeEntityDiff` takes one `customTraits` list and applies it to both sides, so handing it
- * `next.traits` resolved the *old* entity against the *new* trait definitions: a trait field
- * whose type changed, or that the new manifest's trait no longer declares, came back identical on
- * both sides and the diff reported nothing — while the served table genuinely gains, loses or
- * retypes that column, since `columnPlanForEntity` reads `manifest.traits`. Measured on the
- * committed tree before this, through the reviewer's own diff view: a trait field retyped, a
- * trait field removed and a trait field's classification weakened `phi` → `internal` each
- * answered `impact: none` with every count zero. The first two are what this closes; a
- * classification moves no column, so `computeFieldModification` does not compare it and
- * `diffManifestSections` is the half that reports it.
- *
- * Pre-resolving is what keeps the fix inside this function: with `traits: []` the diff's own
- * `expandTraits` call contributes nothing and `fields` already holds the old resolution, so index
- * resolution and the removed-column map read exactly what they would have for the real pair.
- * `checkEntityFieldNames` is called here because the diff's copy of it then has an empty trait
- * list and could no longer catch an own-field/trait-field collision on the old side.
- */
-function resolvedAgainstOwnTraits(entity: Entity, customTraits: readonly Trait[]): Entity {
-  if (entity.traits === undefined || entity.traits.length === 0) return entity;
-  const traitFields = expandTraits(entity, customTraits);
-  checkEntityFieldNames(entity, traitFields);
-  return { ...entity, traits: [], fields: [...entity.fields, ...traitFields] };
 }
 
 function entityDiffHasChanges(diff: EntityDiff): boolean {

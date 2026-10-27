@@ -32,10 +32,41 @@ export interface EntityDiff {
   readonly destructive: boolean;
 }
 
-export interface DiffContext {
-  readonly customTraits?: readonly Trait[];
-}
-
+/**
+ * Which trait definitions each side resolves against — **both or neither**, never one.
+ *
+ * `oldCustomTraits` exists because a trait whose field changed type, or that the new manifest's
+ * trait no longer declares, used to resolve the old entity against the *new* definition: both
+ * sides came back identical and the diff reported nothing while the served table genuinely gains,
+ * loses or retypes that column. Two lists rather than a caller pre-expanding the old entity into a
+ * fabricated `{...entity, traits: [], fields: [...own, ...trait]}` — this function already has a
+ * mechanism for *which traits apply* and applying one list to both sides was the whole defect, so
+ * giving it two is the direct fix, and it keeps trait provenance, which the fabricated entity
+ * destroyed. That mattered: with trait fields merged into `fields`, the `checkEntityFieldNames`
+ * call below read a trait-contributed field as an own field and threw `ReservedFieldNameError`
+ * for a trait supplying `id` — a manifest `ManifestSchema` parses.
+ *
+ * The **union is the fence**, and it replaced `oldCustomTraits?: readonly Trait[]` defaulting to
+ * `customTraits`. That default was the pre-fix behaviour kept as what silence buys, so a caller
+ * supplying one list and forgetting the other got the original defect back with the type valid —
+ * ADR-0386's shape, where an optional field with a safe-looking default makes its own omission
+ * unobservable, in the increment that fixed the defect. There is no honest default either:
+ * `customTraits` restores the bug and `[]` makes every trait field read as *added*, so the
+ * compiler asks instead (ADR-0338). It costs nothing to ask — the diff's own suite passes no
+ * context at all, which the first member admits, and `computeManifestDiff` is the one live caller
+ * and holds two manifests by construction.
+ */
+export type DiffContext =
+  | {
+      /** No custom trait anywhere, so both entities resolve against the built-ins alone. */
+      readonly customTraits?: undefined;
+      readonly oldCustomTraits?: undefined;
+    }
+  | {
+      readonly customTraits: readonly Trait[];
+      /** The trait definitions the **old** entity resolves against. */
+      readonly oldCustomTraits: readonly Trait[];
+    };
 
 export function computeEntityDiff(
   old: Entity,
@@ -46,9 +77,12 @@ export function computeEntityDiff(
     throw new EntityRenameNotSupportedError(old.name, next.name);
   }
 
+  // Both `?? []`, which is the union's whole point: a context supplying one list and not the other
+  // is a compile error, so there is no asymmetric fallback left for a caller to inherit.
   const customTraits = context.customTraits ?? [];
+  const oldCustomTraits = context.oldCustomTraits ?? [];
 
-  const oldTraitFields = expandTraits(old, customTraits);
+  const oldTraitFields = expandTraits(old, oldCustomTraits);
   checkEntityFieldNames(old, oldTraitFields);
   const newTraitFields = expandTraits(next, customTraits);
   checkEntityFieldNames(next, newTraitFields);
@@ -83,7 +117,7 @@ export function computeEntityDiff(
     }
   }
 
-  const oldIndexes = computeResolvedIndexes(old, customTraits);
+  const oldIndexes = computeResolvedIndexes(old, oldCustomTraits);
   const newIndexes = computeResolvedIndexes(next, customTraits);
   const addedIndexes = newIndexes.filter((idx) => !indexesContain(oldIndexes, idx));
   const removedIndexes = oldIndexes.filter((idx) => !indexesContain(newIndexes, idx));

@@ -60,6 +60,19 @@ export interface DiffCountsView {
 export interface SectionChangeView {
   readonly section: string;
   readonly reach: string;
+  /**
+   * The server's own sentence for this reach. This file used to hold a `Record<string, string>`
+   * keyed on the bare `reach` string, and that copy was the **live** one — the one a reviewer
+   * reads — while the kernel's map had no non-test reader at all. Its two non-served sentences
+   * each dropped a different clause, between them exactly the two facts that separate
+   * `validated_only` from `unread`, and both said "runtime" where the measured axis is the
+   * *request path*. So the fix is to send the sentence rather than fence the copy.
+   *
+   * Optional, and the fallback is the bare `reach` rather than a sentence: a server that predates
+   * the field would otherwise be papered over with prose this file invented, which is the state
+   * being left. Saying less beats saying something false.
+   */
+  readonly reachNote?: string;
   readonly presence: string;
   readonly membersKeyed: boolean;
   readonly mayWithhold: boolean;
@@ -250,12 +263,6 @@ export function DiffView({ diff }: { diff: ManifestDiffView }) {
   );
 }
 
-const REACH_NOTE: Readonly<Record<string, string>> = {
-  served: "alters what a request gets",
-  validated_only: "validated only — no runtime reads it",
-  unread: "read by nothing — a change serves nothing",
-};
-
 function SectionChanges({ changes }: { changes: ReadonlyArray<SectionChangeView> }) {
   return (
     <div>
@@ -287,9 +294,7 @@ function SectionChanges({ changes }: { changes: ReadonlyArray<SectionChangeView>
                   <ChipRow label="Changed" names={change.changed} tone="danger" />
                 </div>
               ) : null}
-              <p className="text-[11px] text-ink-faint">
-                {REACH_NOTE[change.reach] ?? change.reach}
-              </p>
+              <p className="text-[11px] text-ink-faint">{change.reachNote ?? change.reach}</p>
             </div>
           </li>
         ))}

@@ -2,6 +2,7 @@ import type { ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { Handler, HandlerInput, HandlerOutput } from "@crossengin/api-gateway-runtime";
 import { describe, expect, it } from "vitest";
 
+import { diffManifests, type ManifestDiffView } from "./manifest-diff.js";
 import {
   buildDesignReviewRoutes,
   type DesignReviewContext,
@@ -671,8 +672,74 @@ const STUB_DIFF: ManifestDiffViewLike = {
   rolesAdded: [],
   rolesRemoved: [],
   lifecycleChanges: [],
+  sectionChanges: [
+    {
+      section: "entities",
+      reach: "served",
+      reachNote: "a change here alters what a request gets",
+      keying: "named_array",
+      presence: "present",
+      membersKeyed: true,
+      added: ["Deal"],
+      removed: [],
+      changed: [],
+      countBefore: 1,
+      countAfter: 2,
+      mayWithhold: false,
+    },
+  ],
   counts: { added: 1, removed: 0, modified: 0, warnings: 0 },
 };
+
+/**
+ * The mirror must cover every field the real view carries, which is the direction structural
+ * assignability cannot check.
+ *
+ * Passing `diffManifests` as a `ManifestDiffer` already proves `ManifestDiffView` is assignable to
+ * `ManifestDiffViewLike` — i.e. the real view has *at least* the mirror's fields. The other
+ * direction is unchecked by construction, and that is how ADR-0388 added `sectionChanges` to the
+ * view, to the web mirror and not to this one: the route's type stopped describing its own response
+ * and `STUB_DIFF` above could omit the census while typechecking.
+ *
+ * `AssertNever` is the fence and an array of the `Exclude` would not be: `[]` is assignable to
+ * `"sectionChanges"[]` just as it is to `never[]`, so a missing field would compile and the test
+ * would pass. The constraint fails at the alias instead, naming the field. The assertion below only
+ * gives the alias a reader.
+ */
+type AssertNever<T extends never> = T;
+type UncoveredViewField = AssertNever<
+  Exclude<keyof ManifestDiffView, keyof ManifestDiffViewLike>
+>;
+const UNCOVERED_VIEW_FIELDS: UncoveredViewField[] = [];
+
+/**
+ * The same fence one level in, and it is a second fence rather than a tidier first one: the alias
+ * above compares the two *views'* keys, so it is blind to everything inside an array. `reachNote`
+ * proved it — the field landed on `ManifestSectionChange` one commit after this mirror was written
+ * and `UncoveredViewField` stayed `never`, exactly as it had for `sectionChanges` itself one level
+ * out. There is no generic way to walk a type's nested array elements, so each mirrored element
+ * shape owes its own alias; this is the only one, because `sectionChanges` is the only field of
+ * this mirror whose element the kernel owns.
+ */
+type UncoveredSectionChangeField = AssertNever<
+  Exclude<
+    keyof ManifestDiffView["sectionChanges"][number],
+    keyof ManifestDiffViewLike["sectionChanges"][number]
+  >
+>;
+const UNCOVERED_SECTION_CHANGE_FIELDS: UncoveredSectionChangeField[] = [];
+
+describe("ManifestDiffViewLike", () => {
+  it("declares every field the real diff view carries", () => {
+    // The compile error above is the fence; this names it in the suite so a reader of the test list
+    // knows the property is checked at all.
+    expect(UNCOVERED_VIEW_FIELDS).toEqual([]);
+  });
+
+  it("declares every field a real section change carries", () => {
+    expect(UNCOVERED_SECTION_CHANGE_FIELDS).toEqual([]);
+  });
+});
 
 interface DifferStub {
   readonly diff: ManifestDiffer;
@@ -742,6 +809,43 @@ describe("design-review-routes — activation diff", () => {
     expect(out.status).toBe(200);
     expect(out.body["diff"]).toBe(STUB_DIFF);
     expect(Object.keys(out.body).sort()).toEqual(["diff", "review", "risk"]);
+  });
+
+  it("serves the real differ's section census in the response body", async () => {
+    // The route's own tests drive a stub, so the mirror being short of a field was invisible to all
+    // of them: the view is passed by reference and serialized by own properties, so the bytes were
+    // right while the type was wrong. This one wires the **real** `diffManifests` and asserts the
+    // census reaches the body — the property that mirror drift makes unobservable.
+    //
+    // It needs its own fixtures, which is the point rather than an inconvenience: this file's
+    // `MANIFEST` and `ACTIVE_MANIFEST` carry no `manifestVersion`, so the real differ refuses them
+    // and answers `comparable: false` with every list empty. Written against those, this test
+    // failed — a probe that had not parsed, which is the same trap three of the probes behind this
+    // addendum walked into, so `comparable` is asserted first here for that reason.
+    const { ctx, store } = makeCtx();
+    const parseable = (names: readonly string[]): Record<string, unknown> => ({
+      manifestVersion: "1.0",
+      meta: { name: "Plumber CRM", slug: "acme/crm", version: "1.0.0" },
+      entities: names.map((name) => ({
+        name,
+        fields: [{ name: "title", type: { kind: "text", maxLength: 80 }, required: true }],
+      })),
+    });
+    const active = recordingActiveSource(parseable(["Lead"]));
+    const withDiff: DesignReviewContext = {
+      ...ctx,
+      diffManifests,
+      activeManifests: active.source,
+    };
+    const seeded = store.seed({ manifest: parseable(["Lead", "Deal"]) });
+    const out = await call(withDiff, "platform.designReviews.get", { params: { id: seeded.id } });
+    expect(out.status).toBe(200);
+    const diff = out.body["diff"] as ManifestDiffViewLike;
+    expect(diff.comparable).toBe(true);
+    expect(diff.sectionChanges.map((change) => change.section)).toEqual(["entities"]);
+    expect(diff.sectionChanges[0]?.added).toEqual(["Deal"]);
+    // And it survives JSON, which is what the wire does to it.
+    expect(JSON.parse(JSON.stringify(diff))["sectionChanges"]).toHaveLength(1);
   });
 
   it("diffs the resolved active manifest against the review's own manifest", async () => {

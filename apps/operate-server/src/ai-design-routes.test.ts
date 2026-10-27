@@ -1159,6 +1159,25 @@ const STUB_DIFF: ManifestDiffViewLike = {
   rolesAdded: [],
   rolesRemoved: [],
   lifecycleChanges: [],
+  // Required on the mirror since ADR-0388's addendum, which is what found this stub: a differ that
+  // omitted the section census used to typecheck, so the route's own tests served a response the
+  // route's type did not describe.
+  sectionChanges: [
+    {
+      section: "entities",
+      reach: "served",
+      reachNote: "a change here alters what a request gets",
+      keying: "named_array",
+      presence: "present",
+      membersKeyed: true,
+      added: ["Lead"],
+      removed: [],
+      changed: [],
+      countBefore: 0,
+      countAfter: 1,
+      mayWithhold: false,
+    },
+  ],
   counts: { added: 1, removed: 0, modified: 0, warnings: 0 },
 };
 

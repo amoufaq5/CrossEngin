@@ -315,7 +315,9 @@ sees three exact matches — which is why Option G was refused. `rowToDeletionRe
    **not** `auditOnce` as written here: that method returns early unless `auditEveryTicks` is
    configured, which defaults to never, so a deadline pass inside it would have been dark on every
    deployment that had not opted into the expensive tombstone audit — two unrelated conditions, and
-   a mutation swapping the one call for the other fails 7 tests. The cadence is **derived** from the
+   a mutation swapping the one call for the other fails **8** tests — 7 when this was written, and
+   measured twice afterwards in two independent mutation forms; the conclusion holds and the figure
+   was stale, which is this register's own P3.1 class inside the ADR that cites it. The cadence is **derived** from the
    scheduler's own `intervalMs` (`max(1, round(DEADLINE_SWEEP_TARGET_MS / intervalMs))`, about once
    an hour) rather than being a tick count, because the right cadence is a property of *time* and
    the tick is not: `--deletion-runner-ms` is set anywhere from a second to minutes, so one constant
@@ -410,8 +412,11 @@ this, no SQL in the workspace named either status. **A `deferred` request past i
 `deferred_until` as the extension's home exercised rather than asserted. **The ordering is
 `deadline_at ASC`** (10-17, 10-25, 10-30, 11-16), so a cut page drops the rows *furthest* from their
 deadline — the property Option E's refusal rests on. **`within_deadline` and the refusal recorded
-*inside* its deadline are each correctly absent** from the findings, which is the non-vacuity control:
-a sweep reporting everything would report these two. And **`canStillBeMet` is true for `approaching`
+*inside* its deadline are each correctly absent** from the findings. Only the first of those is a
+non-vacuity control over `isDeadlineFinding`, which this passage conflated: the in-time refusal is
+excluded by the SQL's own `rejected_at > deadline_at` and never reaches `examined` at all — confirmed
+by this section's own arithmetic, where `examined=5` is 4 waiting plus 1 late refusal with the
+in-time refusal absent from the read. Two different fences, one sentence. And **`canStillBeMet` is true for `approaching`
 alone**, false for both breached standings, live.
 
 **The extension, and the fact that it is the remedy.**
@@ -427,17 +432,157 @@ re-audit        → examined=5 findings=3 (was 4)
 The stored row reads `deadline=2026-12-06 | extended_at=2026-10-27 | reason=the request is complex…`,
 and **`approaching` drops out of the findings**: 4 → 3. That last line is the whole reason the
 extension is in this increment rather than a follow-up — a finding whose lawful remedy does not exist
-is worse than none (ADR-0334), and here the remedy exists, is refused when it would be unlawful, and
-is observably what clears the finding.
+is worse than none (ADR-0334), and here the **mechanism** exists, is refused when it would be
+unlawful, and is observably what clears the finding.
+
+**That sentence said "the remedy exists" and an adversarial pass measured it false.**
+`extendDeadline` has **one** hit in the workspace: its own definition. No route, no CLI flag, no
+scheduler, no `node.ts` reference — so an operator reading `[deletion] request dreq_… is 10d past
+its Article 12(3) deadline` still cannot grant an extension without writing TypeScript against the
+store. The mechanism is what this increment landed and the *surface* is not, which is ADR-0334 one
+layer out, inside the increment that cites it as its reason for shipping early. It is the first open
+question below rather than a sentence quietly reworded, because the dependency argument the Context
+and Alternatives both rest on is the thing that moved. The two facts that bound it: the sweep is
+still the only Article 12(3) instrument there is, and the extension still cannot be granted
+unlawfully.
 
 **Not verified even now:** `extendDeadline`'s behaviour when the row is in another tenant's scope
 (the `UPDATE`'s `WITH CHECK` reach), and the scheduler pass end to end through `operate-server`'s
 boot — both reasoned from the recorded SQL and the unit suites.
 
+## Addendum: what the adversarial pass found
+
+Twelve findings, every one measured, run live on PG 16.13 as the non-owner `serving` role against
+the real catalog DDL. Four are fixed here, three are claim corrections made above, and five are
+recorded below as open questions. The one that mattered:
+
+**An empty extension reason committed the extension and made the request permanently unreadable —
+including unerasable.** `planDeadlineExtension` validated five things and **not the reason**, while
+the contract requires `min(1)` paired with the instant. So `""` passed the plan, the `UPDATE`
+committed all three columns, and the `RETURNING` row was refused by the schema from then on:
+`read()` throws for ever, `transition()` throws **before building any SQL** so the request can never
+reach `in_progress`, `completed` or `rejected` again — the Article 17 erasure for that data subject
+is unreachable through this store — `extendDeadline` cannot recover it either, since its first act is
+that `read()`, and the request leaves the sweep entirely, reaching `onUnreadableRequest` and never
+`examined`.
+
+It is exactly the shape the **fifth** refusal exists to prevent, in that refusal's own words, and
+`DeadlineExtensionRefused`'s doc asserted the guarantee that failed (*"every member is raised by
+`planDeadlineExtension` before any statement is issued, so the claim in the first line is about
+position as well as state"* — the first line being *nothing was written*). `reason_not_stated` is the
+sixth member, checked **first** and trimmed, because `.min(1)` does not trim so `"   "` was accepted
+end to end and stored as the Article 12(3) reason. The ordering has an argument: an input that cannot
+be represented is not worth comparing against state, and the mirror cost — an already-answered
+request with a blank reason reports the reason — is the lesser one, since that caller can see their
+own argument where they cannot see the row's status. Bounded by the surface gap above: the reachable
+population today is a direct store caller.
+
+**Why nothing caught it, which is the reusable half.** `it("every refusal has a producer")` asserts
+no member is unreachable and **nothing asserted the converse** — that no admitted input produces a
+row the schema refuses, which is the direction the blank reason escaped through. That converse is a
+test now. And the one store test covering this class used `deadline_extension_reason: null`, a row
+shape this `UPDATE` can never write since it always binds all three columns — so the one reachable
+way to produce the failure was the one untested.
+
+**The coverage claim was wrong in the reassuring direction, twice.** `complete` was computed from the
+**readable** record count, so one unreadable row on a full page made a truncated sweep claim it had
+reached the end — measured, 3 of 6 rows read with `complete: true`, which also dropped the page-cut
+clause from the operator's log line. And `DeadlineAuditPage` carried no unreadable count, so a page
+where *nothing* was assessable reported `{examined: 0, complete: true, findings: []}`, byte-identical
+to a healthy deployment with no pending requests.
+
+The sibling sweep had solved both and written the rule down — `TombstoneScanPage` carries `rowsRead`
+on the stated ground that **a refused row is a row**, holding a position in the ordering — so the fix
+is to follow it rather than to invent: the two reads return `DeadlineRequestPage {records,
+unreadable, rowsRead}` through `readRowsWithUnreadable`, which is ADR-0373's **verifier** arm that
+these two reads declined. Returning the refused rows instead of taking a reporter is the other half
+of following it: a sweep is a verifier, so what happens to a refused row is the caller's decision
+made once, and the count cannot then be derived from a different set than the one the reporter saw.
+`DeadlineAuditPage.unreadable` and the scheduler's mirror carry it, and the `[deletion] article 12(3)
+sweep:` line prints it even at zero.
+
+**And the fake could not express the defect**, which is why no test caught it: it ignored the limit
+and drew refused rows from a list independent of the records, so *a page that fills its limit and
+holds an unreadable row* was inexpressible — and `scanAll`'s own fake, two methods up in the same
+file, already modelled the limit over one interleaved row list and says in its comment why (*"a fake
+that took it from the records would agree with a caller that derived it the same wrong way, and the
+pair would be green together"*). That is precisely what happened. The deadline fakes take that shape
+now.
+
+Verified: `tenant-lifecycle` 507 → 513 tests, `tenant-lifecycle-pg` 513, `apps/operate-server` 5,034,
+all green with `typecheck` clean. Mutations, each reversed by inverse string replacement: dropping the
+reason check fails 3 tests (two new, one the totality fence); deriving `complete` from the records
+again fails the composed case. The two changed packages were **rebuilt** before the app was
+typechecked, because the app reads their `dist` and the page shape is a contract change.
+
+**That `tenant-lifecycle-pg` figure was conditional-green, and the fence that caught it is a
+different one from the fence that should have.** The rebuild above covered `typecheck` and not
+`test`, so the store's suite ran against a `dist` whose `DEADLINE_EXTENSION_REFUSALS` still had
+**five** members — and `deletion-request-store.test.ts`'s own both-ways enumeration (*"refuses every
+plan refusal by name, before any statement"*) therefore enumerated five and passed. On the next
+`pnpm -r build && pnpm -r test` it failed by name, missing `reason_not_stated`, because the store's
+case table had no input that produces it. So the contract gained a member and its *store-level*
+producer fence went green on a stale copy of the enum: CLAUDE.md's documented ADR-0329 trap
+(*"run `pnpm -r build` before trusting a consumer's tests after a contract change"*), in the
+increment whose own subject is a converse fence nobody had written. The case is added — whitespace
+rather than `""`, since that is the form `.min(1)` admits — and the lesson is narrower than the
+rule already on file: **a both-ways enumeration over a cross-package constant is green against any
+stale `dist`, which is exactly the shape that reads as coverage.**
+
+**Both fixes live**, on PG 16.13 as the non-owner `serving` role with tenant context, against a
+freshly bootstrapped catalog (965/965 statements). The P0 is the one worth having end to end,
+because what the defect destroyed was the *erasure* rather than the extension:
+
+```
+=== blank reason (reason="") ===
+  extendDeadline:        DeadlineExtensionRefused refusal=reason_not_stated
+  stored(after):         status=verified deadline=2026-10-17 ext=null reason=[<null>] len=0
+  read():                OK status=verified
+  transition(in_progress): OK — the Article 17 erasure is still reachable
+=== whitespace reason (reason="   ") ===   identical, all four lines
+=== control (a stated reason) ===
+  extendDeadline:        RETURNED a record
+  stored(after):         status=in_progress deadline=2026-12-16 ext=2026-10-27
+                         reason=[the request is complex] len=22
+```
+
+The third and fourth lines are the finding: pre-fix both of those threw for ever, so the row's
+three columns being untouched is necessary and not sufficient — what had to be shown is that the
+request is still *readable* and still *transitionable*, since the defect's cost was a data subject
+whose erasure no longer had a path. The control extends, so the refusal is not a disarmed surface;
+its `status=in_progress` is the preceding arm's own `transition` on the same row rather than
+anything the extension did.
+
+The coverage half, with one unreadable row seeded at position 2 of 6 by deadline:
+
+```
+limit  SQL rows  examined  unreadable  complete  page cut?  claim
+3      3         2         1           false     true       exact
+4      4         3         1           false     true       exact
+5      5         4         1           false     true       exact
+6      6         5         1           false     false      conservative
+```
+
+Three rows are exact where the adversarial pass had measured all four dishonest. The fourth is
+**sound but conservative**, and that is pre-existing semantics rather than something this fix
+introduced: `complete` is `rowsRead < bounded`, and a `LIMIT n` read that comes back with n rows
+cannot distinguish *there were exactly n* from *there were more* — so it declines to claim
+completeness in the one case where the claim would have been true. The direction is the safe one
+(ADR-0372: never claim a reading nobody took), the only cost is a page-cut clause on an
+exactly-full final page, and the `n + 1` fetch that would make it exact is a different change
+against both reads' `ORDER BY`. Written down here because the live table shows it and no unit test
+can: at the limit, the honest and the exact answers differ.
+
 ## Open questions
 
 | Question | Owner | Deadline |
 |---|---|---|
+| **`extendDeadline` is reachable by no deployment** — one hit in the workspace, its own definition. The sweep names a condition whose lawful remedy has no surface, which is ADR-0334 one layer out. It wants the `--deletion-request-reconcile-role` apparatus the pending list is already queued behind: a grant, a recorded write, a tenant refusal. | operate-server owner | 2026-11-30 |
+| `assessDeadline` fails **open** on an unparseable instant: `now > NaN` and `NaN <= warningDays` are both false, so a request with a malformed `deadlineAt` reads `within_deadline, reported: false`, and the schema's own Article 12(3) cap is bypassed the same way. **Refuted as live through the store** three ways (node-postgres returns `Date`, `'infinity'` is refused by the schema and reaches `onUnreadableRequest`, and `$8::timestamptz` refuses a `+99:00` offset on submit), so the audience is the direct caller this ADR's Consequences section names — for whom the answer is not the honest one that section promises. A `Number.isFinite` guard answering `answer_time_unstated` closes it. | tenant-lifecycle owner | 2026-12-31 |
+| `--deletion-warning-days` has no **upper** bound. The lower one is argued (0 would make the horizon the deadline itself); the symmetric hazard is unfenced — with the 30-day submit default, `>= 29` makes `within_deadline` unreachable, so every pending request is `approaching` and a finding on every hourly pass. Measured at 29, 30, 100 and 10000. | operate-server owner | 2026-12-31 |
+| `rejectedAfterDeadline` orders `rejected_at DESC`, so a cut page drops the **oldest** uncured breach — arguably the one a compliance audit least wants a limit to lose. It matches `completedWithTombstone`'s convention and this ADR states the direction, so it is a decision to confirm rather than a defect. | reviewer-surface owner | 2026-12-31 |
+| `planDeadlineExtension` accepts an extension recorded in the **future** — it refuses only `< submittedMs`, and `deadlineExtendedAt: "3000-01-01"` stores. The `recorded_before_submission` argument (*an impossibility rather than an awkward fact*) applies in both directions, and open question 3 below reads the notification obligation against that instant. | tenant-lifecycle owner | 2026-12-31 |
+| The sweep **fires on the first tick** whenever the derived cadence is 1 (`intervalMs >= ~1.8M`), because `ticks` is incremented before the pass and `1 % 1 === 0` — so a crash-looping deployment on a ≥30-minute interval re-emits every standing finding on every restart. `auditOnce` argues the opposite for its sibling (*"a boot is still when a misconfiguration is most likely"*). On the shipped `--deletion-runner-ms` the derived cadence is ≥3600, so it does not fire at boot there. | operate-server owner | 2026-12-31 |
 | The **grade**. `deadlineCanStillBeMet` says paging is coherent for `approaching` and incoherent for a breach, and the severity is still a deployment choice. It is gated on two things: `--deletion-escalation-config`'s `severityByDefect` is keyed on `EVIDENCE_DEFECTS`, which a `DeadlineStanding` is not, so routing a deadline finding needs either a second policy block or a widened key; and a breach's honest grade is a ticket rather than a page, which this repo has no non-paging escalation vocabulary for. | platform | 2026-12-15 |
 | A **route** for the pending list, which `unanswered` exists to serve and which no surface reaches. | platform | 2026-12-15 |
 | The Article 12(3) **notification** obligation — inform the subject of an extension within one month of receipt — is represented nowhere, because there is no mail channel (register P1.14). `deadline_extended_at` records when the extension was granted, not when anybody was told, and nothing refuses a late recording on the obligation's behalf. | platform | _unscheduled_ |

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { RESERVED_ENTITY_FIELD_NAMES } from "../ddl/resolution.js";
 import { ManifestSchema, type Manifest } from "./types.js";
 import { ManifestValidationError } from "./errors.js";
 import { manifestClassifiedFields, validateManifest } from "./validate.js";
@@ -383,6 +384,110 @@ describe("validateManifest — traits", () => {
       ],
     };
     expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  /**
+   * A reserved field name is a property of the manifest alone — decidable by a pack author, by
+   * `crossengin validate` and by the reviewer approving what the Architect designed — so it is a
+   * validation error and not a boot refusal (ADR-0348's split).
+   *
+   * Measured before adding it: across the seven built-in packs, **69 entities, 556 own fields, 0
+   * custom traits and 0 trait fields**; and across the four compliance packs — the only source of
+   * a custom trait in the workspace, which `resolveCompliancePacks` merges into `manifest.traits` —
+   * **3 traits and 9 trait fields**. `id` is declared **0** times in all of it, and every pack still
+   * validates resolved. So it refuses nothing that ships, which is the cheapest moment it will ever
+   * have, and the trait half is not vacuous for long: the compliance packs are one wiring step from
+   * putting the first custom trait into a served manifest. The cost of *not* having it
+   * is not a stylistic one: `columnPlanForEntity` happily plans the column and
+   * `emitEntityTableDdl` then writes `"id" TEXT NOT NULL` for the implicit key **and** `"id" TEXT`
+   * for the declaration in one `CREATE TABLE`, which Postgres refuses `42701 column "id" specified
+   * more than once` — so the manifest parsed, validated and could not be served at all.
+   */
+  it.each(RESERVED_ENTITY_FIELD_NAMES)(
+    "rejects an own field named `%s`, which the store emits itself",
+    (name) => {
+      const m: Manifest = {
+        manifestVersion: "1.0",
+        meta: baseMeta,
+        entities: [{ name: "Patient", fields: [{ name, type: { kind: "text" } }] }],
+      };
+      expect(() => validateManifest(m)).toThrow(ManifestValidationError);
+      try {
+        validateManifest(m);
+      } catch (e) {
+        expect(e).toBeInstanceOf(ManifestValidationError);
+        const err = e as ManifestValidationError;
+        expect(err.path).toBe("entities[0].fields[0].name");
+        expect(err.message).toMatch(/reserved/);
+      }
+    },
+  );
+
+  /**
+   * Driven from the constant rather than listing the names, because `tenant_id` got here by the
+   * set's own justification being false: this module's doc comment said it was "refused earlier as
+   * a reserved prefix", there is no such refusal, and driven through `validateManifest` it was
+   * accepted and emitted the same duplicate `CREATE TABLE` column as `id`. A hand-written list
+   * would let the third member arrive the same way.
+   *
+   * The negative half is the one that keeps the set honest: `created_at` and `updated_at` are two
+   * more columns the emitter writes and they are **not** reserved, because `auditable` supplies
+   * exactly those names — so the emitter overrides them instead of duplicating, which is a real
+   * defect (register P2.12c) and not one a name refusal can fix.
+   */
+  it("holds the emitted columns a declaration duplicates, and not the ones it overrides", () => {
+    expect([...RESERVED_ENTITY_FIELD_NAMES].sort()).toEqual(["id", "tenant_id"]);
+    for (const overridden of ["created_at", "updated_at"]) {
+      expect(RESERVED_ENTITY_FIELD_NAMES).not.toContain(overridden);
+      const m: Manifest = {
+        manifestVersion: "1.0",
+        meta: baseMeta,
+        entities: [{ name: "Patient", fields: [{ name: overridden, type: { kind: "text" } }] }],
+      };
+      expect(() => validateManifest(m)).not.toThrow();
+    }
+  });
+
+  /**
+   * The half `checkEntityFieldNames` can never reach: it refuses an **own** field, deliberately, so
+   * that a trait-contributed field keeps its provenance (see `DiffContext.oldCustomTraits`). A
+   * trait's own declaration therefore has to be refused here, where the trait has an index to point
+   * at and the remedy can say that renaming it changes every entity carrying it.
+   */
+  it("rejects a trait supplying a field named `id`, at the trait's own path", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      traits: [{ name: "stamped", fields: [{ name: "id", type: { kind: "text" } }] }],
+      entities: [
+        {
+          name: "Patient",
+          traits: ["stamped"],
+          fields: [{ name: "label", type: { kind: "text" } }],
+        },
+      ],
+    };
+    try {
+      validateManifest(m);
+      throw new Error("expected validateManifest to refuse");
+    } catch (e) {
+      expect(e).toBeInstanceOf(ManifestValidationError);
+      const err = e as ManifestValidationError;
+      expect(err.path).toBe("traits[0].fields[0].name");
+      expect(err.message).toMatch(/reserved.*every entity carrying this trait/s);
+    }
+  });
+
+  it("rejects a trait supplying `id` even when no entity carries the trait", () => {
+    // The trait's declaration is wrong on its own: every entity that later adopts it is unserveable,
+    // so the refusal does not wait for one to.
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      traits: [{ name: "stamped", fields: [{ name: "id", type: { kind: "text" } }] }],
+      entities: [{ name: "Patient", fields: [{ name: "label", type: { kind: "text" } }] }],
+    };
+    expect(() => validateManifest(m)).toThrow(ManifestValidationError);
   });
 
   it("throws on an unknown trait reference", () => {

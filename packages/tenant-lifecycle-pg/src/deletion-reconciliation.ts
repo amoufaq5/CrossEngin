@@ -781,19 +781,27 @@ export class DeletionReconciler {
    */
   async auditDeadlines(limit = DEFAULT_DEADLINE_AUDIT_LIMIT): Promise<DeadlineAuditPage> {
     const bounded = Math.max(1, Math.min(500, Math.trunc(limit)));
-    const waiting = await this.opts.requests.unanswered(this.opts.onUnreadableRequest, bounded);
-    const lateRefusals = await this.opts.requests.rejectedAfterDeadline(
-      this.opts.onUnreadableRequest,
-      bounded,
-    );
+    const waiting = await this.opts.requests.unanswered(bounded);
+    const lateRefusals = await this.opts.requests.rejectedAfterDeadline(bounded);
+    // Forwarded here rather than inside the two reads, which is what following `scanAll`'s shape
+    // buys: one place decides what a refused row does, and the count below cannot be derived from a
+    // different set than the one the reporter saw.
+    const unreadable = [...waiting.unreadable, ...lateRefusals.unreadable];
+    for (const row of unreadable) this.opts.onUnreadableRequest(row);
     const findings: DeadlineFinding[] = [];
-    for (const request of [...waiting, ...lateRefusals]) {
+    for (const request of [...waiting.records, ...lateRefusals.records]) {
       const finding = this.reportDeadline(request);
       if (finding !== null) findings.push(finding);
     }
     return {
-      examined: waiting.length + lateRefusals.length,
-      complete: waiting.length < bounded && lateRefusals.length < bounded,
+      examined: waiting.records.length + lateRefusals.records.length,
+      unreadable: unreadable.length,
+      // From the **rows** each query returned and never from the records it yielded. A refused row
+      // is a row: it holds a position in the ordering, so with one unreadable row on a full page the
+      // record count is short of the limit and this claimed the table had ended — measured at 3 of
+      // 6 rows read with `complete: true`, which also dropped the page-cut clause from the
+      // operator's line. `TombstoneScanPage`'s rule, which this pass had not followed.
+      complete: waiting.rowsRead < bounded && lateRefusals.rowsRead < bounded,
       findings,
       warningDays: this.warningDays(),
     };
@@ -990,7 +998,23 @@ export interface DeadlineAuditPage {
   /** How many requests this pass **assessed**. A row the contract refused is not among them. */
   readonly examined: number;
   /**
+   * How many rows this pass read and could not represent, so a clean page is one where **both** this
+   * and `findings` are empty rather than the findings alone.
+   *
+   * `TombstoneSweepPage` carries it and says exactly that; this page was the one member of the
+   * family that dropped it, and the scheduler's mirror dropped it with it — so a page on which
+   * nothing was assessable reported `{examined: 0, complete: true, findings: []}`, byte-identical
+   * to a healthy deployment with no pending requests. The rows do reach `onUnreadableRequest`, so
+   * what was wrong is the **coverage claim** rather than the reporting, and the coverage claim is
+   * what this method's product is.
+   */
+  readonly unreadable: number;
+  /**
    * `false` when either read filled its limit, so the pass is a bounded reading of the queue.
+   *
+   * Derived from the **rows** each query returned and not from the records it yielded: a refused row
+   * holds a position in the ordering, so with one unreadable row on a full page the record count is
+   * short of the limit and a cut page used to read as the end of the table.
    *
    * The waiting read is ordered nearest-deadline-first, so a cut page drops the requests *furthest*
    * from their deadline and loses a breach only when there are more breaches than the limit. That is

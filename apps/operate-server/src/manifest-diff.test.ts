@@ -1,5 +1,6 @@
 import {
-  manifestSectionChangeMayWithhold,
+  MANIFEST_SECTION_NAMES,
+  MANIFEST_SECTION_REACH_MEANINGS,
   type ManifestSectionName,
 } from "@crossengin/kernel/manifest";
 import { describe, expect, it } from "vitest";
@@ -7,7 +8,7 @@ import { describe, expect, it } from "vitest";
 import {
   DIFF_IMPACTS,
   EMPTY_DIFF_VIEW,
-  SECTIONS_WITH_DETAIL_LAYERS,
+  SECTION_DETAIL_LAYER,
   diffManifests,
   relationLabel,
   type DiffWarningCode,
@@ -497,6 +498,55 @@ describe("permissions", () => {
     ]);
     expect(view.impact).toBe("breaking");
   });
+
+  it("treats a widened field-level create grant as additive, where update is breaking", () => {
+    // ADR-0348's asymmetry rather than an inconsistency with the test above: a principal supplying
+    // a value already knows it, so widening who may *set* a field discloses nothing, while widening
+    // who may *change* one lets a value be destroyed by someone who cannot read it.
+    const next = base();
+    permissions(next, "Customer")["fields"] = { contact_email: { create: { roles: ["app_user"] } } };
+    const view = diffManifests(base(), next);
+    expect(permissionChange(view, "Customer", "fields.contact_email.create").granted).toEqual([
+      "app_user",
+    ]);
+    expect(view.impact).toBe("additive");
+  });
+
+  it("names the field whose create grant is narrowed", () => {
+    // `grantMap` read `fields.*.read` and `fields.*.update` and not the third arm for the two
+    // increments after ADR-0348 added it, so this narrowing produced no `PermissionChange` at all:
+    // a reviewer was shown a `permissions` section change with nothing naming the field.
+    const active = base();
+    permissions(active, "Customer")["fields"] = {
+      contact_email: { create: { roles: ["app_admin", "app_user"] } },
+    };
+    const next = base();
+    permissions(next, "Customer")["fields"] = {
+      contact_email: { create: { roles: ["app_admin"] } },
+    };
+    const view = diffManifests(active, next);
+    expect(permissionChange(view, "Customer", "fields.contact_email.create")).toEqual({
+      entity: "Customer",
+      operation: "fields.contact_email.create",
+      granted: [],
+      revoked: ["app_user"],
+    });
+    expect(codes(view)).toContain("permission_revoked");
+    expect(view.impact).toBe("breaking");
+  });
+
+  it("reads the create arm directly rather than through its update fallback", () => {
+    // `create ?? update` is the authorization path's fallback and resolving it here would report an
+    // inherited `update` grant twice and a declared `create` grant not at all. A field declaring
+    // only `update` must therefore produce exactly one change, named `.update`.
+    const next = base();
+    permissions(next, "Customer")["fields"] = { contact_email: { update: { roles: ["app_user"] } } };
+    const view = diffManifests(base(), next);
+    const operations = view.permissionChanges
+      .filter((change) => change.operation.startsWith("fields."))
+      .map((change) => change.operation);
+    expect(operations).toEqual(["fields.contact_email.update"]);
+  });
 });
 
 describe("relations", () => {
@@ -556,6 +606,71 @@ describe("relations", () => {
     expect(view.relationChanges).toEqual([
       { change: "added", label: "Customer ↔ WorkOrder", detail: null },
     ]);
+  });
+
+  it("flags the one kind flip that keeps its label", () => {
+    // `many_to_one` and `one_to_many` over the same triple share `relationLabel`, so before this
+    // the flip was invisible to this layer — and to the census too, since `relations` is
+    // `unkeyed_array` and a same-count content change answers `mayWithhold: false`. Measured at
+    // `additive` with no detail and no warning.
+    //
+    // The active side declares CASCADE so the fixture exercises what the warning claims: only
+    // `many_to_one` is indexed by `relationDeleteIndex`, so after the flip the declared policy is
+    // inert and the column's foreign key reverts to RESTRICT.
+    const active = base();
+    const before = relations(active)[0];
+    if (before === undefined) throw new Error("no relation");
+    before["onDelete"] = "cascade";
+    const next = base();
+    const relation = relations(next)[0];
+    if (relation === undefined) throw new Error("no relation");
+    relation["kind"] = "one_to_many";
+    relation["onDelete"] = "cascade";
+    const view = diffManifests(active, next);
+    expect(view.impact).toBe("breaking");
+    expect(codes(view)).toContain("relation_kind_changed");
+    expect(view.relationChanges).toEqual([
+      {
+        change: "modified",
+        label: "WorkOrder.customer → Customer",
+        detail: "kind many_to_one → one_to_many",
+      },
+    ]);
+  });
+
+  it("reports the kind alone when the kind and the onDelete both change", () => {
+    // A consequence of comparing the kind first, and the right one: the flip makes the declared
+    // policy inert, so reporting `onDelete restrict → cascade` beside it would name a rule that
+    // will never be applied.
+    const next = base();
+    const relation = relations(next)[0];
+    if (relation === undefined) throw new Error("no relation");
+    relation["kind"] = "one_to_many";
+    relation["onDelete"] = "cascade";
+    const view = diffManifests(base(), next);
+    expect(view.relationChanges).toEqual([
+      {
+        change: "modified",
+        label: "WorkOrder.customer → Customer",
+        detail: "kind many_to_one → one_to_many",
+      },
+    ]);
+    expect(codes(view)).not.toContain("relation_cascade_added");
+  });
+
+  it("reports a kind flip involving many_to_many as a removal and an addition", () => {
+    // Which is why the kind comparison needs no arm for it: the label carries the whole of a
+    // `many_to_many` (`{kind, left, right}` and nothing else), so such a flip cannot reach the
+    // modified branch at all.
+    const next = base();
+    next["relations"] = [{ kind: "many_to_many", left: "WorkOrder", right: "Customer" }];
+    const view = diffManifests(base(), next);
+    expect(view.relationChanges.map((change) => change.change).sort()).toEqual([
+      "added",
+      "removed",
+    ]);
+    expect(codes(view)).toContain("relation_removed");
+    expect(codes(view)).not.toContain("relation_kind_changed");
   });
 });
 
@@ -835,22 +950,54 @@ describe("the section census", () => {
       r: { kind: "tabular", name: "R", entity: "Customer", columns: ["display_name"] },
     };
     const view = diffManifests(baseWithUnreadSections(), next);
+
+    // Written down rather than re-derived. The first draft of this test looped the changes
+    // asserting `change.mayWithhold === manifestSectionChangeMayWithhold(change)`, which compares
+    // a field against the very call that produced it (`compare` spreads the change and sets the
+    // field from that function, which reads none of `mayWithhold`) — so it held for every input
+    // and could only have failed if the field stopped being set at all, which the two values
+    // below already catch. Expected values make it a fence: the kernel owns *what the predicate
+    // answers* and this owns *that the view carries the kernel's answer*.
+    expect(
+      view.sectionChanges.map((change) => [change.section, change.mayWithhold] as const),
+    ).toEqual([
+      // A removed job: `served`, so a reviewer must be told something may be withheld.
+      ["jobs", true],
+      // A whole section declared where there was none, and `validated_only`: nothing reads it, so
+      // nothing can be withheld by it.
+      ["reports", false],
+    ]);
+  });
+
+  it("sends the kernel's sentence for each reach rather than leaving the client to key on it", () => {
+    const next = baseWithUnreadSections();
+    next["jobs"] = {};
+    next["reports"] = {
+      r: { kind: "tabular", name: "R", entity: "Customer", columns: ["display_name"] },
+    };
+    const view = diffManifests(baseWithUnreadSections(), next);
+
+    // `apps/operate-web` held a fourth copy of these three sentences keyed on the bare `reach`
+    // string and that copy was the live one, so the sentence travels now. Asserted against the
+    // kernel's map rather than against literals: a literal here would be the fifth copy.
     for (const change of view.sectionChanges) {
-      expect(change.mayWithhold).toBe(manifestSectionChangeMayWithhold(change));
+      expect(change.reachNote).toBe(MANIFEST_SECTION_REACH_MEANINGS[change.reach]);
     }
-    expect(view.sectionChanges.map((c) => c.mayWithhold)).toContain(true);
-    expect(view.sectionChanges.map((c) => c.mayWithhold)).toContain(false);
+    // Non-vacuity: the two changes above span two reaches, so the loop compares two distinct
+    // sentences rather than one repeated.
+    expect(new Set(view.sectionChanges.map((change) => change.reachNote)).size).toBe(2);
   });
 });
 
-// A representative *withholding* change per section the detail layers read, with the field it must
-// land in. Withholding deliberately — `manifestSectionChangeMayWithhold` is what the census would
-// upgrade impact on, so a probe whose change answers false would pass whether or not the layer
-// covered the section, and the fence would assert nothing.
+// A representative *withholding* change per section a detail layer reads. Withholding
+// deliberately — `manifestSectionChangeMayWithhold` is what the census would upgrade impact on, so
+// a probe whose change answers false would pass whether or not the layer covered the section, and
+// the fence would assert nothing. No `detail` field: the extractor comes from
+// `SECTION_DETAIL_LAYER`, so the fence reads the production reader rather than a parallel copy of
+// it — which is the whole reason that map replaced a membership set.
 const COVERED_SECTION_PROBES: readonly {
   readonly section: ManifestSectionName;
   readonly mutate: (next: Record<string, unknown>) => void;
-  readonly detail: (view: ManifestDiffView) => readonly unknown[];
 }[] = [
   {
     section: "entities",
@@ -859,28 +1006,24 @@ const COVERED_SECTION_PROBES: readonly {
         (candidate) => candidate["name"] !== "notes",
       );
     },
-    detail: (view) => view.fieldChanges,
   },
   {
     section: "relations",
     mutate: (next) => {
       next["relations"] = [];
     },
-    detail: (view) => view.relationChanges,
   },
   {
     section: "roles",
     mutate: (next) => {
       delete (next["roles"] as Record<string, unknown>)["app_user"];
     },
-    detail: (view) => view.rolesRemoved,
   },
   {
     section: "permissions",
     mutate: (next) => {
       permissions(next, "WorkOrder")["create"] = { roles: ["app_admin"] };
     },
-    detail: (view) => view.permissionChanges,
   },
   {
     section: "workflows",
@@ -889,19 +1032,31 @@ const COVERED_SECTION_PROBES: readonly {
       workflow["states"] = [{ name: "open" }, { name: "closed" }];
       workflow["transitions"] = [{ name: "close", from: "open", to: "closed" }];
     },
-    detail: (view) => view.lifecycleChanges,
   },
 ];
 
-describe("SECTIONS_WITH_DETAIL_LAYERS", () => {
-  it("matches the probe table in both directions", () => {
-    // One-way would pass while both halves were stale together (pg-record-retention.ts's rule).
-    expect([...SECTIONS_WITH_DETAIL_LAYERS].sort()).toEqual(
-      COVERED_SECTION_PROBES.map((probe) => probe.section).sort(),
-    );
+function layerCount(view: ManifestDiffView, section: ManifestSectionName): number {
+  const layer = SECTION_DETAIL_LAYER[section];
+  if (layer === null) throw new Error(`no detail layer declared for ${section}`);
+  return layer(view);
+}
+
+describe("SECTION_DETAIL_LAYER", () => {
+  it("is total over the kernel's section census", () => {
+    // A section added to `ManifestSchema` is a compile error here; this is the run-time half, so a
+    // renamed key cannot leave a live entry pointing at a section that no longer exists.
+    expect(Object.keys(SECTION_DETAIL_LAYER).sort()).toEqual([...MANIFEST_SECTION_NAMES].sort());
   });
 
-  it("has a detail layer for every section it suppresses", () => {
+  it("matches the probe table in both directions", () => {
+    // One-way would pass while both halves were stale together (pg-record-retention.ts's rule).
+    const covered = MANIFEST_SECTION_NAMES.filter(
+      (section) => SECTION_DETAIL_LAYER[section] !== null,
+    );
+    expect([...covered].sort()).toEqual(COVERED_SECTION_PROBES.map((probe) => probe.section).sort());
+  });
+
+  it("counts what its layer reported for every section it covers", () => {
     for (const probe of COVERED_SECTION_PROBES) {
       const next = base();
       probe.mutate(next);
@@ -912,26 +1067,25 @@ describe("SECTIONS_WITH_DETAIL_LAYERS", () => {
       const change = sectionChange(view, probe.section);
       expect(change.mayWithhold, `${probe.section}: probe must be a withholding change`).toBe(true);
 
-      // And the layer saw it, which is what earns the section its place in the set. A section
-      // declared covered and not covered fails here rather than silently suppressing its own
-      // census upgrade — which would leave impact `additive` where it should be `breaking`.
+      // And the declared extractor saw it. A section whose entry reads the wrong view field fails
+      // here rather than silently suppressing its own census upgrade for every change.
       expect(
-        probe.detail(view).length,
-        `${probe.section}: declared covered but no detail layer reported it`,
+        layerCount(view, probe.section),
+        `${probe.section}: extractor read nothing for a change its layer reported`,
       ).toBeGreaterThan(0);
     }
   });
 
-  it("reports no detail for any covered section on an unchanged pair", () => {
-    // The non-vacuity control: each detail list above is non-empty *because of* the mutation.
+  it("counts zero for every covered section on an unchanged pair", () => {
+    // The non-vacuity control: each count above is non-zero *because of* the mutation.
     const view = diffManifests(base(), base());
     for (const probe of COVERED_SECTION_PROBES) {
-      expect(probe.detail(view), `${probe.section}`).toEqual([]);
+      expect(layerCount(view, probe.section), `${probe.section}`).toBe(0);
     }
   });
 
   it("does not overrule a layer that judged a change additive", () => {
-    // The regression that produced the set: adding an optional field changes the `entities`
+    // The regression that produced the suppression: adding an optional field changes the `entities`
     // section, `entities` is served, so the coarse census answers may-withhold — and mapping that
     // straight onto impact reported `breaking` for a change entityLayer had correctly called
     // additive, in five existing tests at once.
@@ -940,6 +1094,152 @@ describe("SECTIONS_WITH_DETAIL_LAYERS", () => {
     const view = diffManifests(base(), next);
     expect(sectionChange(view, "entities").mayWithhold).toBe(true);
     expect(fieldChange(view, "Customer", "nickname").change).toBe("added");
+    expect(layerCount(view, "entities")).toBeGreaterThan(0);
+    expect(view.impact).toBe("additive");
+  });
+
+  it("does not overrule a layer that judged a lifecycle state addition additive", () => {
+    // The second half of the same property, and the one a per-member rule would regress: the
+    // census names the *workflow* key while `lifecycleLayer` reports by **entity**, so matching
+    // member keys against layer details would find no match here and upgrade a state addition to
+    // breaking.
+    const next = base();
+    const workflow = lifecycle(next);
+    workflow["states"] = [
+      { name: "open" },
+      { name: "closed" },
+      { name: "cancelled" },
+      { name: "on_hold" },
+    ];
+    workflow["transitions"] = [
+      { name: "close", from: "open", to: "closed" },
+      { name: "cancel", from: "open", to: "cancelled" },
+      { name: "hold", from: "open", to: "on_hold" },
+    ];
+    const view = diffManifests(base(), next);
+    expect(sectionChange(view, "workflows").mayWithhold).toBe(true);
+    expect(layerCount(view, "workflows")).toBeGreaterThan(0);
+    expect(view.impact).toBe("additive");
+  });
+});
+
+// Every one of these changes a covered section, is a change the census would upgrade on, and is
+// invisible to that section's own detail layer — so before the layer-silence rule each read
+// `additive` while taking something away. Measured against the committed tree; four of the five
+// covered sections have a member.
+const SILENT_LAYER_CASES: readonly {
+  readonly name: string;
+  readonly section: ManifestSectionName;
+  readonly mutateActive?: (active: Record<string, unknown>) => void;
+  readonly mutate: (next: Record<string, unknown>) => void;
+}[] = [
+  {
+    // The sharpest member: ADR-0340 refuses an undischargeable obligation at boot, so for a tenant
+    // whose deployment declares no evaluator this is a permanent 503 approved as additive.
+    name: "an abac obligation added to a list grant",
+    section: "permissions",
+    mutate: (next) => {
+      permissions(next, "Customer")["list"] = {
+        roles: ["app_admin", "app_user"],
+        abac: "own_rows",
+      };
+    },
+  },
+  {
+    name: "a role losing its inherits",
+    section: "roles",
+    mutateActive: (active) => {
+      (active["roles"] as Record<string, Record<string, unknown>>)["app_user"] = {
+        name: "app_user",
+        inherits: ["app_admin"],
+      };
+    },
+    mutate: () => {
+      /* next keeps the plain role, so the change is the removal */
+    },
+  },
+  {
+    // A real unique index since ADR-0360: existing duplicates stop being updatable and a create
+    // that would collide answers 409.
+    name: "unique added to a field",
+    section: "entities",
+    mutate: (next) => {
+      field(next, "Customer", "contact_email")["unique"] = true;
+    },
+  },
+  {
+    name: "a transition retargeted",
+    section: "workflows",
+    mutate: (next) => {
+      lifecycle(next)["transitions"] = [
+        { name: "close", from: "open", to: "cancelled" },
+        { name: "cancel", from: "open", to: "cancelled" },
+      ];
+    },
+  },
+  {
+    name: "a transition re-sourced",
+    section: "workflows",
+    mutate: (next) => {
+      lifecycle(next)["transitions"] = [
+        { name: "close", from: "closed", to: "closed" },
+        { name: "cancel", from: "open", to: "cancelled" },
+      ];
+    },
+  },
+];
+
+describe("a silent layer is not a verdict", () => {
+  for (const probe of SILENT_LAYER_CASES) {
+    it(`reports ${probe.name} as breaking`, () => {
+      const active = base();
+      probe.mutateActive?.(active);
+      const next = base();
+      probe.mutate(next);
+      const view = diffManifests(active, next);
+
+      // Three facts, and the test is worthless without all three: the manifest still parses (an
+      // unparseable one answers `comparable: false` with every count zero, which is how two of
+      // these probes first read as clean), the census would upgrade on it, and the layer that reads
+      // that section saw nothing.
+      expect(view.comparable, "the mutated manifest must still parse").toBe(true);
+      expect(sectionChange(view, probe.section).mayWithhold).toBe(true);
+      expect(layerCount(view, probe.section), "the layer must be silent for this to be the case").toBe(
+        0,
+      );
+
+      expect(view.impact).toBe("breaking");
+      // And no detail layer produced a warning either, so `breaking` here is the census's verdict
+      // rather than something a warning would have reported anyway.
+      expect(view.warnings).toEqual([]);
+    });
+  }
+
+  it("upgrades a cosmetic change inside a covered section too, which is the stated cost", () => {
+    // A role's description moving withholds nothing and reads breaking. That is the same cost every
+    // *uncovered* section already pays — the kernel's own doc gives `roles` as its example of a
+    // change that may only have moved a label — and it is the safe direction: a reviewer who looks
+    // at an over-reported diff loses time, where one who was not shown a removal loses the data.
+    const next = base();
+    (next["roles"] as Record<string, Record<string, unknown>>)["app_user"] = {
+      name: "app_user",
+      description: "renamed label",
+    };
+    const view = diffManifests(base(), next);
+    expect(layerCount(view, "roles")).toBe(0);
+    expect(view.impact).toBe("breaking");
+  });
+
+  it("stays additive when the layer spoke about a different member, which is the stated residual", () => {
+    // The granularity is the section and not the member: `entityLayer` reports the added field on
+    // Customer, so the census is suppressed for `entities` as a whole and the `unique` added to
+    // WorkOrder.title rides along invisibly. Closing this means matching member keys against layer
+    // details, which the lifecycle-state test above shows cannot be done uniformly.
+    const next = base();
+    fields(next, "Customer").push({ name: "nickname", type: { kind: "text", maxLength: 50 } });
+    field(next, "WorkOrder", "title")["unique"] = true;
+    const view = diffManifests(base(), next);
+    expect(layerCount(view, "entities")).toBeGreaterThan(0);
     expect(view.impact).toBe("additive");
   });
 });
