@@ -79,6 +79,22 @@ export interface TombstoneSweepPage {
 }
 
 /**
+ * One page of the Article 12(3) sweep (ADR-0387). Structural, so this file imports no store type.
+ *
+ * `findings` is declared `unknown[]` because this layer **counts** them and never renders one: each
+ * finding's sentence has exactly one producer, the reconciler's required `onDeadlineFinding`, and a
+ * second renderer here would be the duplicated log line that increment converged (ADR-0288). The
+ * three fields beside it are the half a reader cannot infer from the findings — how far the sweep
+ * looked, whether it reached the end, and the horizon it judged against.
+ */
+export interface DeadlineSweepPage {
+  readonly examined: number;
+  readonly complete: boolean;
+  readonly warningDays: number;
+  readonly findings: readonly unknown[];
+}
+
+/**
  * What the tombstone sweep has covered (ADR-0328).
  *
  * The sweep is the only thing that verifies a tombstone the synchronous deletion route wrote, and
@@ -222,7 +238,28 @@ export interface StrandedReconcilerLike {
     readonly limit?: number;
     readonly afterTombstoneId?: string | null;
   }): Promise<TombstoneSweepPage>;
+  /**
+   * The fourth direction: every request whose Article 12(3) standing is a finding (ADR-0387).
+   *
+   * Optional for the same reason the two above are — the scheduler is wired against a structural
+   * mirror — and it reports nothing through this return value: the findings leave through the
+   * reconciler's own required `onDeadlineFinding`, so a deployment that offers the method gets the
+   * sentences whether or not it reads the page. What comes back is the **coverage**.
+   */
+  auditDeadlines?(limit?: number): Promise<DeadlineSweepPage>;
 }
+
+/**
+ * How often the Article 12(3) sweep runs when nothing configures it: about once an hour, derived
+ * from the tick the deployment did configure.
+ *
+ * Derived rather than a tick count, because the right cadence is a property of *time* and the tick
+ * is not: `--deletion-runner-ms` is set anywhere from a second to minutes, so one constant would be
+ * every-tick on a slow deployment and 1,200-an-hour on a fast one. Hourly is two orders of
+ * magnitude finer than the quantity being watched — an Article 12(3) horizon is days — and it is
+ * the figure at which repeating a standing finding stays readable.
+ */
+export const DEADLINE_SWEEP_TARGET_MS = 3_600_000;
 
 export interface DeletionSchedulerOptions {
   readonly runner: DeletionRunnerLike;
@@ -289,6 +326,34 @@ export interface DeletionSchedulerOptions {
    * either way (ADR-0313); this callback is for what was found.
    */
   readonly onAuditFindings?: (findings: readonly AuditFinding[]) => void | Promise<void>;
+  /**
+   * How often the Article 12(3) sweep runs, as a multiple of ticks. Default: hourly, derived from
+   * `intervalMs` (`DEADLINE_SWEEP_TARGET_MS`).
+   *
+   * **Its own cadence rather than `auditEveryTicks`, on the cost argument that knob itself makes.**
+   * That pass re-reads and re-hashes every completed request's tombstone; this one is two
+   * index-ordered reads against `deadline_at` and `rejected_at`. Sharing the knob would be the
+   * worse of two mistakes in either direction: at the audit's cadence the cheap pass runs far too
+   * rarely, and at this one the expensive pass runs far too often.
+   *
+   * **And defaulted on rather than off, which is the opposite of `auditEveryTicks` and is the
+   * decision.** There, off is the status quo — a deployment that never audited loses nothing. Here
+   * off *is* the defect: nothing in the workspace detected an Article 12(3) breach before ADR-0387,
+   * so a pass nobody opts into would leave every deployment exactly where it was, which is the
+   * defect restated as a default (ADR-0364's addendum). A malformed explicit value falls back to
+   * the derived cadence for the same reason, where `auditEveryTicks` reads one as off.
+   */
+  readonly deadlineEveryTicks?: number;
+  /**
+   * The Article 12(3) sweep's coverage, reported **every** time it runs, including when it found
+   * nothing.
+   *
+   * ADR-0367's `declares` arm and ADR-0372's rule: a bounded reading that says how far it looked is
+   * honest where silence is not, and "no request is late" cannot be inferred from the absence of a
+   * log line — least of all here, where the absence is also what a sweep that is not running looks
+   * like. The findings are **not** re-reported through this; see `DeadlineSweepPage.findings`.
+   */
+  readonly onDeadlineSweep?: (page: DeadlineSweepPage) => void | Promise<void>;
   /**
    * The tombstone sweep's findings (ADR-0327), reported separately because they are a different
    * fact: an `AuditFinding` names a completed *request* whose proof no longer stands up, while these
@@ -537,6 +602,58 @@ export class DeletionScheduler {
     } catch (err) {
       this.opts.onError?.(err);
     }
+    // A fourth, and **outside `auditOnce` deliberately**: that method returns early unless
+    // `auditEveryTicks` is configured, which defaults to never, so a deadline pass placed inside it
+    // would be dark on every deployment that had not opted into the expensive audit — the two
+    // conditions have nothing to do with each other. Its own `try` for the reason the other three
+    // have theirs.
+    try {
+      await this.deadlineOnce();
+    } catch (err) {
+      this.opts.onError?.(err);
+    }
+  }
+
+  /**
+   * The Article 12(3) sweep (ADR-0387), on its own hourly-by-default cadence.
+   *
+   * Two index-ordered reads: the unanswered requests ordered by the deadline in force, and the
+   * refusals recorded after theirs. The findings leave through the reconciler's own reporter as it
+   * assesses each row, so this method's whole product is the coverage — which is why it reports
+   * even when the page is clean, and why a reconciler offering no `auditDeadlines` reports nothing
+   * at all rather than an empty page (ADR-0331: nothing was established, so nothing is claimed).
+   */
+  private async deadlineOnce(): Promise<void> {
+    const every = this.deadlineEveryTicks();
+    if (every === 0 || this.ticks % every !== 0) return;
+    const sweep = this.opts.reconciler?.auditDeadlines;
+    if (sweep === undefined) return;
+    const page = await sweep.call(this.opts.reconciler, this.opts.auditLimit);
+    await this.opts.onDeadlineSweep?.(page);
+  }
+
+  /**
+   * The sweep's cadence in ticks, derived from the interval when nothing configures it.
+   *
+   * A configured value must be a positive integer; anything else falls back to the derived cadence
+   * rather than to off, because off is the condition this pass exists to end and silently restoring
+   * it is the wrong direction to fail in. The CLI validates the flag, so the fallback is reachable
+   * only from a direct constructor caller.
+   */
+  private deadlineEveryTicks(): number {
+    const configured = this.opts.deadlineEveryTicks;
+    if (configured !== undefined && Number.isInteger(configured) && configured >= 1) {
+      return configured;
+    }
+    // A degenerate interval is read as *every tick* and not as a large multiple, because the
+    // division is what makes that distinction invisible: `3_600_000 / 0` is `Infinity` and
+    // `/ NaN` is `NaN`, and `ticks % Infinity` is never 0 — so the pass would be **silently off**
+    // for a deployment whose interval is wrong, which is the one direction this method exists to
+    // refuse. Measured both arms; the CLI floors `--deletion-runner-ms` at 1000, so this is
+    // reachable only from a direct constructor caller, which is exactly who the guard is for.
+    const derived = Math.round(DEADLINE_SWEEP_TARGET_MS / this.opts.intervalMs);
+    if (!Number.isFinite(derived)) return 1;
+    return Math.max(1, derived);
   }
 
   /**

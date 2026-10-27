@@ -1,5 +1,13 @@
 import { columnNameForField } from "@crossengin/kernel/ddl";
-import { ManifestSchema, computeManifestDiff, type Manifest } from "@crossengin/kernel/manifest";
+import {
+  ManifestSchema,
+  computeManifestDiff,
+  diffManifestSections,
+  manifestSectionChangeMayWithhold,
+  type Manifest,
+  type ManifestSectionChange,
+  type ManifestSectionName,
+} from "@crossengin/kernel/manifest";
 
 import { CRUD_OPERATIONS, SENSITIVE_CLASSIFICATIONS, formatFieldType } from "./manifest-view.js";
 
@@ -59,6 +67,9 @@ export interface LifecycleChange {
   readonly detail: string;
 }
 
+/** A section change plus the one judgement the renderer must not re-derive. */
+export type SectionChangeView = ManifestSectionChange & { readonly mayWithhold: boolean };
+
 export interface ManifestDiffView {
   readonly comparable: boolean;
   readonly impact: DiffImpact;
@@ -73,6 +84,17 @@ export interface ManifestDiffView {
   readonly rolesRemoved: readonly string[];
   readonly lifecycleChanges: readonly LifecycleChange[];
   readonly counts: { added: number; removed: number; modified: number; warnings: number };
+  /**
+   * Every section the two manifests differ on, including the twelve the detail layers above
+   * cannot see (ADR-0388).
+   *
+   * Beside the layers rather than replacing them: a layer says *what* changed inside the five
+   * it reads, and this says *that* something changed in any of the seventeen — so a reviewer is
+   * never shown `No changes` for a manifest that differs. `mayWithhold` is carried per change
+   * rather than recomputed by the renderer, so the page and the gate cannot disagree about
+   * which change is breaking.
+   */
+  readonly sectionChanges: readonly SectionChangeView[];
 }
 
 type ManifestEntity = NonNullable<Manifest["entities"]>[number];
@@ -103,6 +125,7 @@ function emptyView(): ManifestDiffView {
     rolesAdded: [],
     rolesRemoved: [],
     lifecycleChanges: [],
+    sectionChanges: [],
     counts: { added: 0, removed: 0, modified: 0, warnings: 0 },
   };
 }
@@ -151,6 +174,38 @@ interface EntityLayer {
   readonly modified: readonly string[];
   readonly fieldChanges: readonly FieldChange[];
 }
+
+/**
+ * The sections the detail layers below analyse, so the census must not overrule them on impact.
+ *
+ * `manifestSectionChangeMayWithhold` is deliberately coarse and over-reporting — the kernel says so
+ * at its definition, and tells a consumer to *map* it rather than re-derive a judgement. Mapping it
+ * straight onto `impact` was measured wrong in five places: adding an **optional field** changes the
+ * `entities` section, `entities` is `served`, so the census answers *may withhold* and the view
+ * reported `breaking` for a change `entityLayer` had correctly called additive. Where a layer reads
+ * a section its verdict is strictly better informed, so the census upgrades impact only for the
+ * sections no layer reads — which is exactly where the register's defect lives (a removed job, a
+ * narrowed view, `meta.extends`).
+ *
+ * Declared beside the layers rather than derived, because a layer is a function and which sections
+ * it reads is not a question any text scan can answer soundly. It is fenced **behaviourally**
+ * instead: `manifest-diff.test.ts` drives a representative *withholding* change per section named
+ * here and asserts a detail layer reported it, so a section declared covered and not covered fails
+ * rather than silently suppressing its own census upgrade. Withholding deliberately — a probe whose
+ * change answers `mayWithhold: false` would pass whether or not the layer covered the section,
+ * since the census would not have upgraded anyway.
+ *
+ * Mutation-checked both ways rather than assumed: adding `jobs` here fails 2 tests (the membership
+ * fence, and a removed job dropping from `breaking` to `additive` — the exact failure mode a stale
+ * entry has), and dropping `permissions` fails 3, two of them tests that predate this set.
+ */
+export const SECTIONS_WITH_DETAIL_LAYERS: ReadonlySet<ManifestSectionName> = new Set([
+  "entities",
+  "relations",
+  "roles",
+  "permissions",
+  "workflows",
+]);
 
 function kernelEntityLayer(active: Manifest, next: Manifest): EntityLayer {
   const diff = computeManifestDiff(active, next);
@@ -522,6 +577,11 @@ function compare(active: Manifest, next: Manifest): ManifestDiffView {
 
   const entities = entityLayer(active, next);
   const classificationChanges = classificationLayer(active, next);
+  // The whole-manifest census, which is what makes the five detail layers a *detail* rather
+  // than the answer. `mayWithhold` is resolved here so the view carries one judgement.
+  const sectionChanges: readonly SectionChangeView[] = diffManifestSections(active, next).map(
+    (c) => ({ ...c, mayWithhold: manifestSectionChangeMayWithhold(c) }),
+  );
 
   const modified: string[] = [...entities.modified];
   for (const change of classificationChanges) {
@@ -698,11 +758,20 @@ function compare(active: Manifest, next: Manifest): ManifestDiffView {
     relationChanges.length > 0 ||
     rolesAdded.length > 0 ||
     rolesRemoved.length > 0 ||
-    lifecycleChanges.length > 0;
+    lifecycleChanges.length > 0 ||
+    sectionChanges.length > 0;
 
   return {
     comparable: true,
-    impact: breaking.length > 0 ? "breaking" : changed ? "additive" : "none",
+    // A section whose change can withhold something a request currently gets is breaking even when
+    // no detail layer saw it -- which is the point: before this, a removed job read `none`.
+    impact:
+      breaking.length > 0 ||
+      sectionChanges.some((c) => c.mayWithhold && !SECTIONS_WITH_DETAIL_LAYERS.has(c.section))
+        ? "breaking"
+        : changed
+          ? "additive"
+          : "none",
     warnings,
     entitiesAdded: entities.added,
     entitiesRemoved: entities.removed,
@@ -713,6 +782,7 @@ function compare(active: Manifest, next: Manifest): ManifestDiffView {
     rolesAdded,
     rolesRemoved,
     lifecycleChanges,
+    sectionChanges,
     counts: {
       added: entities.added.length,
       removed: entities.removed.length,

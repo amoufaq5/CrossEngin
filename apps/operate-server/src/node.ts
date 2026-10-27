@@ -286,6 +286,7 @@ import {
   PostgresTombstoneStore,
   censusBootSchemaTables,
   deleteTenantAtomically,
+  formatDeadlineFinding,
   lifecycleTrailGaps,
   probeLifecycleTrail,
 } from "@crossengin/tenant-lifecycle-pg";
@@ -2280,15 +2281,19 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
                 console.error(
                   `[deletion] request row unreadable (${row.requestId ?? "id unreadable"}): ${row.detail}`,
                 ),
-              // A completed-but-late request is a standing Article 12(3) breach. Reporting it is
-              // the point of making the lateness representable (ADR-0372): before this the row
-              // could not be read at all, so this is the first surface the breach can appear on.
-              onDeadlineBreach: (b) =>
-                console.error(
-                  `[deletion] request ${b.requestId} completed ${Math.round(b.lateByMs / 86_400_000).toString()}d past its Article 12(3) deadline (${b.deadlineAt} -> ${b.completedAt}); tombstone ${b.tombstoneId ?? "(none)"}`,
-                ),
+              // An Article 12(3) standing worth reporting — a breach already run, or a deadline
+              // still meetable and close. The sentence comes from `formatDeadlineFinding` rather
+              // than from here, because this wiring and the runner's below carried byte-identical
+              // interpolations of one string (ADR-0288's shape in a log line, ADR-0387); the
+              // `[deletion]` prefix stays at the call site, being this binary's convention and
+              // not the package's.
+              onDeadlineFinding: (finding) =>
+                console.error(`[deletion] ${formatDeadlineFinding(finding)}`),
               ...(options.deletionStrandedAfterMs !== null
                 ? { strandedAfterMs: options.deletionStrandedAfterMs }
+                : {}),
+              ...(options.deletionWarningDays !== null
+                ? { deadlineWarningDays: options.deletionWarningDays }
                 : {}),
             });
       extraRouteList.push(
@@ -4251,6 +4256,18 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         ...(options.deletionSweepStallAfter !== null
           ? { stallAfterAttempts: options.deletionSweepStallAfter }
           : {}),
+        // The Article 12(3) sweep (ADR-0387), which needs no flag to run: its cadence is derived
+        // from this scheduler's own interval and it is on by default, because off is the condition
+        // it exists to end. The findings' sentences come out through the reconciler's
+        // `onDeadlineFinding` below; this line is the coverage claim, reported even when the page
+        // is clean because "nothing is late" cannot be read off a missing log line (ADR-0372).
+        onDeadlineSweep: (page) =>
+          console.error(
+            `[deletion] article 12(3) sweep: examined ${page.examined.toString()}` +
+              `, ${page.findings.length.toString()} finding(s)` +
+              `, horizon ${page.warningDays.toString()}d` +
+              `${page.complete ? "" : " (page cut — more requests than one page)"}`,
+          ),
         // The repair half (ADR-0322). Conclusive verdicts only: a scheduler may record a deletion
         // that demonstrably happened, and may never reject a request on the *absence* of evidence.
         reconciler: new DeletionReconciler({
@@ -4261,15 +4278,17 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             console.error(
               `[deletion] request row unreadable (${row.requestId ?? "id unreadable"}): ${row.detail}`,
             ),
-          // A completed-but-late request is a standing Article 12(3) breach. Reporting it is the
-          // point of making the lateness representable (ADR-0372): before this the row could not
-          // be read at all, so this is the first surface the breach can appear on.
-          onDeadlineBreach: (b) =>
-            console.error(
-              `[deletion] request ${b.requestId} completed ${Math.round(b.lateByMs / 86_400_000).toString()}d past its Article 12(3) deadline (${b.deadlineAt} -> ${b.completedAt}); tombstone ${b.tombstoneId ?? "(none)"}`,
-            ),
+          // One sentence, one producer — see the route wiring above for why this is a call and not
+          // a second interpolation.
+          onDeadlineFinding: (finding) =>
+            console.error(`[deletion] ${formatDeadlineFinding(finding)}`),
           ...(options.deletionStrandedAfterMs !== null
             ? { strandedAfterMs: options.deletionStrandedAfterMs }
+            : {}),
+          // One horizon for both reconcilers, so the route's answer and the scheduler's sweep
+          // cannot disagree about which requests are close to their deadline.
+          ...(options.deletionWarningDays !== null
+            ? { deadlineWarningDays: options.deletionWarningDays }
             : {}),
         }),
         intervalMs: options.deletionRunnerMs,

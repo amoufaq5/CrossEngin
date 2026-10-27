@@ -2,6 +2,7 @@ export * from "./errors.js";
 export * from "./types.js";
 export * from "./validate.js";
 export * from "./diff.js";
+export * from "./sections.js";
 export * from "./extends.js";
 export * from "./hash.js";
 export * from "./patch.js";

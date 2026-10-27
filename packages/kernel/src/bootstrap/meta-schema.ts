@@ -3841,6 +3841,20 @@ export const META_GDPR_DELETION_REQUESTS: TableDefinition = {
     { name: "rejected_reason", type: "TEXT" },
     { name: "deferred_until", type: "TIMESTAMPTZ" },
     { name: "deferral_reason", type: "TEXT" },
+    /**
+     * Article 12(3)'s two-further-months extension, applied to `deadline_at` **in place**, with
+     * these two as its trace. Nullable with no default: a deadline still at the commitment made on
+     * submission has neither, which is every row written before this column existed, and all three
+     * of the alternatives would have asserted an extension nobody granted. `deadline_at` is
+     * therefore always the commitment currently in force, and these say whether it is the original —
+     * which is what keeps every one of its five comparing readers correct by construction (ADR-0387).
+     *
+     * Not evidence that the data subject was informed. Article 12(3) obliges the controller to
+     * inform them of the extension and its reasons within one month of receipt, and this platform
+     * has no mail channel, so nothing here can carry that fact.
+     */
+    { name: "deadline_extended_at", type: "TIMESTAMPTZ" },
+    { name: "deadline_extension_reason", type: "TEXT" },
     {
       name: "retention_obligations",
       type: "JSONB",

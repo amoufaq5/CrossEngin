@@ -1,7 +1,11 @@
 import {
-  isCompletedLate,
+  DEADLINE_STANDING_FACTS,
+  DEFAULT_DEADLINE_WARNING_DAYS,
+  assessDeadline,
+  isDeadlineFinding,
   tombstoneMatchesAttestations,
   verifyTombstoneHashes,
+  type DeadlineAssessment,
   type DeletionRequestStatus,
   type GdprDeletionRequest,
 } from "@crossengin/tenant-lifecycle";
@@ -241,45 +245,87 @@ export interface ReconciliationResult {
 }
 
 /**
- * One completed request that finished after its Article 12(3) deadline.
+ * One request whose Article 12(3) standing a sweep reports.
  *
- * Both instants, because the breach **is** the pair and a reader asked to trust a boolean cannot
- * put it in a letter to a regulator; `lateByMs` beside them so the figure has one spelling rather
- * than being re-derived at every surface that shows it. `tombstoneId` is the proof the erasure was
- * carried out, which is the other half of the sentence: *it was done, and it was done late*.
+ * It carries the `DeadlineAssessment` rather than flattening it, which is the decision: the
+ * assessment is where the standing, the deadline in force, the answer instant, the signed delta and
+ * the horizon are computed once, and a finding that re-spelled any of them would be a second
+ * derivation of a figure a regulator is shown. The identity is what this layer adds — the
+ * assessment is a property of the record and these three are how a caller finds it.
+ *
+ * It replaced a `DeadlineBreach` that could carry only the one standing it was named for, and the
+ * narrowness was the defect: a `completed` request's lateness was reportable and a **breach still
+ * running** was not expressible at all, which is the condition `isOverdue` answers and nothing
+ * asked. `completedAt` was a required field, so the type could not have held a request that had not
+ * finished even if something had looked.
  *
  * Deliberately **not** an `EvidenceAudit`. That type's fields are all about whether the *proof*
  * stands up (`present`, `digestMatches`, `check`), and a late-but-verifying completion answers "fine"
  * to every one of them — so folding it in would make a finding whose every field says nothing is
  * wrong. Worse, mechanically: every `auditCompleted` finding reaches
  * `DeletionEvidenceEscalator.onAuditFinding` through the scheduler, which declares a paging **sev1**
- * for a detected tamper (ADR-0324). A deadline breach is a standing compliance fact, not a tamper,
+ * for a detected tamper (ADR-0324). A deadline standing is a standing compliance fact, not a tamper,
  * and in this repository the grade *is* the route — so it would page the tamper rotation for
- * something no page can fix.
+ * something that, for every standing but one, no page can fix. Which standing that one is is the
+ * contract's `DEADLINE_STANDING_FACTS.deadlineCanStillBeMet`, and the grade is the deployment's.
  */
-export interface DeadlineBreach {
+export interface DeadlineFinding {
   readonly requestId: string;
   readonly tenantId: string;
-  readonly deadlineAt: string;
-  readonly completedAt: string;
-  readonly lateByMs: number;
+  /** The proof the erasure was carried out, when the request names one. */
   readonly tombstoneId: string | null;
+  readonly assessment: DeadlineAssessment;
 }
 
 /**
- * What a sweep does with a completed request that finished late.
+ * What a sweep does with a request whose Article 12(3) standing is a finding.
  *
- * **Required**, on `onUnreadableRequest`'s rule and for the same measured reason: `isCompletedLate`
- * is the predicate that answers for an Article 12(3) breach after the fact, and before this it had
- * **zero** non-test readers in the workspace — three hits for the name, all inside
- * `gdpr-deletion.ts`, two of them doc mentions and one the declaration. So the claim that a breach
- * is "representable, therefore readable, therefore reportable" stopped at the second comma, and it
- * was the third callerless Article 12(3) predicate beside `isOverdue` and `daysUntilDeadline`. An
- * optional reporter defaulting to "drop it silently" would leave it that way for every deployment
- * that did not opt in, which is the defect restated as a default (ADR-0364's addendum, ADR-0371's
- * `onRefused`).
+ * **Required**, on `onUnreadableRequest`'s rule and for the same measured reason, which ADR-0387
+ * widened rather than invented: `isOverdue` and `daysUntilDeadline` had **zero** non-test callers in
+ * the workspace and the `completed`-only predicate beside them had exactly one, so of the three
+ * readings that answer for an Article 12(3) deadline two were asked by nothing. An optional reporter
+ * defaulting to "drop it silently" would leave it that way for every deployment that did not opt in,
+ * which is the defect restated as a default (ADR-0364's addendum, ADR-0371's `onRefused`) — and the
+ * finding this would drop is a deletion request the platform is late on, or about to be.
  */
-export type DeadlineBreachReporter = (breach: DeadlineBreach) => void;
+export type DeadlineFindingReporter = (finding: DeadlineFinding) => void;
+
+/**
+ * One sentence per finding, derived from the standing's **declared facts** rather than from its
+ * name.
+ *
+ * Here because node.ts built it twice — the two `DeletionReconciler` wirings carried
+ * byte-identical interpolations of one string, which is the maintained-list shape (ADR-0288) in a
+ * log line — and a third caller is owed the moment a route renders one.
+ *
+ * It reads `breached` / `deadlineCanStillBeMet` and the two nullables, and names no standing, so a
+ * seventh standing gets a sentence from the facts it is obliged to declare instead of falling
+ * through to a default nobody chose.
+ */
+export function formatDeadlineFinding(finding: DeadlineFinding): string {
+  const a = finding.assessment;
+  const facts = DEADLINE_STANDING_FACTS[a.standing];
+  const days = (ms: number): string => Math.round(Math.abs(ms) / 86_400_000).toString();
+  const where = `request ${finding.requestId} (tenant ${finding.tenantId}, status ${a.status})`;
+  const deadline = a.extendedAt === null ? a.deadlineAt : `${a.deadlineAt}, extended ${a.extendedAt}`;
+  if (a.msPastDeadline === null) {
+    return `${where} is ${a.status} and its record does not state when the data subject was answered; deadline ${deadline}`;
+  }
+  if (facts.breached) {
+    return a.answeredAt === null
+      ? `${where} is ${days(a.msPastDeadline)}d past its Article 12(3) deadline and still unanswered; deadline ${deadline}`
+      : `${where} answered the data subject ${days(a.msPastDeadline)}d past its Article 12(3) deadline (${deadline} -> ${a.answeredAt}); tombstone ${finding.tombstoneId ?? "(none)"}`;
+  }
+  if (facts.deadlineCanStillBeMet) {
+    return `${where} is due in ${days(a.msPastDeadline)}d and its Article 12(3) deadline can still be met; deadline ${deadline}`;
+  }
+  // Neither a breach nor meetable, so the deadline was met. `reported` is false for both standings
+  // that land here, which is why this arm is reachable only from a direct call — and it still has to
+  // be right for both, because "is within" is false of a request that has already been answered.
+  return a.answeredAt === null
+    ? `${where} is within its Article 12(3) deadline; deadline ${deadline}`
+    : `${where} answered the data subject within its Article 12(3) deadline; deadline ${deadline}`;
+}
 
 /**
  * Appends a note to a verdict's detail, keeping `null` for "nothing to say".
@@ -316,16 +362,37 @@ export interface ReconcilerOptions {
    */
   readonly onUnreadableRequest: UnreadableRowReporter;
   /**
-   * What to do with a completed request that finished after its Article 12(3) deadline.
+   * What to do with a request whose Article 12(3) standing is a finding.
    *
-   * Emitted from `auditCompleted`'s walk, which is already iterating exactly the completed requests
-   * this classifies — so the fact costs no second page read, and the two pages cannot disagree about
-   * which requests were examined. Deliberately not emitted from `DeletionRunner` at the moment of
-   * completion as well: that would be a second producer of one fact, and this sweep covers every
-   * completion including the one just written.
+   * One reporter for both passes. `auditCompleted` emits it for a late *completion* from a walk that
+   * is already iterating exactly the completed requests — so that fact costs no second page read and
+   * the two pages cannot disagree about which requests were examined — and `auditDeadlines` emits it
+   * for everything else: a request still waiting past its deadline, one approaching it, a refusal
+   * recorded late, and a terminal record that does not state when it answered.
+   *
+   * Two reporters for one fact family was the alternative and is refused for the reason this whole
+   * surface keeps finding: a deployment would wire one and not the other, and the half it wired
+   * would read as coverage. The two passes are disjoint by **status** — `auditCompleted` owns
+   * `completed` and `auditDeadlines` owns the other five — which is a property of the queries rather
+   * than of a filter either applies, so no finding is emitted twice.
+   *
+   * Deliberately not emitted from `DeletionRunner` at the moment of completion as well: that would
+   * be a second producer of one fact, and the sweeps cover every request including the one just
+   * written.
    */
-  readonly onDeadlineBreach: DeadlineBreachReporter;
+  readonly onDeadlineFinding: DeadlineFindingReporter;
   readonly strandedAfterMs?: number;
+  /**
+   * How many days before its deadline a waiting request is reported as `approaching`.
+   *
+   * Optional with `DEFAULT_DEADLINE_WARNING_DAYS`, which is `strandedAfterMs`' treatment one field
+   * over and is the right shape here for the same reason: the horizon's failure mode is reporting
+   * too early or too late, never reporting *nothing*, so a default cannot make the sweep silent. It
+   * is **required** on `assessDeadline` itself, where a default would put the judgement inside the
+   * computation with nobody having chosen it, and every finding carries the value it was assessed
+   * under so `approaching` is legible without the deployment's configuration in hand.
+   */
+  readonly deadlineWarningDays?: number;
   readonly clock?: () => Date;
   readonly onReconciled?: (result: ReconciliationResult) => void;
 }
@@ -350,6 +417,38 @@ export class DeletionReconciler {
 
   private window(): number {
     return this.opts.strandedAfterMs ?? DEFAULT_STRANDED_AFTER_MS;
+  }
+
+  private warningDays(): number {
+    return this.opts.deadlineWarningDays ?? DEFAULT_DEADLINE_WARNING_DAYS;
+  }
+
+  /**
+   * Assesses one request, emits the finding if its standing is one, and hands the same finding back.
+   *
+   * The one place the reporting rule lives, so the two passes cannot disagree about which standings
+   * reach a caller: both call this and neither tests a standing by name. `isDeadlineFinding` reads
+   * `DEADLINE_STANDING_FACTS`, so a seventh standing is reported or not by what it declares rather
+   * than by whichever branch an `if`-chain here ended on.
+   *
+   * It **returns** the finding rather than letting `auditDeadlines` re-ask, so the returned page and
+   * what the reporter saw are the same set by construction. Two readings of the standing — one to
+   * emit, one to collect — is how a page comes to disagree with the log it was supposed to mirror.
+   */
+  private reportDeadline(request: GdprDeletionRequest): DeadlineFinding | null {
+    const assessment = assessDeadline(request, {
+      now: this.now(),
+      warningDays: this.warningDays(),
+    });
+    if (!isDeadlineFinding(assessment.standing)) return null;
+    const finding: DeadlineFinding = {
+      requestId: request.id,
+      tenantId: request.tenantId,
+      tombstoneId: request.tombstoneId,
+      assessment,
+    };
+    this.opts.onDeadlineFinding(finding);
+    return finding;
   }
 
   /** The verdict alone, writing nothing. */
@@ -594,11 +693,11 @@ export class DeletionReconciler {
    * row: this method's answer is *the absence of findings*, so a throw and a clean audit were the
    * same observation — a claim of "every completed deletion still verifies" that nothing had checked.
    *
-   * A request that finished **after its Article 12(3) deadline** goes to `onDeadlineBreach` and is
-   * not a finding, because the two questions are independent and only one of them is about the proof:
-   * a completion can be late and perfectly evidenced. This is also the only reader `isCompletedLate`
-   * has, so the predicate's claim — that a breach the schema used to refuse outright is now
-   * representable, therefore readable, therefore reportable — is true for the first time here.
+   * A request whose Article 12(3) standing is a finding goes to `onDeadlineFinding` and is not an
+   * `EvidenceAudit`, because the two questions are independent and only one of them is about the
+   * proof: a completion can be late and perfectly evidenced. This pass owns `completed` and
+   * `auditDeadlines` owns the other five statuses, which is what keeps one shared reporter from
+   * seeing a request twice — a property of the two queries rather than of a filter either applies.
    */
   async auditCompleted(limit = 100): Promise<readonly EvidenceAudit[]> {
     const completed = await this.opts.requests.completedWithTombstone(
@@ -608,27 +707,17 @@ export class DeletionReconciler {
     const findings: EvidenceAudit[] = [];
     for (const request of completed) {
       const named = request.tombstoneId;
-      const completedAt = request.completedAt;
-      if (completedAt !== null && isCompletedLate(request)) {
-        this.opts.onDeadlineBreach({
-          requestId: request.id,
-          tenantId: request.tenantId,
-          deadlineAt: request.deadlineAt,
-          completedAt,
-          lateByMs: new Date(completedAt).getTime() - new Date(request.deadlineAt).getTime(),
-          tombstoneId: named,
-        });
-      }
       // **First in the loop body**, so no later `continue` can skip it — and the last of them is
-      // taken by every healthy request, which is the ordinary late completion. A deadline breach is
-      // independent of whether the proof stands up: a completion can be late and perfectly
+      // taken by every healthy request, which is the ordinary late completion. A deadline standing
+      // is independent of whether the proof stands up: a completion can be late and perfectly
       // evidenced, and that case is the one the reading exists for.
       //
-      // The `!== null` is the narrowing `GdprDeletionRequest.completedAt` requires and not a second
-      // spelling of the predicate: `isCompletedLate` already answers `false` for a `completed`
-      // request that states no completion time, because a boolean cannot say "the record does not
-      // say when it finished" and `true` would assert a breach from a record that gives no time at
-      // all.
+      // Through `reportDeadline`, which is the one emission rule both passes read. This site used
+      // to emit from a `completed`-only predicate (ADR-0372's `isCompletedLate`, deleted by
+      // ADR-0387 once it had become `status === "completed" && answeredAfterDeadline(…) === true`)
+      // while `auditDeadlines` emitted from `isDeadlineFinding` — two rules for one reporter, which
+      // is how two halves of one fact family come to disagree about one row.
+      this.reportDeadline(request);
       if (named === null) continue; // The contract forbids it; the store would have refused the row.
       const stored = await this.opts.tombstones.read(named);
       if (stored === null) {
@@ -661,6 +750,53 @@ export class DeletionReconciler {
       });
     }
     return findings;
+  }
+
+  /**
+   * The Article 12(3) pass: every request the data subject is still waiting on, and every refusal
+   * recorded late.
+   *
+   * **This is the direction nothing had.** The three existing ones all start from a request the
+   * platform has already acted on — `reconcileStranded` walks `in_progress`, `auditCompleted` walks
+   * `completed`, `auditTombstones` starts from the proofs — so a request sitting `submitted` because
+   * nobody verified it, or `verified` because no runner claimed it, was examined by nothing at all
+   * while its one-month deadline ran. `submitted` and `deferred` were read by **no query in the
+   * workspace**, and `isOverdue` — the predicate that answers for exactly this — had **zero**
+   * non-test callers.
+   *
+   * **Findings only, and it writes nothing.** A deadline is not a repair: the act that cures an
+   * approaching one is verifying or running the request, which is the runner's and an operator's,
+   * and nothing cures a breach at all. ADR-0323's rule, one subject over.
+   *
+   * Two reads because the two predicates are different in kind — the waiting set is compared against
+   * the **clock** and the late refusals against a second **stored** column — and each page is
+   * ordered for what it is: nearest deadline first, so a cut page drops the requests furthest from
+   * their deadline before it drops a breach, and newest refusal first. `complete` says whether
+   * either page was cut (ADR-0367's `declares` arm: a bounded reading that says how far it looked is
+   * honest where silence is not).
+   *
+   * `examined` is what this pass **assessed**, never what it hoped to: a row the contract refused was
+   * read and not assessed, so it goes to `onUnreadableRequest` and sits outside this figure, which is
+   * `auditTombstones`' rule for the same count.
+   */
+  async auditDeadlines(limit = DEFAULT_DEADLINE_AUDIT_LIMIT): Promise<DeadlineAuditPage> {
+    const bounded = Math.max(1, Math.min(500, Math.trunc(limit)));
+    const waiting = await this.opts.requests.unanswered(this.opts.onUnreadableRequest, bounded);
+    const lateRefusals = await this.opts.requests.rejectedAfterDeadline(
+      this.opts.onUnreadableRequest,
+      bounded,
+    );
+    const findings: DeadlineFinding[] = [];
+    for (const request of [...waiting, ...lateRefusals]) {
+      const finding = this.reportDeadline(request);
+      if (finding !== null) findings.push(finding);
+    }
+    return {
+      examined: waiting.length + lateRefusals.length,
+      complete: waiting.length < bounded && lateRefusals.length < bounded,
+      findings,
+      warningDays: this.warningDays(),
+    };
   }
 
   /**
@@ -838,6 +974,33 @@ export type TombstoneReferenceState = (typeof TOMBSTONE_REFERENCE_STATES)[number
 
 /** How many tombstones one `auditTombstones` page verifies when the caller does not say. */
 export const DEFAULT_TOMBSTONE_AUDIT_LIMIT = 100;
+
+/** How many requests one `auditDeadlines` pass assesses **per read** when the caller does not say. */
+export const DEFAULT_DEADLINE_AUDIT_LIMIT = 100;
+
+/**
+ * One `auditDeadlines` pass: what it assessed, what it found, and how far it looked.
+ *
+ * `examined` without `complete` would be the claim ADR-0367 refuses — a figure that reads as a
+ * census while being a prefix — and `complete` without `examined` would be "nothing was found" with
+ * no denominator (ADR-0323). The pair is the honest reading, and `warningDays` is the third
+ * ingredient because `approaching` means nothing without the horizon it was measured against.
+ */
+export interface DeadlineAuditPage {
+  /** How many requests this pass **assessed**. A row the contract refused is not among them. */
+  readonly examined: number;
+  /**
+   * `false` when either read filled its limit, so the pass is a bounded reading of the queue.
+   *
+   * The waiting read is ordered nearest-deadline-first, so a cut page drops the requests *furthest*
+   * from their deadline and loses a breach only when there are more breaches than the limit. That is
+   * a property of the ordering and not a reason to call a cut page complete.
+   */
+  readonly complete: boolean;
+  readonly findings: readonly DeadlineFinding[];
+  /** The horizon this pass used, so `approaching` is legible without the deployment's config. */
+  readonly warningDays: number;
+}
 
 /** One finding from `auditTombstones`: a stored tombstone that does not stand up on its own terms. */
 export interface TombstoneAudit {

@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 376 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 383 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 20,439 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 20,570 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -1690,7 +1690,9 @@ report; `apps/operate-web` has none).
   Every part also had to be given a **reader**: `requiredSubsystemsFor`, `absentSubsystemsFor` and
   `unerasedSubsystemsFor` had zero callers outside `assembleTombstone`, `formatDrReadiness` and
   `formatUnevidencedAxes` had none outside their own test, and `isCompletedLate` would have been a
-  **third** callerless Article 12(3) predicate — so a boot line, a report line naming the axes *and
+  **third** callerless Article 12(3) predicate (ADR-0387 then deleted that symbol: it had become a
+  two-term narrowing of `answeredAfterDeadline`, which is the general reading and covers a late
+  *refusal* too) — so a boot line, a report line naming the axes *and
   their remedy*, and a reader in `auditCompleted` are part of the increment rather than follow-ups,
   since a computed fact reaching nobody is this run's most-found shape. Verified live as a non-owner
   on PG 16.13: seven checks, the migration **1 planned step / 0 unreconciled on a populated table**
@@ -2332,6 +2334,92 @@ report; `apps/operate-web` has none).
   As text because no type can ask it — a forwarded field and an absent one are identical to the type
   system.
 
+  ADR-0387 and ADR-0388 are the second P1 batch, run as parallel increments over disjoint files.
+
+  **ADR-0387's class is a finding whose remedy does not exist.** Nothing detected an Article 12(3)
+  deadline breach: `isOverdue` and `daysUntilDeadline` had **zero** non-test callers and no inline
+  second spelling, `submitted` and `deferred` were read by **no query in the workspace**, and
+  `idx_gdpr_deletion_deadline` had no reader at all — so the sweep's index was already paid for and
+  the only thing missing was a predicate. Eight of the register's claims held and **two were wrong,
+  one in the direction that would have misdirected the whole increment**: it reasoned that a naive
+  sweep *"reports a lawfully extended request as a breach"*, which is unreachable, because if no
+  mechanism can record an extension then **no lawfully extended request exists to misreport** — the
+  population is empty. The true statement is worse and inverts the dependency: **the platform cannot
+  grant an extension at all**, in any form (`deadline_at` is in no `SET` clause and the submit route
+  takes `deadlineDays` from one *deployment-wide* setting), so a correct sweep would name a
+  condition whose lawful remedy does not exist — ADR-0334's rule making the extension a
+  **prerequisite** rather than a follow-up. The second refuted claim is `GET .../stranded`'s
+  `olderThan = now`, which is a documented decision whose per-row `findForRequest` is load-bearing:
+  `assessWith` ranks a found tombstone **above** the window check, so a request stranded one minute
+  whose pipeline committed is `completed_by_evidence` immediately.
+  The extension is applied to `deadline_at` **in place**, which is the design's load-bearing choice
+  and is argued from measurement: that column is compared by the schema's Article 12(3) cap, by
+  `isOverdue`, by `answeredAfterDeadline`, by `daysUntilDeadline` and by the store's `ORDER BY`,
+  plus a partial index — five readers and an index, so a second column holding the extended value
+  would make every one of them wrong until it coalesced, and one forgotten coalesce is **the
+  register's imagined hazard, created by the fix**. `deadline_extended_at` /
+  `deadline_extension_reason` are the trace, nullable with no default because every stored row has
+  neither and all three alternatives would retro-assert an extension nobody granted (ADR-0331).
+  `deferred_until` is refused as the extension's home for a sharper reason than convenience: a
+  pause does not move the regulator's clock, so that column would mean two things — which is also
+  why a `deferred` request past its deadline reads `breached` here, by derivation rather than by
+  accident.
+  Three things were sharper than the defect. **A refusal recorded past the deadline is a third
+  breach shape nothing could see**, excused by `isOverdue`'s own doc on the ground that *"a refused
+  request was answered rather than answered late"* — the exact conflation the same doc warns about
+  one paragraph earlier for `completed`, and wrong about the regulation, since Article 12(4) puts a
+  refusal under the same clock; reachable on **both** producers, and closed by
+  `rejectedAfterDeadline`. **The grade is deliberately absent from the package**, because in this
+  repository severity *is* the route, so what the contract carries is the fact that decides whether
+  paging is *coherent* — `deadlineCanStillBeMet`, true for `approaching` alone, with
+  `breached && deadlineCanStillBeMet` asserted false over the enum. And `isCompletedLate` is
+  **deleted** rather than left beside the general reading: it had become
+  `status === "completed" && answeredAfterDeadline(…)` with one caller, so keeping it would have
+  added a fifth callerless Article 12(3) predicate inside the increment whose subject is callerless
+  Article 12(3) predicates (ADR-0375's `anchoringWouldBury` shape). The sweep's cadence is
+  **derived** from the scheduler's own interval (hourly) and defaulted **on**, which is the opposite
+  of `auditEveryTicks` and for a stated reason: there off is the status quo, and here off *is* the
+  defect.
+
+  **ADR-0388's class is a comparison whose aperture is narrower than the artifact it compares** —
+  ADR-0361's class one level out, from a field list to a whole manifest. The reviewer's
+  `ManifestDiffView` covered **5 of 17** sections, and three changes the register names came back
+  **byte-identical to an unchanged manifest**: removing a job, narrowing a view from five columns to
+  one, and adding `meta.extends` each answered `impact=none warn=0 counts={0,0,0,0}` against the
+  real `erp-core`. Three of the register's claims are refuted. *"Two of the eleven are served"* is
+  **three**, and the omitted one is the one that produces database columns — `manifest.traits` is read
+  across **22 source files** (re-measured; ADR-0388 says 20 under a tighter predicate, and the figure
+  moves with the predicate, so read the set rather than the count) including `column-plan.ts`,
+  `write-mask.ts` and `list-query.ts`. The register is right only because **no pack declares a custom
+  trait** — verified by building all seven and checking the key, which is absent on every one, so the
+  69 grep hits are entity-level trait *references* — which makes the exposure reachable from a
+  hand-edited proposal, from a model exceeding the design spec, and from `resolveCompliancePacks`,
+  whose `gdpr` pack contributes a trait carrying a **required enum**. The consequence of `views`
+  being uncovered is sharper than a missing summary line: `listConfigForEntity` derives
+  `filterableFields` from a view's columns and since ADR-0359 a request naming a dropped one is
+  answered **400**, so narrowing a view turns a working filter into a refusal invisibly — and
+  `jobs[].invokeRoles` is an **authorization input** the permission layer cannot see.
+  **And one defect was in neither the register nor this file**: `computeManifestDiff` passed
+  `next.traits` as the one `customTraits` list and `computeEntityDiff` applied it to **both** sides,
+  so the *old* entity was resolved against the *new* trait definitions. Measured through the
+  reviewer's own view, a trait field retyped, removed, or weakened `phi` → `internal` each answered
+  `impact: none` with every count zero while `columnPlanForEntity` genuinely gains, loses or retypes
+  that column — the covered five being **silently wrong** rather than merely narrow.
+  The census is `MANIFEST_SECTION_NAMES = Exclude<keyof Manifest, "manifestVersion">`, an exclusion
+  that is a **proof** rather than a convention (the schema pins it to `z.literal("1.0")`, so two
+  manifests that both parse cannot disagree about it), with three total maps over it so a section
+  added to the schema is a compile error. The orchestrator's half is the one decision worth
+  recording: mapping `manifestSectionChangeMayWithhold` straight onto `impact` was **measured wrong
+  in five places**, because adding an *optional field* changes the `entities` section, `entities` is
+  `served`, so the coarse census answers *may withhold* and overrode `entityLayer`'s correct
+  `additive`. `SECTIONS_WITH_DETAIL_LAYERS` suppresses the upgrade for the five sections a layer
+  reads — declared beside the layers because a layer is a function and which sections it reads is
+  not a question any text scan can answer soundly, and fenced **behaviourally** with a
+  representative *withholding* change per section (withholding deliberately: a probe answering
+  `mayWithhold: false` would pass whether or not the layer covered the section). Mutation-checked
+  both ways: adding `jobs` fails 2 tests and dropping `permissions` fails 3, two of them tests that
+  predate the set.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -2544,6 +2632,35 @@ packages exist at only one layer, noted below where that is true.
   was to widen the aperture of a function that should never have narrowed it, while three read
   `entity.fields` directly — and the three were invisible precisely *because* the helper took an
   entity: the narrow answer needed no workaround and the wide one did.
+  **`manifest/sections.ts` is the census of what two manifests can differ on** (ADR-0388), and it is
+  derived from the schema rather than listed: `ManifestSectionName = Exclude<keyof Manifest,
+  "manifestVersion">` over **17** sections, so adding one to `ManifestSchema` is a compile error at
+  all three total maps. The exclusion is a **proof** and not a convention — `manifestVersion` is
+  `z.literal("1.0")`, so two manifests that both parse cannot disagree about it. `MANIFEST_SECTION_REACH`
+  (served 9 / validated_only 5 / unread 3) is a *measured* claim about the committed tree and takes
+  `served` wherever **any** key of the section is served, because under-reporting a reach is the
+  dangerous direction; `MANIFEST_SECTION_REACH_MEANINGS` is keyed by **reach** and not by section, so
+  there are three sentences to keep true rather than seventeen. `MANIFEST_SECTION_MEMBER_KEYING` is
+  declared rather than probed from `ManifestSchema.shape`, for a compile-time obligation a probe
+  cannot give and because `named_array` has to know the key property is `name`; the cost is drift,
+  which `manifestSectionMemberKeyingsMatchSchema` closes by running that probe in the test and
+  comparing both ways. `manifestSectionChangeMayWithhold` is deliberately **coarse and
+  over-reporting**, and says so where it is defined: a changed `roles` member may only have moved a
+  label, nothing here can tell that apart without re-diffing each section's own shape, and
+  under-reporting is the direction that lets a reviewer approve a removal blind. It is a statement
+  about the **manifest** rather than about any caller's rendering, which is why the kernel holds it —
+  a consumer that maps it to a banner or an impact is then mapping one fact instead of re-deriving a
+  judgement.
+  **And `diff.ts` resolves each side against its own manifest's traits** (ADR-0388), which it did
+  not: `computeManifestDiff` passed `next.traits` as the one `customTraits` list and
+  `computeEntityDiff` applied it to **both** sides, so the *old* entity was resolved against the
+  *new* trait definitions. Measured through the reviewer's own diff view, a trait field retyped,
+  removed, or weakened `phi` → `internal` each answered `impact: none` with every count zero while
+  `columnPlanForEntity` genuinely gains, loses or retypes that column. `resolvedAgainstOwnTraits`
+  pre-expands the old entity against `old.traits` and hands on an entity carrying `traits: []`, so
+  the diff's own `expandTraits` contributes nothing and `fields` already holds the old resolution;
+  `checkEntityFieldNames` is called at the pre-expansion site because the diff's copy of it then has
+  an empty trait list and could no longer catch an own-field/trait-field collision on the old side.
 - **`kernel-pg`** — the impure applier. `PgConnection` + `parsePgEnvConfig` + node-postgres
   binding, advisory-lock-gated per-statement migration application with `_meta_migrations`
   hash bookkeeping, preconditions, and the pgcrypto at-rest encryption stack (coverage report,
@@ -3986,6 +4103,28 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `declareOneOf`, because two of the three had already gone stale naming `'v2' or 'v3'` — a
   hand-maintained list inside a *remedy* is the worst place for one, since the reader is being told
   what to do.
+  **Article 12(3) has one spelling per comparison since ADR-0387**, where it had three readers each
+  writing the complement out by hand. `ARTICLE_12_ANSWER_INSTANT` is a total map over
+  `DeletionRequestStatus` to `"unanswered" | "completed_at" | "rejected_at"` — a map and not a pair
+  of predicates, because the deadline is on *answering* and the two terminal statuses carry that
+  instant in **different columns** — and `UNANSWERED_DELETION_REQUEST_STATUSES` is **derived** from
+  it, so a seventh status cannot drop out of the sweep by omission. `assessDeadline(request, {now,
+  warningDays})` is the one reading and every comparison inside it is an existing predicate
+  (`isOverdue` + `daysUntilDeadline` on the unanswered branch, `answeredAfterDeadline` on the
+  answered one); `warningDays` is **required**, with `DEFAULT_DEADLINE_WARNING_DAYS = 7` exported as
+  a starting point and never a `z.default()`. `DEADLINE_STANDING_FACTS` is three facts over six
+  standings rather than a grade, and **`deadlineCanStillBeMet` is why**: it is the escalation axis,
+  true for `approaching` **alone**, with `breached && deadlineCanStillBeMet` asserted false over the
+  enum — a missed deadline cannot still be met, so no page fixes it, while an approaching one is the
+  single standing where waking somebody changes the outcome. The grade itself is deliberately
+  **absent from the package**, because in this repository severity *is* the route. `isCompletedLate`
+  is **deleted**: it had become `status === "completed" && answeredAfterDeadline(…)`, a two-term
+  narrowing with one caller, and keeping it would have been a fifth callerless Article 12(3)
+  predicate inside the increment whose subject is callerless Article 12(3) predicates (ADR-0375's
+  `anchoringWouldBury` shape). `planDeadlineExtension` is the extension's contract, with
+  `ARTICLE_12_MAX_DEADLINE_MS` **extracted** from an inline `30 * 86_400_000 * 3.1` in the schema's
+  own refinement so the validator and the extension cannot disagree about which extensions are
+  lawful.
 - **`tenant-lifecycle-pg`** — also the tenant lifecycle **trail** (ADR-0335). `lifecycle-event-store.ts`
   is the first writer `meta.tenant_lifecycle_events` ever had, whose own `PLATFORM_RECORD_TABLES`
   comment says why it matters: *without it nothing in the database distinguishes a tenant that was
@@ -4100,6 +4239,23 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   so a targeted check cannot be stricter (never closing anything) or laxer (closing an episode whose
   finding stands); a **dangling-but-intact** tombstone answers `unverified` deliberately, because the
   sweep still reports it.
+  **The fourth direction is `auditDeadlines`** (ADR-0387), and it starts from neither a request's
+  *status* nor a proof but from the **clock**: `unanswered` (the four pending statuses, ordered by
+  the deadline in force) and `rejectedAfterDeadline` (a comparison between two **stored** columns,
+  ordered `rejected_at DESC`) are the two store reads nothing had, and one query for both was
+  refused on measurement — the two predicates differ in kind, cannot share an ordering, and one
+  `complete` flag over one limit could not express a page cut on only one of them. The waiting set
+  carries **no deadline predicate at all**, deliberately, because the same page is the operator's
+  *pending list*: one query, two readings, the standing computed rather than filtered — and
+  truncation is then safe by ordering, since a cut page drops the rows **furthest** from their
+  deadline while still declaring `complete: false` (ADR-0367). It **writes nothing**: curing an
+  approaching deadline is the runner's act or an operator's, and nothing cures a breach.
+  `formatDeadlineFinding` is the one producer of each finding's sentence — `node.ts` had built it
+  twice, byte-identically, which is ADR-0288's shape in a log line — and it reads the standing's
+  **declared facts** rather than its name, so a seventh standing gets a sentence from the facts it
+  is obliged to declare instead of falling through to a default nobody chose. `extendDeadline` is
+  the one write path for Article 12(3)'s extension, with two guards in the `UPDATE` predicate
+  (ADR-0321's *the row is the lock*).
   **And `eraseSharedTablesWithin` is the second real erasure** (ADR-0329), which until then did not
   exist at all: **112 of the 143 `META_TABLES` carry a `tenant_id`** and nothing erased one of them,
   so every deployment declared `shared_tables: "absent"` and signed an Article 17 proof over a tenant
@@ -5100,6 +5256,27 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `verify()` still answers `{"valid":true}`). The timeline note ADR-0327 added is **not** superseded by
   it: the two are a pair, and the timeline is the one that still lands when the emitter itself is
   unreachable, which is the condition a compromise finding escalates for.
+  **The Article 12(3) sweep is a fourth pass on the deletion scheduler, and it needs no flag to
+  run** (ADR-0387). Its cadence is **derived** from this scheduler's own `intervalMs` —
+  `max(1, round(DEADLINE_SWEEP_TARGET_MS / intervalMs))`, about once an hour — rather than being a
+  tick count, because the right cadence is a property of *time* and the tick is not: that interval
+  is set anywhere from a second to minutes, so one constant would be every-tick on a slow
+  deployment and 1,200-an-hour on a fast one. It is **defaulted on**, which is the opposite of
+  `auditEveryTicks` and is the decision: there off is the status quo, and here off *is* the defect
+  the pass exists to end, so a malformed configured value falls back to the derived cadence rather
+  than to off. It sits in `runOnce` and deliberately **not** inside `auditOnce`, which returns early
+  unless `auditEveryTicks` is configured — a deadline pass placed there would be dark on every
+  deployment that had not opted into the expensive tombstone audit, two unrelated conditions — with
+  its own `try` for the reason the other three have theirs. `onDeadlineSweep` reports the
+  **coverage** every time the pass runs, including on a clean page (ADR-0367's `declares` arm), and
+  `DeadlineSweepPage.findings` is typed `readonly unknown[]` because this layer counts them and
+  never renders one: each finding's sentence has exactly one producer, the reconciler's required
+  `onDeadlineFinding`, and a second renderer here would be the duplicated log line the same
+  increment converged. A reconciler offering no `auditDeadlines` reports **nothing** rather than an
+  empty page, since `{examined: 0}` would read as a sweep that looked and found no request at all
+  (ADR-0331). `--deletion-warning-days` is the increment's one new flag — the cadence needs none and
+  the horizon is the one policy nothing else can set — and both `DeletionReconciler` sites take it,
+  so the route's answer and the scheduler's sweep cannot disagree about which requests are close.
   `PostgresReadStateStore` (ADR-0330) is the writer `meta.notification_read_states` and
   `meta.notification_read_watermarks` never had — ADR-0309 modelled both and nothing stored one, so the
   tables had sat unwritten and, in the way of ADR-0300, **drifted**: `dispatch_id` was `UUID` against a
@@ -5911,6 +6088,17 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `isUnread` fails open on an unparseable `queuedAt`, so a successful `markReadThrough` does not
   imply zero unread. The per-row sentence is keyed on the **failure kind** and not on a fourth
   `NoticeReadState`, which would be a value `noticeReadState()` can never return.
+  **`DiffView` shows the section census and reads the server's `impact` rather than re-deriving it**
+  (ADR-0388). The early return on `impact === "none"` is what made three withholding changes read
+  as *"This proposal matches the currently-active system"*, and it reads `sectionChanges` too now —
+  for its **presence**, not its verdict. The chip and banner take `diff.impact` as given, which is a
+  correction to that increment's own first draft: it recomputed the impact from
+  `sectionChanges.some(mayWithhold)`, and since the census is coarse while the server suppresses its
+  upgrade for the five sections a detail layer reads, the two **disagreed** — measured against the
+  real `diffManifests`, adding one *optional field* read `breaking` in the browser over a server
+  saying `additive`. A client re-deriving a judgement the server already made, with a different rule,
+  in an app with zero tests. `sectionChanges` is **optional** on the web mirror, so a server a build
+  behind sends nothing and the page reads as it did.
   It still has **zero tests**, so it is outside the sweep — though no longer outside every strategy
   rule: `entity-field-aperture.ts` (ADR-0361) walks it through a local fs walk, because that member
   has no `src/` and is therefore invisible to the other nine, and it is where 25 of the class's
@@ -6214,6 +6402,24 @@ contract that refuses infinity, 49 of them in 11 detector-subsystem files of whi
 `new Date(String(value)).toISOString()`, so the same tamper is a bare `RangeError: Invalid time
 value` rather than a `ZodError`, in a `record_throwing` conversion with no wrapper, in the store that
 holds the verdicts.
+
+**`meta.gdpr_deletion_requests` carries Article 12(3)'s extension as a trace beside the deadline it
+moved** (ADR-0387). `deadline_extended_at` and `deadline_extension_reason` are nullable with no
+default, and the extension is applied to `deadline_at` **in place** — measured, because that column
+has five comparing readers (the schema's Article 12(3) cap, `isOverdue`, `answeredAfterDeadline`,
+`daysUntilDeadline`, the store's `ORDER BY`) plus the partial `idx_gdpr_deletion_due`, so a second
+column holding the extended value would make every one of them wrong until it coalesced. `deadline_at`
+is therefore always the commitment currently in force and these two say whether it is the original;
+the stated cost is that the original deadline is **not stored**, which is not load-bearing for any
+Article 12 check because the cap runs from the immutable `submitted_at`. Nullable with no default
+for `record_storage`'s reason: every stored row has neither, and all three alternatives would
+retro-assert an extension nobody granted. **Neither carries a CHECK**, and that is declared rather
+than overlooked (ADR-0366's rule): the table already has **4** nullable TEXT columns parsed against
+`z.string().min(1)` and **7** TIMESTAMPTZ columns parsed against `Iso8601` with no such constraint,
+so fencing only the two new ones — while the operands the sweep *compares against* (`deadline_at`,
+`completed_at`, `rejected_at`) stay unfenced — would be a count reduction inside the class. That is
+register P2.12b. The migration is free for ADR-0358's reason: two nullable `add_column` steps with
+no CHECK riding along, so nothing is data-dependent. **Not verified live.**
 
 **Every column-level value-set CHECK declares which contract domain governs it** (ADR-0353), in
 `packages/testing/src/strategy/pg-value-set-domains.ts` rather than in the catalog — a ref is a
@@ -9721,7 +9927,28 @@ three make the rest honest, cheap or verifiable.
    attributed to the review rather than measured**: both `CREATE EXTENSION IF NOT EXISTS` statements
    succeed for a role that cannot create a function, which is precisely why they establish nothing
    about that privilege.
-2. **Eight manifest sections are read by nothing — but they are not *authored*, and the headline
+2. **Eight manifest sections are read by nothing — and the reviewer-blindness half is closed by
+   ADR-0388, which refuted three more of this entry's claims.** The denominator is **17 and not 16**
+   (`meta` is a section two manifests differ on, since `meta.extends` decides whether a design
+   extends the pack or replaces it; `manifestVersion` is the one exclusion and that is a *proof*
+   rather than a convention, the schema pinning it to `z.literal("1.0")`). *"Two of the eleven
+   (`jobs`, `views`) are served"* is **three**: `manifest.traits` is read across **22 source files**
+   (re-measured — the ADR's 20 is a tighter predicate, so read the set and not the count),
+   including the one that produces database columns, and this entry is right only because **no pack
+   declares a custom trait** (verified by building all seven: the key is absent on every one) — so the exposure is reachable from a hand-edited proposal, from a
+   model exceeding the design spec, and from `resolveCompliancePacks`, whose `gdpr` pack contributes
+   a trait carrying a required enum. And the consequence of `views` being uncovered is sharper than
+   a missing summary line: narrowing a view's columns turns a working `?field=` filter into a
+   **400** (ADR-0359), while `jobs[].invokeRoles` is an authorization input the permission layer
+   cannot see. **One defect was in neither this entry nor this file**: the diff resolved the *old*
+   entity against the *new* manifest's traits, so a trait field retyped, removed or weakened
+   `phi` → `internal` each answered `impact: none` with every count zero — the covered five being
+   silently wrong rather than merely narrow. `sectionChanges` now names every section the two
+   manifests differ on, so a reviewer is never shown `No changes` for a manifest that differs. What
+   remains of this entry is the **validated-only** half below — eight sections authored, hashed and
+   read by no runtime, three of them not even validated — plus its own last clause, the per-view and
+   per-report `permissions` override that nothing enforces. The original entry:
+   **Eight manifest sections are read by nothing — but they are not *authored*, and the headline
    this entry gave is inverted.** The core fact holds: `integrations`, `files`, `reports`,
    `dashboards`, `customWidgets`, `theme`, `i18n` and `search` are merged across lineage, committed
    to `manifestHash` and read by no runtime. Five particulars were wrong, measured against the
@@ -9824,7 +10051,26 @@ three make the rest honest, cheap or verifiable.
    incident table is platform-wide too. The decisions that are not evidence-decidable: whether
    `requiresStatusPage` relaxes, a status page gets built, or `publiclyVisible` becomes an
    attestation; whether `meta.incidents` gains a `tenant_id`.
-8. **Nothing detects an Article 12(3) deadline breach, and no route lists pending requests.**
+8. ~~**Nothing detects an Article 12(3) deadline breach, and no route lists pending requests.**~~ —
+   **the detection half is closed by ADR-0387**, which refuted two of this entry's own claims and
+   found one breach shape it had not named. The refuted pair: *"a naive sweep reports a lawfully
+   extended request as a breach"* is **unreachable**, because with no mechanism to record an
+   extension the population of lawfully extended requests is empty — and the true statement is both
+   narrower and worse, that **the platform cannot grant an extension at all**, which inverts the
+   dependency and made the extension a *prerequisite* of the sweep (ADR-0334) rather than a
+   follow-up; and `GET .../stranded`'s `olderThan = now` is a documented decision whose per-row
+   `findForRequest` is load-bearing, since `assessWith` ranks a found tombstone **above** the window
+   check. The unnamed shape: **a refusal recorded past the deadline**, excused by `isOverdue`'s own
+   doc comment and wrong about the regulation (Article 12(4) puts a refusal under the same clock),
+   reachable on both producers and now closed by `rejectedAfterDeadline`. This entry's reading of
+   the escalatable case was right and is in: `deadlineCanStillBeMet` is true for `approaching`
+   alone. What remains is ADR-0387's own open ends — chiefly that **the grade is still open**, gated
+   on two things (`severityByDefect` is keyed on `EVIDENCE_DEFECTS`, which a `DeadlineStanding` is
+   not, and a breach's honest grade is a *ticket*, for which this repo has no non-paging escalation
+   vocabulary), and that **no route lists the pending requests**: `unanswered` serves exactly that
+   page and belongs with the `--deletion-request-reconcile-role` apparatus (a grant, a recorded
+   read, a tenant refusal), which is the increment after this one. The original entry, kept because
+   its measurements are what the fix rests on:
    `isOverdue` and `daysUntilDeadline` have zero non-test callers and **no inline second spelling**
    (a clean grep, which matters because both names collide with live predicates in `dr` and
    `forensics`). Three corrections. The store's "none on `deadline_at`" is wrong in a useful way:
@@ -10307,6 +10553,22 @@ method is that a stale figure misleads.
    default makes its own omission unobservable**, and the three mechanisms compose, so any of them
    alone would have been caught. Worth knowing before adding an option to any forwarding list —
    ADR-0288's shape, now wrong four times.
+   **ADR-0387 and ADR-0388 add five members between them, and the pattern has turned into a
+   property of this register rather than of the code it describes: of the seven P1 items measured
+   before being worked, five had a claim that measurement refuted.** Two were wrong in the direction
+   that misdirects the work — P1.8's imagined hazard (a sweep misreporting a lawfully extended
+   request) is *unreachable*, because the population is empty, while the real fact inverts the
+   dependency and makes the extension a prerequisite; and P1.2's served count (two of eleven) was
+   **three**, with the omitted section the only one of the eight that produces database columns.
+   Two were counts: 16 sections against a real 17, and a denominator (`ManifestDiffView` covering
+   5 of 16) whose arithmetic was right and whose exclusion of `meta` was not. And one was a reading
+   of a *documented decision* as a defect (`GET .../stranded`'s `olderThan = now`, whose per-row
+   read is load-bearing because a found tombstone outranks the window check). The rule that comes
+   out of it: **re-measure the entry before designing against it**, which is now the first step of
+   every increment in this run and has paid on every one. A corollary the second batch sharpened:
+   an entry's *reasoning* can survive its figures being wrong — ADR-0387's hazard analysis is
+   correct about everything except whether the hazard can be reached — so a refutation is worth
+   writing down beside the claim rather than deleting the claim, because the next reader needs both.
 2. **Six concepts are modelled several times over, two with non-nesting member sets.** Data
    classification has five declarations — four identical and one, in `data-lineage`, **disjoint past
    two members**, so the moment anything bridges the kernel's classification into the lineage graph
@@ -10393,7 +10655,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 372 records; 293 Accepted, 79 Proposed (the
+title or status change cannot drift. 383 records; 304 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

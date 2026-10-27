@@ -1,7 +1,11 @@
 import { readRows, textIdentity, unreadableDetail, type PgConnection } from "@crossengin/kernel-pg";
 import {
   GdprDeletionRequestSchema,
+  UNANSWERED_DELETION_REQUEST_STATUSES,
   canTransitionDeletionRequest,
+  planDeadlineExtension,
+  type DeadlineExtensionInput,
+  type DeadlineExtensionRefusal,
   type DeletionRequestStatus,
   type GdprDeletionRequest,
   type GdprLegalBasis,
@@ -64,6 +68,8 @@ export const REQUEST_COLUMNS = [
   "rejected_reason",
   "deferred_until",
   "deferral_reason",
+  "deadline_extended_at",
+  "deadline_extension_reason",
   "retention_obligations",
   "retained_data_categories",
   "notes",
@@ -161,6 +167,30 @@ export class DeletionRequestCommittedUnreadable extends Error {
     this.requestId = requestId;
     this.committedStatus = committedStatus;
     this.parseMessage = parseMessage;
+  }
+}
+
+/**
+ * Article 12(3)'s extension was refused, and **nothing was written**.
+ *
+ * Its own class rather than a sixth `RequestRefusal`, because the two vocabularies answer different
+ * questions: `REQUEST_REFUSALS` is about the *call* — a malformed id, a tenant that is not a uuid, a
+ * row that is not there — while these five are about whether the regulation permits this extension
+ * of this request. A route picks its status code off the refusal, so collapsing them would make an
+ * unlawful extension and a malformed id indistinguishable to the one reader that has to tell them
+ * apart.
+ *
+ * Every member is raised by `planDeadlineExtension` before any statement is issued, so the claim in
+ * the first line is about position as well as state — unlike `DeletionRequestRefused`, whose own doc
+ * had to retire that framing when `submit` grew a read-back.
+ */
+export class DeadlineExtensionRefused extends Error {
+  readonly refusal: DeadlineExtensionRefusal;
+
+  constructor(requestId: string, refusal: DeadlineExtensionRefusal, detail: string) {
+    super(`deadline extension refused for ${requestId}: ${detail}`);
+    this.name = "DeadlineExtensionRefused";
+    this.refusal = refusal;
   }
 }
 
@@ -304,6 +334,7 @@ export function rowToDeletionRequest(row: Record<string, unknown>): GdprDeletion
     completionSha256: textOrNull(row["completion_sha256"])?.trim() ?? null,
     rejectedAt: isoOrNull(row["rejected_at"]),
     deferredUntil: isoOrNull(row["deferred_until"]),
+    deadlineExtendedAt: isoOrNull(row["deadline_extended_at"]),
     retentionObligations: jsonArray(row["retention_obligations"]) as RetentionObligation[],
     retainedDataCategories: jsonArray(row["retained_data_categories"]) as string[],
     tombstoneId: textOrNull(row["tombstone_id"]),
@@ -312,6 +343,8 @@ export function rowToDeletionRequest(row: Record<string, unknown>): GdprDeletion
   if (rejected !== null) candidate["rejectedReason"] = rejected;
   const deferral = textOrNull(row["deferral_reason"]);
   if (deferral !== null) candidate["deferralReason"] = deferral;
+  const extension = textOrNull(row["deadline_extension_reason"]);
+  if (extension !== null) candidate["deadlineExtensionReason"] = extension;
   const notes = textOrNull(row["notes"]);
   if (notes !== null) candidate["notes"] = notes;
   return GdprDeletionRequestSchema.parse(candidate);
@@ -531,6 +564,86 @@ export class PostgresDeletionRequestStore {
   }
 
   /**
+   * Every request the data subject has **not yet been answered on**, nearest deadline first.
+   *
+   * The listing that did not exist, and the gap was not an oversight in one place: this store's
+   * three queries named `verified`, `in_progress` and `completed`, so **`submitted` and `deferred`
+   * were read by no query in the workspace** — a request nobody verifies sits past its Article 12(3)
+   * deadline with nothing in the system looking at it, and the likeliest real breach path was the
+   * one with no reader at all.
+   *
+   * The status set is **bound from `UNANSWERED_DELETION_REQUEST_STATUSES`**, which is derived from
+   * `ARTICLE_12_ANSWER_INSTANT`, rather than written here as a literal like its three siblings. That
+   * is the whole fix for the class: a literal is a second spelling a new status joins only if
+   * somebody remembers, and forgetting here is exactly how `submitted` came to be unread.
+   * `= ANY($1::text[])` for `job-claim.ts`' reason — one parameter for a set whose size is a
+   * property of the contract and not of the call.
+   *
+   * **The ordering is what makes a bounded page safe.** `deadline_at ASC` puts the most overdue
+   * first, so a page cut by `limit` can only drop requests that are *further* from their deadline —
+   * a truncated sweep loses `within_deadline` rows before it loses a breach, and it loses a breach
+   * only when there are more breaches than the limit. That is still a bounded reading and the
+   * caller declares it (ADR-0367's `declares` arm); it is not a silent one.
+   *
+   * It is deliberately **not** filtered on the deadline. The same page is the operator's pending
+   * list — the register's other half, since no route lists pending requests — and a healthy request
+   * is a row an operator wants to see while a breach is a row a sweep wants to report. One query,
+   * two readings, and the standing is computed by `assessDeadline` rather than by a `WHERE`.
+   */
+  async unanswered(
+    onUnreadable: UnreadableRowReporter,
+    limit = 100,
+  ): Promise<readonly GdprDeletionRequest[]> {
+    return this.conn.transaction(async (tx) => {
+      await tx.query("SELECT set_config('app.platform_audit', 'on', true)");
+      const result = await tx.query<Record<string, unknown>>(
+        `SELECT ${REQUEST_COLUMNS.join(", ")} FROM ${this.table}
+          WHERE status = ANY($1::text[]) ORDER BY deadline_at, request_id LIMIT $2`,
+        [[...UNANSWERED_DELETION_REQUEST_STATUSES], Math.max(1, Math.min(500, Math.trunc(limit)))],
+      );
+      return readRequestRows(result.rows, onUnreadable);
+    });
+  }
+
+  /**
+   * `rejected` requests whose refusal was recorded **after** their deadline, newest first.
+   *
+   * The third Article 12(3) breach shape, and the one nothing could see. `isOverdue` excused
+   * `rejected` on the ground that "a refused request was answered rather than answered late", which
+   * is the conflation that doc warns about one paragraph earlier and is wrong about the regulation:
+   * Article 12(4) puts a refusal under the same one-month clock. So a request left alone until its
+   * deadline passed and then rejected — which the reject route writes with `at: now` and no deadline
+   * check, and which the runner writes for every deterministic pipeline refusal — is a breach that
+   * `auditCompleted` cannot reach (it walks `completed`) and `unanswered` cannot reach (it walks the
+   * four waiting statuses).
+   *
+   * A **comparison between two stored columns** rather than against the clock, which is what makes
+   * this a historical audit like `completedWithTombstone` and not a queue like `dueForExecution` —
+   * and why it is its own method: one query cannot be ordered by both a deadline and a refusal
+   * instant, and the two pages mean different things when they are cut short.
+   *
+   * `status = 'rejected'` is a literal, as its three siblings are, and what keeps it honest is in
+   * the contract: a test asserts that `rejected` is the *only* status whose answer instant is
+   * `rejected_at`, so a seventh status answering through that column fails there and names this
+   * query rather than silently falling outside every sweep.
+   */
+  async rejectedAfterDeadline(
+    onUnreadable: UnreadableRowReporter,
+    limit = 100,
+  ): Promise<readonly GdprDeletionRequest[]> {
+    return this.conn.transaction(async (tx) => {
+      await tx.query("SELECT set_config('app.platform_audit', 'on', true)");
+      const result = await tx.query<Record<string, unknown>>(
+        `SELECT ${REQUEST_COLUMNS.join(", ")} FROM ${this.table}
+          WHERE status = 'rejected' AND rejected_at > deadline_at
+          ORDER BY rejected_at DESC, request_id LIMIT $1`,
+        [Math.max(1, Math.min(500, Math.trunc(limit)))],
+      );
+      return readRequestRows(result.rows, onUnreadable);
+    });
+  }
+
+  /**
    * `completed` requests that name a tombstone, newest first — the audit's input (ADR-0323).
    *
    * Every completed request names one, because the contract requires it and `rowToDeletionRequest`
@@ -672,6 +785,83 @@ export class PostgresDeletionRequestStore {
       throw new DeletionRequestCommittedUnreadable(
         requestId,
         to,
+        unreadableDetail(err),
+      );
+    }
+  }
+
+  /**
+   * Applies Article 12(3)'s two-further-months extension, **in place on `deadline_at`**.
+   *
+   * Until this there was no way to grant one at all: `deadline_at` appeared in no `SET` clause, the
+   * submit route computes it as `now + deadlineDays` from a deployment-wide setting, and `deferred`
+   * — the status whose `deferredUntil`/`deferralReason` read like the natural home for it — has **no
+   * producer in the workspace**. So a request that lawfully earned more time had nowhere to record
+   * it, which is what made the sweep beside this method a prerequisite rather than a follow-up: a
+   * breach whose remedy does not exist is a finding nobody can act on (ADR-0334).
+   *
+   * **In place, and `planDeadlineExtension` is where that argument lives.** The short version: five
+   * readers compare `deadline_at` and a second column holding the extended value would have made
+   * every one of them wrong until it coalesced, so forgetting at a single site reports a lawfully
+   * extended request as a breach — the hazard the register named, created by the fix.
+   *
+   * Two things guard the write and they guard different races. `status = $5` is the status this
+   * method just read, so a request verified-then-rejected between the read and the write is the
+   * reject's (ADR-0321: the row is the lock). `deadline_extended_at IS NULL` is the second
+   * extension's guard, and it has to be in the predicate rather than only in the plan because two
+   * concurrent extensions would both pass a pre-check and the later one would overwrite the earlier
+   * one's reason while the regulation grants one extension.
+   *
+   * `null` therefore means *somebody else moved or extended it*, which is the convention
+   * `transition` already sets, and a caller treats it as "not mine" rather than as an error.
+   */
+  async extendDeadline(
+    requestId: string,
+    input: DeadlineExtensionInput,
+  ): Promise<GdprDeletionRequest | null> {
+    const current = await this.read(requestId);
+    if (current === null) {
+      throw new DeletionRequestRefused("not_found", `no deletion request ${requestId}`);
+    }
+    const plan = planDeadlineExtension(current, input);
+    if (!plan.ok) {
+      throw new DeadlineExtensionRefused(requestId, plan.refusal, plan.detail);
+    }
+    // The scope the isolation policy's `WITH CHECK` needs, from the row this call already read, in a
+    // transaction because `set_config(…, true)` is transaction-local — the three facts that made
+    // every write on this table raise `42501` as a non-owner before ADR-0335.
+    const result = await this.conn.transaction(async (tx) => {
+      await tx.query(SET_TENANT_CONTEXT_SQL, [current.tenantId]);
+      return tx.query<Record<string, unknown>>(
+        `UPDATE ${this.table}
+            SET deadline_at = $2::timestamptz,
+                deadline_extended_at = $3::timestamptz,
+                deadline_extension_reason = $4
+          WHERE request_id = $1 AND status = $5 AND deadline_extended_at IS NULL
+          RETURNING ${REQUEST_COLUMNS.join(", ")}`,
+        [
+          requestId,
+          input.deadlineAt,
+          input.deadlineExtendedAt,
+          input.deadlineExtensionReason,
+          current.status,
+        ],
+      );
+    });
+    const row = result.rows[0];
+    if (row === undefined) return null;
+    try {
+      return rowToDeletionRequest(row);
+    } catch (err) {
+      // Committed, and the status is the one it committed under — unchanged by an extension, which
+      // is why `current.status` is the honest value to carry rather than a target this call has
+      // none of. `transition`'s rule, for its reason: a read-back that cannot be represented must
+      // not be reported as a write that did not happen, because only one of the two is re-drivable
+      // and here re-driving would be refused `already_extended` on a row whose reason it cannot
+      // read.
+      throw new DeletionRequestCommittedUnreadable(
+        requestId,
+        current.status,
         unreadableDetail(err),
       );
     }

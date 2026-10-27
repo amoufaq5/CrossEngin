@@ -1,8 +1,13 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  DEADLINE_EXTENSION_REFUSALS,
+  UNANSWERED_DELETION_REQUEST_STATUSES,
+} from "@crossengin/tenant-lifecycle";
 import { assertBindArity } from "@crossengin/testing";
 import { describe, expect, it } from "vitest";
 
 import {
+  DeadlineExtensionRefused,
   DeletionRequestCommittedUnreadable,
   DeletionRequestRefused,
   PostgresDeletionRequestStore,
@@ -37,6 +42,8 @@ function rowOf(over: Record<string, unknown> = {}): Record<string, unknown> {
     rejected_reason: null,
     deferred_until: null,
     deferral_reason: null,
+    deadline_extended_at: null,
+    deadline_extension_reason: null,
     retention_obligations: JSON.stringify(["none"]),
     retained_data_categories: JSON.stringify([]),
     notes: null,
@@ -163,7 +170,7 @@ describe("the column list", () => {
   it("carries the request's own id and the tombstone that completes it", () => {
     expect(REQUEST_COLUMNS).toContain("request_id");
     expect(REQUEST_COLUMNS).toContain("tombstone_id");
-    expect(REQUEST_COLUMNS).toHaveLength(22);
+    expect(REQUEST_COLUMNS).toHaveLength(24);
   });
 });
 
@@ -751,5 +758,221 @@ describe("transition", () => {
     expect(update?.sql).toContain("in_progress_at =");
     expect(update?.sql).not.toContain("completed_at =");
     expect(update?.sql).not.toContain("verified_at =");
+  });
+});
+
+describe("unanswered", () => {
+  it("binds the status set from the contract rather than naming it", async () => {
+    // The whole fix for the class. This store's three sibling queries name `verified`,
+    // `in_progress` and `completed` as literals, which is how `submitted` and `deferred` came to be
+    // read by no query in the workspace — a derived set cannot omit a new status by forgetting.
+    const { conn, calls } = fakePg([rowOf({ status: "submitted", verification_method: null, verified_at: null, verified_by: null })]);
+    await new PostgresDeletionRequestStore(conn).unanswered(collector().report);
+    const select = calls.find((c) => c.sql.includes("status = ANY"));
+    expect(select).toBeDefined();
+    expect(select?.params[0]).toEqual([...UNANSWERED_DELETION_REQUEST_STATUSES]);
+    expect(select?.params[0]).toContain("submitted");
+    expect(select?.params[0]).toContain("deferred");
+  });
+
+  it("orders nearest deadline first, which is what makes a cut page safe", async () => {
+    // `deadline_at ASC` puts the most overdue first, so a page cut by `limit` drops the requests
+    // furthest from their deadline before it drops a breach. Reversing it would make a bounded
+    // sweep silent about exactly the rows it exists to find.
+    const { conn, calls } = fakePg();
+    await new PostgresDeletionRequestStore(conn).unanswered(collector().report);
+    const select = calls.find((c) => c.sql.includes("status = ANY"));
+    expect(select?.sql).toContain("ORDER BY deadline_at, request_id");
+    expect(select?.sql).not.toContain("deadline_at DESC");
+  });
+
+  it("elevates, clamps the limit, and filters on no deadline", async () => {
+    const { conn, calls } = fakePg();
+    const store = new PostgresDeletionRequestStore(conn);
+    await store.unanswered(collector().report, 9_999);
+    const select = calls.find((c) => c.sql.includes("status = ANY"));
+    expect(select?.params[1]).toBe(500);
+    expect(calls.some((c) => c.sql.includes("app.platform_audit"))).toBe(true);
+    // Deliberately no deadline predicate: the same page is the operator's pending list, and the
+    // standing is computed by `assessDeadline` rather than by a `WHERE`.
+    expect(select?.sql).not.toContain("deadline_at <");
+    expect(select?.sql).not.toContain("now()");
+  });
+
+  it("reports a row it cannot represent and returns the rest of the page", async () => {
+    const { reported, report } = collector();
+    const { conn } = fakePg([unreadableRow("verified", "dreq_unreadable01"), rowOf()]);
+    const page = await new PostgresDeletionRequestStore(conn).unanswered(report);
+    expect(page).toHaveLength(1);
+    expect(reported.map((r) => r.requestId)).toEqual(["dreq_unreadable01"]);
+  });
+});
+
+describe("rejectedAfterDeadline", () => {
+  const rejectedLate = rowOf({
+    status: "rejected",
+    verification_method: null,
+    verified_at: null,
+    verified_by: null,
+    rejected_at: "2026-11-05T00:00:00.000Z",
+    rejected_reason: "not a data subject",
+  });
+
+  it("compares two stored columns, which is what makes it an audit and not a queue", async () => {
+    // Article 12(4) puts a refusal under the same clock as an erasure, and nothing compared these
+    // two columns anywhere — `auditCompleted` walks `completed` and `unanswered` walks the four
+    // waiting statuses, so a refusal recorded past its deadline was covered by neither.
+    const { conn, calls } = fakePg([rejectedLate]);
+    const page = await new PostgresDeletionRequestStore(conn).rejectedAfterDeadline(
+      collector().report,
+    );
+    const select = calls.find((c) => c.sql.includes("rejected_at >"));
+    expect(select?.sql).toContain("status = 'rejected'");
+    expect(select?.sql).toContain("rejected_at > deadline_at");
+    expect(select?.sql).toContain("ORDER BY rejected_at DESC, request_id");
+    // No clock parameter at all: both operands are stored, so the finding does not drift.
+    expect(select?.params).toEqual([100]);
+    expect(page).toHaveLength(1);
+    expect(page[0]?.rejectedAt).toBe("2026-11-05T00:00:00.000Z");
+  });
+
+  it("reports a row it cannot represent and returns the rest of the page", async () => {
+    const { reported, report } = collector();
+    const { conn } = fakePg([
+      { ...rejectedLate, request_id: "dreq_unreadable01", rejected_reason: null },
+      rejectedLate,
+    ]);
+    const page = await new PostgresDeletionRequestStore(conn).rejectedAfterDeadline(report);
+    expect(page).toHaveLength(1);
+    expect(reported.map((r) => r.requestId)).toEqual(["dreq_unreadable01"]);
+  });
+});
+
+describe("extendDeadline", () => {
+  const EXTENSION = {
+    deadlineAt: "2026-11-20T00:00:00.000Z",
+    deadlineExtendedAt: "2026-10-20T00:00:00.000Z",
+    deadlineExtensionReason: "complexity of the request",
+  };
+
+  /** The row the extension writes back: the new deadline, the instant and the reason. */
+  const extendedRow = (over: Record<string, unknown> = {}): Record<string, unknown> =>
+    rowOf({
+      deadline_at: EXTENSION.deadlineAt,
+      deadline_extended_at: EXTENSION.deadlineExtendedAt,
+      deadline_extension_reason: EXTENSION.deadlineExtensionReason,
+      ...over,
+    });
+
+  it("moves deadline_at in place and records the trace", async () => {
+    // In place, which is the decision `planDeadlineExtension` argues: five readers compare
+    // `deadline_at`, and a second column holding the extended value would make every one of them
+    // wrong until it coalesced — forgetting at any single site reports a lawfully extended request
+    // as a breach.
+    const { conn, calls } = fakePg([rowOf()], [extendedRow()]);
+    const out = await new PostgresDeletionRequestStore(conn).extendDeadline(REQ, EXTENSION);
+    const update = calls.find((c) => c.sql.startsWith("UPDATE"));
+    expect(update?.sql).toContain("SET deadline_at = $2::timestamptz");
+    expect(update?.sql).toContain("deadline_extended_at = $3::timestamptz");
+    expect(update?.sql).toContain("deadline_extension_reason = $4");
+    expect(update?.params).toEqual([
+      REQ,
+      EXTENSION.deadlineAt,
+      EXTENSION.deadlineExtendedAt,
+      EXTENSION.deadlineExtensionReason,
+      "verified",
+    ]);
+    expect(out?.deadlineAt).toBe(EXTENSION.deadlineAt);
+    expect(out?.deadlineExtendedAt).toBe(EXTENSION.deadlineExtendedAt);
+    expect(out?.deadlineExtensionReason).toBe(EXTENSION.deadlineExtensionReason);
+  });
+
+  it("guards the status and the second extension in the predicate", async () => {
+    // Two races, two guards. `status = $5` is the row this call read (ADR-0321: the row is the
+    // lock), and `deadline_extended_at IS NULL` is what stops two concurrent extensions both
+    // passing a pre-check and the later one overwriting the earlier one's reason.
+    const { conn, calls } = fakePg([rowOf()], [extendedRow()]);
+    await new PostgresDeletionRequestStore(conn).extendDeadline(REQ, EXTENSION);
+    const update = calls.find((c) => c.sql.startsWith("UPDATE"));
+    expect(update?.sql).toContain("WHERE request_id = $1 AND status = $5");
+    expect(update?.sql).toContain("deadline_extended_at IS NULL");
+  });
+
+  it("sets the tenant context, in a transaction, from the row it read", async () => {
+    // The defect class ADR-0335 found in this very store: the isolation policy is the only arm on
+    // this table carrying a `WITH CHECK`, so a write with no scope raises `42501` as a non-owner —
+    // and `set_config(…, true)` is transaction-local, so the wrapping transaction is load-bearing.
+    const { conn, calls } = fakePg([rowOf()], [extendedRow()]);
+    await new PostgresDeletionRequestStore(conn).extendDeadline(REQ, EXTENSION);
+    const i = calls.findIndex((c) => c.sql === SET_TENANT_CONTEXT_SQL && c.params[0] === TENANT);
+    const u = calls.findIndex((c) => c.sql.startsWith("UPDATE"));
+    expect(i).toBeGreaterThanOrEqual(0);
+    expect(i).toBeLessThan(u);
+    expect(calls.slice(0, i).map((c) => c.sql)).toContain("BEGIN");
+  });
+
+  it("refuses every plan refusal by name, before any statement", async () => {
+    const cases: { row: Record<string, unknown>; input: typeof EXTENSION; refusal: string }[] = [
+      {
+        row: rowOf({ status: "completed", completed_at: "2026-10-05T00:00:00.000Z", completion_sha256: SHA, tombstone_id: TOMB, in_progress_at: "2026-10-03T00:00:00.000Z" }),
+        input: EXTENSION,
+        refusal: "request_already_answered",
+      },
+      { row: extendedRow(), input: { ...EXTENSION, deadlineAt: "2026-12-01T00:00:00.000Z" }, refusal: "already_extended" },
+      { row: rowOf(), input: { ...EXTENSION, deadlineAt: "2026-10-01T00:00:00.000Z" }, refusal: "not_an_extension" },
+      { row: rowOf(), input: { ...EXTENSION, deadlineAt: "2027-06-01T00:00:00.000Z" }, refusal: "exceeds_article_12_cap" },
+      { row: rowOf(), input: { ...EXTENSION, deadlineExtendedAt: "2026-09-01T00:00:00.000Z" }, refusal: "recorded_before_submission" },
+    ];
+    const seen: string[] = [];
+    for (const c of cases) {
+      const { conn, calls } = fakePg([c.row], [extendedRow()]);
+      await expect(
+        new PostgresDeletionRequestStore(conn).extendDeadline(REQ, c.input),
+      ).rejects.toThrow(DeadlineExtensionRefused);
+      // The class's own claim: nothing was written, and here that is about position as well as
+      // state — the plan runs before the `UPDATE` is built.
+      expect(calls.filter((x) => x.sql.startsWith("UPDATE"))).toEqual([]);
+      try {
+        await new PostgresDeletionRequestStore(fakePg([c.row], [extendedRow()]).conn).extendDeadline(
+          REQ,
+          c.input,
+        );
+      } catch (err) {
+        seen.push((err as DeadlineExtensionRefused).refusal);
+      }
+    }
+    expect(seen.sort()).toEqual([...DEADLINE_EXTENSION_REFUSALS].sort());
+  });
+
+  it("refuses a request that is not there", async () => {
+    const { conn } = fakePg([]);
+    await expect(
+      new PostgresDeletionRequestStore(conn).extendDeadline(REQ, EXTENSION),
+    ).rejects.toThrow(DeletionRequestRefused);
+  });
+
+  it("answers null when the guarded UPDATE matches nothing", async () => {
+    // Somebody else moved or extended it. `transition`'s convention: a caller treats it as "not
+    // mine" rather than as an error.
+    const { conn } = fakePg([rowOf()], []);
+    expect(await new PostgresDeletionRequestStore(conn).extendDeadline(REQ, EXTENSION)).toBeNull();
+  });
+
+  it("reports a committed write whose row cannot be read back, under the status it committed", async () => {
+    // `transition`'s rule: a read-back that cannot be represented must not be reported as a write
+    // that did not happen. An extension changes no status, so `current.status` is the honest value —
+    // and re-driving would be refused `already_extended` on a row whose reason it cannot read.
+    const { conn } = fakePg([rowOf()], [extendedRow({ deadline_extension_reason: null })]);
+    try {
+      await new PostgresDeletionRequestStore(conn).extendDeadline(REQ, EXTENSION);
+      throw new Error("expected a throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(DeletionRequestCommittedUnreadable);
+      expect((err as DeletionRequestCommittedUnreadable).committedStatus).toBe("verified");
+      // The detail names the field path and the issue code, never the stored value (ADR-0373).
+      expect((err as DeletionRequestCommittedUnreadable).parseMessage).toContain(
+        "deadlineExtensionReason",
+      );
+    }
   });
 });

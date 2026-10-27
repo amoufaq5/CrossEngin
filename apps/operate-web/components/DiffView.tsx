@@ -44,6 +44,32 @@ export interface DiffCountsView {
   readonly warnings: number;
 }
 
+/**
+ * One manifest section that differs, as the kernel's section census reports it. The five layers
+ * above cover entities, relations, roles, permissions and workflows; this is what tells a reviewer
+ * about the other twelve, two of which (`jobs`, `views`) are served by the shipped packs.
+ *
+ * `mayWithhold` is the kernel's own `manifestSectionChangeMayWithhold` — a *may*, because a
+ * changed view can have dropped the column that made a filter serveable and a changed role can
+ * have moved a label, and nothing short of re-diffing the section tells those apart.
+ *
+ * `membersKeyed === false` is `relations` alone, whose members have no name to report; its empty
+ * lists mean "there is no key to name" and never "nothing changed", so the counts are what a
+ * reader acts on.
+ */
+export interface SectionChangeView {
+  readonly section: string;
+  readonly reach: string;
+  readonly presence: string;
+  readonly membersKeyed: boolean;
+  readonly mayWithhold: boolean;
+  readonly added: ReadonlyArray<string>;
+  readonly removed: ReadonlyArray<string>;
+  readonly changed: ReadonlyArray<string>;
+  readonly countBefore: number;
+  readonly countAfter: number;
+}
+
 export interface ManifestDiffView {
   readonly comparable: boolean;
   readonly impact: DiffImpact;
@@ -58,6 +84,8 @@ export interface ManifestDiffView {
   readonly rolesRemoved: ReadonlyArray<string>;
   readonly lifecycleChanges: ReadonlyArray<LifecycleChangeView>;
   readonly counts: DiffCountsView;
+  /** Absent from a server that predates the section census; an absent field reads as today's page. */
+  readonly sectionChanges?: ReadonlyArray<SectionChangeView>;
 }
 
 /**
@@ -109,7 +137,13 @@ export function DiffView({ diff }: { diff: ManifestDiffView }) {
     );
   }
 
-  if (diff.impact === "none") {
+  const sectionChanges = diff.sectionChanges ?? [];
+
+  // "No changes" is a claim about the whole manifest, so it may not be made while a section
+  // differs. The guard is here as well as on the server because a server that reports the
+  // sections without folding them into `impact` would otherwise have this page contradict its
+  // own payload.
+  if (diff.impact === "none" && sectionChanges.length === 0) {
     return (
       <div className="rounded-xl border border-line bg-surface-soft px-4 py-3">
         <p className="text-sm font-semibold text-ink">No changes</p>
@@ -120,7 +154,18 @@ export function DiffView({ diff }: { diff: ManifestDiffView }) {
     );
   }
 
-  const breaking = diff.impact === "breaking";
+  // `diff.impact` as the server computed it, and deliberately **not** re-derived from
+  // `sectionChanges` here. The census is coarse by design, and the server suppresses its upgrade
+  // for the five sections a detail layer reads — so folding it again on this side applies a rule
+  // the server rejected, with a measured consequence: adding one *optional field* changes the
+  // `entities` section, `entities` is served, so the census answers may-withhold and this page
+  // would read `breaking` over a server that says `additive`. Measured against the real
+  // `diffManifests`, which is why there is no second fold left. The `No changes` guard above is a
+  // different thing and stays: it reads `sectionChanges` for its *presence*, not its verdict, and
+  // keeps this page from claiming nothing changed if it is ever served by a build whose `impact`
+  // predates the census.
+  const impact = diff.impact;
+  const breaking = impact === "breaking";
   const entitiesChanged =
     diff.entitiesAdded.length + diff.entitiesRemoved.length + diff.entitiesModified.length > 0;
 
@@ -139,7 +184,7 @@ export function DiffView({ diff }: { diff: ManifestDiffView }) {
                 : "bg-white text-emerald-700 ring-1 ring-emerald-600/30"
             }`}
           >
-            {diff.impact}
+            {impact}
           </span>
           <span
             className={`text-sm font-semibold ${breaking ? "text-brand-700" : "text-emerald-800"}`}
@@ -199,8 +244,80 @@ export function DiffView({ diff }: { diff: ManifestDiffView }) {
       )}
 
       {diff.lifecycleChanges.length > 0 && <LifecycleChanges changes={diff.lifecycleChanges} />}
+
+      {sectionChanges.length > 0 && <SectionChanges changes={sectionChanges} />}
     </div>
   );
+}
+
+const REACH_NOTE: Readonly<Record<string, string>> = {
+  served: "alters what a request gets",
+  validated_only: "validated only — no runtime reads it",
+  unread: "read by nothing — a change serves nothing",
+};
+
+function SectionChanges({ changes }: { changes: ReadonlyArray<SectionChangeView> }) {
+  return (
+    <div>
+      <div className="label">Manifest sections</div>
+      <ul className="divide-y divide-line rounded-xl border border-line">
+        {changes.map((change) => (
+          <li key={change.section} className="flex flex-wrap items-start gap-3 px-4 py-3">
+            <span
+              className={`mt-0.5 inline-flex shrink-0 items-center rounded-md px-2 py-0.5 font-mono text-[11px] font-bold ${
+                change.mayWithhold
+                  ? "bg-brand text-white ring-1 ring-brand-700"
+                  : "bg-surface-sunken text-ink-muted ring-1 ring-line"
+              }`}
+            >
+              {change.section}
+            </span>
+            <div className="min-w-0 flex-1 space-y-1">
+              <p
+                className={`text-sm font-medium ${
+                  change.mayWithhold ? "text-brand-700" : "text-ink"
+                }`}
+              >
+                {sectionSentence(change)}
+              </p>
+              {change.membersKeyed ? (
+                <div className="space-y-1">
+                  <ChipRow label="Added" names={change.added} tone="positive" />
+                  <ChipRow label="Removed" names={change.removed} tone="danger" />
+                  <ChipRow label="Changed" names={change.changed} tone="danger" />
+                </div>
+              ) : null}
+              <p className="text-[11px] text-ink-faint">
+                {REACH_NOTE[change.reach] ?? change.reach}
+              </p>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/**
+ * Says what is known and never more. An unkeyed section gets counts because it has no member to
+ * name, and `presence` gets its own sentence because `{}` and an absent key are different
+ * manifests to `manifestHash` while neither has a member to list.
+ */
+function sectionSentence(change: SectionChangeView): string {
+  if (change.presence === "added") {
+    return `${change.section} is declared where the active system declares none (${change.countAfter.toString()} entries).`;
+  }
+  if (change.presence === "removed") {
+    return `${change.section} is no longer declared (${change.countBefore.toString()} entries go away).`;
+  }
+  if (!change.membersKeyed) {
+    return `${change.section} changed — ${change.countBefore.toString()} entries become ${change.countAfter.toString()}; its members carry no name to list.`;
+  }
+  const parts: string[] = [];
+  if (change.added.length > 0) parts.push(`${change.added.length.toString()} added`);
+  if (change.removed.length > 0) parts.push(`${change.removed.length.toString()} removed`);
+  if (change.changed.length > 0) parts.push(`${change.changed.length.toString()} changed`);
+  return `${change.section}: ${parts.join(", ")}.`;
 }
 
 function WarningRow({ warning }: { warning: DiffWarningView }) {

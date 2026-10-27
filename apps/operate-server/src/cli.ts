@@ -514,6 +514,17 @@ export interface ServeOptions {
    * here "off" is the silence this exists to end — so refusing it here is belt-and-braces.
    */
   readonly deletionSweepStallAfter: number | null;
+  /**
+   * How many days before an Article 12(3) deadline a still-unanswered request becomes a finding
+   * (default 7, ADR-0387).
+   *
+   * The one policy in that increment nothing else can set: the cadence is derived from the runner's
+   * interval and needs no flag, while this decides *which* requests the sweep reports and would
+   * otherwise be a constant in a package an operator cannot edit. It moves the warning horizon
+   * only — a breach is a breach at any setting — and every finding names the horizon it was judged
+   * under, so a report read later cannot be ambiguous about which value produced it.
+   */
+  readonly deletionWarningDays: number | null;
   /** Days from submission to the Article 12(3) deadline (default 30, cap 90). Set per deployment rather than per request. */
   readonly deletionRequestDeadlineDays: number | null;
   /** Run verified deletion requests out of band every N ms (needs --tenant-deletion-routes' wiring). Off unless set; the first tick is one interval after boot, never at boot. */
@@ -691,6 +702,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let deletionCapabilities: string | null = null;
   let deletionSubjectScope: "tenant" | null = null;
   let deletionAuditEveryTicks: number | null = null;
+  let deletionWarningDays: number | null = null;
   let deletionSweepStallAfter: number | null = null;
   let deletionRequestDeadlineDays: number | null = null;
   let deletionRunnerMs: number | null = null;
@@ -1424,6 +1436,17 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       deletionAuditEveryTicks = n;
       i += consumed();
     } else if (
+      arg === "--deletion-warning-days" ||
+      arg.startsWith("--deletion-warning-days=")
+    ) {
+      const raw = takeValue(arg, next, "--deletion-warning-days");
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1) {
+        throw new CliUsageError(`invalid --deletion-warning-days: ${raw} (>= 1)`);
+      }
+      deletionWarningDays = n;
+      i += consumed();
+    } else if (
       arg === "--deletion-sweep-stall-after" ||
       arg.startsWith("--deletion-sweep-stall-after=")
     ) {
@@ -2151,6 +2174,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     deletionCapabilities,
     deletionSubjectScope,
     deletionAuditEveryTicks,
+    deletionWarningDays,
     deletionSweepStallAfter,
     deletionRequestDeadlineDays,
     deletionRunnerMs,

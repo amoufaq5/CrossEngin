@@ -1122,6 +1122,16 @@ describe("parseServeArgs — the reverse-direction audit cadence", () => {
     expect(() => parseServeArgs([...PG, "--deletion-audit-every-ticks", "0"])).toThrow();
     expect(() => parseServeArgs([...PG, "--deletion-audit-every-ticks", "1.5"])).toThrow();
   });
+
+  it("takes an Article 12(3) warning horizon in days and refuses a non-positive integer", () => {
+    expect(parseServeArgs([...PG, "--deletion-warning-days=14"]).deletionWarningDays).toBe(14);
+    // Null and not a default: the reconciler owns `DEFAULT_DEADLINE_WARNING_DAYS`, so a flag that
+    // defaulted here would be a second spelling of one figure (ADR-0387).
+    expect(parseServeArgs([...PG]).deletionWarningDays).toBeNull();
+    // Days, so 0 would make the horizon the deadline itself — a warning that arrives as the breach.
+    expect(() => parseServeArgs([...PG, "--deletion-warning-days", "0"])).toThrow();
+    expect(() => parseServeArgs([...PG, "--deletion-warning-days", "7.5"])).toThrow();
+  });
 });
 
 /**

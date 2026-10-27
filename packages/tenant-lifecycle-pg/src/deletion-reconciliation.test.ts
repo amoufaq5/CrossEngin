@@ -1,5 +1,8 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
 import {
+  DEADLINE_STANDINGS,
+  DEADLINE_STANDING_FACTS,
+  DEFAULT_DEADLINE_WARNING_DAYS,
   assembleTombstone,
   type DeletionAttestation,
   type DeletionRequestStatus,
@@ -9,6 +12,7 @@ import {
 import { describe, expect, it } from "vitest";
 
 import {
+  DEFAULT_DEADLINE_AUDIT_LIMIT,
   DEFAULT_STRANDED_AFTER_MS,
   DEFAULT_TOMBSTONE_AUDIT_LIMIT,
   DeletionReconciler,
@@ -16,11 +20,12 @@ import {
   EVIDENCE_DEFECTS,
   TOMBSTONE_REFERENCE_STATES,
   TOMBSTONE_VERIFICATION_OUTCOMES,
+  formatDeadlineFinding,
   isConclusive,
   needsOperator,
   tombstoneStanding,
   verifyStoredEvidence,
-  type DeadlineBreach,
+  type DeadlineFinding,
   type ReconciliationResult,
   type ReconcilerOptions,
 } from "./deletion-reconciliation.js";
@@ -64,6 +69,7 @@ function requestOf(over: Partial<GdprDeletionRequest> = {}): GdprDeletionRequest
     completionSha256: null,
     rejectedAt: null,
     deferredUntil: null,
+    deadlineExtendedAt: null,
     retentionObligations: ["none"],
     retainedDataCategories: [],
     tombstoneId: null,
@@ -327,7 +333,9 @@ interface Harness {
   readonly requestReads: string[];
   readonly reported: ReconciliationResult[];
   readonly unreadable: UnreadableRequestRow[];
-  readonly breaches: DeadlineBreach[];
+  readonly findings: DeadlineFinding[];
+  readonly unansweredCalls: (number | undefined)[];
+  readonly lateRefusalCalls: (number | undefined)[];
 }
 
 function harness(
@@ -349,6 +357,12 @@ function harness(
     /** Rows the store's own page could not represent, reported rather than returned. */
     readonly strandedUnreadable?: readonly UnreadableRequestRow[];
     readonly completedUnreadable?: readonly UnreadableRequestRow[];
+    /** What `unanswered` returns — the waiting queue the Article 12(3) pass reads. */
+    readonly unanswered?: readonly GdprDeletionRequest[];
+    readonly unansweredUnreadable?: readonly UnreadableRequestRow[];
+    /** What `rejectedAfterDeadline` returns — refusals recorded past their deadline. */
+    readonly lateRefusals?: readonly GdprDeletionRequest[];
+    readonly lateRefusalUnreadable?: readonly UnreadableRequestRow[];
     /**
      * The targets whose `transition` commits and cannot read the row back.
      *
@@ -368,7 +382,9 @@ function harness(
   const requestReads: string[] = [];
   const reported: ReconciliationResult[] = [];
   const unreadable: UnreadableRequestRow[] = [];
-  const breaches: DeadlineBreach[] = [];
+  const findings: DeadlineFinding[] = [];
+  const unansweredCalls: (number | undefined)[] = [];
+  const lateRefusalCalls: (number | undefined)[] = [];
   const requests = {
     transition: async (
       id: string,
@@ -410,6 +426,25 @@ function harness(
       completedCalls.push(limit);
       for (const row of behaviour.completedUnreadable ?? []) onUnreadable(row);
       return behaviour.completed ?? [];
+    },
+    // The Article 12(3) pass's two reads. Separate counters, because the pass's `complete` is a
+    // conjunction over both and a fake that answered one call for both could not express a page cut
+    // on only one of them.
+    unanswered: async (
+      onUnreadable: (row: UnreadableRequestRow) => void,
+      limit?: number,
+    ): Promise<readonly GdprDeletionRequest[]> => {
+      unansweredCalls.push(limit);
+      for (const row of behaviour.unansweredUnreadable ?? []) onUnreadable(row);
+      return behaviour.unanswered ?? [];
+    },
+    rejectedAfterDeadline: async (
+      onUnreadable: (row: UnreadableRequestRow) => void,
+      limit?: number,
+    ): Promise<readonly GdprDeletionRequest[]> => {
+      lateRefusalCalls.push(limit);
+      for (const row of behaviour.lateRefusalUnreadable ?? []) onUnreadable(row);
+      return behaviour.lateRefusals ?? [];
     },
   } as unknown as PostgresDeletionRequestStore;
   const tombstones = {
@@ -455,7 +490,7 @@ function harness(
     clock: () => new Date(NOW),
     onReconciled: (r) => reported.push(r),
     onUnreadableRequest: (row) => unreadable.push(row),
-    onDeadlineBreach: (b) => breaches.push(b),
+    onDeadlineFinding: (f) => findings.push(f),
     ...over,
   });
   return {
@@ -468,7 +503,9 @@ function harness(
     requestReads,
     reported,
     unreadable,
-    breaches,
+    findings,
+    unansweredCalls,
+    lateRefusalCalls,
   };
 }
 
@@ -1047,28 +1084,32 @@ describe("auditCompleted", () => {
   });
 
   it("reports a completion past its Article 12(3) deadline, and not as a finding", async () => {
-    // `isCompletedLate`'s first reader. Before this the predicate had zero non-test callers, so the
-    // breach the schema stopped refusing was representable, readable and reported by nothing.
     const h = harness({ completed: [LATE], evidence: [tombstoneOf()] });
     const findings = await h.reconciler.auditCompleted();
     // Not an `EvidenceAudit`: this proof stands up, so every field of a finding would say nothing is
     // wrong — and every finding reaches the escalator, which pages a sev1 for a tamper.
     expect(findings).toEqual([]);
-    expect(h.breaches).toHaveLength(1);
-    expect(h.breaches[0]).toEqual({
+    expect(h.findings).toHaveLength(1);
+    expect(h.findings[0]).toEqual({
       requestId: LATE.id,
       tenantId: TENANT,
-      deadlineAt: "2026-10-28T00:00:00.000Z",
-      completedAt: "2026-10-30T00:00:00.000Z",
-      lateByMs: 2 * 86_400_000,
       tombstoneId: TOMB,
+      assessment: {
+        standing: "answered_late",
+        status: "completed",
+        deadlineAt: "2026-10-28T00:00:00.000Z",
+        answeredAt: "2026-10-30T00:00:00.000Z",
+        msPastDeadline: 2 * 86_400_000,
+        extendedAt: null,
+        warningDays: DEFAULT_DEADLINE_WARNING_DAYS,
+      },
     });
   });
 
   it("says nothing about a completion that met its deadline", async () => {
     const h = harness({ completed: [COMPLETED], evidence: [tombstoneOf()] });
     await h.reconciler.auditCompleted();
-    expect(h.breaches).toEqual([]);
+    expect(h.findings).toEqual([]);
   });
 
   it("reports the breach even when the proof is also broken, because neither answer is the other", async () => {
@@ -1078,20 +1119,303 @@ describe("auditCompleted", () => {
     const findings = await h.reconciler.auditCompleted();
     expect(findings).toHaveLength(1);
     expect(findings[0]?.present).toBe(false);
-    expect(h.breaches).toHaveLength(1);
-    expect(h.breaches[0]?.requestId).toBe(LATE.id);
+    expect(h.findings).toHaveLength(1);
+    expect(h.findings[0]?.requestId).toBe(LATE.id);
   });
 
-  it("says nothing for a completed request that states no completion time", async () => {
-    // The schema refuses that pairing, so it is unreachable past validation — and a boolean cannot
-    // say "the record does not state when it finished", while `true` would assert a breach from a
-    // record that gives no time at all.
+  it("reports a completed request that states no completion time, as neither late nor on time", async () => {
+    // A **behaviour change**, and the direction is the whole of it. The predicate this replaced
+    // answered `false` here and the pass said nothing, so a `completed` row whose `completed_at` the
+    // contract refuses read exactly like a compliant completion. `answer_time_unstated` is a
+    // declared standing that is `reported: true` and `breached: false`: a record that cannot say is
+    // a finding, and calling it either thing would be a claim nobody established.
     const h = harness({
       completed: [requestOf({ ...LATE, completedAt: null })],
       evidence: [tombstoneOf()],
     });
     await h.reconciler.auditCompleted();
-    expect(h.breaches).toEqual([]);
+    expect(h.findings).toHaveLength(1);
+    expect(h.findings[0]?.assessment.standing).toBe("answer_time_unstated");
+    expect(h.findings[0]?.assessment.msPastDeadline).toBeNull();
+  });
+});
+
+describe("auditDeadlines", () => {
+  /** A `submitted` request nobody verified, five days past its deadline. */
+  const BREACHED = requestOf({
+    id: "dreq_breached0001",
+    status: "submitted",
+    verificationMethod: null,
+    verifiedAt: null,
+    verifiedBy: null,
+    inProgressAt: null,
+    deadlineAt: "2026-09-28T00:00:00.000Z",
+  });
+
+  /** A `verified` request whose deadline is three days out — the one standing an act can change. */
+  const APPROACHING = requestOf({
+    id: "dreq_approach0001",
+    status: "verified",
+    inProgressAt: null,
+    deadlineAt: "2026-10-06T00:00:00.000Z",
+  });
+
+  /** A `verified` request 24 days from its deadline. */
+  const HEALTHY = requestOf({ id: "dreq_healthy00001", status: "verified", inProgressAt: null });
+
+  /** A refusal recorded two days past the deadline — Article 12(4)'s breach. */
+  const LATE_REFUSAL = requestOf({
+    id: "dreq_refused00001",
+    status: "rejected",
+    inProgressAt: null,
+    rejectedAt: "2026-09-30T00:00:00.000Z",
+    rejectedReason: "not a data subject",
+    deadlineAt: "2026-09-28T00:00:00.000Z",
+  });
+
+  it("reports a submitted request nobody verified, which no query in the workspace could find", async () => {
+    // The register's likeliest real breach path, and the reason it was invisible: this store's three
+    // queries named `verified`, `in_progress` and `completed`, so `submitted` was read by nothing.
+    const h = harness({ unanswered: [BREACHED] });
+    const page = await h.reconciler.auditDeadlines();
+    expect(page.findings.map((f) => f.assessment.standing)).toEqual(["breached"]);
+    expect(page.findings[0]?.requestId).toBe(BREACHED.id);
+    expect(page.findings[0]?.assessment.status).toBe("submitted");
+    expect(page.examined).toBe(1);
+    expect(page.complete).toBe(true);
+  });
+
+  it("reports an approaching deadline as the one standing that can still be met", async () => {
+    const h = harness({ unanswered: [APPROACHING] });
+    const page = await h.reconciler.auditDeadlines();
+    expect(page.findings[0]?.assessment.standing).toBe("approaching");
+    // The escalation axis: this is the only finding a page could usefully wake somebody for.
+    expect(
+      DEADLINE_STANDING_FACTS[page.findings[0]?.assessment.standing ?? "breached"]
+        .deadlineCanStillBeMet,
+    ).toBe(true);
+  });
+
+  it("says nothing about a request comfortably inside its deadline", async () => {
+    const h = harness({ unanswered: [HEALTHY] });
+    const page = await h.reconciler.auditDeadlines();
+    expect(page.findings).toEqual([]);
+    // And the denominator is still reported, because "nothing was found" is only a claim with it
+    // (ADR-0323).
+    expect(page.examined).toBe(1);
+  });
+
+  it("reports a refusal recorded past the deadline — the third breach shape", async () => {
+    // Article 12(4) puts a refusal under the same clock. `auditCompleted` walks `completed` and the
+    // waiting read walks the four unanswered statuses, so this was covered by neither.
+    const h = harness({ lateRefusals: [LATE_REFUSAL] });
+    const page = await h.reconciler.auditDeadlines();
+    expect(page.findings[0]?.assessment).toMatchObject({
+      standing: "answered_late",
+      status: "rejected",
+      answeredAt: "2026-09-30T00:00:00.000Z",
+      msPastDeadline: 2 * 86_400_000,
+    });
+  });
+
+  it("reads both pages and reports every finding from both", async () => {
+    const h = harness({
+      unanswered: [BREACHED, APPROACHING, HEALTHY],
+      lateRefusals: [LATE_REFUSAL],
+    });
+    const page = await h.reconciler.auditDeadlines();
+    expect(page.examined).toBe(4);
+    expect(page.findings.map((f) => f.requestId)).toEqual([
+      BREACHED.id,
+      APPROACHING.id,
+      LATE_REFUSAL.id,
+    ]);
+    // The reporter saw exactly the page, by construction rather than by two readings of the standing.
+    expect(h.findings).toEqual([...page.findings]);
+  });
+
+  it("writes nothing", async () => {
+    // A deadline is not a repair: curing an approaching one is the runner's act or an operator's,
+    // and nothing cures a breach at all (ADR-0323's rule, one subject over).
+    const h = harness({ unanswered: [BREACHED], lateRefusals: [LATE_REFUSAL] });
+    await h.reconciler.auditDeadlines();
+    expect(h.transitions).toEqual([]);
+    expect(h.retired).toEqual([]);
+  });
+
+  it("forwards the limit to both reads and clamps it", async () => {
+    const h = harness();
+    await h.reconciler.auditDeadlines(7);
+    expect(h.unansweredCalls).toEqual([7]);
+    expect(h.lateRefusalCalls).toEqual([7]);
+    const d = harness();
+    await d.reconciler.auditDeadlines();
+    expect(d.unansweredCalls).toEqual([DEFAULT_DEADLINE_AUDIT_LIMIT]);
+    const c = harness();
+    await c.reconciler.auditDeadlines(99_999);
+    expect(c.unansweredCalls).toEqual([500]);
+  });
+
+  it("declares a bounded reading when either page fills its limit", async () => {
+    // ADR-0367's `declares` arm. The waiting read is nearest-deadline-first, so a cut page drops
+    // the requests furthest from their deadline — but a cut page is still a prefix and saying so is
+    // the honest answer.
+    const waiting = harness({ unanswered: [BREACHED, APPROACHING] });
+    expect((await waiting.reconciler.auditDeadlines(2)).complete).toBe(false);
+    expect((await harness({ unanswered: [BREACHED] }).reconciler.auditDeadlines(2)).complete).toBe(
+      true,
+    );
+    // And on the other read alone, which a single counter could not express.
+    const refusals = harness({ lateRefusals: [LATE_REFUSAL] });
+    expect((await refusals.reconciler.auditDeadlines(1)).complete).toBe(false);
+  });
+
+  it("forwards an unreadable row from both reads and keeps assessing the rest", async () => {
+    const h = harness({
+      unanswered: [BREACHED],
+      unansweredUnreadable: [{ requestId: "dreq_unreadable01", detail: "verificationMethod" }],
+      lateRefusals: [LATE_REFUSAL],
+      lateRefusalUnreadable: [{ requestId: null, detail: "request_id" }],
+    });
+    const page = await h.reconciler.auditDeadlines();
+    expect(h.unreadable.map((u) => u.requestId)).toEqual(["dreq_unreadable01", null]);
+    expect(page.findings).toHaveLength(2);
+    // A row the contract refused was read and **not assessed**, so it sits outside this figure —
+    // `auditTombstones`' rule for the same count (ADR-0371).
+    expect(page.examined).toBe(2);
+  });
+
+  it("reports the horizon it used, and honours an override", async () => {
+    const d = harness({ unanswered: [HEALTHY] });
+    expect((await d.reconciler.auditDeadlines()).warningDays).toBe(DEFAULT_DEADLINE_WARNING_DAYS);
+    // 24 days out, so a 30-day horizon makes the same request `approaching`.
+    const wide = harness({ unanswered: [HEALTHY] }, { deadlineWarningDays: 30 });
+    const page = await wide.reconciler.auditDeadlines();
+    expect(page.warningDays).toBe(30);
+    expect(page.findings[0]?.assessment.standing).toBe("approaching");
+  });
+
+  it("is disjoint from auditCompleted by status, so no finding is emitted twice", async () => {
+    // The two passes share one reporter, and what keeps a finding from arriving twice is a property
+    // of the queries rather than a filter either applies: `completedWithTombstone` selects
+    // `completed` and neither of this pass's reads can return one.
+    const h = harness({
+      unanswered: [BREACHED],
+      lateRefusals: [LATE_REFUSAL],
+      completed: [
+        requestOf({
+          status: "completed",
+          completedAt: "2026-10-30T00:00:00.000Z",
+          completionSha256: PROOF,
+          tombstoneId: TOMB,
+        }),
+      ],
+      evidence: [tombstoneOf()],
+    });
+    await h.reconciler.auditDeadlines();
+    await h.reconciler.auditCompleted();
+    expect(h.findings).toHaveLength(3);
+    expect(new Set(h.findings.map((f) => f.requestId)).size).toBe(3);
+  });
+});
+
+describe("formatDeadlineFinding", () => {
+  const assessOf = (
+    standing: string,
+    over: Partial<DeadlineFinding["assessment"]> = {},
+  ): DeadlineFinding => ({
+    requestId: REQ,
+    tenantId: TENANT,
+    tombstoneId: null,
+    assessment: {
+      standing: standing as DeadlineFinding["assessment"]["standing"],
+      status: "verified",
+      deadlineAt: "2026-10-28T00:00:00.000Z",
+      answeredAt: null,
+      msPastDeadline: 0,
+      extendedAt: null,
+      warningDays: DEFAULT_DEADLINE_WARNING_DAYS,
+      ...over,
+    },
+  });
+
+  it("renders every standing, so none falls through to a default nobody chose", () => {
+    // It names no standing in its logic — it reads the declared facts — so this is the assertion
+    // that a seventh standing gets a sentence from what it is obliged to declare.
+    for (const standing of DEADLINE_STANDINGS) {
+      const line = formatDeadlineFinding(
+        assessOf(standing, standing === "answer_time_unstated" ? { msPastDeadline: null } : {}),
+      );
+      expect(line).toContain(REQ);
+      expect(line.length).toBeGreaterThan(40);
+    }
+  });
+
+  it("distinguishes a breach still running from one already answered", () => {
+    const running = formatDeadlineFinding(
+      assessOf("breached", { msPastDeadline: 5 * 86_400_000 }),
+    );
+    expect(running).toContain("5d past its Article 12(3) deadline and still unanswered");
+
+    const answered = formatDeadlineFinding(
+      assessOf("answered_late", {
+        status: "rejected",
+        answeredAt: "2026-11-02T00:00:00.000Z",
+        msPastDeadline: 5 * 86_400_000,
+      }),
+    );
+    expect(answered).toContain("answered the data subject 5d past");
+  });
+
+  it("says a deadline can still be met, which is the only actionable sentence", () => {
+    expect(
+      formatDeadlineFinding(assessOf("approaching", { msPastDeadline: -3 * 86_400_000 })),
+    ).toContain("due in 3d and its Article 12(3) deadline can still be met");
+  });
+
+  it("says a record cannot state when it answered, rather than inventing a figure", () => {
+    const line = formatDeadlineFinding(
+      assessOf("answer_time_unstated", { status: "completed", msPastDeadline: null }),
+    );
+    expect(line).toContain("does not state when the data subject was answered");
+    expect(line).not.toContain("NaN");
+  });
+
+  it("says a met deadline was met, and whether anybody was answered", () => {
+    // Both standings that land in the last arm are `reported: false`, so this is reachable only
+    // from a direct call — and "is within" is false of a request that has already been answered.
+    expect(formatDeadlineFinding(assessOf("within_deadline", { msPastDeadline: -9 * 86_400_000 })))
+      .toContain("is within its Article 12(3) deadline");
+    expect(
+      formatDeadlineFinding(
+        assessOf("answered_in_time", {
+          status: "completed",
+          answeredAt: "2026-10-20T00:00:00.000Z",
+          msPastDeadline: -8 * 86_400_000,
+        }),
+      ),
+    ).toContain("answered the data subject within its Article 12(3) deadline");
+  });
+
+  it("names the extension, so a reader knows the deadline in force is not the original", () => {
+    expect(
+      formatDeadlineFinding(
+        assessOf("breached", {
+          msPastDeadline: 86_400_000,
+          extendedAt: "2026-10-10T00:00:00.000Z",
+        }),
+      ),
+    ).toContain("extended 2026-10-10T00:00:00.000Z");
+  });
+
+  it("carries no subject identifier, legal basis or note", () => {
+    // ADR-0310's rule: a finding's notice carries the handle and the fact, never the record's
+    // content. This line reaches a deployment log and an incident note.
+    const line = formatDeadlineFinding(
+      assessOf("breached", { msPastDeadline: 86_400_000 }),
+    );
+    expect(line).not.toContain("subject@example.test");
+    expect(line).not.toContain("article_17");
   });
 });
 
@@ -1605,7 +1929,7 @@ describe("auditTombstones writes nothing", () => {
         // This harness exists to prove the sweep writes nothing, so a reported row has nowhere to
         // go here — and it must not be a *write*, which is exactly what the assertion below checks.
         onUnreadableRequest: () => undefined,
-        onDeadlineBreach: () => undefined,
+        onDeadlineFinding: () => undefined,
       }),
       sql: () => sql,
     };

@@ -9,6 +9,7 @@ import {
   type TombstoneSweepPage,
   type TombstoneSweepProgress,
   type TombstoneSweepStall,
+  type DeadlineSweepPage,
 } from "./deletion-scheduler.js";
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
 
@@ -2016,5 +2017,190 @@ describe("DeletionScheduler — a sweep that says it recovered (ADR-0329)", () =
     });
     await tick(s, 5);
     expect(s.sweepProgress().stall).toBeNull();
+  });
+});
+
+function deadlineReconciler(behaviour: { throws?: boolean; findings?: number; complete?: boolean } = {}): {
+  readonly reconciler: StrandedReconcilerLike;
+  readonly calls: (number | undefined)[];
+} {
+  const calls: (number | undefined)[] = [];
+  return {
+    calls,
+    reconciler: {
+      reconcileStranded: async () => [],
+      auditDeadlines: async (limit) => {
+        calls.push(limit);
+        if (behaviour.throws === true) throw new Error("the database is gone");
+        return {
+          examined: 3,
+          complete: behaviour.complete ?? true,
+          warningDays: 7,
+          findings: Array.from({ length: behaviour.findings ?? 0 }, () => ({})),
+        };
+      },
+    },
+  };
+}
+
+describe("the Article 12(3) sweep", () => {
+  it("runs on the derived hourly cadence with no flag at all", async () => {
+    const r = deadlineReconciler();
+    const pages: DeadlineSweepPage[] = [];
+    await new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: r.reconciler,
+      // One tick is one hour, so the derived cadence is 1 and the sweep runs every tick.
+      intervalMs: 3_600_000,
+      scheduler: fakeScheduler(),
+      auditLimit: 42,
+      onDeadlineSweep: (page) => {
+        pages.push(page);
+      },
+    }).runOnce();
+    expect(r.calls).toEqual([42]);
+    expect(pages).toHaveLength(1);
+  });
+
+  it("runs even though auditEveryTicks is unset, which is why it is not inside auditOnce", async () => {
+    // The placement decision. `auditOnce` returns early unless `auditEveryTicks` is configured, and
+    // it defaults to never — so a deadline pass placed there would be dark on every deployment that
+    // had not opted into the expensive tombstone audit, two unrelated conditions.
+    const r = deadlineReconciler();
+    const pages: DeadlineSweepPage[] = [];
+    await new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: r.reconciler,
+      intervalMs: 3_600_000,
+      scheduler: fakeScheduler(),
+      onDeadlineSweep: (page) => {
+        pages.push(page);
+      },
+    }).runOnce();
+    expect(pages).toHaveLength(1);
+  });
+
+  it("reports a clean page, because nothing-is-late cannot be read off a missing log line", async () => {
+    const pages: DeadlineSweepPage[] = [];
+    await new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: deadlineReconciler({ findings: 0 }).reconciler,
+      intervalMs: 3_600_000,
+      scheduler: fakeScheduler(),
+      onDeadlineSweep: (page) => {
+        pages.push(page);
+      },
+    }).runOnce();
+    expect(pages[0]).toEqual({ examined: 3, complete: true, warningDays: 7, findings: [] });
+  });
+
+  it("honours a configured tick multiple", async () => {
+    const r = deadlineReconciler();
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: r.reconciler,
+      intervalMs: 1000,
+      scheduler: fakeScheduler(),
+      deadlineEveryTicks: 3,
+    });
+    await s.runOnce();
+    await s.runOnce();
+    expect(r.calls).toHaveLength(0);
+    await s.runOnce();
+    expect(r.calls).toHaveLength(1);
+  });
+
+  it("reads a malformed tick multiple as the derived cadence and NOT as off", async () => {
+    // The opposite of `auditEveryTicks`, deliberately: there off is the status quo, and here off is
+    // the condition the pass exists to end, so silently restoring it is the wrong way to fail.
+    for (const bad of [0, -1, 2.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const r = deadlineReconciler();
+      await new DeletionScheduler({
+        runner: runner().runner,
+        reconciler: r.reconciler,
+        intervalMs: 3_600_000,
+        scheduler: fakeScheduler(),
+        deadlineEveryTicks: bad,
+      }).runOnce();
+      expect(r.calls, `deadlineEveryTicks: ${bad.toString()}`).toHaveLength(1);
+    }
+  });
+
+  it("reports nothing for a reconciler that offers no auditDeadlines", async () => {
+    // Not an empty page: nothing was established, so nothing is claimed (ADR-0331). An
+    // `{examined: 0}` here would read as a sweep that looked and found no request at all.
+    const pages: DeadlineSweepPage[] = [];
+    await new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: { reconcileStranded: async () => [] },
+      intervalMs: 3_600_000,
+      scheduler: fakeScheduler(),
+      onDeadlineSweep: (page) => {
+        pages.push(page);
+      },
+    }).runOnce();
+    expect(pages).toEqual([]);
+  });
+
+  it("sends a throwing sweep to onError without taking the other passes down", async () => {
+    const errors: unknown[] = [];
+    const ran: number[] = [];
+    await new DeletionScheduler({
+      runner: {
+        runDue: async () => {
+          ran.push(1);
+          return [];
+        },
+      },
+      reconciler: deadlineReconciler({ throws: true }).reconciler,
+      intervalMs: 3_600_000,
+      scheduler: fakeScheduler(),
+      onError: (err) => errors.push(err),
+    }).runOnce();
+    expect(errors).toHaveLength(1);
+    // The run pass is ahead of it in `runOnce` and must still have happened.
+    expect(ran).toEqual([1]);
+  });
+
+  it("reads a degenerate interval as every tick, not as a multiple nothing reaches", async () => {
+    // `3_600_000 / 0` is Infinity and `/ NaN` is NaN, and `ticks % Infinity` is never 0 — so the
+    // division is what makes "silently off" reachable from a wrong interval. Not reachable through
+    // the CLI (`--deletion-runner-ms` floors at 1000); this is the direct-constructor guard.
+    for (const intervalMs of [0, Number.NaN]) {
+      const r = deadlineReconciler();
+      await new DeletionScheduler({
+        runner: runner().runner,
+        reconciler: r.reconciler,
+        intervalMs,
+        scheduler: fakeScheduler(),
+      }).runOnce();
+      expect(r.calls, `intervalMs ${String(intervalMs)}`).toHaveLength(1);
+    }
+  });
+
+  it("derives one tick per hour however short the interval is, floored at one", async () => {
+    // The cadence is a property of time and the tick is not, which is the argument against a
+    // constant: at a one-second tick that would be 3,600 sweeps an hour.
+    const cases: [number, number][] = [
+      [1000, 3600],
+      [60_000, 60],
+      [3_600_000, 1],
+      // Longer than an hour: the floor, because anything above 1 on a daily cadence would put the
+      // sweep days apart.
+      [86_400_000, 1],
+    ];
+    for (const [intervalMs, expected] of cases) {
+      const r = deadlineReconciler();
+      const s = new DeletionScheduler({
+        runner: runner().runner,
+        reconciler: r.reconciler,
+        intervalMs,
+        scheduler: fakeScheduler(),
+      });
+      for (let i = 0; i < expected - 1; i += 1) await s.runOnce();
+      expect(r.calls, `intervalMs ${intervalMs.toString()} before`).toHaveLength(0);
+      await s.runOnce();
+      expect(r.calls, `intervalMs ${intervalMs.toString()}`).toHaveLength(1);
+    }
   });
 });
