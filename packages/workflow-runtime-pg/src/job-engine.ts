@@ -8,6 +8,7 @@ import {
 } from "@crossengin/jobs";
 
 import { finalizeCancelledJobRun } from "./job-cancellation.js";
+import { withTenantContext } from "./tenant-context.js";
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 const DEFAULT_SCHEMA = "meta";
@@ -202,9 +203,13 @@ function parseJson(v: unknown): unknown {
  * `pending` through execution (mutual exclusion is the worker's lease, not a `running` status), so a
  * crashed worker's run is re-claimed once its lease lapses; the finalizing `UPDATE` is guarded by
  * `status = 'pending'`, so a duplicate execution is a no-op (`rowCount = 0`). This is the job analog
- * of the activity engine's `executeScheduledActivity`. The connection is platform-scoped
- * (RLS-bypassing, like the rest of `workflow-runtime-pg`); every query is scoped by both
- * `tenant_id` and `run_id`, so a run is only ever read/finalized within its own tenant.
+ * of the activity engine's `executeScheduledActivity`. Every query is scoped by both `tenant_id`
+ * and `run_id` in its predicate **and** runs inside the run's own tenant RLS context, each in its
+ * own short transaction. The comment this replaces said the connection was "platform-scoped
+ * (RLS-bypassing, like the rest of `workflow-runtime-pg`)", which was the false premise behind the
+ * defect: a worker's connection is whatever role the deployment configured, and only a table's
+ * *owner* bypasses RLS — so on a least-privilege serving role every statement here read or wrote
+ * zero rows (ADR-0389).
  *
  * Terminal mapping: `completed` → completed; `failed` retryable with attempts remaining → back to
  * `pending` (attempts + 1, claim cleared, immediately due); `failed` non-retryable → `failed`;
@@ -239,11 +244,27 @@ export class PostgresJobRunEngine {
     const execStart = this.now().getTime();
     const signal = options.signal ?? NEVER_ABORTED;
 
-    const read = await this.conn.query<RunRow>(
-      `SELECT job_id, job_kind, attempts, trigger, input_redacted, cancel_requested_at
+    // **One short transaction per statement, and deliberately not one across the handler.**
+    // `registration.handler(...)` below is arbitrary deployment code that may run for minutes; a
+    // transaction held open across it is an idle-in-transaction connection holding its locks and a
+    // pool slot for the handler's whole duration. So this read is scoped here and each finalizing
+    // `UPDATE` is scoped at its own call site — the instinct to hoist one wrapper around the method
+    // is the thing to resist.
+    //
+    // Unscoped, this `SELECT` matched **0 rows** as any role but the table's owner, because
+    // `meta.job_runs` carries one `ALL`-scope isolation policy and with no context its predicate is
+    // `tenant_id = NULL` — so `executeJobRun` answered `not_claimable` for a run that exists, which
+    // is a queue able to enqueue rows it can never execute. Softer than the enqueue's 42501 and the
+    // same defect: a silent zero reads exactly like an empty queue. The scope is a fact about the
+    // *row*, not about the worker's connection, which stays cross-tenant for the claim
+    // (`tenant-context.ts`).
+    const read = await withTenantContext(this.conn, tenantId, async (tx) =>
+      tx.query<RunRow>(
+        `SELECT job_id, job_kind, attempts, trigger, input_redacted, cancel_requested_at
          FROM ${this.schema}.job_runs
         WHERE run_id = $1 AND tenant_id = $2::uuid AND status = 'pending'`,
-      [runId, tenantId],
+        [runId, tenantId],
+      ),
     );
     const row = read.rows[0];
     if (row === undefined) {
@@ -308,12 +329,16 @@ export class PostgresJobRunEngine {
     if (result.status === "completed") {
       const completedAt = this.now();
       const durationMs = Math.max(0, completedAt.getTime() - execStart);
-      const updated = await this.conn.query(
-        `UPDATE ${this.schema}.job_runs
+      // Its own transaction, opened after the handler returned: an `UPDATE` refused by RLS matches
+      // zero rows *silently*, so unscoped this reported `not_claimable` for work that succeeded.
+      const updated = await withTenantContext(this.conn, tenantId, async (tx) =>
+        tx.query(
+          `UPDATE ${this.schema}.job_runs
             SET status = 'completed', completed_at = $3::timestamptz, duration_ms = $4,
                 output_redacted = $5::jsonb, claimed_by = NULL, claim_expires_at = NULL
           WHERE run_id = $1 AND tenant_id = $2::uuid AND status = 'pending'`,
-        [runId, tenantId, completedAt.toISOString(), durationMs, JSON.stringify(result.output ?? null)],
+          [runId, tenantId, completedAt.toISOString(), durationMs, JSON.stringify(result.output ?? null)],
+        ),
       );
       if ((updated.rowCount ?? 0) === 0) return { runId, executed: false, disposition: "not_claimable" };
       return { runId, executed: true, disposition: "completed", attempts };
@@ -327,12 +352,14 @@ export class PostgresJobRunEngine {
     if (willRetry) {
       // Defer the re-claim by the policy's backoff: started_at = now + delay (>= now = immediate).
       const startedAt = nextRetryAt(registration.retry, attempts, this.now().toISOString(), registration.jitterRng);
-      const updated = await this.conn.query(
-        `UPDATE ${this.schema}.job_runs
+      const updated = await withTenantContext(this.conn, tenantId, async (tx) =>
+        tx.query(
+          `UPDATE ${this.schema}.job_runs
             SET attempts = attempts + 1, error = $3::jsonb, started_at = $4::timestamptz,
                 claimed_by = NULL, claim_expires_at = NULL
           WHERE run_id = $1 AND tenant_id = $2::uuid AND status = 'pending'`,
-        [runId, tenantId, JSON.stringify(result.error), startedAt],
+          [runId, tenantId, JSON.stringify(result.error), startedAt],
+        ),
       );
       if ((updated.rowCount ?? 0) === 0) return { runId, executed: false, disposition: "not_claimable" };
       return { runId, executed: true, disposition: "retry_scheduled", attempts: attempts + 1 };
@@ -361,6 +388,16 @@ export class PostgresJobRunEngine {
    * of this engine, and a default of `true` is the recoverable direction. And the `ON CONFLICT`
    * target is the declared `(tenant_id, run_id)` unique constraint, so a re-finalize after a lost
    * race is `already_recorded` rather than a second row for one failure.
+   *
+   * A **fourth** thing is deliberate and is why the statement is wrapped: `meta.dead_letter_jobs`
+   * carries one `ALL`-scope isolation policy with a NULL `WITH CHECK`, so as any role but the
+   * table's owner this `INSERT` was refused 42501 — and because the outcome here is reported rather
+   * than thrown, the refusal surfaced as `"failed"` through `onDeadLetterError` and the run stayed
+   * terminal with no record of what did not happen. That is softer than the enqueue's 42501, which
+   * escapes to the caller, and it is the same defect: the one question a dead-letter queue exists to
+   * answer had no data behind it *again*, one layer in. The scope is `input.tenantId` — a fact about
+   * the row being written, not about the worker's connection, which stays deliberately cross-tenant
+   * for the claim (`tenant-context.ts`).
    */
   private async recordDeadLetter(input: {
     readonly runId: string;
@@ -383,20 +420,22 @@ export class PostgresJobRunEngine {
       code: input.error.code,
     };
     try {
-      const inserted = await this.conn.query(
-        `INSERT INTO ${this.schema}.dead_letter_jobs
+      const inserted = await withTenantContext(this.conn, input.tenantId, async (tx) =>
+        tx.query(
+          `INSERT INTO ${this.schema}.dead_letter_jobs
            (tenant_id, job_id, run_id, reason, attempt_count, final_error, input_redacted)
          VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6::jsonb, $7::jsonb)
          ON CONFLICT (tenant_id, run_id) DO NOTHING`,
-        [
-          input.tenantId,
-          input.jobDefinitionId,
-          input.runId,
-          JOB_DEAD_LETTER_REASONS[input.disposition],
-          Math.max(1, Math.floor(input.attempts)),
-          JSON.stringify(finalError),
-          JSON.stringify(input.inputRedacted ?? null),
-        ],
+          [
+            input.tenantId,
+            input.jobDefinitionId,
+            input.runId,
+            JOB_DEAD_LETTER_REASONS[input.disposition],
+            Math.max(1, Math.floor(input.attempts)),
+            JSON.stringify(finalError),
+            JSON.stringify(input.inputRedacted ?? null),
+          ],
+        ),
       );
       return (inserted.rowCount ?? 0) > 0 ? "recorded" : "already_recorded";
     } catch (err) {
@@ -450,12 +489,18 @@ export class PostgresJobRunEngine {
   ): Promise<ExecuteJobRunResult> {
     const completedAt = this.now();
     const durationMs = Math.max(0, completedAt.getTime() - execStart);
-    const updated = await this.conn.query(
-      `UPDATE ${this.schema}.job_runs
+    // Its own transaction, and this is the one that makes `recordDeadLetter`'s own scoping reachable
+    // at all: unscoped, this `UPDATE` matched zero rows as a non-owner, so the `rowCount === 0` guard
+    // below returned `not_claimable` **before** the dead-letter write was ever attempted — the fence
+    // one layer down could never fire, and a terminal failure left no record of what did not happen.
+    const updated = await withTenantContext(this.conn, tenantId, async (tx) =>
+      tx.query(
+        `UPDATE ${this.schema}.job_runs
           SET status = $3, completed_at = $4::timestamptz, duration_ms = $5,
               error = $6::jsonb, claimed_by = NULL, claim_expires_at = NULL
         WHERE run_id = $1 AND tenant_id = $2::uuid AND status = 'pending'`,
-      [runId, tenantId, disposition, completedAt.toISOString(), durationMs, JSON.stringify(error)],
+        [runId, tenantId, disposition, completedAt.toISOString(), durationMs, JSON.stringify(error)],
+      ),
     );
     // A lost guard means another worker already finalized this run — and wrote (or suppressed) its
     // own dead letter. Writing one here would attribute the failure to an execution that did not

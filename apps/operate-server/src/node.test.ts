@@ -289,6 +289,15 @@ describe("the two durable job producers report their failures", () => {
   it("names a remedy in both, because the measured cause has one", () => {
     // ADR-0334's rule: naming a fix that would not work is worse than naming none — and here one
     // works, so it is named. A bare "enqueue failed" would send an operator to the job handlers.
+    //
+    // ADR-0389 **replaced** the remedy both messages name, and the replacement is why this test's
+    // own premise had to be re-read rather than left alone. They used to say *own the table or
+    // bypass its policy*, which was the measured cause while the enqueue was an unscoped
+    // `conn.query`. The enqueue now sets `app.current_tenant_id` from the row's own tenant, so that
+    // advice became unnecessary **and** the opposite of the least-privilege direction the fix
+    // supports — ADR-0334's own rule turned against the sentence it had justified. What a 42501 on
+    // this path can still mean is a missing table-level GRANT, which is what they name now. The
+    // assertion is unchanged because it pins the *presence* of a named cause, not its content.
     for (const prefix of ["[schedule] enqueue failed", "[entity-events] enqueue failed"]) {
       const at = src.indexOf(prefix);
       expect(at, prefix).toBeGreaterThan(-1);

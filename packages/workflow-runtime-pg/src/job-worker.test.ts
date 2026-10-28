@@ -39,15 +39,19 @@ function mockConn(
   rowsForClaim: readonly Record<string, unknown>[],
   capture?: Array<{ sql: string; params: readonly unknown[] | undefined }>,
 ): PgConnection {
-  return {
+  const conn: PgConnection = {
     query: (async (sql: string, params?: readonly unknown[]): Promise<PgQueryResult> => {
       if (capture !== undefined) capture.push({ sql, params });
       return sql.includes("RETURNING") ? { rows: rowsForClaim, rowCount: rowsForClaim.length } : { rows: [], rowCount: 0 };
     }) as PgConnection["query"],
-    transaction: (async () => undefined) as unknown as PgConnection["transaction"],
+    // Runs its callback: `observeJobCancellation` reads inside `withTenantContext` (ADR-0389),
+    // and a fake that discarded this would make that read unobservable and answer `undefined`.
+    transaction: (async <T,>(fn: (tx: PgConnection) => Promise<T>): Promise<T> =>
+      fn(conn)) as PgConnection["transaction"],
     withAdvisoryLock: (async () => undefined) as unknown as PgConnection["withAdvisoryLock"],
     close: (async () => undefined) as PgConnection["close"],
   };
+  return conn;
 }
 
 function recordingEngine(): {
@@ -165,14 +169,24 @@ describe("buildJobCancellationWatcher", () => {
         capture.push({ sql, params });
         return { rows: [{ cancel_requested_at: NOW, cancel_requested_by: "user:7", cancel_reason: null }], rowCount: 1 };
       }) as PgConnection["query"],
-      transaction: (async () => undefined) as unknown as PgConnection["transaction"],
+      // Runs its callback: `observeJobCancellation` reads inside `withTenantContext` (ADR-0389),
+      // and a fake that discarded this would make that read unobservable and answer `undefined`.
+      transaction: (async <T,>(fn: (tx: PgConnection) => Promise<T>): Promise<T> =>
+        fn(conn)) as PgConnection["transaction"],
       withAdvisoryLock: (async () => undefined) as unknown as PgConnection["withAdvisoryLock"],
       close: (async () => undefined) as PgConnection["close"],
     };
     const watcher = buildJobCancellationWatcher(conn, { schema: "ops" });
     expect(await watcher.isCancelRequested({ jobId: "run-1", tenantId: TENANT })).toBe(true);
-    expect(capture[0]!.sql).toContain("FROM ops.job_runs");
-    expect(capture[0]!.params).toEqual(["run-1", TENANT]);
+    // Selected by predicate rather than by position: the read is now preceded by the RLS context
+    // statement (ADR-0389), and indexing would shift again the next time one is added or removed.
+    const read = capture.filter((c) => !c.sql.includes("set_config('app.current_tenant_id'"));
+    expect(read).toHaveLength(1);
+    expect(read[0]!.sql).toContain("FROM ops.job_runs");
+    expect(read[0]!.params).toEqual(["run-1", TENANT]);
+    expect(
+      capture.filter((c) => c.sql.includes("set_config('app.current_tenant_id'"))[0]!.params,
+    ).toEqual([TENANT]);
   });
 
   it("reports false for a run nobody asked to cancel", async () => {
@@ -326,7 +340,10 @@ describe("buildWorkflowJobWorker cancellation wiring", () => {
         }
         return { rows: [], rowCount: 0 };
       }) as PgConnection["query"],
-      transaction: (async () => undefined) as unknown as PgConnection["transaction"],
+      // Runs its callback: `observeJobCancellation` reads inside `withTenantContext` (ADR-0389),
+      // and a fake that discarded this would make that read unobservable and answer `undefined`.
+      transaction: (async <T,>(fn: (tx: PgConnection) => Promise<T>): Promise<T> =>
+        fn(conn)) as PgConnection["transaction"],
       withAdvisoryLock: (async () => undefined) as unknown as PgConnection["withAdvisoryLock"],
       close: (async () => undefined) as PgConnection["close"],
     };

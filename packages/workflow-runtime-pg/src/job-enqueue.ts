@@ -11,6 +11,8 @@ import {
   type UserInvocation,
 } from "@crossengin/jobs";
 
+import { withTenantContext } from "./tenant-context.js";
+
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 const DEFAULT_SCHEMA = "meta";
 
@@ -61,8 +63,17 @@ export interface EnqueueJobsForEventOptions {
  * `run_id` is derived deterministically from the plan's idempotency key, so the insert is
  * `ON CONFLICT (tenant_id, run_id) DO NOTHING` — a re-delivered event never enqueues a duplicate run
  * (`inserted: false`). `started_at` is set to `now`, so the run is immediately due. All values are
- * bound; the validated schema is the only interpolated identifier. The connection is platform-scoped
- * (RLS-bypassing), with `tenant_id` bound from the event on each row.
+ * bound; the validated schema is the only interpolated identifier.
+ *
+ * The clause this replaced claimed "the connection is platform-scoped (RLS-bypassing), with
+ * `tenant_id` bound from the event on each row", and it was the premise that made a bare
+ * `conn.query` here read as correct. It is false twice: the caller passes the ordinary serving
+ * connection (`PostgresEntityEventSink`'s own `this.conn`), and *RLS-bypassing* is a property of the
+ * **role**, true only for the table's owner. `meta.job_runs` carries one `ALL`-scope isolation
+ * policy with a NULL `WITH CHECK`, so as any other role the write check is
+ * `tenant_id = NULL` — never true. The tenant context is established in `insertPlannedRuns` now;
+ * see `tenant-context.ts` for the live measurement and for why a platform write arm cannot serve
+ * this table.
  */
 export async function enqueueJobsForEvent(
   conn: PgConnection,
@@ -82,8 +93,27 @@ export async function enqueueJobsForEvent(
  * (`inserted: false`). `started_at` is `now + delayMs` (a delayed trigger defers past the enqueue
  * time; every other kind has `delayMs 0` → `now`, immediately due). All values are bound; the caller
  * has already validated the schema identifier.
+ *
+ * The whole batch runs inside **one** tenant-scoped transaction, which is where both of its callers
+ * get their RLS context — one place rather than two, because the scope is the same fact for both
+ * (`options.event.tenantId` and `options.invocation.tenantId` are each the tenant being enqueued
+ * for). `enqueueScheduledJobs` does **not** come through here: it has its own statement, which is
+ * why it carries its own wrapper, and a fix applied to this function alone would have left the one
+ * producer `--schedule-ms` drives still raising 42501.
  */
 async function insertPlannedRuns(
+  conn: PgConnection,
+  schema: string,
+  tenantId: string,
+  now: string,
+  planned: readonly PlannedJobRun[],
+): Promise<readonly EnqueuedJobRun[]> {
+  if (planned.length === 0) return [];
+  return withTenantContext(conn, tenantId, async (tx) => insertPlannedRunsWithin(tx, schema, tenantId, now, planned));
+}
+
+/** The statements themselves, inside a caller's tenant-scoped transaction. */
+async function insertPlannedRunsWithin(
   conn: PgConnection,
   schema: string,
   tenantId: string,
@@ -159,6 +189,11 @@ export interface EnqueueScheduledJobsOptions {
  * fires the tick exactly once with no last-fired state table (the row *is* the state). `started_at`
  * is the tick instant (≤ now), so the run is immediately due for the claim. Overlapping schedulers /
  * multiple replicas are safe: they race on the same run id and only one wins.
+ *
+ * Its own statement rather than `insertPlannedRuns`', so it carries its own tenant context — and
+ * that separation is the whole reason this producer is named here: it is the one `--schedule-ms`
+ * drives, so a scope fix applied to the shared helper would have closed the two producers that are
+ * off by default and missed the one an operator turns on.
  */
 export async function enqueueScheduledJobs(
   conn: PgConnection,
@@ -169,6 +204,20 @@ export async function enqueueScheduledJobs(
 
   const byId = new Map(options.jobs.map((j) => [j.id, j]));
   const due = scheduledJobsDue(options.jobs, { now: options.now });
+  if (due.length === 0) return [];
+  return withTenantContext(conn, options.tenantId, async (tx) =>
+    insertDueScheduledRuns(tx, schema, options, byId, due),
+  );
+}
+
+/** The statements themselves, inside the caller's tenant-scoped transaction. */
+async function insertDueScheduledRuns(
+  conn: PgConnection,
+  schema: string,
+  options: EnqueueScheduledJobsOptions,
+  byId: ReadonlyMap<string, JobDeclaration>,
+  due: readonly { readonly jobId: string; readonly fireAt: string }[],
+): Promise<readonly EnqueuedJobRun[]> {
   const results: EnqueuedJobRun[] = [];
 
   for (const { jobId, fireAt } of due) {

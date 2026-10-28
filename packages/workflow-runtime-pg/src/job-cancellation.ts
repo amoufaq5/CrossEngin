@@ -6,6 +6,8 @@ import {
   type JobRunStatus,
 } from "@crossengin/jobs";
 
+import { withTenantContext } from "./tenant-context.js";
+
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 const DEFAULT_SCHEMA = "meta";
 const DEFAULT_REAP_LIMIT = 50;
@@ -81,6 +83,16 @@ interface StateRow {
  *
  * Falling back from (1) to (2) is bounded — never a retry loop — and always degrades towards the
  * weaker, safer action.
+ *
+ * All of it runs inside **one** `withTenantContext` (ADR-0389), and the granularity is per function
+ * rather than per statement for two reasons. The scope is what the statements need at all: this is
+ * the route's handler (`buildJobCancelRoutes`), and `meta.job_runs` carries one `ALL`-scope isolation
+ * policy whose `USING` doubles as its `WITH CHECK`, so with no context set the read matched 0 rows
+ * and the caller was answered `not_found` **for a run that exists** — a wrong answer rather than a
+ * refusal, which is the dangerous direction. And one transaction over the read-decide-write-reread
+ * sequence is an *improvement* on top of that: the UPDATE's re-assertion of the plan's premise is now
+ * atomic with the read that planned it, so (1)'s fence is evaluated against the state the plan saw
+ * rather than against whatever the row drifted to between two autocommitted statements.
  */
 export async function requestJobCancellation(
   conn: PgConnection,
@@ -90,46 +102,49 @@ export async function requestJobCancellation(
   const { runId, tenantId, now } = options;
   const reason = options.reason ?? null;
 
-  const read = await conn.query<StateRow>(
-    `SELECT status, claimed_by, claim_expires_at, cancel_requested_at
+  // The annotation is what gives every `return` below its contextual type, so a mistyped `outcome`
+  // is a compile error rather than a widened `string` the generic swallows.
+  return withTenantContext(conn, tenantId, async (tx): Promise<RequestJobCancellationResult> => {
+    const read = await tx.query<StateRow>(
+      `SELECT status, claimed_by, claim_expires_at, cancel_requested_at
        FROM ${schema}.job_runs
       WHERE run_id = $1 AND tenant_id = $2::uuid`,
-    [runId, tenantId],
-  );
-  const row = read.rows[0];
-  if (row === undefined) {
-    return { runId, outcome: "not_found", status: null, requestedAt: null };
-  }
+      [runId, tenantId],
+    );
+    const row = read.rows[0];
+    if (row === undefined) {
+      return { runId, outcome: "not_found", status: null, requestedAt: null };
+    }
 
-  const state: JobRunCancellationState = {
-    status: str(row.status) as JobRunStatus,
-    claimedBy: nullableStr(row.claimed_by),
-    claimExpiresAt: nullableStr(row.claim_expires_at),
-    cancelRequestedAt: nullableStr(row.cancel_requested_at),
-  };
-  const plan = planJobCancellation(state, now);
-
-  if (plan.kind === "already_terminal") {
-    return {
-      runId,
-      outcome: "already_terminal",
-      status: plan.status,
-      requestedAt: state.cancelRequestedAt,
+    const state: JobRunCancellationState = {
+      status: str(row.status) as JobRunStatus,
+      claimedBy: nullableStr(row.claimed_by),
+      claimExpiresAt: nullableStr(row.claim_expires_at),
+      cancelRequestedAt: nullableStr(row.cancel_requested_at),
     };
-  }
-  if (plan.kind === "already_requested") {
-    return {
-      runId,
-      outcome: "already_requested",
-      status: state.status,
-      requestedAt: plan.requestedAt,
-    };
-  }
+    const plan = planJobCancellation(state, now);
 
-  if (plan.kind === "cancel_now") {
-    // `duration_ms` stays NULL: the run never executed, so it has no duration to report.
-    const cancelled = await conn.query(
-      `UPDATE ${schema}.job_runs
+    if (plan.kind === "already_terminal") {
+      return {
+        runId,
+        outcome: "already_terminal",
+        status: plan.status,
+        requestedAt: state.cancelRequestedAt,
+      };
+    }
+    if (plan.kind === "already_requested") {
+      return {
+        runId,
+        outcome: "already_requested",
+        status: state.status,
+        requestedAt: plan.requestedAt,
+      };
+    }
+
+    if (plan.kind === "cancel_now") {
+      // `duration_ms` stays NULL: the run never executed, so it has no duration to report.
+      const cancelled = await tx.query(
+        `UPDATE ${schema}.job_runs
           SET status = 'cancelled', completed_at = $3::timestamptz,
               cancel_requested_at = $3::timestamptz, cancel_requested_by = $4, cancel_reason = $5,
               cancelled_at_checkpoint = 'before_claim',
@@ -137,50 +152,51 @@ export async function requestJobCancellation(
         WHERE run_id = $1 AND tenant_id = $2::uuid
           AND status = 'pending'
           AND (claimed_by IS NULL OR claim_expires_at IS NULL OR claim_expires_at <= $3::timestamptz)`,
-      [runId, tenantId, now, options.requestedBy, reason],
-    );
-    if ((cancelled.rowCount ?? 0) > 0) {
-      return { runId, outcome: "cancelled", status: "cancelled", requestedAt: now };
+        [runId, tenantId, now, options.requestedBy, reason],
+      );
+      if ((cancelled.rowCount ?? 0) > 0) {
+        return { runId, outcome: "cancelled", status: "cancelled", requestedAt: now };
+      }
     }
-  }
 
-  const requested = await conn.query<{ status: unknown; cancel_requested_at: unknown }>(
-    `UPDATE ${schema}.job_runs
+    const requested = await tx.query<{ status: unknown; cancel_requested_at: unknown }>(
+      `UPDATE ${schema}.job_runs
         SET cancel_requested_at = COALESCE(cancel_requested_at, $3::timestamptz),
             cancel_requested_by = COALESCE(cancel_requested_by, $4),
             cancel_reason = COALESCE(cancel_reason, $5)
       WHERE run_id = $1 AND tenant_id = $2::uuid
         AND status IN ('pending', 'running')
      RETURNING status, cancel_requested_at`,
-    [runId, tenantId, now, options.requestedBy, reason],
-  );
-  const updated = requested.rows[0];
-  if (updated !== undefined) {
-    return {
-      runId,
-      outcome: "cancellation_requested",
-      status: str(updated.status) as JobRunStatus,
-      requestedAt: nullableStr(updated.cancel_requested_at),
-    };
-  }
+      [runId, tenantId, now, options.requestedBy, reason],
+    );
+    const updated = requested.rows[0];
+    if (updated !== undefined) {
+      return {
+        runId,
+        outcome: "cancellation_requested",
+        status: str(updated.status) as JobRunStatus,
+        requestedAt: nullableStr(updated.cancel_requested_at),
+      };
+    }
 
-  // The run went terminal between the read and the write; report what it actually became.
-  const reread = await conn.query<StateRow>(
-    `SELECT status, claimed_by, claim_expires_at, cancel_requested_at
+    // The run went terminal between the read and the write; report what it actually became.
+    const reread = await tx.query<StateRow>(
+      `SELECT status, claimed_by, claim_expires_at, cancel_requested_at
        FROM ${schema}.job_runs
       WHERE run_id = $1 AND tenant_id = $2::uuid`,
-    [runId, tenantId],
-  );
-  const after = reread.rows[0];
-  if (after === undefined) {
-    return { runId, outcome: "not_found", status: null, requestedAt: null };
-  }
-  return {
-    runId,
-    outcome: "already_terminal",
-    status: str(after.status) as JobRunStatus,
-    requestedAt: nullableStr(after.cancel_requested_at),
-  };
+      [runId, tenantId],
+    );
+    const after = reread.rows[0];
+    if (after === undefined) {
+      return { runId, outcome: "not_found", status: null, requestedAt: null };
+    }
+    return {
+      runId,
+      outcome: "already_terminal",
+      status: str(after.status) as JobRunStatus,
+      requestedAt: nullableStr(after.cancel_requested_at),
+    };
+  });
 }
 
 export interface JobCancellationObservation {
@@ -195,21 +211,29 @@ export interface JobCancellationObservation {
  * cancelled: there is nothing to cancel, and every finalizing write is fenced by the run's status
  * anyway, so an absent row cannot be mistakenly completed. A query that *throws* propagates — the
  * caller decides, and the two callers decide differently (see `processJobBatch` vs `abortWhile`).
+ *
+ * The read carries its own tenant context (ADR-0389), and here the consequence of its absence was
+ * the quietest of the three: *a row that has vanished reads as not cancelled* is the correct rule and
+ * a confined session cannot tell it from *a row this session may not see*, so every cancellation went
+ * unobserved and no handler was ever aborted — the worker's pre-flight and mid-flight probe answering
+ * "nothing to do" for a request that is durably recorded.
  */
 export async function observeJobCancellation(
   conn: PgConnection,
   options: { readonly runId: string; readonly tenantId: string; readonly schema?: string },
 ): Promise<JobCancellationObservation> {
   const schema = checkSchema(options.schema);
-  const result = await conn.query<{
-    cancel_requested_at: unknown;
-    cancel_requested_by: unknown;
-    cancel_reason: unknown;
-  }>(
-    `SELECT cancel_requested_at, cancel_requested_by, cancel_reason
+  const result = await withTenantContext(conn, options.tenantId, async (tx) =>
+    tx.query<{
+      cancel_requested_at: unknown;
+      cancel_requested_by: unknown;
+      cancel_reason: unknown;
+    }>(
+      `SELECT cancel_requested_at, cancel_requested_by, cancel_reason
        FROM ${schema}.job_runs
       WHERE run_id = $1 AND tenant_id = $2::uuid`,
-    [options.runId, options.tenantId],
+      [options.runId, options.tenantId],
+    ),
   );
   const row = result.rows[0];
   const requestedAt = row === undefined ? null : nullableStr(row.cancel_requested_at);
@@ -237,20 +261,27 @@ export interface FinalizeCancelledJobRunOptions {
  * whose cancellation is durably recorded, so a bug in the abort path cannot invent a cancellation
  * nobody asked for. Returns `false` when the run was no longer cancellable — already finalized, or
  * never requested — which makes a duplicate honouring a no-op rather than a rewrite.
+ *
+ * The write carries its own tenant context (ADR-0389). Without it the `UPDATE` matched 0 rows and
+ * this returned `false`, which is indistinguishable from the one state the `false` is *for* — the run
+ * is no longer cancellable — so an honoured cancellation reported itself as a duplicate and the run
+ * stayed `pending` with its lease released by nothing.
  */
 export async function finalizeCancelledJobRun(
   conn: PgConnection,
   options: FinalizeCancelledJobRunOptions,
 ): Promise<boolean> {
   const schema = checkSchema(options.schema);
-  const result = await conn.query(
-    `UPDATE ${schema}.job_runs
+  const result = await withTenantContext(conn, options.tenantId, async (tx) =>
+    tx.query(
+      `UPDATE ${schema}.job_runs
         SET status = 'cancelled', completed_at = $3::timestamptz, duration_ms = $4,
             cancelled_at_checkpoint = $5, claimed_by = NULL, claim_expires_at = NULL
       WHERE run_id = $1 AND tenant_id = $2::uuid
         AND status IN ('pending', 'running')
         AND cancel_requested_at IS NOT NULL`,
-    [options.runId, options.tenantId, options.now, options.durationMs ?? null, options.checkpoint],
+      [options.runId, options.tenantId, options.now, options.durationMs ?? null, options.checkpoint],
+    ),
   );
   return (result.rowCount ?? 0) > 0;
 }
@@ -274,6 +305,14 @@ export interface ReapedJobRun {
  * on an unclaimed run by the `cancel_now` fallback.
  *
  * `FOR UPDATE SKIP LOCKED` so every worker in the fleet can sweep on each poll without contending.
+ *
+ * **Deliberately *not* wrapped in `withTenantContext`** (ADR-0389), where its three siblings above
+ * are. This sweep is cross-tenant by design — the `FOR UPDATE SKIP LOCKED` selection spans every
+ * tenant and the statement *returns* the tenant ids it found, which is how a caller learns whose runs
+ * it finalized — so there is no single scope to set, and setting one would silently turn a fleet-wide
+ * reaper into a single-tenant one. It is the `claimDueJobs` asymmetry one function over: what a
+ * confined session can see on this path is the question `probeJobQueueVisibility` in `job-claim.ts`
+ * answers at boot (ADR-0334), rather than one this statement can answer per row.
  */
 export async function reapCancelledJobRuns(
   conn: PgConnection,

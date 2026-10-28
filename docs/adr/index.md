@@ -1,10 +1,10 @@
 # ADR index
 
-383 records. Generated from the ADR files themselves — regenerate rather than
+384 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 304  **Proposed:** 79
+- **Accepted:** 305  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -395,3 +395,4 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0386](0386-a-required-claim-is-required.md) | A required claim is required | — | Accepted | 2026-10-27 |
 | [0387](0387-a-deadline-nobody-asked-about.md) | A deadline nobody asked about | — | Accepted | 2026-10-27 |
 | [0388](0388-a-diff-that-covers-five-of-seventeen.md) | A diff that covers five of seventeen | — | Accepted | 2026-10-27 |
+| [0389](0389-a-queue-no-non-owner-could-write.md) | A queue no non-owner could write | — | Accepted | 2026-10-28 |

@@ -1,6 +1,7 @@
 import { JobDeclarationSchema, type JobDeclaration } from "@crossengin/jobs";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import type { EntityEvent } from "@crossengin/operate-runtime";
+import { SET_TENANT_CONTEXT_SQL } from "@crossengin/workflow-runtime-pg";
 import { describe, expect, it } from "vitest";
 
 import { PostgresEntityEventSink } from "./entity-events.js";
@@ -12,17 +13,38 @@ interface Call {
   readonly params: readonly unknown[] | undefined;
 }
 
+/** The two statement kinds this producer emits, selected by predicate rather than by index. */
+const inserts = (calls: readonly Call[]): readonly Call[] =>
+  calls.filter((c) => c.sql.includes("INSERT INTO meta.job_runs"));
+const contexts = (calls: readonly Call[]): readonly Call[] =>
+  calls.filter((c) => c.sql.includes(SET_TENANT_CONTEXT_SQL));
+
+/**
+ * `transaction` must RUN its callback, handing it this same recording connection, or the whole
+ * producer body is unobservable: `enqueueJobsForEvent` wraps its batch in `withTenantContext`, so a
+ * `transaction` that discarded its callback recorded nothing and the assertions read an empty array
+ * — which does not read as "the fake skipped the work" (CLAUDE.md's `Tests` convention, seventh
+ * member).
+ *
+ * The `set_config` branch is **first** and returns before the fault injection, for two reasons. It
+ * begins with `SELECT`, so any later branch keying on that word would hand it another statement's
+ * rows (ADR-0363); and `throws` exists to fail an *enqueue*, which is the INSERT — before the
+ * producer became tenant-scoped the only statement it issued was that INSERT, so failing the context
+ * statement instead would quietly change what the best-effort test is about.
+ */
 function mockConn(calls: Call[], opts: { throws?: boolean } = {}): PgConnection {
-  return {
+  const conn: PgConnection = {
     query: (async (sql: string, params?: readonly unknown[]): Promise<PgQueryResult> => {
       calls.push({ sql, params });
+      if (sql.includes(SET_TENANT_CONTEXT_SQL)) return { rows: [], rowCount: 1 };
       if (opts.throws === true) throw new Error("db down");
       return { rows: [{ run_id: params?.[3] }], rowCount: 1 };
     }) as PgConnection["query"],
-    transaction: (async () => undefined) as unknown as PgConnection["transaction"],
+    transaction: (async <T,>(fn: (tx: PgConnection) => Promise<T>) => fn(conn)) as PgConnection["transaction"],
     withAdvisoryLock: (async () => undefined) as unknown as PgConnection["withAdvisoryLock"],
     close: (async () => undefined) as PgConnection["close"],
   };
+  return conn;
 }
 
 function event(name: string): EntityEvent {
@@ -58,9 +80,11 @@ describe("PostgresEntityEventSink", () => {
 
     await sink.emit(event("salesorder.placed"));
 
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.sql).toContain("INSERT INTO meta.job_runs");
-    expect(calls[0]!.params?.[0]).toBe(TENANT);
+    const ins = inserts(calls);
+    expect(ins).toHaveLength(1);
+    expect(ins[0]!.params?.[0]).toBe(TENANT);
+    // Nothing but that insert and its tenant context is issued.
+    expect(calls).toHaveLength(ins.length + contexts(calls).length);
     expect(enqueued).toHaveLength(1);
     expect(enqueued[0]!.name).toBe("salesorder.placed");
     expect(enqueued[0]!.ids).toHaveLength(1);
@@ -70,7 +94,29 @@ describe("PostgresEntityEventSink", () => {
     const calls: Call[] = [];
     const sink = new PostgresEntityEventSink(mockConn(calls), [orderPlacedJob], { now: NOW });
     await sink.emit(event("salesorder.returned"));
+    // Not one statement, so no transaction is opened and no context is set when nothing is planned.
     expect(calls).toHaveLength(0);
+  });
+
+  it("establishes the tenant RLS context, with the tenant bound rather than interpolated", async () => {
+    const calls: Call[] = [];
+    const sink = new PostgresEntityEventSink(mockConn(calls), [orderPlacedJob], { now: NOW });
+    await sink.emit(event("salesorder.placed"));
+
+    // `meta.job_runs` carries exactly one ALL-scope isolation policy with a NULL WITH CHECK, so its
+    // USING doubles as the write check: with no context the predicate is `tenant_id = NULL`, never
+    // true, and the INSERT is refused 42501 as any role but the table's owner (ADR-0389). This sink
+    // swallows its failures by design, so without the context every served entity write silently
+    // enqueued nothing.
+    const ctx = contexts(calls);
+    expect(ctx).toHaveLength(1);
+    expect(ctx[0]!.sql).toBe(SET_TENANT_CONTEXT_SQL);
+    // Bound as `$1`, never interpolated — a tenant id must not reach SQL text.
+    expect(ctx[0]!.params).toEqual([TENANT]);
+    expect(ctx[0]!.sql).not.toContain(TENANT);
+    expect(ctx[0]!.sql).toContain("$1");
+    // And it precedes the insert it exists to admit.
+    expect(calls.indexOf(ctx[0]!)).toBeLessThan(calls.indexOf(inserts(calls)[0]!));
   });
 
   it("is best-effort: an enqueue failure is routed to onError and never thrown", async () => {

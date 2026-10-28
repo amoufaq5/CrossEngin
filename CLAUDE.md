@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 20,615 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 20,645 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -2568,6 +2568,83 @@ report; `apps/operate-web` has none).
   the bare `reach` rather than to prose of its own: **a copy removed cannot drift where a copy fenced
   can**, and saying less beats saying something false.
 
+  ADR-0389 is the first increment of the **P0 remainder** run, and the class is **a remedy whose only
+  admissible row cannot exist**. The register's P0.3 names a real defect — four writers of the job
+  queue issue a bare `conn.query`, and `meta.job_runs` / `meta.dead_letter_jobs` each carry one
+  `ALL`-scope isolation policy with a NULL `WITH CHECK`, so the `USING` doubles as the write check and
+  with nothing set it is `tenant_id = NULL`, never true — and prescribes the fix in the same sentence:
+  *"a platform write arm on the three queue tables in ADR-0332's pattern."* **That fix cannot work,
+  proven live**: the arm's check requires `tenant_id IS NULL`, all three columns are **NOT NULL** with
+  a `meta.tenants` reference, and creating the policy on a real cluster and claiming the grant leaves
+  the only row it admits refused one layer down by `null value in column "tenant_id" … violates
+  not-null constraint`. `PLATFORM_WRITE_GRANTS`' own doc had already scoped that pattern — *"every
+  tenant-scoped meta table whose `tenant_id` is **nullable**"* — and `audit_log.tenant_id` is `YES`
+  against these three `NO`, which is exactly why it works there and is unsatisfiable here. A policy
+  with no admissible case is not a policy (ADR-0375), so the honest fix is the ordinary one ADR-0333
+  swept into fourteen stores: the scope is **a fact about the row**, every producer already holds the
+  tenant it is enqueueing for, and `withTenantContext` is what that wants.
+  Three more of the entry's facts were wrong and one of them decides the shape of the fix.
+  `insertPlannedRuns` has **two** callers, not four; there are **three** producers, because
+  `enqueueScheduledJobs` carries its own inline `INSERT` — **the one `--schedule-ms` drives**, so a
+  fix applied to the shared helper would have closed the two producers that are off by default and
+  missed the one an operator turns on, which is why each fenced statement carries its own test
+  and why dropping the scheduled wrapper fails **exactly one**. The fourth writer is not a producer at
+  all but `recordDeadLetter`, on a different table and *reporting* rather than throwing — so there the
+  42501 surfaced as `"failed"` through `onDeadLetterError` and the run stayed terminal with no record
+  of what did not happen, which is the question a dead-letter queue exists to answer, unanswered a
+  second time one layer in. And **`meta.job_costs` has zero `INSERT` sites workspace-wide**, so of
+  "three queue tables" only two have a writer; a policy for the third would be a grant for a statement
+  that does not exist.
+  **Why nothing caught it** is two facts, and the second is the reusable one. The writers satisfy
+  every one of the twelve workspace rules — the columns exist, the `INSERT` is complete, the values are
+  admitted, the domains mirror, the names agree — because what is missing is a *session setting*, which
+  no rule asks about. And of this package's **24** fake `PgConnection.transaction` members across 19
+  test files, **23 discarded the callback** (`async () => undefined`, or a bare `vi.fn()`, which
+  returns the same), so a transaction
+  body is unobservable: a test asserting on recorded statements sees nothing and one asserting on a
+  return value sees `undefined`, and neither reads as *the fake skipped the work*. That is why
+  ADR-0333's sweep did not reach here — in those packages the fakes run the callback, so an absent
+  `set_config` shows up as an absent recorded statement. **The twenty-fourth is what makes that claim
+  exact rather than merely plausible**: one fake did run its callback, and it belongs to
+  `PostgresWorkflowDefinitionStore` — *not a queue writer* — so the package's single honest fake was
+  pointed at the one store this defect does not touch. A fixed fake also needs its `set_config` branch
+  placed **first**, because that statement begins with `SELECT` and `job-engine.test.ts` routes
+  `/^\s*SELECT/i` to the queued read rows: ADR-0363's defect verbatim, in the arm that scripts the
+  dead-letter failure. (ADR-0389's first draft said "24 of 25" and claimed a transaction body was
+  observable here "for the first time"; both were measured wrong, the second in the flattering
+  direction, and the *reasoning* survived both corrections — P3.1's shape. The first re-count was
+  wrong too, answering **0 honest** because `grep 'transaction:.*=> fn('` is a single-line pattern
+  and that fake spans two lines: count with two patterns or read the span.)
+  Live, both arms, as the non-owner `serving` role through the real compiled code: pre-fix all three
+  producers answer `42501 new row violates row-level security policy` and the table holds **0 rows**;
+  post-fix all three return their deterministic run ids and it holds **3** — with
+  `started_at=03:00:00Z` for a 09:17 clock, which independently reproduces ADR-0355's cron-tick
+  finding. The queue worked at all only because the shipped compose connects as `POSTGRES_USER`, the
+  role that ran `migrate`, and an owner bypasses RLS — so **the whole job queue was owner-dependent**
+  and stopped working the moment a deployment used a least-privilege serving role, which is the
+  configuration every other store here is written for. The grade moves with that: none of the three
+  producers is mounted on any shipped compose, so by the register's own test this half of P0.3 is a
+  **P2** rather than a P0 — wrong the moment a flag is passed or the serving role is narrowed, which is
+  what closing the rest of P0.3 will do.
+  **And an adversarial pass over the commit found that the increment's own heading was false and its
+  fix partly unreachable, which is the most useful thing in it.** *Every writer of a queue table
+  establishes the row's own tenant context* was true of the three `INSERT`s and false of **ten
+  `UPDATE`s and reads**, and the asymmetry is the finding: an unscoped `INSERT` raises `42501`, while
+  an unscoped `UPDATE` or `SELECT` under the same `USING` matches **0 rows with no error code and
+  nothing in a log** — the silent-zero class this file's own RLS bullet records, and every caller here
+  reads a zero `rowCount` as *somebody else got there first*. Two were live. `executeJobRun`'s read
+  was unscoped, so a non-owner got `not_claimable` for a run that exists — **the fix as first written
+  enqueued runs it could never execute**. And `finalizeFailure`'s `UPDATE` returned `not_claimable`
+  **one line before** `recordDeadLetter`, so the dead-letter fence the increment had just written
+  could never fire: *one of the four original writers was unreachable in the configuration the fix is
+  for.* The sharpest member is an HTTP route rather than a fleet path —
+  `requestJobCancellation`, reached under the same `--enable-job-invoke` the P2 grade turns on,
+  answered `{outcome: "not_found"}` for a run that exists, so passing that one flag would have bought
+  a working `invoke` and a silently broken `cancel` over the same queue. Ten statements are fenced
+  now, two are cross-tenant by design with a negative control, and two are blocked by a shared
+  worker contract and deferred on the one cost that makes them the safe half. The rule the correction
+  leaves behind: **a write path is only fixed as far as the read that finds the row again.**
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -3685,6 +3762,42 @@ packages exist at only one layer, noted below where that is true.
   `buildPersistentEngine`, a replayer for drift repair, and the claim/lease layer that makes
   multiple workers safe: `claimDueTimers`/`Activities`/`Jobs` with renew + release, plus a
   `PostgresJobRunEngine` with a job handler registry and enqueue path.
+  **Every statement that holds the row's tenant establishes its context; the ones that do not are
+  unfenced for two different reasons** (ADR-0389, `tenant-context.ts`). `meta.job_runs` and
+  `meta.dead_letter_jobs` each carry one
+  `ALL`-scope isolation policy with a NULL `WITH CHECK`, so the `USING` doubles as the write check and
+  with nothing set it is `tenant_id = NULL` — measured live as a non-owner, every producer answered
+  `42501` and the table held 0 rows, so **the whole job queue was owner-dependent** and worked only
+  because the shipped compose connects as the role that ran `migrate`. ADR-0332's platform write arm
+  **cannot** serve these tables: its check requires `tenant_id IS NULL` and all three columns are NOT
+  NULL, so it admits no row (proven by creating it, claiming the grant, and watching the not-null
+  constraint refuse the only candidate). The scope is therefore **a fact about the row**.
+  **An `INSERT` is the loud case and the quiet ones are worse, which is why this reaches ten
+  statements and not four**: the same `USING` governs which rows an `UPDATE` or a `SELECT` can see, so
+  an unscoped one matches **0 rows with no error code and nothing in a log**, and every caller here
+  reads a zero `rowCount` as *somebody else got there first*. Two consequences were live and in no
+  register entry — `executeJobRun`'s own read matched nothing, so **the queue could enqueue runs it
+  could never execute**, and `finalizeFailure`'s `UPDATE` returned `not_claimable` one line *before*
+  `recordDeadLetter`, so the dead-letter fence could never fire. **Fencing the `INSERT`s alone would
+  have been a fix whose own effect was unreachable**, which is the rule worth carrying: *a write path
+  is only fixed as far as the read that finds the row again.* `enqueueScheduledJobs` carries its own
+  statement rather than sharing `insertPlannedRuns`, which is why each is fenced separately: it is the
+  one `--schedule-ms` drives, so a fix to the shared helper alone would have missed it.
+  Two statements stay unfenced **by design** — `claimDueJobs` and `reapCancelledJobRuns` are
+  cross-tenant so one fleet serves every tenant and the reaper *returns* the tenant ids it found, and
+  a platform *read* arm could not express that either for the same NOT NULL reason;
+  `probeJobQueueVisibility` answers for them and a negative-control test asserts the reaper issues no
+  context statement. Two more are **blocked by a contract rather than by wiring**:
+  `releaseJobClaim` and `renewJobClaim` take `{jobId, workerId}` and no tenant at all, so as a
+  non-owner the release does not release and the renew answers *lease lost* for a lease still held —
+  the worker holds the fact but `ClaimRenewer` is shared with the timer and activity workers, so
+  carrying it is a three-path contract change, deferred on the one cost that makes it the safe half
+  (a lost release or renew is **recoverable**, since the lease lapses and the run is re-claimed,
+  where a lost finalize is not). Each producer's batch is **one** transaction,
+  safe only because every `run_id` is deterministic so a retry re-derives the same ids and the
+  `ON CONFLICT` absorbs whatever landed; an empty plan opens no transaction at all. In
+  `executeJobRun` each statement gets its **own short** transaction and deliberately not one spanning
+  the handler, which is arbitrary deployment code that may run for minutes.
   **`PostgresWorkflowDefinitionStore` is the writer `meta.workflow_definitions` never had**
   (ADR-0331), and definitions are **authored rather than compiled from a manifest** — the evidence is
   in that ADR. `planDefinitionPublication` decides between `insert` / `replace_draft` /
@@ -7213,6 +7326,37 @@ isolated copy of the package instead, which is the better answer when more than 
   adopters: **1,108 tests, zero further mismatches**, so the class has exactly one live member —
   and **72 `*.test.ts` files build a fake `query` inline** rather than through their package's
   shared module, which is the sweep this did not take.
+  **ADR-0389 adds a seventh, and it is the only one where the fake does not answer wrongly but
+  skips the work entirely: a `transaction` that discards its callback.**
+  `transaction: (async () => undefined)` — and a bare `vi.fn()`, which returns the same — never runs
+  the body, so a statement issued inside a transaction is **unobservable**: a test asserting on
+  recorded SQL sees nothing and one asserting on a return value sees `undefined`, and neither reads
+  as *the fake skipped the work*. That is why ADR-0333's sweep of fourteen stores never reached the
+  job queue: in those packages the fakes run the callback, so a missing `set_config` shows up as a
+  missing recorded statement, while **23 of `workflow-runtime-pg`'s 24 fake `transaction` members**
+  were in this shape — and the one that was not belongs to a store the defect does not touch, so a
+  transaction-wrapped path there was untestable by construction. **And the class is not confined to
+  one package**: making the three producers transactional broke **7 tests in `apps/operate-server`**
+  (`scheduler`, `job-invoke`, `entity-events` — the three consumers), whose fakes discard the callback
+  too, so the INSERT was never issued and the recorded-statement array stayed empty. That is
+  ADR-0329's rule about trusting a consumer's tests after a contract change, one layer out: there a
+  stale `dist`, here a fake that cannot express the new behaviour. The house idiom is
+  `transaction: (async <T,>(fn) => fn(conn))` with the object self-referenced, in eight files under
+  `apps/operate-server`. Two further rules fall out and both are live: a `set_config` branch must be
+  matched **first**, because `SELECT set_config(…)` begins with `SELECT` and a `/^\s*SELECT/i` branch
+  will otherwise hand it another statement's rows (ADR-0363, reproduced here in the arm that scripts
+  a dead-letter failure); and once the context statement is recorded, every **positional** assertion
+  on `calls[n]` shifts, so the honest repair is to select by predicate rather than renumber
+  (ADR-0370). **1 of 24 was honest at HEAD and 8 are now** — seven conversions, four of them in
+  files the brief had not identified as in scope, because a fake that discards its callback is latent
+  until its *subject* opens a transaction, so the blast radius of making something transactional is
+  every fake of every **consumer** and not the fakes in the package being changed. **16 remain** —
+  the fence wants to be a per-fake predicate like `assertBindArity` rather than a `strategy/` scan,
+  since whether a callback ran is a runtime fact. Count it with care: `grep 'transaction:.*=> fn('`
+  under-reports (the multi-line spelling), and widening the span to the next line **over**-reports,
+  because `transaction: vi.fn()` contains the literal `fn(` — both directions were walked into while
+  writing this paragraph, which is why the honest unit is *does the member declare a callback
+  parameter and invoke it*.
   Reads stay exempt from
   that tripwire on purpose — `classifyScopedWriteRefusal`'s diagnosing re-read is
   deliberately unscoped, because its whole question is whether the row sits in another
@@ -7451,10 +7595,15 @@ Two constraints worth knowing before suggesting a host:
   (`[tenant-status] 1 configured API-key tenant(s) have no meta.tenants row …`): it is correct, it
   is about `OPERATE_ADMIN_API_KEY`'s placeholder uuid, `/v1/platform` is exempt so the bootstrap
   still runs, and it is documented in both the compose comment and `README.md` so it does not read
-  as the default having broken the deployment. `--read-state-routes` is **withheld with its reason
-  written down**: mounting it works and the inbox badge has nothing that can clear what it then
-  counts, so it is blocked on a notifications page rather than on a decision.
-  `deployment-defaults.test.ts` fences all three — the two presences and the one absence.
+  as the default having broken the deployment. `--read-state-routes` **was** withheld with its reason
+  written down — mounting it worked and the inbox badge had nothing that could clear what it then
+  counted — and **ADR-0385 built that page, so the compose passes it now** with both roles; the
+  `deployment-defaults.test.ts` block is retitled *"the default that was withdrawn and is now
+  earned"*. The **one** absence that file fences today is `--read-state-backfill-role`, on the stated
+  ground that it is the one read-state grant that gates something: `resolveViewer` takes the viewer
+  from `principal.principalId` unconditionally and `bodyNamesAViewer` refuses a body naming one, so
+  the ordinary grants gate a principal's access to its *own* row while the backfill role marks a whole
+  backlog read in one call.
 - **The documented bootstrap is five curls and no shell** (ADR-0376). `deploy/.env.example` omitted
   **creating the tenant**, so its step 2 was a `422 meta.tenants has no row for the id this grant
   names` on every fresh deployment; the id is minted by the server (`{slug, name}`, and an `id` key
@@ -9744,8 +9893,10 @@ by it**.
    first open question. What is left: **14 (pack, field) pairs on a deployment that has not set the
    secret**, no per-tenant-manifest survey, and `?sort=` on an unreadable field still accepted.
 3. **The shipped compose mounts no background subsystem, so nearly everything built since Phase 3
-   is off.** Measured against the committed tree: the `api` command passes **20 distinct** flags
-   (21 occurrences — `--ai-design-role` twice), not the six
+   is off.** Measured against the committed tree: the `api` command passes **22 distinct** flags
+   (**24** occurrences — `--ai-design-role` and `--read-state-role` twice each; the figure went stale
+   a **fourth** time, re-derived twice independently in ADR-0389's measurement pass, and the previous
+   reading of 20/21 predates ADR-0385 adding the three read-state lines), not the six
    on record, and `--platform-user-routes` is among them — ADR-0358 added it (with a `deploy/README.md`
    note that the page had told readers to POST to a route the stack did not serve), so that clause of
    this entry was **false**, and so is any claim that the operator provisioning path is unreachable on
@@ -9893,17 +10044,41 @@ by it**.
    compose connects as `POSTGRES_USER`, the same role that ran `migrate`, so the owner bypasses RLS.
    It stops holding the moment a deployment uses a least-privilege serving role, which is the
    configuration every other store in the repo is written for.
-   **Re-measured, and it is wider than one producer**: `insertPlannedRuns` is shared, so **all four**
-   enqueue producers are in that state, and one of them — the `userInvoked` path — is reachable over
-   HTTP through `POST /v1/meta/jobs/invoke`, which is the only HTTP-reachable member of the set. Two
-   things make it *latent* rather than live and both belong in the grade: the flag is absent from
-   every shipped compose, and `node.ts` already wires an `onError` naming `42501` with its remedy and
-   already probes queue visibility at boot — **but only under `--workflow-workers`, not under
-   `--schedule-ms`**, so the one flag that would hit it is the one flag the probe does not cover.
-   The fix is a platform write arm on the three queue tables in ADR-0332's pattern: four call sites,
-   cheaper than anything in P1.6, and the prerequisite for ever running this deployment as a
-   least-privilege role. The decision it needs from a human is which grant, and whether scoping the
-   *producer* is coherent while `claimDueJobs` stays deliberately cross-tenant.
+   ~~**Re-measured, and it is wider than one producer**~~ — **closed by ADR-0389, which refuted four
+   of this sub-item's own claims including its prescribed fix.** The defect is real and is proven live
+   both arms as the non-owner `serving` role (pre-fix `42501`, 0 rows; post-fix 3 rows), and the
+   prescribed *"platform write arm on the three queue tables in ADR-0332's pattern"* **cannot work**:
+   that arm's check requires `tenant_id IS NULL`, all three columns are **NOT NULL**, and the policy
+   admits no row the column permits — created live, grant claimed, refused by the not-null constraint.
+   `PLATFORM_WRITE_GRANTS`' own doc scopes the pattern to a **nullable** `tenant_id`. The honest fix
+   is `withTenantContext` (ADR-0333's idiom): the scope is a fact about the row, and every producer
+   already holds it. Of the other three claims, `insertPlannedRuns` has **two** callers rather than
+   four, there are **three** producers because `enqueueScheduledJobs` carries its own `INSERT` (the
+   one `--schedule-ms` drives, so the shared-helper fix would have missed it), the fourth writer is
+   `recordDeadLetter` on another table, and **`meta.job_costs` has zero `INSERT` sites** so only two
+   tables had a writer to fix. `POST /v1/meta/jobs/invoke` is additionally gated on
+   `--enable-job-invoke`, which no compose passes — and **none of the three producers is mounted on
+   any shipped compose**, so the grade is **P2** by the register's own test rather than P0.
+   **And an adversarial pass over that commit found the fix was three statements where it needed to
+   be ten**, because an unscoped `INSERT` raises `42501` while an unscoped `UPDATE` or `SELECT` under
+   the same `USING` matches **0 rows silently** — so `executeJobRun`'s read answered `not_claimable`
+   for a run that exists (the queue could enqueue runs it could never execute),
+   `finalizeFailure`'s `UPDATE` short-circuited **one line before** `recordDeadLetter` so that fence
+   could never fire, and `requestJobCancellation` — an HTTP route under the same
+   `--enable-job-invoke` this grade turns on — answered **`not_found` for a run that exists**. All
+   verified live both arms as a non-owner, every pre-fix answer carrying **no error code**.
+   What is left: **`releaseJobClaim` and `renewJobClaim` take no tenant at all**, so a release does
+   not release and a renew answers *lease lost* for a lease still held — the worker holds the fact
+   but `ClaimRenewer` is shared with the timer and activity workers, so it is a three-path contract
+   change, deferred because a lost release or renew is *recoverable* where a lost finalize is not;
+   the **claim** path is cross-tenant and cannot be a platform read arm either for the same NOT
+   NULL reason, so a confined fleet still sees no rows; `probeJobQueueVisibility` reports that only
+   under `--workflow-workers` and not under `--schedule-ms`, whose producer now writes successfully;
+   and `PostgresJobInvoker.invoke` has **no error handling at all** — it is the one producer of
+   **three** with neither a remedy message nor a probe, which corrects the claim that it was the one
+   of two: the scheduler's and the entity emitter's `onError` handlers live at their *wiring sites*
+   in `node.ts` rather than on the producers, and both named a remedy (*own the table or bypass its
+   policy*) that this fix made wrong and that is rewritten rather than kept.
 4. ~~**An Article 17 request naming one data subject erases the whole tenant.**~~ — **closed by
    ADR-0379**, which corrected this entry a third time and found that **the two readings it had
    settled on were both the wrong fix**. The mechanism is confirmed and the exposure is bounded:
@@ -9995,8 +10170,9 @@ by it**.
    `paymentApplicationEffect` at `:488` and `:498` — and **no effect `compile.ts` wires triggers on
    `paid` at all**: every `triggerState` is `sent` or `approved`, and `settleableStates` are the
    states a document is settled *from*. Meanwhile three permission-gated transitions reach `paid`
-   with no `Payment` row: `Invoice.mark_paid` and `Bill.mark_paid` (`workflows.ts:30-35`, `:147-151`,
-   plus the timer transitions `sent_to_paid_30d` and `approved_to_paid_due`) and
+   with no `Payment` row: `Invoice.mark_paid` and `Bill.mark_paid` (`workflows.ts:30-35`, `:147-151`
+   — and the `sent_to_paid_30d` / `approved_to_paid_due` entries beside them are **`slas`, not
+   transitions, and drive nothing**; see the correction below) and
    `TaxReturn.mark_paid` (`workflows-ext.ts:200-213`, granted at `:243`), which no effect names at
    all. Measured against the real store: an invoice of 120 with a Payment of 50, hand-marked paid,
    leaves **AR net +70** on a document that reads `paid`; a tax return reaching `paid` moves cash,
@@ -10015,6 +10191,70 @@ by it**.
    fourth and fifth), and the remedy is the harmful one. It stays open, and the shape of a correct
    fix is a ledger question — how a residual effect and the settlement effects share one notion of
    an open control balance — rather than a wiring step.
+   **Re-measured in ADR-0389's pass, then that re-measurement was itself adversarially refuted and
+   five of its six corrections were wrong. Read this whole block before working the item; the first
+   finding changes what a fix is for.**
+
+   **The two "timer transitions" drive nothing, and this was in neither the register nor either
+   ADR.** `sent_to_paid_30d` (`workflows.ts:48`) and `approved_to_paid_due` (`:163`) are entries in
+   the `slas:` array, not `transitions:` — and `slas` has **exactly one** non-test reader in the
+   workspace, `kernel/src/workflow/validate.ts:73-83`, which checks only that `from`/`to` name
+   declared states. `SlaSchema` is `{name, from, to, deadline, businessHoursOnly?, escalation}` with
+   **no `trigger`, no `guards`, no `preEffects`/`postEffects`** against `TransitionSchema`'s all four,
+   and `EntityLifecycleWorkflowSchema` declares the two as separate arrays. There is no timer, no
+   scheduler and no executor: measured, zero readers of an SLA's `deadline` or `escalation` anywhere
+   in `workflow-runtime`, `workflow-engine` or `operate-server`. **So an SLA cannot put a document in
+   `paid`** — it is a validated-only declaration, P1.2's shape exactly. Three consequences: only
+   **three** declared transitions can reach `paid`, all user-action and permission-gated, which
+   narrows the surface without weakening the defect; ADR-0378's *"five declared transitions reach
+   `paid`"* is wrong as an account of **reachability**; and ADR-0366:219 names *"the `mark_paid` /
+   timer-driven settlement gap"* as the follow-up, so **a fix designed to cover timer-driven
+   settlement would be designing for a path that does not exist.**
+
+   Then the five corrections, four of them wrong. (i) The gate citations: `compile.ts:473/488/498`
+   *are* one line low at HEAD — cite **474 / 489 / 499** — but *"it is not a drift"* is **false**:
+   `d854513` has a hunk at `@@ -23,6 +23,7 @@`, a net +1 line in the import block, and that commit's
+   pre-image puts the three gates at exactly **473 / 488 / 498**. The originals were correct when
+   written and drifted by one line. (ii) *"the other 8 hardcode a named state in the effect body"* is
+   **false of every one of them**: all the state names live in module-level config-default constants
+   (`DEFAULTS` at `:53-54`, `CN_DEFAULTS` `:249`, `GL_DEFAULTS` `:454`, `SETTLEMENT_FALLBACKS`
+   `:1021`, `APPLICATION_FALLBACKS` `:1133`, `FX_REVAL_FALLBACKS` `:1267`, `WHT_CLEARING_FALLBACKS`
+   `:1667`) and the bodies read `c.<field>`, so a caller can override any of them — the opposite of
+   hardcoded. The set is **six** names, not the five given (`posted` was omitted though it sits on the
+   same constant as the listed `reversed`), and the checkable claim is over those constants plus the
+   separately-checkable fact that `compile.ts` overrides none of them. (iii) *"'all eleven effects' is
+   stale"* is the **inverse** mis-filing: `git log -S'All eleven effects were enumerated' -- CLAUDE.md`
+   returns exactly one commit, `f0d7683`, **the same commit that deleted the two factories** — so
+   "eleven" was wrong *when written*, not drifted. The 9-factories / 12-push-sites figure is right.
+   (iv) The ADR-0365 misattribution stands and is **stronger** than stated: that ADR mentions neither
+   `79` nor the word "transition", and the figure **79 is itself correct** (resolved `erp-core` has
+   exactly 79 transitions across 19 lifecycles), so it is a pure misattribution rather than a wrong
+   number — worth saying so nobody re-measures 79 looking for an error. (v) *"three is the spelling
+   both ADRs intend"* is **false**: ADR-0378:115-116 explicitly enumerates five, counting the two
+   SLAs as transitions, and ADR-0366:88-93 tabulates all four lines. And *"five is (transition,
+   from-state) edges, the two timer transitions being additional edges into `paid`"* is the **right
+   number by the wrong mechanism**, which is the worst shape a correction can take: the genuine source
+   of five is the **multi-valued `from:` arrays** — `Invoice.mark_paid from=["sent","overdue"]`,
+   `Bill.mark_paid from=["approved","overdue"]`, `TaxReturn.mark_paid from="filed"` = 2+2+1 — so a
+   reader following that explanation looks for two timer transitions, finds two SLAs, and the real
+   five sits unremarked in the `from:` arrays.
+
+   One of the item's own premises is also loose: *"the only AR-clearing postings are the Payment-gated
+   settlement, a credit note and a reversal"* omits a fourth effect that credits AR.
+   `unrealizedFxRevaluationEffect` posts to the control account and is **not** Payment-gated
+   (`write-effects.ts:1470-1473`: a negative AR delta yields `controlSide: "credit"`). The defect is
+   unaffected for two independent reasons — it revalues by the FX delta only, so it can never bring AR
+   to zero, and its Invoice `openStates: ["sent","overdue"]` excludes `paid` — so the honest wording is
+   *the only postings that **settle** AR*, with the revaluation named as a fourth, non-settling one.
+
+   **The two mis-filings are a matched pair against P3.1's own taxonomy, and neither alone shows it:**
+   (i) called a genuine drift "not drift" and (iii) called a wrong-when-written figure "stale". P3.1
+   distinguishes those two classes precisely *because the remedies differ* — re-measurement discipline
+   versus anchoring by section heading — so filing one case in each wrong bucket is a failure of the
+   taxonomy rather than two slips, and every figure in this item should state which class it is in
+   rather than asserting the class in passing. For later readers, `erp-core`'s real shape, measured
+   from current `dist`: **19 entityLifecycle workflows, 79 transitions, 108 (transition, from-state)
+   edges, 3 slas**; targeting `paid`, **3 transitions and 5 edges**.
 7. ~~**`unique: true` emits no constraint on any entity table while the UI says the field is
    unique.**~~ — **closed by ADR-0360**, which corrected two of the three things this entry said.
    *"while the UI says the field is unique"* is **false**: `unique` occurs exactly once in the whole
@@ -10070,6 +10310,32 @@ by it**.
    `node.ts:1234` hardcodes `compliancePacks: []` into the marketplace `TenantContext`, so a catalog
    pack requiring `hipaa` is refused on a healthcare deployment that declares it. That one is a
    one-line fix and is the only part of this item that is.
+   **Re-measured in ADR-0389's pass, and then that re-measurement was refuted on one of its own two
+   corrections.** (i) Both line citations are stale — the literal is at `node.ts:1465-1471` and its
+   comment at `:1453-1455` — but *"`:1416` and `:1234` are P3.1's own class"* is **wrong for
+   `:1416`**, which is the *other* class, the one P0.9's block two paragraphs down defines in
+   opposition to it: `git log -S 'node.ts:1416'` gives `0a5dc46`, whose `node.ts` really does carry
+   `compliancePacks` at **1416**, so it was correct when written and drifted. Only `:1234` is P3.1's
+   class (the literal was at **1334**, a plausible transposition). The distinction decides the
+   remedy — anchor-by-heading versus re-measurement discipline — so filing a drifted citation under
+   the wrong-when-written class sends the next reader to the wrong fix for one of the two.
+   (ii) *"three of the five fabrications err toward refusal and two err toward admission"* is **not
+   derivable from the code**, and asserting it was P3.1's own failure mode committed inside a
+   correction to P3.1's class. Read field by field against `checkCompatibility`
+   (`packages/marketplace/src/compatibility.ts:115-158`): `compliancePacks: []` and
+   `isDedicatedTenant: false` are **refusal-only** (each has a single membership/boolean check that
+   an empty or false value can never make admit); `planTier: "professional"` is **admission-leaning**
+   (`PLAN_TIER_RANK` puts it 3 of 0–4, so it wrongly admits for 3 real tiers and wrongly refuses for
+   1); `region: "us-east"` is **symmetric**, both checks being conditional on the pack's own list;
+   and `platformVersion: "1.0.0"` is **undeterminable in principle**, since the `min` check errs
+   toward refusal and the optional `max` check the other way — and the only version string in the
+   repo is `apps/operate-server/package.json`'s `"version": "0.0.0"`, which would make 1.0.0 *higher*
+   than truth and flip the min check to admission. Honest accounting: **2 refusal-only, 1
+   admission-leaning, 1 symmetric, 1 undeterminable** — so there is no "admitting pair" to promote to
+   the headline. (iii) The latent/P2 verdict **stands and is understated**: the gate is a **triple**,
+   not a flag — `--pack-catalog` appears in no file under `deploy/` (and neither does `admin/packs`),
+   it is refused under `--store memory`, and **no pack catalog file exists anywhere in the repo**, so
+   an operator must author one with no example to copy. P2 is right and if anything generous.
 8b. ~~**A deployment with no backups is certified DR-ready**, and the rule against it is written out
    twenty lines above the function that breaks it.~~ — **closed by ADR-0372**, and it was never a
    live P0: an adversarial pass over the audit's own verdicts refuted that grade on the discipline
@@ -10114,6 +10380,51 @@ by it**.
    nothing and proves only that the file decompresses. Both `README:830-831` and `ORACLE.md:519-520`
    already say the platform ships no backup scheduler, so the honest finding is the untested
    restore and the absent in-stack scheduler, not an absent cron.
+   **Re-measured in ADR-0389's pass: 9 of 13 claims confirmed, and the four that moved are
+   instructive rather than merely stale.** Every line citation here (`ORACLE.md:500-510`,
+   `README:830-831`, `ORACLE.md:519-520`) was **correct when written and has drifted** — the cron
+   line traces 380 → 510 → 538, README's sentence 742 → 767 → 771 → 816 → 830 → 872 → 910 — which is
+   a **different diagnosis from P3.1's other members**, all of which were wrong when written, and so
+   wants a different remedy: anchor by section heading rather than by line. `--dr-readiness-config`
+   is confirmed **absent** from the compose. And one finding sharpens the item: **README is worse
+   than `ORACLE.md` rather than equivalent to it** — a reader following README gets a manual
+   one-liner with no schedule *and* a sentence telling them that schedule is their recovery point —
+   while the word **"restore" occurs exactly once in the whole of `deploy/`** (~110 KB over three
+   documents), at `ORACLE.md:541`, labelling the block that restores nothing.
+
+   **An adversarial pass over that re-measurement then found the one defect that holds this item at
+   P0, and it is in neither the item nor the correction.** The README/ORACLE.md asymmetry is not an
+   emphasis problem but a **copy-paste with a dangling reference**: `README.md:781-912` is an
+   abridged copy of ORACLE.md's walkthrough, the abridgement dropped the crontab step and kept the
+   sentence pointing at it, so `README:910-911` reads *"…does not yet ship a backup scheduler, so
+   until it does, **that cron line** is the deployment's real recovery point"* with **no cron line
+   anywhere in README** (`grep -n crontab deploy/README.md` → 0). And README carries **two** backup
+   one-liners, not one — and `README:487` is **the only `pg_dump` in `deploy/` that omits `-T`** (the
+   other two, `README:907` and `ORACLE.md:533`, have it) *and* it redirects to a **fixed filename**,
+   `> backup.sql`. The shell truncates that file **before `pg_dump` runs**, so re-running the
+   documented command destroys the previous backup before the new one is known to have succeeded —
+   a documented procedure that can leave a deployment with **no restorable dump**, which is this
+   item's own "no tested restore" theme with a concrete destructive mechanism.
+
+   **So the grade needs asking in the other direction, which neither the item nor its correction
+   did.** With ADR-0380 having closed the `verify-chain` half and ADR-0372 the certification half,
+   the stated remainder — no automated backup, untested restore, no backup service — produces no
+   wrong answer, no disclosure and no destroyed data, and the prose is honest in both documents
+   (`README` and `ORACLE.md` each say the platform ships no backup scheduler). That is **P1's**
+   definition, not P0's, and the item applies exactly this demotion argument to P0.8 one paragraph
+   earlier without applying it here. The **only** thing holding P0.9 at P0 is the `README:487`
+   truncation above — so as written before this correction, the item's P0 grade rested on nothing
+   in it.
+
+   Two carried claims are also looser than stated. `VERCEL-SUPABASE.md` mentions neither backup nor
+   cron **nor dump, PITR, snapshot or recovery** — zero for all six over 329 lines — so the one
+   deployment path where the provider genuinely *does* offer automated backups and PITR is the only
+   document that says nothing about a recovery point in either direction. And *"`BackupRecord` has
+   zero producers"* is true of **code** and false of the **configuration surface**:
+   `apps/operate-server/src/dr-readiness.ts:34` is `backups: z.array(BackupRecordSchema).default([])`,
+   which parses operator-supplied `--dr-readiness-config` JSON — so a deployment can hand-type a
+   verified backup record, which is precisely the falsely-true-control shape ADR-0372 closed, latent
+   only because that flag is absent from every compose.
 
 ### P1 — the product claims it and no deployment can execute it
 
@@ -10878,6 +11189,43 @@ method is that a stale figure misleads.
    `ManifestSectionChange` and the route mirror's fence stayed `never` — exactly as it had for
    `sectionChanges` itself one level out, two increments earlier. Each mirrored element shape owes
    its own alias; no type can walk a type's nested arrays.
+   **ADR-0389's measurement pass is the largest single harvest, and it establishes that this entry is
+   a property of the register rather than of any one item.** Four P0 items were re-derived against the
+   committed tree before any design, each with an independent adversary aimed at the measurement:
+   **P0.3 confirmed 16 of 22 claims, P0.9 9 of 13, P0.8 4 of 6, and P0.6b 1 of 6.** Three kinds came
+   out and they want different remedies. A **prescribed fix that cannot work** is the costliest —
+   P0.3's platform write arm, refuted on a live cluster — because acting on it builds the wrong thing
+   and the build succeeds. A **grade** can be stale as easily as a figure: two of the four items turn
+   out to be *latent*, not live, because the flag that would reach them is passed by no shipped
+   compose, so they are P2 by the register's own test. And **a citation that was correct when written
+   and drifted** (all of P0.9's) is a different diagnosis from this entry's other members, which were
+   wrong when written — its remedy is to anchor by section heading rather than by line, not to
+   re-measure more carefully. The standing rule gains a clause: **re-measure the entry before
+   designing against it, and check its *remedy* as well as its facts** — a remedy is a claim too, and
+   it is the one an increment spends itself on.
+
+   **And then that measurement pass was itself refuted, which is the finding that outranks everything
+   above it: a correction is exactly as liable to be wrong as the claim it replaces, and nothing in
+   this process had ever checked one.** Three read-only refuters were aimed at the corrections rather
+   than at the register, and of P0.6b's six **five were wrong**, of P0.8's two **one**, and P0.9's
+   gained a defect and a grade reversal. The two sharpest are a *matched pair against this entry's own
+   taxonomy*, and neither alone would have shown it: P0.6b's correction (i) called a **genuine drift**
+   "not drift" (the commit has a hunk at line 23, a +1 import, and its pre-image carries the original
+   citations exactly), while correction (iii) called a **wrong-when-written** figure "stale" (`git
+   log -S` puts the sentence in the very commit that performed the deletion). **One case filed in each
+   wrong bucket** — so the classification failed in both directions at once, which is a failure of the
+   taxonomy's *use* rather than two slips, and it matters because this entry makes the class decide the
+   remedy. Beside them, three shapes worth naming: a correction can be **right about the number and
+   wrong about the mechanism** (P0.6b's "five edges" — right count, and the two it names are `slas`
+   that drive nothing, while the real five sits in the multi-valued `from:` arrays), which is the worst
+   shape because the arithmetic checks out and sends the reader somewhere false; a correction can
+   assert a **split the code does not support** (P0.8's "three refuse, two admit", not derivable —
+   P3.1's own failure mode committed inside a correction to P3.1's class); and a correction can be
+   **understated in the direction that hides the only live defect** (P0.9's, where the real finding is
+   a documented `pg_dump` that truncates its own output file before running). The operational rule:
+   **a refuter aimed at the corrections is worth as much as one aimed at the claims**, and it is
+   cheapest to run before the commit that carries them, since the corrections are what the next
+   increment designs against.
 2. **Six concepts are modelled several times over, two with non-nesting member sets.** Data
    classification has five declarations — four identical and one, in `data-lineage`, **disjoint past
    two members**, so the moment anything bridges the kernel's classification into the lineage graph

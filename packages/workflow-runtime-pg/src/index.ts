@@ -1,3 +1,4 @@
+export * from "./tenant-context.js";
 export * from "./activity-claim.js";
 export * from "./activity-provenance.js";
 export * from "./activity-store.js";

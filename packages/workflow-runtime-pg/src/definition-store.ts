@@ -31,9 +31,25 @@ import type { WorkflowDefinitionIdResolver } from "./id-mapping.js";
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 const TABLE = "workflow_definitions";
 
-/** Mirrors `feature-flags-pg`'s helpers rather than importing them: this package has no edge to it. */
-export const SET_TENANT_CONTEXT_SQL =
-  "SELECT set_config('app.current_tenant_id', $1, true)";
+/**
+ * One spelling per package, and this is no longer it: the constant moved to `tenant-context.ts`
+ * when the job producers needed the same statement, because two declarations in one package is the
+ * drift this file's own comment was guarding against one scope out. Re-exported here so an importer
+ * of this module keeps resolving it.
+ *
+ * Its old comment read "mirrors `feature-flags-pg`'s helpers rather than importing them: this
+ * package has no edge to it" — true of that edge and the wrong conclusion, because the statement is
+ * declared in **fifteen** packages and every one of them already depends on `@crossengin/kernel-pg`,
+ * where `assertScopeTenantId` and `setPlatformWriteSql` already live. `PLATFORM_WRITE_GRANTS`' doc
+ * there makes the argument in so many words: a transaction-local `set_config` is a fact about the
+ * session `PgConnection` describes. Converging all fifteen is its own increment and is not the
+ * mechanical move it looks like — the fifteen hold three different wrappers over this one string;
+ * `tenant-context.ts` carries the census and why one of them cannot take a non-null parameter.
+ *
+ * Imported rather than re-exported: `index.ts` spreads both modules, so a second `export *` path to
+ * one binding is how this package earned a `TS2308` the first time.
+ */
+import { SET_TENANT_CONTEXT_SQL } from "./tenant-context.js";
 
 /**
  * The elevation a platform-wide definition write needs.

@@ -280,7 +280,18 @@ export async function probeJobQueueVisibility(
   };
 }
 
-/** Hands a claimed-but-unexecuted job back for immediate re-claim (scoped to the owning worker). */
+/**
+ * Hands a claimed-but-unexecuted job back for immediate re-claim (scoped to the owning worker).
+ *
+ * **Deliberately not inside `withTenantContext`, and blocked by a contract rather than by wiring.**
+ * Its predicate is `run_id = $1 AND claimed_by = $2` with no tenant, and the options carry none — so
+ * as a non-owner this `UPDATE` matches 0 rows silently and the claim is not released. The worker
+ * *has* the tenant (`ClaimedJob.tenantId`), but `JobClaimer.release` in `@crossengin/workflow-worker`
+ * does not pass it and `ClaimRenewer` beside it is shared with the timer and activity workers, so
+ * carrying it is a three-path contract change. Left for its own increment on a stated cost, which is
+ * the only reason this is the safe half to defer: a lost release is **recoverable** — the lease
+ * lapses and the run is re-claimed — where a lost finalize is not. See `tenant-context.ts`.
+ */
 export async function releaseJobClaim(
   conn: PgConnection,
   options: { readonly jobId: string; readonly workerId: string; readonly schema?: string },
@@ -298,6 +309,12 @@ export async function releaseJobClaim(
 /**
  * Extends the lease on a job this worker still holds (for a slow handler). Returns `true`
  * only if the row updated — still `pending` AND still owned; `false` means the lease was lost.
+ *
+ * Unfenced for `releaseJobClaim`'s reason and with one extra consequence worth knowing: as a
+ * non-owner the `UPDATE` matches 0 rows, so this answers `false` — *the lease was lost* — for a
+ * lease the worker still holds. The caller's response is to stop renewing and let the run be
+ * re-claimed, which is the conservative direction, so the degradation is at-least-once execution
+ * rather than a wrong answer to a client.
  */
 export async function renewJobClaim(
   conn: PgConnection,
