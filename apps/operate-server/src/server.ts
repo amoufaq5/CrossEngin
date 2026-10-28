@@ -216,6 +216,11 @@ export interface BuildOperateHttpServerOptions {
    * is opt-in and refuses at boot.
    */
   readonly writeMaskMode?: WriteMaskMode;
+  /**
+   * Accepts knowingly that a document may be marked settled while completed payments do not cover
+   * its total. Default (absent) builds the coverage guard. See `--allow-uncovered-settlement`.
+   */
+  readonly allowUncoveredSettlement?: boolean;
   /** Allocates document numbers for sequence-defaulted fields on create. */
   readonly allocator?: SequenceAllocator;
   /** Backs the `/v1/admin/settings` endpoints + runtime numbering overrides. */
@@ -407,6 +412,9 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     ...(options.idempotencyStore !== undefined ? { idempotencyStore: options.idempotencyStore } : {}),
     ...(options.policyForEntity !== undefined ? { policyForEntity: options.policyForEntity } : {}),
     ...(options.writeMaskMode !== undefined ? { writeMaskMode: options.writeMaskMode } : {}),
+    ...(options.allowUncoveredSettlement !== undefined
+      ? { allowUncoveredSettlement: options.allowUncoveredSettlement }
+      : {}),
     ...(options.abac !== undefined ? { abacEvaluator: options.abac.evaluator } : {}),
     ...(options.abac?.evaluateBatch !== undefined
       ? { abacBatchEvaluator: options.abac.evaluateBatch }

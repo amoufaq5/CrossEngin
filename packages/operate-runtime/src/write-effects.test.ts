@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { DEFAULT_DRAIN_PAGE_SIZE, isReadCeilingExceeded, ReadCeilingExceeded } from "./list-drain.js";
+import { settlementCoverageGuard } from "./write-guards.js";
 import { InMemoryEntityStore, type EntityStore } from "./store.js";
 import {
   bookingRateStampEffect,
@@ -1760,3 +1761,83 @@ describe("resolveAccountId — no positional fallback", () => {
     expect(accounts.sort()).toEqual(["accounts_receivable", "revenue"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The applied-payment fold is one function with three readers (ADR-0391). These pin the two
+// properties the convergence has to preserve for *this* module: the effect's settle condition is
+// the guard's refusal condition negated, and the FX revaluation's per-side maps stay aligned with
+// the specs that asked for them.
+// ---------------------------------------------------------------------------
+
+describe("paymentApplicationEffect — one coverage predicate, two readers", () => {
+  const effect = paymentApplicationEffect({
+    documentEntity: "Invoice",
+    refField: "invoice_id",
+    settleableStates: ["sent", "overdue"],
+    clock,
+  });
+  const guard = settlementCoverageGuard({ entity: "Invoice", refField: "invoice_id" });
+
+  async function settleAttempt(total: number, paid: number) {
+    const store = new InMemoryEntityStore();
+    const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-P", state: "sent", total });
+    const invId = String(inv["id"]);
+    const pay = await store.create(TENANT, "Payment", {
+      invoice_id: invId,
+      direction: "inbound",
+      amount: paid,
+      state: "completed",
+    });
+    await effect({
+      operation: "transition",
+      entity: "Payment",
+      tenantId: TENANT,
+      id: String(pay["id"]),
+      before: { state: "pending" },
+      after: { ...(await store.get(TENANT, "Payment", String(pay["id"])))! },
+      store,
+    });
+    const settledByEffect = (await store.get(TENANT, "Invoice", invId))?.["state"] === "paid";
+    // Asked of a document still in `sent`, so the guard's own second conjunct cannot mask the
+    // answer: a fresh store with the same payment, and the by-hand mark the guard would vet.
+    const fresh = new InMemoryEntityStore();
+    const inv2 = await fresh.create(TENANT, "Invoice", { invoice_number: "INV-P", state: "sent", total });
+    await fresh.create(TENANT, "Payment", {
+      invoice_id: String(inv2["id"]),
+      amount: paid,
+      state: "completed",
+    });
+    const block = await guard({
+      operation: "transition",
+      entity: "Invoice",
+      tenantId: TENANT,
+      id: String(inv2["id"]),
+      before: { state: "sent", total },
+      after: { state: "paid", total },
+      store: fresh,
+    });
+    return { settledByEffect, refusedByGuard: block !== null };
+  }
+
+  it("settles exactly when the guard would not refuse, on both sides of the epsilon", async () => {
+    // If these ever disagreed, a document would be simultaneously auto-marked by the effect and
+    // unmarkable by hand — or the reverse. One `settlementIsCovered` is why they cannot.
+    for (const [total, paid] of [
+      [120, 50],
+      [120, 120],
+      [120, 119.999],
+      [120, 119.98],
+      [120, 500],
+    ] as const) {
+      const r = await settleAttempt(total, paid);
+      expect(r.settledByEffect, `${total}/${paid}`).toBe(!r.refusedByGuard);
+    }
+  });
+});
+
+// The FX revaluation's per-side keying needs no new test here: the pre-existing
+// "keeps each document side's applied map keyed by that side's own ref field" above already fails
+// when the sides are zipped from one shared map, and it does so through the **real effect** rather
+// than through the fold — measured, it is the only failure that mutation produces. A second
+// assertion over `readAppliedPayments` would have been the bucket test in `write-guards.test.ts`
+// written twice.

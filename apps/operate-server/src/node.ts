@@ -173,6 +173,11 @@ import {
   type TenantWriteStatus,
 } from "./rekey.js";
 import {
+  formatSettlementCoverageReport,
+  settlementCoverageIsSuspect,
+  surveySettlementCoverage,
+} from "./settlement-coverage-survey.js";
+import {
   CLASSIFIED_WRITE_MASK_FLAG,
   buildSensitiveFieldPolicy,
   checkClassifiedWriteMask,
@@ -1016,6 +1021,26 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     console.warn(viewPermissionLine);
   } else {
     console.info(viewPermissionLine);
+  }
+  // Which documents may be marked settled, and which of those a coverage guard covers. A pure
+  // function of `(manifest, flag)` and so said once here rather than per store: unlike unique
+  // enforcement, the answer does not depend on `--store`, because the guard reads rows through the
+  // same `EntityStore` interface whichever one is behind it.
+  //
+  // Said either way, including when nothing is settleable, because the whole defect was a silence —
+  // the aging report drops a document that is not open while the GL keeps its residual, and neither
+  // surface says so. Reports and never refuses: the refusal is in the guard, where a write that
+  // would create that divergence meets it, and a document that *cannot* be guarded (`TaxReturn` has
+  // no `total` and no `Payment` reference, so both operands are missing) is a capability this
+  // deployment lacks rather than a misconfiguration an operator could clear.
+  const settlementCoverage = surveySettlementCoverage(manifest, {
+    allowUncoveredSettlement: options.allowUncoveredSettlement,
+  });
+  const settlementLine = formatSettlementCoverageReport(settlementCoverage);
+  if (settlementCoverageIsSuspect(settlementCoverage)) {
+    console.warn(settlementLine);
+  } else {
+    console.info(settlementLine);
   }
   // Who may read and write each sensitive class. One declaration, both directions: the same policy
   // object reaches the response-redaction registry and the write mask, because `privilegedForClass`
@@ -3843,6 +3868,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     settingsStore,
     policyForEntity: sensitivePolicyForEntity,
     writeMaskMode,
+    allowUncoveredSettlement: options.allowUncoveredSettlement,
     ...(abac !== undefined ? { abac } : {}),
     ...(sessionRevocation !== undefined ? { sessionRevocation } : {}),
     ...(regionGuard !== undefined ? { regionGuard } : {}),
@@ -4662,6 +4688,14 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           // `unservable_field_type` in `applyTenantManifestSchema`.
           policyForEntity: sensitivePolicyForEntity,
           writeMaskMode,
+          // The per-tenant gateway gets the coverage guard too, for the reason ADR-0340 put the
+          // obligation check in `buildOperateHttpServer`: a tenant's own activated manifest can
+          // declare a settleable document, and a guard that covered only the boot manifest would
+          // leave exactly the tenant-authored one unguarded — which is the aperture class this
+          // repository keeps finding. Whether it is *built* for a given entity is decided per
+          // manifest inside `defaultWriteGuards`, so a tenant whose design declares no `Invoice`
+          // or `Bill` simply gets no guard rather than a guard over an entity it does not have.
+          allowUncoveredSettlement: options.allowUncoveredSettlement,
           // One policy layer for every gateway: a policy key is a deployment declaration and an
           // attribute is a fact about a membership in the tenant being served, so neither varies
           // with whose manifest is compiled. The per-tenant manifest's own obligations are checked

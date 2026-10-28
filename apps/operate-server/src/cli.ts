@@ -14,6 +14,7 @@ import {
 
 import { COLUMN_ENCRYPTION_SECRET_VAR } from "./column-encryption.js";
 import { ALLOW_CURSOR_DISCLOSURE_FLAG } from "./cursor-encryption.js";
+import { ALLOW_UNCOVERED_SETTLEMENT_FLAG } from "./settlement-coverage-survey.js";
 import {
   COLUMN_KEY_MODES,
   COLUMN_KEY_MODE_FLAG,
@@ -94,6 +95,21 @@ export interface ServeOptions {
    * deployment that sets the secret gets sealed cursors whether or not it also passes this.
    */
   readonly allowCursorDisclosure: boolean;
+  /**
+   * Accepts knowingly that a document may be marked settled while completed payments do not cover
+   * its total — the state in which the aging subledger reports nothing open and the GL control
+   * account still carries the residual, with nothing reconciling the two.
+   *
+   * `--allow-plaintext-phi`'s shape and deliberately not ADR-0340's no-hatch shape, and the
+   * distinction is the same one `allowCursorDisclosure` draws two fields up: an unevaluated ABAC
+   * obligation is the *opposite* of what the manifest declares and nothing a tenant does repairs
+   * it, while an uncovered settlement is degraded-but-**recoverable** — record the payment and the
+   * two views reconcile — so it is a state an operator may reasonably accept.
+   *
+   * It does not suppress the boot survey: a deployment that passes it is still told which of its
+   * settleable documents are now unguarded, because the defect being closed was the silence.
+   */
+  readonly allowUncoveredSettlement: boolean;
   /**
    * How the at-rest column key is obtained (ADR-0347): `derived` recomputes it from
    * `COLUMN_ENCRYPTION_SECRET` on demand and stores nothing, `envelope` stores a wrapped per-tenant
@@ -580,6 +596,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let store: StoreKind = "memory";
   let allowPlaintextPhi = false;
   let allowCursorDisclosure = false;
+  let allowUncoveredSettlement = false;
   let columnKeyMode: ColumnKeyMode = "derived";
   let columnKeyTtlMs: number | null = null;
   let schema: string | null = null;
@@ -934,6 +951,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       allowPlaintextPhi = true;
     } else if (arg === ALLOW_CURSOR_DISCLOSURE_FLAG) {
       allowCursorDisclosure = true;
+    } else if (arg === ALLOW_UNCOVERED_SETTLEMENT_FLAG) {
+      allowUncoveredSettlement = true;
     } else if (arg === COLUMN_KEY_MODE_FLAG || arg.startsWith(`${COLUMN_KEY_MODE_FLAG}=`)) {
       const raw = takeValue(arg, next, COLUMN_KEY_MODE_FLAG);
       if (!(COLUMN_KEY_MODES as readonly string[]).includes(raw)) {
@@ -2074,6 +2093,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     workflowCancelRoles,
     allowPlaintextPhi,
     allowCursorDisclosure,
+    allowUncoveredSettlement,
     columnKeyMode,
     columnKeyTtlMs,
     sensitiveFieldRoles,
@@ -2440,6 +2460,16 @@ Options:
                        the environment (never argv) to seal them instead; this
                        flag only accepts the disclosure, and does not suppress
                        sealing when a secret is set.
+  ${ALLOW_UNCOVERED_SETTLEMENT_FLAG}
+                       Let a document be marked paid while completed payments do
+                       not cover its total. Off by default: the aging report
+                       drops a document that is not open, so it then shows
+                       nothing owed while the GL control account still carries
+                       the residual, and nothing reconciles the two. An
+                       uncovered document is recoverable -- record the payment
+                       and the two views agree -- which is why this is a flag
+                       and not a refusal with no way past it. The boot survey
+                       reports which documents are unguarded either way.
   --column-key-mode <m>
                        How the at-rest column key is obtained: derived | envelope
                        (default derived). derived recomputes it per tenant from

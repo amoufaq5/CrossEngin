@@ -2,10 +2,17 @@ import { describe, expect, it } from "vitest";
 
 import { InMemoryEntityStore, type ListPage, type ListQuery } from "./store.js";
 import {
+  APPLIED_PAYMENT_EPSILON,
   journalPostingGuard,
   lockedDocumentGuard,
   postedEntryImmutabilityGuard,
+  readAppliedPayments,
+  readAppliedToDocument,
   runWriteGuards,
+  SETTLED_DOCUMENT_STATE,
+  SETTLEMENT_COVERAGE_DOCUMENTS,
+  settlementCoverageGuard,
+  settlementIsCovered,
   type WriteGuardInput,
 } from "./write-guards.js";
 
@@ -408,5 +415,371 @@ describe("runWriteGuards", () => {
     const r = await runWriteGuards([ok, block, never], input);
     expect(r?.error).toBe("nope");
     expect(calls).toEqual(["ok", "block"]);
+  });
+});
+
+// ---- Applied payments + settlement coverage ---------------------------------
+
+const DOC = "doc-1";
+
+async function payment(
+  store: InMemoryEntityStore,
+  row: Record<string, unknown>,
+): Promise<void> {
+  await store.create(TENANT, "Payment", { state: "completed", amount: 0, ...row });
+}
+
+function coverageInput(
+  store: InMemoryEntityStore,
+  over: Partial<WriteGuardInput> & { readonly after: Record<string, unknown> },
+): WriteGuardInput {
+  return {
+    operation: "transition",
+    entity: "Invoice",
+    tenantId: TENANT,
+    id: DOC,
+    before: { state: "sent", total: 100 },
+    store,
+    ...over,
+  };
+}
+
+describe("readAppliedPayments / readAppliedToDocument", () => {
+  it("sums only completed payments, and only ones naming the document", async () => {
+    const store = new InMemoryEntityStore();
+    await payment(store, { amount: 30, invoice_id: DOC });
+    await payment(store, { amount: 70, invoice_id: DOC, state: "pending" });
+    await payment(store, { amount: 11, invoice_id: "other" });
+    const read = await readAppliedToDocument(store, TENANT, "invoice_id", DOC, { ceiling: 100 });
+    expect(read).toEqual({ applied: 30, complete: true });
+  });
+
+  it("does not stop once the running total crosses a threshold", async () => {
+    // The measured defect the no-early-stop rule exists for: a later page carrying a negative
+    // correction takes the total back under. 1100 payments forces three pages at the 500 default,
+    // so the correction is genuinely on a page after the one that crossed 400.
+    const store = new InMemoryEntityStore();
+    for (let i = 0; i < 1099; i += 1) await payment(store, { amount: 1, invoice_id: DOC });
+    await payment(store, { amount: -1000, invoice_id: DOC });
+    const read = await readAppliedToDocument(store, TENANT, "invoice_id", DOC, { ceiling: 5000 });
+    expect(read.applied).toBe(99);
+    expect(read.complete).toBe(true);
+  });
+
+  it("keeps one map per bucket, so two documents sharing an id never merge", async () => {
+    // The invariant three independent spellings of this fold each re-derived in a comment: a
+    // caller-supplied `id` is not stripped and records are bucketed per (tenant, entity), so a
+    // single map keyed by document id would credit the invoice with the bill's money.
+    const store = new InMemoryEntityStore();
+    await payment(store, { amount: 40, bill_id: "shared" });
+    const read = await readAppliedPayments(store, TENANT, ["invoice_id", "bill_id"], {
+      ceiling: 100,
+    });
+    expect(read.applied[0]!.get("shared")).toBeUndefined();
+    expect(read.applied[1]!.get("shared")).toBe(40);
+  });
+
+  it("answers positionally, one map per requested ref field", async () => {
+    const store = new InMemoryEntityStore();
+    await payment(store, { amount: 5, invoice_id: "i" });
+    const read = await readAppliedPayments(store, TENANT, ["bill_id", "invoice_id"], { ceiling: 9 });
+    expect(read.applied).toHaveLength(2);
+    expect(read.applied[0]!.size).toBe(0);
+    expect(read.applied[1]!.get("i")).toBe(5);
+  });
+
+  it("skips a non-string reference rather than coercing it", async () => {
+    // `reference` is `acceptAny` in FIELD_TYPE_CHECKS, so `{"invoice_id": 42}` is a body the
+    // validator admits and the JSONB store round-trips as a number. Of the three spellings this
+    // replaced, two skipped such a row and one counted it — so they disagreed about a reachable
+    // record, and the strict form is fail-closed for both readers: `applied` understated makes the
+    // guard refuse and the effect decline to settle.
+    const store = new InMemoryEntityStore();
+    await payment(store, { amount: 50, invoice_id: 42 });
+    const read = await readAppliedToDocument(store, TENANT, "invoice_id", "42", { ceiling: 100 });
+    expect(read.applied).toBe(0);
+  });
+
+  it("reports an exceeded ceiling rather than truncating in silence", async () => {
+    const store = new InMemoryEntityStore();
+    for (let i = 0; i < 5; i += 1) await payment(store, { amount: 1, invoice_id: DOC });
+    const read = await readAppliedToDocument(store, TENANT, "invoice_id", DOC, { ceiling: 2 });
+    expect(read.complete).toBe(false);
+  });
+});
+
+describe("settlementIsCovered", () => {
+  it("is the exact complement of the effect's settle condition", () => {
+    // The pair is only sound if the two agree exactly, which is why this is one function:
+    // `paymentApplicationEffect` settles when this is true and the guard refuses when it is false.
+    expect(settlementIsCovered(100, 100)).toBe(true);
+    expect(settlementIsCovered(100, 99.996)).toBe(true); // inside the epsilon
+    expect(settlementIsCovered(100, 99.99)).toBe(false);
+    expect(settlementIsCovered(100, 101)).toBe(true);
+  });
+
+  it("covers a total of zero or less, which is what makes an absent total unguardable", () => {
+    // `num(undefined)` is 0, so a guard built for an entity with no total field would pass every
+    // write — the reason `TaxReturn` is declared uncoverable rather than given a weaker predicate.
+    expect(settlementIsCovered(0, 0)).toBe(true);
+    expect(settlementIsCovered(-50, 0)).toBe(true);
+  });
+
+  it("uses the epsilon the module exports, not a second constant", () => {
+    expect(settlementIsCovered(100, 100 - APPLIED_PAYMENT_EPSILON)).toBe(true);
+    expect(settlementIsCovered(100, 100 - APPLIED_PAYMENT_EPSILON * 2)).toBe(false);
+  });
+});
+
+describe("settlementCoverageGuard", () => {
+  const guard = settlementCoverageGuard({ entity: "Invoice", refField: "invoice_id", noun: "an invoice" });
+
+  it("blocks a transition into paid while payments fall short", async () => {
+    const store = new InMemoryEntityStore();
+    await payment(store, { amount: 50, invoice_id: DOC });
+    const r = await guard(coverageInput(store, { after: { state: "paid", total: 120 } }));
+    expect(r?.status).toBe(422);
+    expect(r?.error).toBe("uncovered_settlement");
+    // The figure is in the detail: the caller holds `update`/`mark_paid` on this document, which on
+    // every shipped pack is a subset of its `read` grant, so 70.00 of 120.00 discloses nothing they
+    // could not already compute.
+    expect(r?.detail).toContain("70.00 of 120.00");
+    expect(r?.detail).toContain("record the remaining payment");
+  });
+
+  it("allows it once completed payments cover the total", async () => {
+    const store = new InMemoryEntityStore();
+    await payment(store, { amount: 120, invoice_id: DOC });
+    expect(await guard(coverageInput(store, { after: { state: "paid", total: 120 } }))).toBeNull();
+  });
+
+  it("blocks a plain PATCH that sets state=paid, not only a transition", async () => {
+    // The largest thing an operation-keyed guard would miss. `state` is an ordinary enum field,
+    // neither Invoice nor Bill declares a field-level permission, and `lockedDocumentGuard` returns
+    // null when the BEFORE state is unlocked — so `PATCH {"state":"paid"}` from `draft` lands.
+    const store = new InMemoryEntityStore();
+    const r = await guard(
+      coverageInput(store, {
+        operation: "update",
+        before: { state: "draft", total: 120 },
+        after: { state: "paid", total: 120 },
+      }),
+    );
+    expect(r?.error).toBe("uncovered_settlement");
+  });
+
+  it("blocks a create that carries state=paid", async () => {
+    // `before` is null, so the `!==` arm admits it by construction rather than by a third clause.
+    const store = new InMemoryEntityStore();
+    const r = await guard(
+      coverageInput(store, {
+        operation: "create",
+        id: null,
+        before: null,
+        after: { state: "paid", total: 10 },
+      }),
+    );
+    expect(r?.error).toBe("uncovered_settlement");
+  });
+
+  it("passes a write that is not entering the settled state", async () => {
+    const store = new InMemoryEntityStore();
+    expect(await guard(coverageInput(store, { after: { state: "overdue", total: 120 } }))).toBeNull();
+  });
+
+  it("passes a write of an already-settled document", async () => {
+    // The second conjunct. Re-saving a paid document must not be refused for a shortfall that was
+    // accepted when it was marked paid — otherwise the hatch would be the only way to edit one.
+    // This is also the control for the raised-total arm below: the total is unchanged here.
+    const store = new InMemoryEntityStore();
+    const r = await guard(
+      coverageInput(store, {
+        operation: "update",
+        before: { state: "paid", total: 120 },
+        after: { state: "paid", total: 120, notes: "x" },
+      }),
+    );
+    expect(r).toBeNull();
+  });
+
+  it("blocks raising the total of a document that is already settled", async () => {
+    // The edge-only predicate let this through, and an adversarial pass reached it in **two
+    // ordinary writes** as `ap_clerk` on the shipped pack: create a Bill `approved, total 0`,
+    // `mark_paid` (allowed by the nothing-owed arm, correctly), then `PATCH {"total":120}`. The
+    // result was `paid` with 120 owed and no payments — the exact divergence this guard exists to
+    // close — on the one entity nothing else protects, since `Invoice` is incidentally covered by
+    // `paid` being one of its `lockedStates` and `Bill` has no locked-document guard at all.
+    const store = new InMemoryEntityStore();
+    const r = await guard(
+      coverageInput(store, {
+        operation: "update",
+        before: { state: "paid", total: 0 },
+        after: { state: "paid", total: 120 },
+      }),
+    );
+    expect(r?.error).toBe("uncovered_settlement");
+    expect(r?.detail).toContain("120.00 of 120.00");
+    // "leave" rather than "mark": on this arm the document is already settled and the caller is
+    // raising what it owes, so the old wording described a write nobody made.
+    expect(r?.detail).toContain("cannot leave");
+  });
+
+  it("passes a correction that lowers the total of a settled document", async () => {
+    // `owesMore` is a comparison and not a presence test, so a write-down of a paid document — the
+    // ordinary correction — is still allowed. Without this the only way to reduce a paid
+    // document's total would be the deployment-wide hatch.
+    const store = new InMemoryEntityStore();
+    const r = await guard(
+      coverageInput(store, {
+        operation: "update",
+        before: { state: "paid", total: 120 },
+        after: { state: "paid", total: 90 },
+      }),
+    );
+    expect(r).toBeNull();
+  });
+
+  it("refuses a total it cannot read rather than treating it as nothing owed", async () => {
+    // `num` collapses a non-numeric value to 0, so without this the `total <= 0` arm allowed the
+    // write: a document whose stored total is `"n/a"` was marked paid, read `paid`, and was dropped
+    // by the aging report in silence. ADR-0367's rule — a decision from a quantity that could not
+    // be read is not a decision — and the fourth cause of an unreadable figure, the only one where
+    // allowing is the wrong answer.
+    const store = new InMemoryEntityStore();
+    const r = await guard(coverageInput(store, { after: { state: "paid", total: "n/a" } }));
+    expect(r?.status).toBe(422);
+    expect(r?.error).toBe("settlement_coverage_unverifiable");
+    expect(r?.detail).toContain("is not a number");
+  });
+
+  it("reads the state field it was configured with, not the fallback", async () => {
+    // The guard reads the state field BY NAME, so a manifest whose lifecycle drives `status` got an
+    // inert guard — `after["state"]` is undefined, every write answers null — while the boot survey
+    // went on naming the entity as guarded. `defaultWriteGuards` sets this from the lifecycle now;
+    // this is the config arm that makes that wiring mean something.
+    const store = new InMemoryEntityStore();
+    const statusKeyed = settlementCoverageGuard({
+      entity: "Invoice",
+      refField: "invoice_id",
+      stateField: "status",
+    });
+    const r = await statusKeyed(coverageInput(store, { after: { status: "paid", total: 120 } }));
+    expect(r?.error).toBe("uncovered_settlement");
+    // And the fallback-keyed guard is blind to exactly that document, which is the defect.
+    expect(await guard(coverageInput(store, { after: { status: "paid", total: 120 } }))).toBeNull();
+  });
+
+  it("can never fire on a delete, because the handler passes after = before", async () => {
+    const store = new InMemoryEntityStore();
+    const r = await guard(
+      coverageInput(store, {
+        operation: "delete",
+        before: { state: "paid", total: 120 },
+        after: { state: "paid", total: 120 },
+      }),
+    );
+    expect(r).toBeNull();
+  });
+
+  it("ignores another entity", async () => {
+    const store = new InMemoryEntityStore();
+    const r = await guard(coverageInput(store, { entity: "Bill", after: { state: "paid", total: 120 } }));
+    expect(r).toBeNull();
+  });
+
+  it("passes a document with nothing owed without reading any payment", async () => {
+    class CountingStore extends InMemoryEntityStore {
+      reads = 0;
+      override async listPage(t: string, e: string, q: ListQuery): Promise<ListPage> {
+        this.reads += 1;
+        return super.listPage(t, e, q);
+      }
+    }
+    const store = new CountingStore();
+    expect(await guard(coverageInput(store, { after: { state: "paid", total: 0 } }))).toBeNull();
+    expect(store.reads).toBe(0);
+  });
+
+  it("REFUSES on an exceeded ceiling rather than deciding from a prefix", async () => {
+    // `READ_CEILING_EFFECT.guard` is `refuses`: a decision from a prefix is not a decision, and the
+    // direction is not even bounded, since nothing enforces `Payment.amount`'s `min: 0`.
+    const store = new InMemoryEntityStore();
+    for (let i = 0; i < 4; i += 1) await payment(store, { amount: 1000, invoice_id: DOC });
+    const tight = settlementCoverageGuard({ entity: "Invoice", refField: "invoice_id", maxPayments: 2 });
+    const r = await tight(coverageInput(store, { after: { state: "paid", total: 120 } }));
+    expect(r?.error).toBe("settlement_coverage_unverifiable");
+    // Would have been *covered* over the whole set (4000 >= 120), so this is not the shortfall
+    // block arriving by another name — the prefix is refused on its own account.
+    expect(r?.error).not.toBe("uncovered_settlement");
+  });
+
+  it("names no remedy for an exceeded ceiling, because maxPayments reaches no flag", async () => {
+    const store = new InMemoryEntityStore();
+    for (let i = 0; i < 4; i += 1) await payment(store, { amount: 1, invoice_id: DOC });
+    const tight = settlementCoverageGuard({ entity: "Invoice", refField: "invoice_id", maxPayments: 2 });
+    const r = await tight(coverageInput(store, { after: { state: "paid", total: 120 } }));
+    expect(r?.detail).not.toContain("remedy");
+    expect(r?.detail).not.toContain("--");
+  });
+
+  it("refuses a create whose id the store has not assigned yet", async () => {
+    // Nothing can reference a document that does not exist, so `applied` is 0 and the predicate
+    // decides — rather than an absent id falling through to an allow.
+    const store = new InMemoryEntityStore();
+    const r = await guard(
+      coverageInput(store, { operation: "create", id: null, before: null, after: { state: "paid", total: 1 } }),
+    );
+    expect(r?.error).toBe("uncovered_settlement");
+  });
+});
+
+describe("SETTLEMENT_COVERAGE_DOCUMENTS", () => {
+  it("names exactly the two documents whose coverage predicate is expressible", async () => {
+    expect(SETTLEMENT_COVERAGE_DOCUMENTS.map((d) => d.entity)).toEqual(["Invoice", "Bill"]);
+  });
+
+  it("would be vacuous over TaxReturn, which is the reason for the omission", async () => {
+    // Shown rather than asserted in prose, because it is the whole argument: a guard built for an
+    // entity with no `total` reads `num(undefined)` as 0, finds every document covered, and passes
+    // every write while appearing in the guard list as a control. `net_payable: 500` is genuinely
+    // owed and no payment can name this document, so the honest answer is a refusal and this
+    // returns null — which is why `TaxReturn` is declared uncoverable and surveyed instead.
+    //
+    // It is also what a mutation adding `TaxReturn` to the declaration produces: measured, that
+    // mutation leaves `compile.test.ts` entirely green, because a 200 cannot tell *no guard* from
+    // *a guard that checks nothing*. The declaration tests below are what catch it.
+    const store = new InMemoryEntityStore();
+    const vacuous = settlementCoverageGuard({ entity: "TaxReturn", refField: "tax_return_id" });
+    const r = await vacuous({
+      operation: "transition",
+      entity: "TaxReturn",
+      tenantId: TENANT,
+      id: "tr-1",
+      before: { state: "filed", net_payable: 500 },
+      after: { state: "paid", net_payable: 500 },
+      store,
+    });
+    expect(r).toBeNull();
+  });
+
+  it("omits TaxReturn deliberately, and the resolved pack is why", async () => {
+    // Measured on resolved erp-core: TaxReturn has no `total` field and `Payment` carries
+    // `invoice_id`/`bill_id` and nothing naming it, so BOTH operands of `total - applied` are
+    // missing. The survey in apps/operate-server reports it; a guard would read every filing as
+    // covered (`num(undefined)` is 0) and pass every write while looking like a control.
+    expect(SETTLEMENT_COVERAGE_DOCUMENTS.some((d) => d.entity === "TaxReturn")).toBe(false);
+  });
+
+  it("gives every entry a payment reference field and a caller-actionable remedy", async () => {
+    for (const doc of SETTLEMENT_COVERAGE_DOCUMENTS) {
+      expect(doc.refField, doc.entity).toMatch(/_id$/);
+      expect(doc.remedy, doc.entity).toBeTruthy();
+      // Never a server flag: a 4xx naming one tells a client to ask for the guard to be switched off.
+      expect(doc.remedy, doc.entity).not.toContain("--");
+    }
+  });
+
+  it("settles on the state the guard and the survey both read", async () => {
+    expect(SETTLED_DOCUMENT_STATE).toBe("paid");
   });
 });

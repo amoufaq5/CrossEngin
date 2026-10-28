@@ -1,10 +1,10 @@
 # ADR index
 
-384 records. Generated from the ADR files themselves — regenerate rather than
+386 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 305  **Proposed:** 79
+- **Accepted:** 307  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -396,3 +396,5 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0387](0387-a-deadline-nobody-asked-about.md) | A deadline nobody asked about | — | Accepted | 2026-10-27 |
 | [0388](0388-a-diff-that-covers-five-of-seventeen.md) | A diff that covers five of seventeen | — | Accepted | 2026-10-27 |
 | [0389](0389-a-queue-no-non-owner-could-write.md) | A queue no non-owner could write | — | Accepted | 2026-10-28 |
+| [0390](0390-the-backup-the-documentation-destroys.md) | The backup the documentation destroys | — | Accepted | 2026-10-28 |
+| [0391](0391-the-subledger-and-the-ledger-disagree.md) | The subledger and the ledger disagree | — | Accepted | 2026-10-28 |

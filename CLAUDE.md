@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 383 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 386 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 20,645 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 20,729 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -2644,6 +2644,204 @@ report; `apps/operate-web` has none).
   now, two are cross-tenant by design with a negative control, and two are blocked by a shared
   worker contract and deferred on the one cost that makes them the safe half. The rule the correction
   leaves behind: **a write path is only fixed as far as the read that finds the row again.**
+
+  ADR-0390 and ADR-0391 are the two genuinely-P0 halves of the register's P0 remainder, run as
+  parallel increments over disjoint files after a read-only pass re-derived all four remaining items
+  against the committed tree with an adversary aimed at each **measurement**. That ordering is the
+  increment's first result: **two of the four demote on their own test** (P0.3's file half and P0.8
+  are latent — every flag and every gated surface appears 0 times in all three compose files, and
+  P0.8's gate is a *triple* whose catalog file exists nowhere in the repository), and of the eight
+  claims the measurements corrected, the refuters then overturned **five**, two of them
+  prescriptions rather than facts. P3.1's rule gains its sharpest clause yet: **a remedy is a claim
+  too, and it is the one an increment spends itself on.**
+
+  **ADR-0390's class is a document that destroys what it tells you to keep.** `deploy/ORACLE.md`
+  shipped a `dump.sh` whose `pg_dump` is the **non-final** element of `pg_dump | gzip > f` with no
+  `pipefail` anywhere in `deploy/`, followed by an **unconditional** `find … -mtime +14 -delete`.
+  Reproduced on a real cluster rather than reasoned: a good 72,122-byte dump aged to 20 days, one
+  failing run, the error printed, **`set -e` did not fire**, the script reached the prune and
+  **exited 0**, and the 72KB backup was **gone** — a 20-byte file in its place. **One** run, not
+  fifteen; the brief said fifteen and the measurement corrected it downward, which is the direction
+  that matters. The section's own restore check could not have caught it (`gunzip -c | head -40`
+  reads the preamble a truncated dump still carries, and `head` closes the pipe before any CRC
+  check), and it was the **only** occurrence of the word "restore" in all of `deploy/` — measured
+  pre-fix at 1 hit across the three documents, and 4 after, which is the fix rather than drift.
+  Three things were sharper than the defect, and two of them refuted this increment's own
+  prescriptions. **`gunzip -t` as the minimum was wrong**: `: | gzip` is a *valid* 20-byte archive
+  and `gunzip -t` exits **0** on it, so the prescribed fix passes on a dump that does not exist — a
+  second falsely-true control in place of the first. **`pipefail` alone was wrong too**: it stops
+  the prune and leaves a today-stamped file both checks accept, which is worse for an operator
+  reading a directory listing than for one reading an exit code, so temp-file-then-`mv` under a
+  `trap` is *required*. And the two checks turn out to catch **disjoint** failures — `gunzip -t` is
+  the reliable detector of a *truncated* stream and is blind to one that never started, because an
+  empty input is a valid gzip, while a terminating-line check is the reverse. The slice then refused
+  that terminating-line check on a SIGPIPE-under-`pipefail` argument, which is **right about the
+  hazard and wrong about which form carries it**: measured over a real 16,590-line dump, 200 trials
+  each, `gunzip -c f | grep -q …` exits non-zero **200/200** — it breaks *deterministically on a
+  good dump* — while `gunzip -c f | tail -5 | grep -q …` exits non-zero **0/200**, structurally,
+  because `tail` cannot emit until the stream ends.
+  Beside it, README's **Day-2 operations** one-liner had three defects (no `-T`, a **constant**
+  redirect target the shell truncates *before* `pg_dump` runs, and two variables never set in the
+  operator's shell) and **fails loudly**, which is why it destroys nothing and the P0 rests on the
+  scheduled path — a command that always fails can never have written the backup a re-run would
+  destroy. A **second** unset-variable site sat on the **recovery** path, in the by-hand
+  `CREATE EXTENSION` repair under *If `extensions` exits 2*, with the *working* idiom 38 lines above
+  it in the same section's password-repair step: two spellings in one document with the broken one
+  later, so the fix had an in-file precedent and the slice found it outside its brief. And README's
+  Oracle walkthrough pointed at *"that cron line"* in a file containing **zero** crontab lines,
+  because the abridgement dropped the script, the crontab, the retention **and** the restore block —
+  four missing antecedents, repaired by pointing at ORACLE.md's heading rather than copying the
+  line, since a copy removed cannot drift where a copy fenced can. **Those references are anchored
+  by heading rather than by line here and in the ADR**, which is the remedy register P0.9 already
+  prescribes: every line citation in the slice's own report that sat below its own ten-line
+  insertion was exactly ten low, because it took the numbers before making the edit.
+  The P0.3 half is a **documentation** defect and the item demotes: `ORACLE.md` asserted **in bold**
+  that no file-taking flag has a path by which a file can be supplied, which is false —
+  `Dockerfile:18` is `COPY . .` under a repo-root context with `.dockerignore` excluding
+  `deploy/.env` and not `deploy/*.json`, and a build context is the *working tree*, so an
+  **untracked** file is baked too. The honest statement is that the route is too **expensive** to
+  use (that `COPY` sits immediately above the full `pnpm install && pnpm -r build && next build`
+  under a comment saying the layer is deliberately coarse) and that what is missing is a route for
+  an *uncommitted, host-side* file — which an Ed25519 seed needs, and which baking makes worse, so
+  it **sharpens** ADR-0301 rather than weakening it. So the `volumes:` key is **withheld** with its
+  reason: the three configs it would serve are meaningless until the chain has an environment route,
+  and a mount now would license a private seed in a mounted file (ADR-0334). The new staleness
+  shape: **checking that a document has been rewritten is not checking that the rewrite is true** —
+  retiring the register line would have left the refuted bold assertion standing and deleted the
+  only record that it is false.
+  The fence is the part that prevents recurrence and it is **sized honestly**:
+  `deployment-defaults.test.ts` read exactly two files and **none** of the three markdown documents,
+  so this is a scope extension over ~110 KB of prose. Thirteen `it` blocks, each carrying its
+  measurement, the first a **non-vacuity floor** — and **three of them were vacuous on their first
+  run**. Removing `gunzip -t` from the script **passed**, because the script's own *comments quote*
+  it; restoring *"that cron line"* **passed**, because the replacement prose contains the word
+  *crontab*; and deleting one of two cross-references **passed**, because `toContain` was satisfied
+  by the other. All three are closed (comment-stripping, a `hasRunnableCronLine()` predicate, an
+  asserted count of 2), and the first is this file's own drain-absence hazard reproduced by an
+  author who had just read it.
+  **And then an adversarial pass found five more ways to satisfy it, the sharpest being that the
+  fence could not see the defect in the form it actually had.** `pgDumpCommands()` stripped markdown
+  code spans on a stated convention — *a command name in prose is always inside backticks and in a
+  command it never is* — and the tree's own pre-image refutes it: the day-2 defect shipped as a
+  **one-line code span**, so restoring it verbatim left the `-T`, unset-variable and constant-target
+  assertions **unexamined** and only the population count fired. A fence resting on formatting is
+  one the next author satisfies by changing the formatting, so the discriminator is **content** now
+  (fenced-block lines plus code spans outside them; an invocation names `pg_dump` and then goes on
+  to say something), and the same mutation fails four assertions. Beside it: the document set was a
+  hardcoded pair, so a maximally defective command in `VERCEL-SUPABASE.md` — the one document of the
+  three with no occurrence of *backup*, *dump*, *restore*, *PITR* or *snapshot*, and therefore the
+  one a backup section would be added to — passed everything; uniqueness was whitelisted by
+  **variable name**, so a constant `out=` in the unattended script passed all 33; the bare-variable
+  rule missed `${BRACE}`; and **one defect had two remedies in one document with the fence refusing
+  the right one** — README's own idiom reads the role out of `.env`, and the literal `crossengin` is
+  a remedy that fails for exactly the population its own `role "…" does not exist` bullet is about,
+  so both dump commands take the lookup and the rule is one predicate with a positive floor.
+  Two of that pass's findings are worth more than the fence. A committed test comment said
+  `gunzip -t` catches *"a pg_dump that exits 0 having written a short answer"* — the **opposite** of
+  what this increment measured and recorded in its own alternatives, so the correct fact was in the
+  report and the wrong one in the tree. And the documented ad-hoc dump **wrote into the Docker build
+  context**: both README commands run from `deploy/`, the context is `..`, `.dockerignore` has no
+  `*.sql`, and the documented upgrade is `up -d --build` — so a plaintext dump holding `meta.users`'
+  credential hashes was baked into a pushable layer, which is the exposure the same increment spends
+  two paragraphs refusing for a 32-byte seed. Both redirect to `$HOME`; a blanket `*.sql` ignore is
+  **refused**, because two `.sql` files under `deploy/` are in the context on purpose.
+  **The mutation harness failed its own reversal twice, both times caught by its own guards**, which
+  is the reusable half: expressing a deletion as a replacement with `""` has an inverse the
+  empty-`old` guard refuses, and re-expressing it with `true` has one that matches seven times and
+  the occurrence-count guard refuses — so a mutation reversed by string replacement must be a
+  **bijection in both directions**, non-empty *and* unique. Both left the tree mutated until it was
+  repaired by hand and confirmed byte-identical by `md5sum`.
+
+  **ADR-0391's class is two surfaces that disagree in silence.** Three permission-gated transitions
+  reach `paid` on the shipped `erp-core` and **no effect `compile.ts` wires triggers on `paid` at
+  all**, so a document marked paid with 70 outstanding leaves the control account uncleared. The
+  increment's first act is to correct the harm statement every version of this item had carried:
+  *"AR is overstated"* silently picks one of three business facts the edge cannot distinguish — a
+  write-off, an off-system settlement, operator error — which post to three different accounts, and
+  each posting that *did* happen is individually correct, so the ledger is not wrong; it says *70
+  is owed*, which is **true** if the operator erred. What holds under all three readings is the
+  **divergence**: `openStates` excludes `paid`, so the aging subledger reports **0 open** while the
+  GL carries the residual and nothing reconciles them. That inverts what a fix is for — the harm is
+  the **silence**, so making the state unreachable is complete and the residual posting is not
+  needed at all, which matters because ADR-0378 measured that remedy **harmful** (AR net −50, cash
+  +170, silently, because the entry numbers differ so no constraint fires).
+  **And the reachable surface is wider than three transitions**, which is the largest thing the
+  register did not have: `state` is an ordinary `enum` field on all three documents with **no
+  field-level permissions on any of them**, so a plain `PATCH {"state":"paid"}` reaches `paid` from
+  `draft` on an Invoice and from **any** state on a Bill, which has **no locked-document guard at
+  all**. On that path recognition never fired, so a residual effect computing `total − applied`
+  would credit a control account that was never debited — a sixth ledger decision, *inexpressible*
+  for `Bill`. So the guard is keyed on the **state edge** and not the operation
+  (`after[state] === paid && before?.[state] !== paid`), which covers the transition, the `PATCH`
+  and a `create` alike — and is the house idiom rather than an invention, since `journalPostingGuard`
+  is keyed on exactly that shape. An operation-keyed guard would have closed one path of three.
+  The prerequisite is the register's own named one: **"applied per document" was spelled three times
+  independently**, and the evidence that it is one function is that all three carried
+  near-identical comments explaining why the map is keyed **per bucket** — a shared map would merge
+  an invoice's payments with a same-id bill's. One `appliedByRef`, three callers, the keying and its
+  reason in the helper, with the one-document case the degenerate one-bucket form plus its `eq`
+  filter (the difference between one index lookup and draining every payment in the tenant). One
+  epsilon and one `settlementIsCovered`, so the guard and `paymentApplicationEffect` cannot disagree
+  about whether a document is covered — if they did, a document would be simultaneously unmarkable
+  and auto-marked. An exceeded read ceiling **refuses**, on `READ_CEILING_EFFECT.guard`'s stated
+  ground and `journalPostingGuard`'s precedent, including its deliberate refusal to name a remedy.
+  Default-on with `--allow-uncovered-settlement`, on ADR-0338's premise rather than ADR-0334's: a
+  document reading `paid` while the GL carries the receivable and the aging report shows nothing is
+  not a deployment serving this correctly, so refusing breaks nothing that was **right** — and the
+  hatch exists because that state is degraded but **recoverable**, which is what earns one where an
+  unevaluated obligation did not. The edge no guard can cover (`TaxReturn` has no `total`, no
+  `paid_at` and no `Payment` referencing it) is **declared and reported** rather than silently left.
+  Verified live as the non-owner `serving` role through the real server on a real cluster, five arms
+  including the control: `mark_paid` on an invoice of 120 with 50 paid answers **422** naming both
+  remedies and leaves the state `sent`; `PATCH {"state":"paid"}` on a `draft` invoice and on a
+  `draft` bill each answer **422**; a bill POSTed directly as `paid` answers **422**; and a fully
+  covered invoice answers **200** with the state `paid`. Three bounds are stated at their sites
+  rather than discovered later — `Payment.amount`'s `min: 0` is enforced by **nothing**, so the
+  predicate is approximately sound; `paymentSettlementGlPostingEffect` never reads the referenced
+  document **at all**, not even its existence; and `paid_at` is stamped on `Bill`, which declares no
+  such field, so a stamp-based coordination between the residual and the settlement effects could
+  never have been the mechanism.
+  **And then an adversarial pass found that the invariant was false and the false claim was in the
+  durable record**, which is ADR-0337's direction inside an increment whose whole subject is a
+  silence. The guard fired on the **edge into** the settled state, so the state was reachable in
+  **two ordinary writes** as `ap_clerk` on the shipped pack with no flags: a Bill created
+  `approved, total 0`, `mark_paid` (allowed by the nothing-owed arm, correctly, because nothing was
+  owed), then `PATCH {"total":120}` — which the edge-only second conjunct let through because
+  `before[state]` was already `paid`. The result is `paid` with 120 owed and no payments, dropped by
+  AP aging, residual in the GL: the divergence verbatim, on the one entity nothing else covers, since
+  `Invoice` is incidentally protected by `paid` being one of its `lockedStates`. The predicate is *a
+  write that leaves the document settled and owing more than it did*, with `owesMore` a **comparison**
+  so a correction downward is still allowed, and the refusal says *"cannot leave"* rather than
+  *"cannot mark"* because on that arm the document is already settled.
+  Two more were falsely-true in the same shape. **The guard read its state field by name and the name
+  was hardcoded `state`**, so a manifest whose lifecycle drives `status` — accepted by
+  `validateWorkflows`, and the normal shape for `Opportunity.stage` in all seven packs — got a guard
+  that answered `null` for every write **and a boot line naming the entity as guarded**;
+  `defaultWriteGuards` reads the lifecycle's `stateField` now, through a `lifecycleStateField`
+  **exported** from `list-query.ts` rather than spelled twice, and the survey then needs **no** sixth
+  gap because survey-says-guarded and guard-can-fire become one fact (a gap for the difference would
+  be a verdict with no producer). And **`num()` collapses an unreadable total to 0**, so a stored
+  `"n/a"` took the nothing-owed arm and was marked paid in silence — the fourth cause of an unreadable
+  figure and the only one where allowing is wrong, refused as `settlement_coverage_unverifiable` on
+  ADR-0367's rule. A role count that said *four* where the union is **three** distinct roles rounds it
+  out: the substance held and the only cost was a reader re-deriving the paragraph.
+  **Its own top open question closed in the same commit, and it was one assertion wide.** The chain
+  is `cli.ts` → `node.ts` → `server.ts` → `compile.ts`, and the last hop is a forwarding literal of
+  exactly ADR-0386's shape — a conditional **spread**, which bypasses TypeScript's
+  excess-property check, into an **optional** field with a default — except that here the default is
+  `?? false` and `false` means *do not build the guard*, so a dropped spread **silently disarms the
+  whole increment**, where ADR-0386's drop produced a *safe* wrong answer. Measured: deleting the
+  three lines, `tsc` exits **0**. `compile.test.ts`'s fence covers one hop further in, so
+  `server.test.ts` gains the sibling — and its unit is the **intersection of the two interfaces'
+  field names** (29 app options, 30 gateway options, **16 shared**, 0 dropped), because only a shared
+  field can be dropped there and the `notForwarded` form would need **13** maintained entries in that
+  position (ADR-0288's list). `compile.ts` is read by relative path as **text**, so no build output
+  is consulted. Two claims in that fence's own first comment were wrong and the mutation caught both:
+  the hop was covered **per field** by this increment's own `node.test.ts` block rather than by
+  nothing, so the two compose and each sits with its right subject (a pin with the wiring chain, a
+  class with the literal); and *"all 5,078 tests pass"* under the mutation is **2 of 5,080 failing** —
+  a figure asserted from an earlier slice's number instead of measured, which is register P3.1's class
+  inside a fence about a dropped field.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -9853,6 +10051,27 @@ Each is reachable on a running deployment and produces a wrong answer, a disclos
 or an authorization bypass. The test against P1 is that **no new capability is needed to be harmed
 by it**.
 
+**This tier is closed as of ADR-0391.** Its **eleven** entries — nine numbered plus 6b and 8b — are
+each fixed, demoted with the measurement that demoted them, or split so the live half closes and the
+rest is re-graded; **read each entry for which**, because several are more than one thing. The
+demotions matter as much as the fixes: P0.3's file half and P0.8 are **latent**, since every flag and
+gated surface they need appears **0** times in all three compose files, which is this paragraph's own
+test failing; P0.6's two headline clauses were inert declarations rather than money defects; and
+P0.9's absent scheduler is **P1** by the same test, leaving only its two destructive documented
+procedures at P0. Two entries were re-graded *upward* instead — P0.6b's harm statement was wrong in
+every version it had, and P0.9's live basis turned out to be a documented `pg_dump` that truncates
+its own output file before running.
+
+The standing rule the tier produced is register P3.1's, and it earned all three clauses here:
+**re-measure an entry before designing against it, check its *remedy* as well as its facts, and aim
+a refuter at the corrections.** Facts that measurement refuted: P0.3's bold file claim, P0.6's
+`decimal_places`, P0.6b's harm statement, P0.7's *"while the UI says the field is unique"*, P0.8's
+refuse/admit split, P0.9's *"no cron, no retention"*. **Prescribed remedies that could not work**:
+P0.3's platform write arm (proven unsatisfiable live), P0.4's `subjectIdentifier` threading (which
+would have made the record worse), and P0.1's named precedent (a second cached directory where the
+row was already being read). And twice a *correction* was itself wrong — see P3.1 — which is why the
+third clause is not a flourish.
+
 1. ~~**`operate-web` authenticates nobody**~~ — **closed by ADR-0358**, and the scoping claim this
    entry made ("it is a subsystem") was **wrong in the direction that deters the work**: a
    self-minted JWT is accepted by the existing gateway with no verifier change at all, so the API
@@ -9968,24 +10187,69 @@ by it**.
    question, and the decisive measurement is that the shipped `platform_admin` key was already 403
    on every entity route (ADR-0365's 0 of 255) while an api-key naming the placeholder tenant with
    an *ERP* role was served **200** over a tenant with no `meta.tenants` row.
-   **Four are blocked by a missing mechanism rather than an undecided default, and the mechanism is
-   one line that does not exist: the `api` service declares no `volumes:` key at all** (measured
-   top-level keys: `build`, `depends_on`, `environment`, `command`, `expose`, `ports`, `healthcheck`,
-   `restart`). So `--audit-chain-config`, `--deletion-capabilities`, `--integrity-proof-config` and
-   `--checkpoint-config` — every file-taking flag — have **no path by which an operator supplies a
-   file**, and `deploy/ORACLE.md:534`'s instruction *"Each is a line added to that `command:`"* cannot
-   be followed for any of them. That is ADR-0364's addendum class (the `.env.example` curl naming a
-   port the stack published nowhere) in the document an Oracle operator actually follows, and it wants
-   a documented Ed25519 keypair-generation step beside it.
-   **ADR-0376 corrected that grouping and it changes the deliverable: the four are not peers.**
-   Measured, `CheckpointConfigSchema.safeParse({})` and `IntegrityProofConfigSchema.safeParse({})`
-   both succeed **fully defaulted** (every field has a default, `intervalMs: 3600000` and
-   `includePlatform: true` among them), and `--deletion-capabilities` is a six-key declaration with
-   no secret — so three are ordinary committable config and one `volumes:` mount serves them. The
-   fourth is different in kind: `AuditChainConfigSchema` requires `privateKeyBase64` and
-   `publicKeyBase64`, validated as real Ed25519 keys rather than merely non-empty, so it is a
-   **credential**, which ADR-0301 says reaches this process through the environment and not through a
-   file. A volume for three plus an env route for one, not one mount for four.
+   **The four file-taking flags are a P2, and the claim this entry made about them is refuted —
+   the live defect is one layer out, in the document that repeats it.** The entry read: *the `api`
+   service declares no `volumes:` key at all, so `--audit-chain-config`,
+   `--deletion-capabilities`, `--integrity-proof-config` and `--checkpoint-config` have no path by
+   which an operator supplies a file.* The first clause is exact (measured top-level keys: `build`,
+   `depends_on`, `environment`, `command`, `expose`, `ports`, `healthcheck`, `restart`; and
+   `docker-compose.ai.yml`'s `volumes:` belongs to `ollama`, so it holds for the merged
+   deployment too). The second **does not follow**: `deploy/Dockerfile:18` is `COPY . .` under
+   `WORKDIR /app`, the build context is `context: ..` — the repo root — and `.dockerignore`
+   excludes `deploy/.env` and **not** `deploy/*.json`, with no `deploy/Dockerfile.dockerignore` to
+   take precedence. So a file in `deploy/` **is** baked into the image and reachable as
+   `--checkpoint-config deploy/checkpoint.json` with no volume at all. A build context is the
+   **working tree** minus `.dockerignore` and not the git index (which is why `.dockerignore` lists
+   `.git`), so an **untracked** file is baked too: no commit required.
+   Two things make it still a gap, and the second is the argument that earns a volume where
+   "there is no route" did not. What is missing is a route for an **uncommitted, host-side** file,
+   which is exactly what a credential needs — and an Ed25519 private seed in an image layer is
+   exposed by `docker history`, `docker save`, any registry push and the local layer cache, which
+   **sharpens** ADR-0301 rather than weakening it. And the route that exists is too expensive to
+   use: `COPY . .` sits immediately above
+   `RUN pnpm install --frozen-lockfile && pnpm -r build && pnpm --filter @crossengin/operate-web build`,
+   under the Dockerfile's own comment that the layer is deliberately coarse, so editing a two-byte
+   `{}` costs a full install plus a full workspace build plus `next build`.
+   **The three non-credential flags are not peers either, and one of this entry's own figures had
+   already propagated into shipped documentation.** `CheckpointConfigSchema.safeParse({})` and
+   `IntegrityProofConfigSchema.safeParse({})` do both succeed and `{}` is a valid file for either —
+   but *not* because "every field has a default": `tenantStatuses` (both schemas) and `escalation`
+   (integrity-proof) are `.optional()` with **none**, which is why the parsed objects carry 6 and 9
+   keys rather than 7 and 11. And `DeletionCapabilitiesSchema.safeParse({})` **fails**, with six
+   `Required` issues, because all six keys are mandatory by design (ADR-0328: a schema default is
+   applied to *silence*) — so a fix shipping three empty `{}` files satisfies two and fails the
+   third at boot. Nor can the one exported template be pasted: `CONSERVATIVE_DELETION_CAPABILITIES`
+   is all six `erases`, which register P2.6 records as refusing every deletion, so each value is a
+   per-subsystem judgement — guidance that **exists in `cli.ts`'s `--help` prose and not in
+   `deploy/`**, which is ADR-0376's asymmetry in a second place. `AuditChainConfigSchema` is still
+   the odd one out and still a **credential** (`privateKeyBase64` and `publicKeyBase64` are its
+   only two fields with neither a default nor `.optional()`, each refined against a real key), so
+   ADR-0301 sends it through the environment; `ed25519PublicKeyFromSeed` means **one** variable and
+   not two, on `credential-auth-env.ts`'s own argument that a pair which can be stated twice can be
+   stated inconsistently. The generator is `generateEd25519Keypair` — lowercase `p`, and the
+   obvious spelling answers `undefined`.
+   **The grade is P2 and the register's own test settles it**: all four flags and all five gated
+   surfaces appear **0** times across the three compose files, every warn arm prints its reason and
+   names its flag, and being harmed requires an operator to pass a flag — which is the new
+   capability the P0 test excludes. What is **live** is the documentation: `deploy/ORACLE.md`
+   asserted the refuted claim **in bold** and carried the propagated "every field has a default"
+   verbatim, so a correction that merely retired this entry would have left a false bold assertion
+   in the document an Oracle operator follows while deleting the only record that it is false.
+   Checking that a document has been *rewritten* is not checking that the rewrite is **true** —
+   and that is the one new staleness shape this measurement found, beside the ordinary one it also
+   committed (`:534` was off by three when written; the sentence was at `:531` at both relevant
+   commits). ADR-0390 fixes the document. **The volume is deliberately withheld**: the three
+   configs it would serve are only meaningful once the chain has an environment route, because with
+   no chain nothing is anchored and the integrity proof verifies an empty chain — which ADR-0380
+   made print `NO HISTORY — nothing was examined` — so shipping a host mount now would quietly
+   license a private seed in a mounted file (ADR-0334: a remedy that cannot work is worse than
+   none). Two further measurements an implementer needs: `--deletion-capabilities` is the one of
+   the four with **no dedicated loader** (an inline `JSON.parse(await readFile(...))`, so a missing
+   or malformed file names neither the flag nor the path, where the other three each produce a
+   "cannot read" and an "invalid JSON in" message), and `--deletion-runner-ms` has **five**
+   requirements and not three — a Postgres store, a chain producer **and** an audit emitter, the
+   capabilities, and `--deletion-subject-scope`, which ADR-0379 added and which appears 0 times in
+   every compose file.
    **ADR-0377's addendum corrects the next clause, which ADR-0376 over-generalised**: that flag was
    called "the keystone of the whole Article 17 story" because `node.ts` skips
    `--tenant-deletion-routes` when `auditChainProducer === null` — true of **one** of the three
@@ -10255,6 +10519,51 @@ by it**.
    rather than asserting the class in passing. For later readers, `erp-core`'s real shape, measured
    from current `dist`: **19 entityLifecycle workflows, 79 transitions, 108 (transition, from-state)
    edges, 3 slas**; targeting `paid`, **3 transitions and 5 edges**.
+
+   **Measured a third time on 2026-10-28 and CLOSED by ADR-0391, and the first thing that increment
+   corrected is the harm statement every version of this item had carried.** *"AR is overstated"*
+   silently picks one of the three business facts the edge cannot distinguish — a write-off, a
+   settlement received off-system, operator error — which post to three different accounts; and each
+   of the postings that *did* happen is individually correct, so the general ledger is not wrong, it
+   says "70 is owed", which is **true** if the operator marked it paid in error. The statement that
+   holds under all three readings is the **divergence**: `openStates` excludes `paid`, so the aging
+   subledger reports **0 open** while the GL control account carries the residual, and nothing
+   reconciles or reports the gap. Whichever fact the operator meant, one of the two surfaces is
+   wrong and they disagree **silently**. That inverts what a fix is for: the harm is the silence, so
+   making the uncovered state unreachable is a complete answer and the residual posting — ADR-0378's
+   measured-harmful remedy, and six ledger decisions deep, one with no derivable answer — is not
+   needed at all.
+   **And the reachable surface is wider than three transitions.** A plain
+   `PATCH {"state":"paid"}` reaches `paid` too: `state` is an ordinary `enum` field on all three
+   documents with **no field-level permissions on any of them** (measured from the resolved pack),
+   and `lockedDocumentGuard` returns `null` first when the *before* state is unlocked — so
+   `PATCH /v1/invoices/{id}` succeeds from `draft`, and `PATCH /v1/bills/{id}` succeeds from **any**
+   state because **`Bill` has no locked-document guard at all** (four `lockedStates` declarations:
+   Invoice, TaxReturn, SalesOrder, PurchaseOrder). On that path **recognition never fired**, so a
+   residual effect computing `total − applied` would credit a control account that was never
+   debited — inventing a negative AR out of nothing, which is the sixth ledger decision and is
+   *inexpressible* for `Bill`, whose record carries no `approved_at` or equivalent. So a guard keyed
+   on the **operation** would have closed one path of three; the guard ADR-0391 ships is keyed on
+   the **state edge** (`after[state] === paid && before?.[state] !== paid`), which covers the
+   transition, the plain `PATCH` and a `create` alike.
+   **The population is bounded and measured**: `erp-core` declares the 3, and all six other packs
+   declare **0** of their own, inheriting core's through `meta.extends` — so three edges are the
+   entire population across all seven packs. The two `slas` targeting `paid` drive **nothing** and
+   are not a fourth and fifth edge: `SlaSchema`'s keys are
+   `{name, from, to, deadline, businessHoursOnly, escalation}` with **no `trigger`, `guards`,
+   `preEffects` or `postEffects`**, and `.slas` has exactly one non-test reader, a state-name
+   validator. ADR-0378's *"five declared transitions reach `paid`"* is the right number by the wrong
+   mechanism — the five are **(transition, from-state) edges** from the multi-valued `from:` arrays
+   (2 + 2 + 1), not two timer transitions — which is this item's own staleness class a third time,
+   and the kind that sends a reader looking for a path that does not exist.
+   Three bounds ADR-0391 states rather than leaves to be discovered: `Payment.amount`'s declared
+   `min: 0` is enforced by **nothing**, so any coverage predicate is computed from a quantity whose
+   sign is unbounded and is approximately sound; `paymentSettlementGlPostingEffect` never reads the
+   referenced document **at all** — not its state and not its existence — so a completed Payment
+   naming a deleted or nonexistent document still credits the control account; and `paid_at` is
+   stamped on `Bill`, which declares no such field, so it lands in the JSONB document on
+   `--store pg` and is **silently dropped** on `--store pg-columns`, which is why a stamp-based
+   coordination between the residual and the settlement effects could never have been the mechanism.
 7. ~~**`unique: true` emits no constraint on any entity table while the UI says the field is
    unique.**~~ — **closed by ADR-0360**, which corrected two of the three things this entry said.
    *"while the UI says the field is unique"* is **false**: `unique` occurs exactly once in the whole
@@ -10319,6 +10628,19 @@ by it**.
    class (the literal was at **1334**, a plausible transposition). The distinction decides the
    remedy — anchor-by-heading versus re-measurement discipline — so filing a drifted citation under
    the wrong-when-written class sends the next reader to the wrong fix for one of the two.
+   **And then clause (i)'s own replacement citation was mis-filed the same way, which is the third
+   consecutive increment to mis-file the class on this one item.** `:1465-1471` was **wrong when
+   written**, not drifted: `git log -S` puts its introduction in `f701296` — the *same* commit that
+   shifted `node.ts` by +2 — so in that commit's own post-image the literal is at **1467** while the
+   sentence says 1465, and the parent carries 1465. The sentence describes **its own commit's
+   pre-image**, and its label gave it away by calling `f701296` *"the intervening commit"* when
+   nothing intervenes between a claim and itself. So the remedy is **re-measure after your own
+   edits**, not anchor-by-heading; anchoring by symbol (`tenantContext:` inside the
+   `options.packCatalogFile !== null` block) is what survives either way. One smaller correction in
+   the same clause was right about the number and wrong about the mechanism — `checkCompatibility`
+   is `115-161` and not `115-158`, and the consequence attached to it (*"truncates
+   `requiresDedicatedTenant` at 154-156, inside the omitted range"*) is **false**, since 154-156 is
+   *inside* 115-158 and what is omitted is three lines of return plumbing.
    (ii) *"three of the five fabrications err toward refusal and two err toward admission"* is **not
    derivable from the code**, and asserting it was P3.1's own failure mode committed inside a
    correction to P3.1's class. Read field by field against `checkCompatibility`
@@ -10336,6 +10658,57 @@ by it**.
    not a flag — `--pack-catalog` appears in no file under `deploy/` (and neither does `admin/packs`),
    it is refused under `--store memory`, and **no pack catalog file exists anywhere in the repo**, so
    an operator must author one with no example to copy. P2 is right and if anything generous.
+   **Measured again on 2026-10-28 with a refuter aimed at the measurement, and clause (ii) above is
+   itself refuted: THREE of the five can wrongly admit, and the third is the sharpest harm in the
+   item.** Tallies reproduced from `dist` by holding every other field at its fabricated value and
+   varying one: `planTier 18 agree / 6 wrong-admit / 1 wrong-refuse`, `compliancePacks 25/0/10`,
+   `isDedicatedTenant 3/0/1`, and **`region 100/14/14`**. So a pack declaring
+   `blockedRegions: ["eu-central"]` **installs for an EU tenant** because the fabrication says
+   `us-east` — a residency control defeated. The 2026-10-20 recount printed
+   `region: wronglyAdmits=14` in its own evidence and then concluded *symmetric*, which is this
+   register's own failure mode a third time: the honest shape is **2 refusal-only, 3 admitting**,
+   and *"there is no admitting pair"* is refuted rather than surviving. `platformVersion` is
+   **symmetric and not undeterminable in principle** — the check structure is determinable, and
+   what is absent is any *truth source*, since it has zero producers and there is no
+   `--platform-version` flag (a `--version` boolean exists and feeds nothing). And **a wrong admit
+   is load-bearing rather than advisory**: `install.ts` runs compatibility as check #3, and passing
+   falls through to `buildInitialGrantSet` and a validated installation record — so the admit
+   **grants the pack's scopes and persists an installation**, bounded independently by the elevated
+   security-review gate beside it.
+   **The grade is still P2**, on reachability alone and confirmed on every clause of the triple, and
+   it becomes a genuine wrong-answer item the moment `--pack-catalog` is considered for a default —
+   so it is an **input to P0.3's per-flag survey** rather than an independent item. Two things
+   bound how latent it is: `deploy/README.md` actively invites an operator to add marketplace flags
+   while no catalog file exists in the repo to copy and `loadPackCatalog`'s shape appears in no
+   documentation.
+   **And the structural blocker is one the register never named, which is why "read the column" was
+   never the fix**: `MarketplaceAdminContext.tenantContext` is a **boot-time constant** while all
+   five facts are **per-tenant**, so the mechanical core is changing that field to
+   `(tenantId) => Promise<TenantContext>` — the handler already resolves `tenantId` twenty-one lines
+   before it passes the context, `install` is already awaited, and the blast radius is one handler
+   of the three routes. The design question *"per-tenant settings? the `meta.tenants` row?"* is also
+   **inverted by measurement**: that table already has `tier` and `region` columns and **both are
+   the wrong vocabulary** — `tier IN ('small','enterprise','regulated','on-prem')` is a tenant
+   *sizing* tier overlapping `PLAN_TIERS` on `enterprise` alone, and
+   `region IN ('eu','us','me','ap','sa')` is a **BroadRegion** with **zero** string overlap with the
+   eight fine `Region` values `TenantContext.region` requires, with `BROAD_REGION_OF` one-to-many
+   inverted and `sa` the image of **no** fine region at all. So reading either would be wrong, not
+   approximate. `region` is nonetheless the one of the five that is **mechanically available in two
+   lines**, because `--region` is already validated against those eight and `options.region` is in
+   scope at the literal — parsed with `RegionSchema` and not with the `as Region` cast beside it,
+   which would reproduce ADR-0362's class. The other four are refused with their reasons: the live
+   plan catalog has **no `tier` field** at all and the vocabulary that matches is a **deliberately
+   storeless** table, `isDedicatedTenant` has zero producers and zero other readers anywhere,
+   `platformVersion` has no producer and no flag, and `resolveCompliancePacks` **cannot be called**
+   — there is no `ComplianceRegistry` implementation in the tree and `packages/compliance` exports
+   no `./packs/*`, so an importer can get the resolver and not a single pack. `packMatchesPlatform`
+   is a **second callerless** compatibility entry point, so giving `platformVersion` a source means
+   deciding whether that function gets a caller or gets deleted (ADR-0337). Landable without a
+   product decision: a boot report over the compliance half (5 of 6 declared ids have no definition;
+   3 definitions are declared by nobody; `uae_moh` versus `uae-moh`), `region` alone, and — one line
+   above the literal — P2.16's `adminRoles: new Set(["erp_admin"])`, whose `node.ts:1336` citation
+   is stale and whose *first* member resolves through a `DEFAULT_ADMIN_ROLES` that has a **second
+   constant of the same name** in this app.
 8b. ~~**A deployment with no backups is certified DR-ready**, and the rule against it is written out
    twenty lines above the function that breaks it.~~ — **closed by ADR-0372**, and it was never a
    live P0: an adversarial pass over the audit's own verdicts refuted that grade on the discipline
@@ -10425,6 +10798,79 @@ by it**.
    which parses operator-supplied `--dr-readiness-config` JSON — so a deployment can hand-type a
    verified backup record, which is precisely the falsely-true-control shape ADR-0372 closed, latent
    only because that flag is absent from every compose.
+
+   **Measured again on 2026-10-28, reproduced on a real cluster, and the clause above naming
+   `README:487` as "the only thing holding P0.9 at P0" is wrong — the grade rests on ORACLE.md's
+   scheduled path.** Two facts invert it, and both are reproduced rather than reasoned.
+   *README:487 fails **loudly** and therefore destroys nothing.* It has no pipeline, so
+   `docker compose exec`'s status propagates — exit 1 with pg_dump's error on stderr, which an
+   interactive operator sees. And the measurement's own new finding undercuts the mechanism it was
+   offered for: `$POSTGRES_USER`/`$POSTGRES_DB` live only in `deploy/.env` and **no documented step
+   sources that file into a shell**, so the command expands to `pg_dump -U "" ""`, libpq falls back
+   to the OS user — **`root`**, not `postgres`, because the official image carries no `USER`
+   directive and drops privileges via gosu inside its entrypoint — and the cluster was initdb'd as
+   `crossengin`, so it answers `FATAL: role "root" does not exist` **every time**. A command that
+   always fails can never have written the backup a re-run is said to destroy: the honest harm is
+   **no backup**, not a destroyed one. (The `postgres` *database* does exist, incidentally — initdb
+   creates it unconditionally; only the role is absent.)
+   *ORACLE.md's `dump.sh` fails **silently** and deletes the last good backup.* Reproduced here, end
+   to end: a good 72,122-byte dump aged to 20 days, then the script's exact structure — `set -eu`
+   with **no `pipefail`** (zero occurrences anywhere in `deploy/`), `pg_dump` as the **non-final**
+   element of `pg_dump | gzip > today.sql.gz`, then an unconditional
+   `find … -mtime +14 -delete`. The error printed, **`set -e` did not fire**, the script reached the
+   prune and **exited 0**, and the 72KB backup was **gone**, leaving a 20-byte file. Its trigger
+   needs no operator-shell precondition at all, because the script hardcodes
+   `-U crossengin crossengin` — **any** ordinary dump failure fires it. Fifteen consecutive
+   silently-partial runs leave only partial dumps.
+   *And the documented restore test cannot fail for the artefact that produces.* `gunzip -c … |
+   head -40` reads only the preamble, which a truncated dump still carries, and `head` closing the
+   pipe sends `SIGPIPE` before any trailing-CRC check — so on the real reproduction it printed
+   nothing and exited 0. **`gunzip -t` alone is not the fix either**, which refutes this
+   increment's own first prescription: a `: | gzip` artefact is a *valid* 20-byte archive and
+   `gunzip -t` exits **0** on it. What discriminates is pg_dump's terminating line, measured at
+   **0** occurrences in the broken artefact. And **`pipefail` alone is not sufficient** — it stops
+   the prune and leaves a today-stamped file that both checks accept, which is worse for an operator
+   reading a directory listing than for one reading an exit code — so the temp-file-then-`mv` is
+   *required*. Verified in both arms: on failure, exit 1 with the good backup **surviving** and no
+   `.partial` left; on success, the 20-day-old one pruned **only once a verified new one exists**.
+   The `-T` defect is measurable without docker too — a `pty.fork()` rewrites every `\n` to `\r\n`
+   where a pipe does not — so no claim in this item now rests on reasoning.
+   **Two more sites, and the second is why the fix has an in-file precedent.** The unset-variable
+   defect has a *second* instance at `README:130`, on the **recovery** path — the by-hand
+   `CREATE EXTENSION` repair for *"If `migrate` exits 1"* — so a documented remedy cannot be
+   followed at the moment it is needed (ADR-0334's class). And `README:92`, ~400 lines above,
+   already uses the correct form `$(grep '^POSTGRES_USER=' .env | cut -d= -f2-)`, which proves the
+   author knew the host shell does not hold these variables: a transcription slip, mechanical to
+   fix. `README:907` is also not the "weaker" sibling this entry calls it — it is piped with no
+   pipefail (**silent**) *and* same-day constant, so it carries **both** defects where `:487`
+   carries one and is loud. And `grep -rn backup.sql deploy/` returns exactly **one** hit, the write
+   site: the one artefact README tells an operator to produce has **no documented consumer**.
+   **The grade is a judgement this entry should state rather than cite.** "Destroyed data" is in the
+   P0 list and the list does not say *whose*: both halves destroy only **backups**, never a tenant
+   row, and the serving deployment answers every request correctly throughout. **P0 stands** — a
+   deployment's only recovery point is data, and ADR-0364's addendum and ADR-0376 both graded
+   `deploy/` documentation defects as real — but the item is **split**: the two destructive paths
+   are P0 and ADR-0390 closes them, the absent scheduler and the untested restore are **P1**, and
+   the `--dr-readiness-config` surface is **P2** (absent from every compose, additionally gated on
+   `--store pg`, with no default call site). One more thing the fence could not have caught and that
+   sizes the remaining work honestly: `deployment-defaults.test.ts` reads exactly **two** files —
+   `docker-compose.yml` and `.env.example` — and **none** of the three markdown documents, so
+   pointing it at them is a scope extension over ~110 KB of prose rather than an extension of
+   coverage.
+   **ADR-0390 closes the two destructive paths and the line citations above describe the pre-fix
+   tree**, which is the one kind of citation that cannot drift: the state they name is frozen. What
+   it leaves is this item's P1 half unchanged — no in-stack scheduler, `BackupRecord` with no code
+   producer, and a restore test that verifies the bytes rather than loading them — plus two things
+   the adversarial pass over that commit added. The **ad-hoc dump wrote into the Docker build
+   context** and is fixed in the same change (both README commands run from `deploy/`, the context
+   is `..`, no `*.sql` is ignored, and the documented upgrade is `up -d --build`, so a plaintext dump
+   holding `meta.users`' credential hashes was baked into a pushable layer — this entry's own
+   "destroys only backups" grade argument read in the other direction, since what it exposes is
+   tenant data). And **README's two dump commands now read the role out of `.env`** rather than
+   hardcoding `crossengin`, because that literal is a remedy failing exactly the population
+   *If `extensions` exits 2*'s own `role "…" does not exist` bullet is about — so the item's
+   premise that the literal is right is withdrawn for README and kept for ORACLE.md's cron script,
+   which is a file authored once for one VM.
 
 ### P1 — the product claims it and no deployment can execute it
 
@@ -11312,7 +11758,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 383 records; 304 Accepted, 79 Proposed (the
+title or status change cannot drift. 386 records; 307 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

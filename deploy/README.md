@@ -127,11 +127,23 @@ git pull && docker compose up -d --build
 If you are on a stack without that service, the same statement by hand (keeps all data):
 
 ```bash
-docker compose exec db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+docker compose exec db psql \
+  -U "$(grep '^POSTGRES_USER=' .env | cut -d= -f2-)" \
+  -d "$(grep '^POSTGRES_DB=' .env | cut -d= -f2-)" \
   -c 'CREATE EXTENSION IF NOT EXISTS pg_uuidv7' \
   -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto'
 docker compose up -d
 ```
+
+Those two `grep`s are the idiom from the password-repair step under
+[If `extensions` exits 2](#if-extensions-exits-2) above, and the reason is the same: this command
+used to read `"$POSTGRES_USER"` and
+`"$POSTGRES_DB"`, which the **operator's** shell expands and where both are unset. They live only
+in `deploy/.env`, and no step in this file sources it. So the repair ran as
+`psql -U "" -d ""` against a cluster that has neither — it could not work, and it is the same
+defect the backup command under [Day-2 operations](#day-2-operations) carried, much further down the
+same document — so this file shipped one defect twice, and the copy on the recovery path is the one
+an operator reaches at the moment it is needed.
 
 If `CREATE EXTENSION` answers `extension "pg_uuidv7" is not available … Could not open extension
 control file`, the **server** does not have the `.so` and the image needs rebuilding
@@ -399,7 +411,7 @@ and what is not:
 | **Platform → Tenants → one tenant** | Grant a membership (user id, primary role, optional secondary roles, and a status you must choose), activate or revoke one, and see every member of that tenant. The secondary roles are additive and take effect at that person's next login — they were accepted and inert before ADR-0369. |
 | **Platform → Users** | List every `meta.users` row with a per-status census, filter by status or by exact email address, provision a new one, and open one to suspend / reactivate / retire it. |
 | **Platform → Users → one user** | **Set their password.** This is the route that did not exist before ADR-0364 and the reason onboarding needed a shell. It cannot be aimed at yourself. |
-| **Platform → Design Reviews** | Approve or reject a manifest the Architect designed, with a field-level diff. This page used to 404: the routes behind it mount on `--design-review`, which the compose did not pass. It does now, via `--require-design-review`. The diff covers five of the manifest's sixteen sections and has **no `jobs` and no `views` layer**, so read it as "what entities, roles, permissions and classifications changed", not as the whole change. |
+| **Platform → Design Reviews** | Approve or reject a manifest the Architect designed, with a field-level diff. This page used to 404: the routes behind it mount on `--design-review`, which the compose did not pass. It does now, via `--require-design-review`. Five of the manifest's **seventeen** sections get an itemised layer; the other twelve — `jobs` and `views` among them, and both *are* served — appear in the section census instead, which says *that* they changed and grades it, without saying what inside them changed. |
 | **AI Studio** (`/setup`) | Describe a business in prose and have the Architect design a manifest for it. Activating one **merges it over this deployment's pack** — before ADR-0368 it replaced the pack outright, so a design with four entities took the other forty-seven away from that tenant. Activation now requires a platform reviewer's approval. It does **not** create typed Postgres tables on `--store pg`; the new entities live in the shared JSONB record table. |
 | **Notifications** (`/notifications`) | Every in-app notice this deployment delivered to you, each marked read, unread or **Unknown**, with per-notice and mark-all-read. The sidebar badge points here and nowhere else — it used to hang off AI Studio, which renders only review decisions and digests, so a badge counting every unread notice led to a page showing a subset of them. A digest's rendered body and a decision's notes are still read in AI Studio; this page links there. |
 | **/account** | Change your own password. Needs the current one, so it is the one credential act that needs no grant. |
@@ -483,8 +495,37 @@ What the flag buys is the limit being *yours* and every decision being on the re
   that landed the user registry, read
   [Clearing the foreign-key drift](#clearing-the-foreign-key-drift-after-an-upgrade) once —
   until you do, `migrate` reports the same 29 findings on every `up`.
-- **Backups:** the data lives in the `db-data` volume. Dump regularly, e.g.
-  `docker compose exec db pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" > backup.sql`.
+- **Backups:** the data lives in the `db-data` volume. For an ad-hoc dump:
+
+  ```sh
+  docker compose exec -T db pg_dump \
+    -U "$(grep '^POSTGRES_USER=' .env | cut -d= -f2-)" \
+    "$(grep '^POSTGRES_DB=' .env | cut -d= -f2-)" \
+    > "$HOME/crossengin-$(date +%F-%H%M).sql"
+  ```
+
+  Four things in that command are deliberate, because the form this file shipped for four phases
+  got the first three wrong. **`-T`**: without it `docker compose exec` allocates a TTY, which
+  injects CR into the byte stream, so a dump that completes may still not restore. **The two
+  `grep`s**: the earlier form read `"$POSTGRES_USER" "$POSTGRES_DB"`, which the *operator's* shell
+  expands, and nothing in any of these documents sources `deploy/.env` into a shell — so both were
+  empty and the command could not name the role and database the cluster was initialised with. The
+  lookups are the same idiom as the extension repair above, and they are read from `.env` rather
+  than written as the literal `crossengin` for a reason this file documents earlier:
+  [If `extensions` exits 2](#if-extensions-exits-2) carries a whole `role "…" does not exist` bullet
+  about an operator who changed `POSTGRES_USER`, so a literal is a remedy that fails for exactly the
+  population most likely to need a backup. **A timestamped filename**: it was `> backup.sql`, a constant, and the
+  shell truncates a redirect target *before* `pg_dump` runs, so re-running the documented command
+  destroyed the previous backup before the new one was known to have succeeded. And **`$HOME`
+  rather than the working directory**: you are standing in `deploy/`, which is inside the Docker
+  build context (`context: ..`), and `.dockerignore` does not exclude a `.sql` — so a dump left
+  here is baked into every later `docker compose up -d --build` and into any image you push. A
+  plaintext dump holds `meta.users`' credential hashes.
+
+  For the scheduled form — a script that verifies the dump before it prunes anything — see
+  [ORACLE.md § 13 Back up](./ORACLE.md#13-back-up); it is the same stack. That script hardcodes the
+  role, which is right there and wrong here: it is a file you author once for one VM, where the
+  paths are hardcoded anyway, and it is not expanded by your interactive shell.
 - **Logs:** `docker compose logs -f api` / `web` / `caddy`.
 - **Stop / start:** `docker compose down` (keeps volumes) / `docker compose up -d`.
 - **Scale the API:** the API is stateless — run several `api` replicas behind Caddy
@@ -672,20 +713,29 @@ A design is not live until **you** approve it. The compose passes
 
 Three things to know before the first one arrives.
 
-**Approval is the only gate, so read the diff rather than the summary.** It covers
-five of the manifest's sixteen sections — entities, relations, roles, permissions
-and workflows. A lifecycle the Architect added **is** shown (`lifecycle added with
-3 states`), and narrowing an existing one is flagged **breaking**. There is no
-`jobs` layer and no `views` layer, and both of those *are* served, so a design can
-change what a request gets in a way the diff does not show you.
+**Approval is the only gate, so read the diff rather than the summary.** Five of the
+manifest's **seventeen** sections get an itemised layer — entities, relations, roles,
+permissions and workflows — and a lifecycle the Architect added **is** shown
+(`lifecycle added with 3 states`), with narrowing an existing one flagged **breaking**.
 
-**The diff does not show you `meta.extends`.** Measured: adding it produces zero
-counts and zero warnings. So the one thing every AI design now declares — which pack
-it builds on — is invisible on the page where you approve it. It is checked at build
-time rather than trusted (a tenant may extend only this deployment's own pack, and
-anything else is refused), so this is a gap in what you can *see* and not in what is
-*enforced*. Until it is closed, read the proposal's own JSON if the lineage matters
-to you.
+**The other twelve are named but not itemised, and that is the line to hold in your
+head.** There is still no `jobs` layer and no `views` layer, so the page cannot tell
+you *which* job went or *which* column a view lost — but it does not go quiet about
+them either. Measured on the real `erp-core`: deleting a job reads
+`impact: breaking` with a `jobs` section change and every itemised count zero, and
+narrowing a view from five columns to one reads the same with `views`. So the thing
+to distrust is the counts, not the verdict: a zero-count `breaking` means a section
+changed in a way nothing here can enumerate, and the proposal's own JSON is where
+you read what it was.
+
+**`meta.extends` is in the census now, and this section used to say it was not.**
+Measured on a pair that differs on `meta` alone: `sectionChanges` carries
+`{section: "meta", added: ["extends"]}`, graded additive. The old claim — *zero counts
+and zero warnings* — is still literally true of the five itemised layers, which is
+how it survived: the five are blind to it and the census is not. Lineage was never a
+trust question anyway (a tenant may extend only this deployment's own pack, and
+anything else is refused at build time), so what changed is that the page now shows
+you a fact that was previously only enforced.
 
 **An activated manifest merges over this deployment's pack; it does not replace it.**
 That is new in ADR-0368. Before it, `meta.extends` on a stored manifest was parsed
@@ -901,14 +951,23 @@ forgot-password, so you create the first account yourself — five `curl` calls 
 **9 — Backups.** *Block Volume → your boot volume → Create Backup Policy.* Always Free
 includes 5 volume backups, which is a snapshot story and not a PITR one. A volume
 snapshot of a running Postgres is crash-consistent rather than transaction-consistent,
-so pair it with a logical dump:
+so pair it with a logical dump. Ad hoc, right now:
 
 ```bash
-docker compose exec -T db pg_dump -U crossengin crossengin | gzip > dump-$(date +%F).sql.gz
+docker compose exec -T db pg_dump \
+  -U "$(grep '^POSTGRES_USER=' .env | cut -d= -f2-)" \
+  "$(grep '^POSTGRES_DB=' .env | cut -d= -f2-)" \
+  > "$HOME/crossengin-$(date +%F-%H%M).sql"
 ```
 
-This repository models DR tiers with RPO/RTO targets and does not yet ship a backup
-scheduler, so until it does, that cron line is the deployment's real recovery point.
+**For the scheduled one, follow [ORACLE.md § 13 Back up](./ORACLE.md#13-back-up) rather
+than this section.** This walkthrough is an abridgement of that runbook, and what the
+abridgement dropped is exactly the part that makes a dump a recovery point: the script,
+the crontab line, the retention sweep and the verification. Until this repository ships a
+backup scheduler of its own, that script is the deployment's real recovery point — and
+this section pointing at it, rather than holding a second copy of it, is deliberate: the
+sentence it used to end with named a cron line that four paragraphs of abridgement had
+already removed.
 
 ### Should the UI go on Vercel instead?
 

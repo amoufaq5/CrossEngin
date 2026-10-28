@@ -305,3 +305,78 @@ describe("the two durable job producers report their failures", () => {
     }
   });
 });
+
+describe("serve() — the settlement coverage flag reaches both gateways and the survey", () => {
+  /**
+   * ADR-0386's class: `buildOperateHttpServer` forwards options **one named field at a time**, and
+   * a field it does not name is dropped in silence — invisible to `tsc` because the caller passes
+   * them inside a conditional spread (which bypasses the excess-property check), invisible to the
+   * boot line because the line reads the flag while the request path reads the dropped option, and
+   * invisible to every test because the default there is the *safe* value. Measured once in that
+   * increment on `requiredJwtClaims`; the same three mechanisms hold here.
+   *
+   * Read as text for the reason the fence above it is: both constructions live inside `serve()`,
+   * which needs a bound port to reach, and no type can ask whether a field was forwarded — a
+   * forwarded field and an absent one are identical to the type system.
+   */
+  const src = readFileSync(resolve(import.meta.dirname, "./node.ts"), "utf8");
+
+  it("forwards it to the boot gateway and to the per-tenant one", () => {
+    // Both, and the per-tenant one is the half ADR-0340 established has to be covered: a tenant's
+    // own activated manifest can declare a settleable document, and a guard built only for the boot
+    // manifest would leave exactly the tenant-authored one unguarded.
+    //
+    // Each call's own option literal, not a count of the field across the file: the first draft
+    // asserted `toHaveLength(2)` over the whole source and read **3**, because the survey call
+    // passes the same field under the same name. A count would have been satisfied by three
+    // forwards and no survey, or by two surveys and one gateway.
+    const sites = [...src.matchAll(/buildOperateHttpServer\(\{/g)].map((m) => m.index ?? -1);
+    expect(sites).toHaveLength(2);
+    for (const at of sites) {
+      // Bounded by a slice rather than by a brace matcher: these literals nest, so the first
+      // `});` is not the end of the call — the window is generous and the field is unique enough
+      // that a hit inside it is a hit in this call.
+      expect(src.slice(at, at + 6000), `buildOperateHttpServer at ${at.toString()}`).toContain(
+        "allowUncoveredSettlement: options.allowUncoveredSettlement",
+      );
+    }
+  });
+
+  it("surveys it at boot, so a deployment is told which documents are unguarded", () => {
+    // The whole defect was a silence, so the flag suppressing the guard must not suppress the
+    // report. `surveySettlementCoverage` is called with the flag rather than with `false`.
+    const at = src.indexOf("surveySettlementCoverage(manifest, {");
+    expect(at).toBeGreaterThan(-1);
+    expect(src.slice(at, at + 180)).toContain("allowUncoveredSettlement: options.allowUncoveredSettlement");
+  });
+
+  it("is forwarded on again by buildOperateHttpServer, which is the unfenced hop", () => {
+    // The chain is three hops — `serve()` → `BuildOperateHttpServerOptions` →
+    // `CompileOperateServerOptions` — and only the first two are covered above. The third has no
+    // fence of its own: `compile.test.ts`' `notForwarded` map (ADR-0386) is over
+    // `buildOperateGateway` → `GatewayRuntime` in `@crossengin/operate-runtime`, and nothing
+    // compares `apps/operate-server/src/server.ts`' option literal against what
+    // `compileOperateServer` accepts. So the hop ADR-0386's defect lived on is, in *this* package,
+    // still only pinned per field — this is that pin for this field, and the general rule is that
+    // package's own open end rather than something this test can supply.
+    //
+    // Read from `node.test.ts` rather than from a `server.test.ts` block because the subject is
+    // one wiring chain and splitting the assertions across two files is how half of one gets
+    // forgotten.
+    const serverSrc = readFileSync(resolve(import.meta.dirname, "./server.ts"), "utf8");
+    expect(serverSrc).toContain("readonly allowUncoveredSettlement?: boolean;");
+    expect(serverSrc).toContain("{ allowUncoveredSettlement: options.allowUncoveredSettlement }");
+  });
+
+  it("chooses the log level from the report rather than from the flag", () => {
+    // `settlementCoverageIsSuspect` reads the same list the verdict is computed from, so the level
+    // an operator sees and the verdict they read cannot disagree — and a level keyed on the flag
+    // would print `info` for `TaxReturn`, which is unguarded on every deployment there is.
+    const at = src.indexOf("const settlementLine = formatSettlementCoverageReport");
+    expect(at).toBeGreaterThan(-1);
+    const after = src.slice(at, at + 300);
+    expect(after).toContain("settlementCoverageIsSuspect(settlementCoverage)");
+    expect(after).toContain("console.warn(settlementLine)");
+    expect(after).toContain("console.info(settlementLine)");
+  });
+});

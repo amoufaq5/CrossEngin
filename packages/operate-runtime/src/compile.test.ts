@@ -669,3 +669,303 @@ describe("buildOperateGateway's option forwarding", () => {
     expect(interfaceFields(source, "OperateGatewayOptions")).toContain("requiredJwtClaims");
   });
 });
+
+// ---------------------------------------------------------------------------
+// The settlement coverage guard is wired from the compile, and the defect it closes is a
+// **divergence** rather than an overstated receivable.
+//
+// Measured on resolved `erp-core`, the shipped `--pack` default: three lifecycle transitions reach
+// `paid` — `Invoice.mark_paid`, `Bill.mark_paid`, `TaxReturn.mark_paid` — and no write effect
+// `compile.ts` wires triggers on `paid` at all (all four `triggerState` declarations are `sent` or
+// `approved`; `settleableStates` are the states a document is settled *from*, and every settlement
+// effect fires on the Payment's edge). So marking an invoice of 120 paid against 50 received leaves
+// `computeAging` reporting nothing open — it drops a document whose state is not in `openStates` —
+// while the GL control account still carries the residual, and nothing reconciles the two.
+//
+// These drive the real compiled handlers rather than the guard in isolation, because the thing
+// under test is the **wiring**: a guard built and not reached is this repository's most-found shape.
+// ---------------------------------------------------------------------------
+
+const COVERAGE_TENANT = TENANT;
+
+/**
+ * An Invoice with everything the coverage guard needs — a `total`, a lifecycle reaching `paid` —
+ * and no `Payment` entity. The gate's negative control: a guard built here would refuse the
+ * `mark_paid` below, so the 200 is the evidence it was not built.
+ */
+const PAYMENTLESS = {
+  meta: { name: "paymentless", version: "1.0.0" },
+  entities: [
+    {
+      name: "Invoice",
+      fields: [
+        { name: "id", type: { kind: "uuid" } },
+        { name: "state", type: { kind: "enum", values: ["sent", "paid"] } },
+        { name: "total", type: { kind: "decimal", precision: 12, scale: 2 } },
+      ],
+    },
+  ],
+  roles: { erp_admin: { name: "erp_admin" } },
+  permissions: {
+    Invoice: {
+      read: { roles: ["erp_admin"] },
+      list: { roles: ["erp_admin"] },
+      create: { roles: ["erp_admin"] },
+      update: { roles: ["erp_admin"] },
+      transitions: { mark_paid: { roles: ["erp_admin"] } },
+    },
+  },
+  workflows: {
+    invoice_lifecycle: {
+      kind: "entityLifecycle",
+      entity: "Invoice",
+      stateField: "state",
+      initialState: "sent",
+      states: [{ name: "sent" }, { name: "paid" }],
+      transitions: [
+        { name: "mark_paid", from: ["sent"], to: "paid", trigger: { kind: "userAction" } },
+      ],
+    },
+  },
+};
+
+function coveragePrincipal(): ResolvedPrincipal {
+  return {
+    principalId: "00000000-0000-4000-8000-0000000000ab",
+    tenantId: COVERAGE_TENANT,
+    principalKind: "user",
+    authScheme: "api_key_header",
+    grantedScopes: ["erp_admin"],
+    mfaProofAgeSeconds: null,
+    resolvedAt: "2026-06-03T12:00:00.000Z",
+  };
+}
+
+function coverageServer(allowUncoveredSettlement?: boolean) {
+  const store = new InMemoryEntityStore();
+  const compiled = compileOperateServer(buildErpCorePack(), {
+    store,
+    principalRoles: () => ({ primaryRole: "erp_admin" }),
+    ...(allowUncoveredSettlement !== undefined ? { allowUncoveredSettlement } : {}),
+  });
+  return { store, compiled };
+}
+
+async function callOperation(
+  compiled: ReturnType<typeof compileOperateServer>,
+  operationId: string,
+  params: Record<string, string>,
+  body: Record<string, unknown> | null,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const handler = compiled.handlers.resolve(operationId);
+  if (handler === null) throw new Error(`no handler for ${operationId}`);
+  const out = await handler({
+    request: req(body === null ? "POST" : "PATCH", "/x", "unused"),
+    route: {} as never,
+    principal: coveragePrincipal(),
+    params,
+    parsedBody: body,
+  });
+  if (out.kind !== "json") throw new Error("expected json");
+  return { status: out.status, body: out.body as Record<string, unknown> };
+}
+
+async function seedInvoice(
+  store: InMemoryEntityStore,
+  opts: { readonly state: string; readonly total: number; readonly paid?: number },
+): Promise<string> {
+  const inv = await store.create(COVERAGE_TENANT, "Invoice", {
+    invoice_number: "INV-1",
+    state: opts.state,
+    total: opts.total,
+    currency: "USD",
+  });
+  const id = String(inv["id"]);
+  if (opts.paid !== undefined) {
+    await store.create(COVERAGE_TENANT, "Payment", {
+      state: "completed",
+      amount: opts.paid,
+      invoice_id: id,
+    });
+  }
+  return id;
+}
+
+describe("compileOperateServer — settlement coverage is wired for the real pack", () => {
+  it("refuses invoice.mark_paid when completed payments fall short", async () => {
+    const { store, compiled } = coverageServer();
+    const id = await seedInvoice(store, { state: "sent", total: 120, paid: 50 });
+    const r = await callOperation(compiled, "invoice.mark_paid", { id }, null);
+    expect(r.status).toBe(422);
+    expect(r.body["error"]).toBe("uncovered_settlement");
+    expect(r.body["detail"]).toContain("70.00 of 120.00");
+    // Nothing was written: the guard runs before `store.update`, so the document is still open and
+    // the two views still agree.
+    expect((await store.get(COVERAGE_TENANT, "Invoice", id))?.["state"]).toBe("sent");
+  });
+
+  it("allows invoice.mark_paid once the payments cover it", async () => {
+    const { store, compiled } = coverageServer();
+    const id = await seedInvoice(store, { state: "sent", total: 120, paid: 120 });
+    const r = await callOperation(compiled, "invoice.mark_paid", { id }, null);
+    expect(r.status).toBe(200);
+    expect((await store.get(COVERAGE_TENANT, "Invoice", id))?.["state"]).toBe("paid");
+  });
+
+  it("refuses a plain PATCH that sets state=paid from draft, which no transition covers", async () => {
+    // The path an operation-keyed guard would have missed, and it is the *larger* of the two:
+    // `draft → paid` is not a declared transition at all (`mark_paid` is from `sent`/`overdue`), and
+    // `lockedDocumentGuard` returns null because `draft` is not one of Invoice's locked states.
+    const { store, compiled } = coverageServer();
+    const id = await seedInvoice(store, { state: "draft", total: 120 });
+    const r = await callOperation(compiled, "invoice.update", { id }, { state: "paid" });
+    expect(r.status).toBe(422);
+    expect(r.body["error"]).toBe("uncovered_settlement");
+    expect((await store.get(COVERAGE_TENANT, "Invoice", id))?.["state"]).toBe("draft");
+  });
+
+  it("lets invoice_locked win over coverage on a PATCH from a locked state", async () => {
+    // The guard order, and it is load-bearing rather than incidental. `sent` is one of Invoice's
+    // locked states, so this PATCH is refused whatever the coverage — and measured live with the
+    // coverage guard first, the answer was `uncovered_settlement: 70.00 of 120.00 still owed`,
+    // whose remedy (record the payment) would NOT let the PATCH through, because the locked guard
+    // would then refuse it. ADR-0334: naming a fix that cannot work is worse than naming none.
+    //
+    // The invoice is **under-covered on purpose**, and the first draft of this test had it fully
+    // covered — which is invisible to the order, because a passing coverage guard is transparent
+    // and both orders then answer `invoice_locked`. Caught by the order mutation staying green.
+    // Only a document that satisfies *both* guards can observe which runs first.
+    const { store, compiled } = coverageServer();
+    const id = await seedInvoice(store, { state: "sent", total: 120, paid: 50 });
+    const r = await callOperation(compiled, "invoice.update", { id }, { state: "paid" });
+    expect(r.status).toBe(422);
+    expect(r.body["error"]).toBe("invoice_locked");
+  });
+
+  it("still reaches coverage on the transition, which the locked guard lets through", async () => {
+    // The complement of the test above, and together they are what says "last" costs nothing: the
+    // locked guard returns null on `operation === "transition"` by design, so `mark_paid` — the
+    // path this whole guard exists for — lands here from `sent` even though `sent` is locked.
+    const { store, compiled } = coverageServer();
+    const id = await seedInvoice(store, { state: "sent", total: 120, paid: 50 });
+    const r = await callOperation(compiled, "invoice.mark_paid", { id }, null);
+    expect(r.body["error"]).toBe("uncovered_settlement");
+  });
+
+  it("refuses a plain PATCH on a Bill, which has no locked-document guard at all", async () => {
+    // Four `lockedStates` declarations exist in `compile.ts` — Invoice, TaxReturn, SalesOrder and
+    // PurchaseOrder — and no Bill, so `PATCH /v1/bills/{id} {"state":"paid"}` lands from *any*
+    // state and this guard is the only thing in front of it.
+    const { store, compiled } = coverageServer();
+    const bill = await store.create(COVERAGE_TENANT, "Bill", {
+      bill_number: "B-1",
+      state: "draft",
+      total: 90,
+      currency: "USD",
+    });
+    const r = await callOperation(compiled, "bill.update", { id: String(bill["id"]) }, { state: "paid" });
+    expect(r.status).toBe(422);
+    expect(r.body["error"]).toBe("uncovered_settlement");
+    expect(r.body["detail"]).toContain("90.00 of 90.00");
+  });
+
+  it("lets an uncovered settlement through under allowUncoveredSettlement", async () => {
+    const { store, compiled } = coverageServer(true);
+    const id = await seedInvoice(store, { state: "sent", total: 120, paid: 50 });
+    const r = await callOperation(compiled, "invoice.mark_paid", { id }, null);
+    expect(r.status).toBe(200);
+    expect((await store.get(COVERAGE_TENANT, "Invoice", id))?.["state"]).toBe("paid");
+  });
+
+  it("serves TaxReturn.mark_paid, whose coverage predicate has neither operand", async () => {
+    // `TaxReturn` declares no `total` field and `Payment` carries no reference to it, so both
+    // operands of `total - applied` are missing and it is deliberately left out of
+    // `SETTLEMENT_COVERAGE_DOCUMENTS` rather than guarded weakly.
+    //
+    // What this 200 establishes is only that the filing is **servable** — it deliberately does not
+    // distinguish *no guard was built* from *a guard was built and checks nothing*, and measured,
+    // it cannot: adding `TaxReturn` to the declaration leaves this whole file green, because
+    // `num(undefined)` is 0 so the guard finds every filing covered. The two facts that case rests
+    // on are pinned where they are separable — `write-guards.test.ts` shows such a guard returning
+    // null for a genuinely owed filing, and asserts the declaration does not name it — and the
+    // boot survey reports it as unguarded with both missing operands.
+    const { store, compiled } = coverageServer();
+    const tr = await store.create(COVERAGE_TENANT, "TaxReturn", {
+      return_number: "TR-1",
+      state: "filed",
+      net_payable: 500,
+      currency: "USD",
+    });
+    const r = await callOperation(compiled, "taxReturn.mark_paid", { id: String(tr["id"]) }, null);
+    expect(r.status).toBe(200);
+  });
+
+  it("builds no coverage guard for a manifest with an Invoice and no Payment entity", async () => {
+    // Gated on `Payment` as every settlement effect is: with nothing recording money arriving the
+    // guard would drain an entity the manifest does not declare — harmless on the in-memory store
+    // and a missing table on `--store pg-columns`.
+    //
+    // Asserted through the **behaviour** and not through the absence of an Invoice route, which
+    // would have been a test of the fixture rather than of the gate: this manifest has everything
+    // the guard needs except a Payment, so a guard built anyway would refuse the write below (zero
+    // applied against a total of 120) and the 200 is what says it was not built.
+    const noPayments = { ...PAYMENTLESS } as unknown as Manifest;
+    const store = new InMemoryEntityStore();
+    const compiled = compileOperateServer(noPayments, {
+      store,
+      principalRoles: () => ({ primaryRole: "erp_admin" }),
+    });
+    const inv = await store.create(COVERAGE_TENANT, "Invoice", {
+      state: "sent",
+      total: 120,
+    });
+    const r = await callOperation(compiled, "invoice.mark_paid", { id: String(inv["id"]) }, null);
+    expect(r.status).toBe(200);
+  });
+
+  it("keys the guard on the lifecycle's own stateField, not on the `state` fallback", async () => {
+    // The guard reads the state field BY NAME, and `SETTLEMENT_COVERAGE_DOCUMENTS` declares none,
+    // so it fell back to `state`. On a manifest whose lifecycle drives `status` — which
+    // `validateWorkflows` accepts since ADR-0359 because the field exists, and which is the normal
+    // shape for `Opportunity.stage`, `WorkOrder.status` and `Enrollment.status` — the guard read
+    // `after["state"]`, got `undefined`, and returned null for **every** write, while the boot
+    // survey went on naming the entity as guarded: ADR-0337's falsely-true direction on the one
+    // surface built to make this gap legible. Reachable from a tenant's own activated manifest.
+    //
+    // Asserted through the behaviour: this manifest has a Payment and an uncovered total, so a
+    // guard that cannot read the state answers 200 and the 422 is what says the wiring took.
+    const statusKeyed = JSON.parse(JSON.stringify(PAYMENTLESS)) as Record<string, never>;
+    const m = statusKeyed as unknown as {
+      entities: { name: string; fields: { name: string; type: unknown }[] }[];
+      permissions: Record<string, unknown>;
+      workflows: { invoice_lifecycle: { stateField: string } };
+    };
+    m.entities[0]!.fields[1]!.name = "status";
+    m.workflows.invoice_lifecycle.stateField = "status";
+    m.entities.push({
+      name: "Payment",
+      fields: [
+        { name: "id", type: { kind: "uuid" } },
+        { name: "state", type: { kind: "enum", values: ["pending", "completed"] } },
+        { name: "amount", type: { kind: "decimal", precision: 12, scale: 2 } },
+        { name: "invoice_id", type: { kind: "uuid" } },
+      ],
+    });
+    m.permissions["Payment"] = {
+      read: { roles: ["erp_admin"] },
+      list: { roles: ["erp_admin"] },
+      create: { roles: ["erp_admin"] },
+      update: { roles: ["erp_admin"] },
+    };
+
+    const store = new InMemoryEntityStore();
+    const compiled = compileOperateServer(statusKeyed as unknown as Manifest, {
+      store,
+      principalRoles: () => ({ primaryRole: "erp_admin" }),
+    });
+    const inv = await store.create(COVERAGE_TENANT, "Invoice", { status: "sent", total: 120 });
+    const r = await callOperation(compiled, "invoice.mark_paid", { id: String(inv["id"]) }, null);
+    expect(r.status).toBe(422);
+    expect(r.body["error"]).toBe("uncovered_settlement");
+  });
+});

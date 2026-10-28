@@ -2,6 +2,7 @@ import { generateEd25519Keypair } from "@crossengin/crypto";
 import { describe, expect, it } from "vitest";
 
 import { COLUMN_KEY_TTL_BOUNDS, DEFAULT_COLUMN_KEY_TTL_MS } from "./data-key-envelope.js";
+import { ALLOW_UNCOVERED_SETTLEMENT_FLAG } from "./settlement-coverage-survey.js";
 import {
   CliUsageError,
   helpText,
@@ -1511,6 +1512,36 @@ describe("--workflow-workers", () => {
   it("defaults --allow-cursor-disclosure off, so a filtered list's cursor is sealed or refused", () => {
     expect(parseServeArgs([...PG]).allowCursorDisclosure).toBe(false);
     expect(parseServeArgs([...PG, "--allow-cursor-disclosure"]).allowCursorDisclosure).toBe(true);
+  });
+
+  it("defaults --allow-uncovered-settlement off, so an unpaid document cannot be marked paid", () => {
+    expect(parseServeArgs([...PG]).allowUncoveredSettlement).toBe(false);
+    expect(parseServeArgs([...PG, ALLOW_UNCOVERED_SETTLEMENT_FLAG]).allowUncoveredSettlement).toBe(
+      true,
+    );
+  });
+
+  it("parses --allow-uncovered-settlement on every store, because the question is not about one", () => {
+    // Unlike `--allow-plaintext-phi`, which is refused on `pg-columns` because that store cannot
+    // produce the outcome the flag accepts. Coverage is read through the `EntityStore` interface,
+    // so the divergence this accepts is reachable on all three and no store makes it redundant.
+    for (const store of ["memory", "pg", "pg-columns"]) {
+      expect(
+        parseServeArgs(["--pack", "erp-core", "--store", store, ALLOW_UNCOVERED_SETTLEMENT_FLAG])
+          .allowUncoveredSettlement,
+        store,
+      ).toBe(true);
+    }
+  });
+
+  it("documents the divergence the settlement flag accepts, not only that it exists", () => {
+    // The cursor entry's rule: an operator cannot tell whether accepting this is safe from the
+    // words "off by default". Both halves of the divergence have to be named, because the harm is
+    // that the two surfaces disagree rather than that either is wrong on its own.
+    expect(helpText).toContain(ALLOW_UNCOVERED_SETTLEMENT_FLAG);
+    expect(helpText).toContain("aging report");
+    expect(helpText).toContain("control account");
+    expect(helpText).toContain("recoverable");
   });
 
   it("does not refuse --allow-cursor-disclosure beside a store, unlike --allow-plaintext-phi", () => {

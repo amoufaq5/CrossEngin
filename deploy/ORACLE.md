@@ -528,24 +528,85 @@ Postgres is crash-consistent rather than transaction-consistent. Pair it with a 
 mkdir -p ~/backups
 cat > ~/backups/dump.sh <<'SH'
 #!/bin/bash
-set -eu
+# `pipefail` is why this is six lines and not three, and leaving it out is how a backup
+# story becomes a destroyed one. `pg_dump` is the NON-FINAL element of the pipe, so
+# without it a dump that dies mid-stream still produces a VALID gzip of a PARTIAL dump:
+# the pipeline exits 0, `set -e` never fires, cron says nothing, and the sweep at the end
+# runs anyway. Measured on the form this section used to ship: ONE failing run, against a
+# directory holding one dump older than the retention window, exits 0, prunes the good
+# dump, and leaves a `gunzip -t`-valid gzip of a one-line partial in its place. It does
+# not take fifteen quiet days — it takes one.
+set -euo pipefail
+# Everything this script says goes to one log, because the diagnosis must not be in the
+# backup file (a truncated gzip says nothing useful) and must not depend on infrastructure
+# this runbook does not install: cron mails a job's output only where an MTA is configured,
+# and nothing below installs one or sets MAILTO. So a failure is RECORDED here rather than
+# announced — strictly better than the void it used to go to, and still a file you have to
+# read. If you want it pushed, set MAILTO and install an MTA, or point a monitor at this log.
+exec >> /home/ubuntu/backups/dump.log 2>&1
+echo "=== $(date -Is)"
 cd /home/ubuntu/crossengin/deploy
-docker compose exec -T db pg_dump -U crossengin crossengin \
-  | gzip > "/home/ubuntu/backups/crossengin-$(date +%F-%H%M).sql.gz"
+out="/home/ubuntu/backups/crossengin-$(date +%F-%H%M).sql.gz"
+tmp="$out.partial"
+# The invariant this buys: ~/backups holds verified dumps and nothing else. A run that
+# fails anywhere leaves the directory exactly as it was, so a later reader never has to
+# ask whether a file there is this minute's half-written one.
+trap 'rm -f "$tmp"' EXIT
+docker compose exec -T db pg_dump -U crossengin crossengin | gzip > "$tmp"
+gunzip -t "$tmp"
+mv -- "$tmp" "$out"
+# Reachable only if everything above succeeded, which is the point: under `set -e` a
+# failed dump or a failed verify never gets here, so the retention sweep cannot be the
+# thing that leaves this deployment with nothing restorable. `*.partial` does not match
+# `*.sql.gz`, so an in-flight dump is excluded by the glob rather than by a race.
 find /home/ubuntu/backups -name 'crossengin-*.sql.gz' -mtime +14 -delete
 SH
 chmod +x ~/backups/dump.sh
 ( crontab -l 2>/dev/null; echo "17 3 * * * /home/ubuntu/backups/dump.sh" ) | crontab -
 ```
 
-**Test the restore now, while nothing depends on it.** An untested backup is a hope:
+**Check the dumps now, while nothing depends on them.** An untested backup is a hope. And
+`~/backups/dump.log` is where a failed run says why — read it, because nothing mails it to you:
 
 ```bash
-gunzip -c ~/backups/crossengin-*.sql.gz | head -40     # it is real SQL, not an error page
+gunzip -t ~/backups/crossengin-*.sql.gz                # 1. each WHOLE stream decompresses
+gunzip -c ~/backups/crossengin-*.sql.gz | head -40     # 2. and it is SQL, not an error page
+for f in ~/backups/crossengin-*.sql.gz; do             # 3. and `pg_dump` reached the end
+  gunzip -c "$f" | tail -5 | grep -q 'PostgreSQL database dump complete' \
+    || echo "INCOMPLETE: $f"
+done
 ```
 
+**That order is the whole of it, and step 2 alone — which is what this section used to
+run — cannot fail for the thing step 1 catches.** A dump truncated at any later byte still
+carries its preamble verbatim, and `head` closes the pipe before `gunzip` ever reaches the
+trailing CRC, so the check came back clean on exactly the file you must not trust.
+Measured: a gzip with its last 30 bytes removed prints its first three lines and exits 0
+under step 2, and answers `unexpected end of file` with exit 1 under step 1.
+
+**Step 3 is not a third opinion on the same question — steps 1 and 3 catch *disjoint*
+failures, which is why both are here.** An *empty* input is a perfectly valid gzip: the
+20-byte file the old script left behind on a dump that never started passes step 1 with
+exit 0 and prints nothing under step 2, so neither of the first two can see it — and this
+directory is exactly where those remnants are. Step 3 answers `0` on it. Conversely a
+*late* truncation leaves the terminating line intact in the decompressible prefix, so step
+3 passes and step 1 is the one that catches it. Measured both ways.
+
+The `| tail -5 |` in the middle of step 3 is load-bearing rather than tidy. `tail` cannot
+emit anything until the stream **ends**, so `gunzip` always runs to completion; written as
+a bare `gunzip -c "$f" | grep -q …` the `grep` matches early, exits, and `gunzip` takes
+SIGPIPE — measured at 200 non-zero exits in 200 trials over a 16,590-line dump, i.e. it
+would report every good dump as broken, where the form above is 0 in 200.
+
+**Be honest about what this is not.** Verifying the bytes is not restoring them: a real
+restore test loads a dump into a scratch database and reads a row back, and nothing here
+does that. These three commands tell you the file is a complete, decompressible SQL dump
+that `pg_dump` finished writing — which is the failure mode a silent cron produces, and
+not the only one there is.
+
 This repository models DR tiers with RPO/RTO targets and ships **no backup scheduler**, so until
-it does, that cron line is the deployment's real recovery point.
+it does, `~/backups/dump.sh` and the crontab line above it are the deployment's real recovery
+point — which is why its `pipefail` and its verify-before-prune are not fussiness.
 
 ---
 
@@ -578,32 +639,92 @@ anchored until you say so.
 | `--rate-limit-policy …` | durable, cross-replica rate limiting | a `command:` line |
 | `--workflow-workers` | the timer, activity and job workers — without this a due timer never fires | a `command:` line, **and a job handler** (see below) |
 | `--schedule-ms 60000` | the manifest's scheduled jobs | `--workflow-workers`, **and a job handler** |
-| `--checkpoint-config …` | the periodic chain checkpoints the truncation check needs | a mounted **file**, see below |
-| `--integrity-proof-config …` | the periodic audit-integrity verification | a mounted **file** |
-| `--deletion-capabilities …` | GDPR Article 17 — neither deletion surface mounts without it | a mounted **file** |
+| `--checkpoint-config …` | the periodic chain checkpoints the truncation check needs | a **file**, see below |
+| `--integrity-proof-config …` | the periodic audit-integrity verification | a **file** |
+| `--deletion-capabilities …` | GDPR Article 17 — neither deletion surface mounts without it | a **file**, and six decisions (below) |
 | `--deletion-subject-scope tenant` | the Article 17 **runner** — it does not mount without it | a `command:` line, and a decision (below) |
-| `--audit-chain-config …` | the hash-chained audit trail | a mounted file **holding a private key** |
+| `--audit-chain-config …` | the hash-chained audit trail | a file **holding a private key** |
 
 The last column is the honest part, and none of it is a `command:` line.
 
-**None of the four file-taking flags has a path by which you can supply a file.** The `api` service
-declares no `volumes:` key at all, so there is nowhere on the host the container can read a config
-from, and the instruction "each is a line added to that `command:`" cannot be followed for any of
-them. That edit is yours to make until it ships as a default, which is why those four sit below the
-other three.
+**The route that exists for a config file is the image, and it is too expensive to use.** This
+section used to say there was no route at all, in bold, and that was false. `deploy/Dockerfile:18`
+is `COPY . .` under `WORKDIR /app`, the compose build context is the repository root, and
+`.dockerignore` excludes `deploy/.env`, and none of its other patterns (`**/node_modules`,
+`**/dist`, `**/.next`, `**/*.tsbuildinfo`, `**/*.log`, `**/coverage`, `.git`, `.github`) matches
+anything under `deploy/` today — so a file you drop at
+`deploy/checkpoint.json` is baked into the image at `/app/deploy/checkpoint.json` and
+`--checkpoint-config deploy/checkpoint.json` reads it, with no `volumes:` key anywhere. It does not
+even have to be committed: a build context is the working tree minus `.dockerignore`, not the git
+index, which is why `.dockerignore` has to list `.git` explicitly.
 
-They are also not peers, which decides how that edit should be designed:
+Two things make it a gap even so, and they are different in kind:
 
-- **Three are ordinary committable config.** Measured, `CheckpointConfigSchema.safeParse({})` and
-  `IntegrityProofConfigSchema.safeParse({})` both succeed **fully defaulted** — every field has a
-  default, including `intervalMs: 3600000` and `includePlatform: true` — so `{}` in a file is a
-  valid config for either, and `--deletion-capabilities` is a six-key declaration of what this
-  deployment holds, with no secret in it.
-- **`--audit-chain-config` holds a 32-byte Ed25519 private seed.** It is the only one of the four
-  whose schema has required fields (`privateKeyBase64` and `publicKeyBase64`, both validated as real
-  keys rather than merely non-empty), so ADR-0301's rule applies: a credential reaches this process
-  through the **environment**, which means this flag wants an env route for its keypair before it
-  wants a volume.
+- **The cost.** `COPY . .` sits immediately above
+  `RUN pnpm install --frozen-lockfile && pnpm -r build && pnpm --filter @crossengin/operate-web build`,
+  and the Dockerfile's own comment says that layer is deliberately coarse. So changing two bytes of
+  JSON invalidates it and buys you a full `pnpm install`, a full workspace build and a `next build`
+  — the first build is 10–20 minutes on two A1 cores, and a rebuild is most of it, because what the
+  cache still holds above the `COPY` is the `node:20` and corepack layers rather than any of the
+  three steps above. A route that costs that per edit is a route nobody uses twice.
+- **What it cannot carry.** What is missing is a route for an *uncommitted, host-side* file, which
+  is exactly the shape a credential needs — and baking one is strictly worse than not having the
+  route. An Ed25519 private seed inside an image layer is in the local layer cache, in any
+  `docker save` tarball, and in every registry the tag is pushed to, and a layer is not deletable
+  from a tag that has been pulled. That **sharpens** ADR-0301's rule rather than weakening it:
+  argv is readable by `ps`, and an image layer is readable by anyone who can pull.
+
+So the `volumes:` key the three committable configs want is still the edit to make, and the keypair
+below wants an environment route instead of either.
+
+They are also not peers, and it is a three-way split rather than the two this section used to draw:
+
+- **Two take `{}` and nothing else.** Measured, `CheckpointConfigSchema.safeParse({})` and
+  `IntegrityProofConfigSchema.safeParse({})` both succeed — so `{}` in a file is a valid config for
+  either, and the useful ones (`intervalMs: 3600000`, `includePlatform: true`) are defaults you do
+  not have to write. The *reason* this section used to give was wrong: it is not that every field
+  has a default. `tenantStatuses` on both, and `escalation` on the integrity proof, are optional
+  with **no** default, which is why `{}` parses to 6 keys out of 7 declared and 9 out of 11 rather
+  than to all of them. Optional-and-absent is not the same fact as defaulted, and here it matters:
+  an absent `escalation` means findings reach the callbacks and page nobody, which is a decision
+  rather than a value you left blank.
+- **`--deletion-capabilities` is six decisions and `{}` is refused.** Measured,
+  `DeletionCapabilitiesSchema.safeParse({})` fails with **six** `Required` issues, one per
+  subsystem — by design, because ADR-0328's rule is that a schema default is applied to *silence*
+  and the reach of an Article 17 proof is not something silence may answer. `cli.ts`'s `--help` for
+  the flag says it outright: *every default is wrong*. So there is nothing to paste and
+  `CONSERVATIVE_DELETION_CAPABILITIES`, the one exported template, is all six `erases`, which keeps
+  every subsystem in scope and therefore refuses every deletion. Write it out with a reason per
+  value:
+
+  ```json
+  {
+    "tenant_schema": "erases",
+    "shared_tables": "erases",
+    "object_storage": "absent",
+    "backups": "present_not_erased",
+    "search_indexes": "absent",
+    "caches": "absent"
+  }
+  ```
+
+  Why each: the first two are the two subsystems this binary actually **performs**, and they may
+  not be declared `absent` at all. `object_storage`, `search_indexes` and `caches` are `absent`
+  because this stack has none — no S3/GCS client, no Typesense, no Redis — and `absent` is a true
+  statement here rather than a convenient one. **`backups` is the one to read twice.** If you
+  followed § 13 you hold nightly dumps, so `absent` would put *"this deployment does not take
+  backups"* inside a cryptographic proof; `erases` and `retains` both keep backups in scope and
+  nothing in this binary can attest for them, so every deletion refuses. `present_not_erased` is
+  the fourth disposition, added for exactly this: it drops the attester requirement **without**
+  claiming the subsystem is not there — a positive signed statement that the data is still held.
+  Its horizon — *"we hold it for 14 days"*, which is what `-mtime +14` means above — is not
+  expressible yet, so the proof says the data is retained and not for how long.
+- **`--audit-chain-config` holds a 32-byte Ed25519 private seed.** Its required fields
+  (`privateKeyBase64` and `publicKeyBase64`, both validated as real keys rather than merely
+  non-empty) are not what sets it apart — the capabilities file has six required fields of its own.
+  What sets it apart is that one of them is a **credential**, so ADR-0301's rule applies: a
+  credential reaches this process through the **environment**, which means this flag wants an env
+  route for its keypair before it wants either a volume or the image bake above.
 
   **It gates one of the three deletion surfaces and not all three**, and the difference decides what
   you can turn on:

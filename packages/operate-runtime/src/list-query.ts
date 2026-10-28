@@ -149,8 +149,18 @@ function searchableFieldsFor(
   return textFields.filter((f) => visible.has(f));
 }
 
-/** The lifecycle `stateField` for an entity, if a workflow declares one. */
-function lifecycleStateField(manifest: Manifest, entity: string): string | null {
+/**
+ * The lifecycle `stateField` for an entity, if a workflow declares one.
+ *
+ * Exported because `defaultWriteGuards` needs the same answer: `settlementCoverageGuard` reads a
+ * state field *by name*, and hardcoding `state` there made the guard inert — while the boot survey
+ * went on naming the entity as guarded — for any manifest whose lifecycle drives another field.
+ * That shape is normal here (`Opportunity.stage` in all seven packs, `WorkOrder.status` and
+ * `Project.status` in `erp-construction`, `Enrollment.status` in `erp-education`) and
+ * `validateWorkflows` accepts it, so it is reachable from a tenant's own activated manifest. Two
+ * spellings of *which field holds the state* is what would eventually disagree, so there is one.
+ */
+export function lifecycleStateField(manifest: Manifest, entity: string): string | null {
   for (const wf of Object.values(manifest.workflows ?? {}) as ReadonlyArray<LifecycleLike>) {
     if (wf.kind === "entityLifecycle" && wf.entity === entity) return wf.stateField;
   }

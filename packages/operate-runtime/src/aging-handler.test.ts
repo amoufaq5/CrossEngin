@@ -263,3 +263,38 @@ describe("buildAgingHandler — the bounded declaration", () => {
     expect(bodyOf(await invoke(buildHandler(store, { maxRows: 9 }))).complete).toBe(false);
   });
 });
+
+describe("buildAgingHandler — the applied fold is the shared reading (ADR-0391)", () => {
+  it("skips a payment whose reference is not a string", async () => {
+    // `reference` is `acceptAny` in `FIELD_TYPE_CHECKS`, so `{"invoice_id": 42}` is a body the
+    // validator admits and the JSONB store round-trips as a number. This read is filtered on the
+    // payment *state* rather than on a document, so the row genuinely reaches the fold here — and
+    // the strict keying is what keeps it out of the applied map. Fail-closed: a skipped payment
+    // leaves `applied` too small, which **overstates** the open balance rather than hiding one.
+    const store = new InMemoryEntityStore();
+    await store.create(TENANT, "Invoice", {
+      id: "42",
+      invoice_number: "INV-42",
+      state: "sent",
+      total: 100,
+      currency: "USD",
+    });
+    await store.create(TENANT, "Payment", { state: "completed", amount: 60, invoice_id: 42 });
+    const body = bodyOf(await invoke(buildHandler(store)));
+    expect(body.sections["ar"]!.documents[0]).toMatchObject({ applied: 0, open: 100 });
+  });
+
+  it("declares the payment read as bounded when it exceeds the ceiling", async () => {
+    // The ceiling's `report` arm: `READ_CEILING_EFFECT.report` is `declares`, so a bounded reading
+    // says how far it looked rather than truncating in silence. The name is the payment read's own,
+    // because a dropped payment and a dropped document point opposite ways.
+    const store = new InMemoryEntityStore();
+    await store.create(TENANT, "Invoice", { invoice_number: "INV-B", state: "sent", total: 10, currency: "USD" });
+    for (let i = 0; i < 4; i += 1) {
+      await store.create(TENANT, "Payment", { state: "completed", amount: 1, invoice_id: "x" });
+    }
+    const body = bodyOf(await invoke(buildHandler(store, { maxRows: 2 })));
+    expect(body.complete).toBe(false);
+    expect(body.bounded).toContain("payments");
+  });
+});

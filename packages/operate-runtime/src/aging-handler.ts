@@ -5,6 +5,7 @@ import type { RoleName } from "@crossengin/auth";
 import { computeAging, type AgingReport } from "./aging.js";
 import { drainList, type BoundedReadDeclaration } from "./list-drain.js";
 import type { EntityRecord, EntityStore } from "./store.js";
+import { readAppliedPayments } from "./write-guards.js";
 
 /** One AR/AP aging section the handler can produce. */
 export interface AgingSpec {
@@ -84,11 +85,6 @@ function json(status: number, body: unknown): HandlerOutput {
   return { kind: "json", status, body };
 }
 
-function num(v: unknown): number {
-  const n = typeof v === "number" ? v : Number(v);
-  return Number.isFinite(n) ? n : 0;
-}
-
 const AS_OF_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 /** First value of a query param (arrays carry the first), or undefined. */
@@ -134,40 +130,31 @@ export function buildAgingHandler(ctx: AgingHandlerContext): Handler {
         : (ctx.clock?.now() ?? new Date()).toISOString();
 
     // Every section's applied-payment map is filled in ONE pass over the payment pages, before the
-    // section loop. The accumulators are hoisted rather than rebuilt per section because a drain is
-    // a stream: rebuilding them inside the loop would either re-read every payment per section or
-    // retain every payment row, where one pass holds only O(sections × documents-with-payments) and
-    // discards the rows as they arrive.
+    // section loop — the one-pass property and the per-section keying both live in
+    // `readAppliedPayments` now, with the reason a shared map keyed by document id would credit an
+    // invoice with a same-id bill's payments.
     //
-    // One map **per section** and not one shared map keyed by document id, because a section's keys
-    // are the values of its own `paymentRefField` and nothing draws two entities' ids from one
-    // space: records are bucketed per `(tenant, entity)` and a caller-supplied `id` is not stripped.
-    // A shared map would credit an invoice with a same-id bill's payments.
-    const sections = Object.entries(ctx.sections).map(([name, spec]) => ({
-      name,
-      spec,
-      applied: new Map<string, number>(),
-    }));
+    // Zipped back onto the sections by **position**, which is what `AppliedPaymentsRead`
+    // guarantees: index *i* answers for `refFields[i]`.
+    const specs = Object.entries(ctx.sections).map(([name, spec]) => ({ name, spec }));
     const bounded: string[] = [];
 
-    const paymentOutcome = await drainList(
+    const paymentRead = await readAppliedPayments(
       ctx.store,
       tenantId,
-      paymentEntity,
-      { sort: [], filters: [{ field: stateField, op: "eq", value: completedState }] },
-      { ceiling: maxRows },
-      (rows) => {
-        for (const p of rows) {
-          if (p[stateField] !== completedState) continue;
-          for (const section of sections) {
-            const ref = p[section.spec.paymentRefField];
-            if (typeof ref !== "string" || ref.length === 0) continue;
-            section.applied.set(ref, (section.applied.get(ref) ?? 0) + num(p[amountField]));
-          }
-        }
-      },
+      specs.map(({ spec }) => spec.paymentRefField),
+      { paymentEntity, stateField, completedState, amountField, ceiling: maxRows },
     );
-    if (!paymentOutcome.complete) bounded.push(PAYMENT_READ_NAME);
+    if (!paymentRead.complete) bounded.push(PAYMENT_READ_NAME);
+    const sections = specs.map(({ name, spec }, i) => ({
+      name,
+      spec,
+      // `!` and not `?? new Map()`: `foldCompletedPayments` builds one bucket per ref field with
+      // `refFields.map(() => new Map())`, so index `i` exists for every `i` a caller can ask about
+      // — the `??` arm was unreachable, and ADR-0361's reason for deleting an unreachable check is
+      // that a dead arm reads as a handled case. Same spelling the fold itself uses one scope in.
+      applied: paymentRead.applied[i]!,
+    }));
 
     const report: Record<string, AgingReport> = {};
     for (const { name, spec, applied } of sections) {

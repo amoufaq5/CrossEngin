@@ -1,7 +1,12 @@
 import { parseDecimal } from "./decimal.js";
 import { drainList, ReadCeilingExceeded } from "./list-drain.js";
 import type { EntityRecord } from "./store.js";
-import type { WriteGuardInput } from "./write-guards.js";
+import {
+  readAppliedPayments,
+  readAppliedToDocument,
+  settlementIsCovered,
+  type WriteGuardInput,
+} from "./write-guards.js";
 
 /**
  * A side effect run after a write has been persisted (the after-commit sibling of WriteGuard).
@@ -1142,8 +1147,6 @@ const APPLICATION_FALLBACKS = {
   maxPayments: 10_000,
 } as const;
 
-const APPLY_EPSILON = 0.005;
-
 /**
  * Per-document payment application: when a Payment completes against a linked
  * document (`refField`), sums all completed payments for that document and — once
@@ -1172,29 +1175,25 @@ export function paymentApplicationEffect(config: PaymentApplicationConfig): Writ
     const total = num(doc[c.documentTotalField]);
     if (total <= 0) return;
 
-    // Every completed payment, not the first page of them, and with no stop once `applied`
-    // crosses `total`: a later page can carry a negative correction that takes it back under,
-    // which is the measured defect — an invoice of 400 with three payments of 200 and a
-    // correction of −300 was written `paid` at a cap of 3 and correctly left `sent` at 99.
-    let applied = 0;
-    const outcome = await drainList(
-      input.store,
-      input.tenantId,
-      c.paymentEntity,
-      { sort: [], filters: [{ field: c.refField, op: "eq", value: docId }] },
-      { ceiling: c.maxPayments },
-      (rows) => {
-        for (const p of rows) {
-          if (String(p[c.refField] ?? "") === docId && p[c.stateField] === c.completedState) {
-            applied += num(p[c.amountField]);
-          }
-        }
-      },
-    );
-    if (!outcome.complete) {
+    // Every completed payment, not the first page of them, and with no stop once the running total
+    // crosses `total` — both rules live in `readAppliedToDocument` now, with the measured defect
+    // that produced them (an invoice of 400 with three payments of 200 and a correction of −300,
+    // written `paid` at a cap of 3 and correctly left `sent` at 99). The `eq` filter on the
+    // reference is the shape that keeps this one index lookup rather than a tenant-wide drain.
+    const read = await readAppliedToDocument(input.store, input.tenantId, c.refField, docId, {
+      paymentEntity: c.paymentEntity,
+      stateField: c.stateField,
+      completedState: c.completedState,
+      amountField: c.amountField,
+      ceiling: c.maxPayments,
+    });
+    if (!read.complete) {
       throw new ReadCeilingExceeded(c.paymentEntity, c.maxPayments, "the amount applied to a document");
     }
-    if (applied + APPLY_EPSILON < total) return; // not yet fully covered
+    // `settlementIsCovered` rather than the comparison written out, so this effect and
+    // `settlementCoverageGuard` cannot come to disagree about whether a document is covered —
+    // which would make one simultaneously unmarkable by hand and auto-marked here.
+    if (!settlementIsCovered(total, read.applied)) return; // not yet fully covered
 
     const nowIso = (c.clock?.now() ?? new Date()).toISOString();
     await input.store.update(input.tenantId, c.documentEntity, docId, {
@@ -1363,37 +1362,32 @@ export function unrealizedFxRevaluationEffect(config: UnrealizedFxRevaluationCon
     const periodLabel = typeof period[c.periodNumberField] === "string" ? (period[c.periodNumberField] as string) : periodId;
 
     // Every document side's applied-payment map is filled in ONE pass over the payment pages,
-    // before the document loop. The accumulators are hoisted rather than rebuilt per side because
-    // a drain is a stream: rebuilding them inside the loop would either re-read every payment per
-    // side or retain every payment row, where one pass holds only
-    // O(sides × documents-with-payments) and the rows are discarded as they arrive.
+    // before the document loop — the one-pass property and the per-side keying both live in
+    // `readAppliedPayments` now, with the reason a shared map keyed by document id would merge an
+    // invoice's payments with a same-id bill's.
     //
-    // One map **per side** and not one shared map keyed by document id, because a side's keys are
-    // the values of its own `paymentRefField` and nothing draws two entities' ids from one space:
-    // records are bucketed per `(tenant, entity)` and a caller-supplied `id` is not stripped (the
-    // fact `compareIds` records for the keyset). A shared map would merge an invoice's payments
-    // with a same-id bill's and skip both as overpaid.
-    const sides = c.documents.map((spec) => ({ spec, applied: new Map<string, number>() }));
-    const paymentOutcome = await drainList(
-      input.store,
-      input.tenantId,
-      c.paymentEntity,
-      { sort: [], filters: [{ field: c.paymentStateField, op: "eq", value: c.paymentCompletedState }] },
-      { ceiling: c.maxRows },
-      (rows) => {
-        for (const p of rows) {
-          if (p[c.paymentStateField] !== c.paymentCompletedState) continue;
-          for (const side of sides) {
-            const ref = p[side.spec.paymentRefField];
-            if (typeof ref !== "string" || ref.length === 0) continue;
-            side.applied.set(ref, (side.applied.get(ref) ?? 0) + num(p[c.paymentAmountField]));
-          }
-        }
-      },
-    );
-    if (!paymentOutcome.complete) {
+    // Zipped back onto the specs by **position**, which is what `AppliedPaymentsRead` guarantees:
+    // index *i* answers for `refFields[i]`, so the side a map belongs to is the index it was asked
+    // for and never a key a reader could mistype.
+    const refFields = c.documents.map((spec) => spec.paymentRefField);
+    const paymentRead = await readAppliedPayments(input.store, input.tenantId, refFields, {
+      paymentEntity: c.paymentEntity,
+      stateField: c.paymentStateField,
+      completedState: c.paymentCompletedState,
+      amountField: c.paymentAmountField,
+      ceiling: c.maxRows,
+    });
+    if (!paymentRead.complete) {
       throw new ReadCeilingExceeded(c.paymentEntity, c.maxRows, "an unrealized FX revaluation");
     }
+    const sides = c.documents.map((spec, i) => ({
+      spec,
+      // `!` and not `?? new Map()`: `foldCompletedPayments` builds one bucket per ref field with
+      // `refFields.map(() => new Map())`, so index `i` exists for every `i` a caller can ask about
+      // — the `??` arm was unreachable, and ADR-0361's reason for deleting an unreachable check is
+      // that a dead arm reads as a handled case. Same spelling the fold itself uses one scope in.
+      applied: paymentRead.applied[i]!,
+    }));
 
     // Accumulate the open foreign balance per (currency, side); then one rate lookup per currency.
     // We also accumulate Σ(open × bookingRate) so the revaluation compares against each

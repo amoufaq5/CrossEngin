@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { generateEd25519Keypair } from "@crossengin/crypto";
 import { InMemoryEntityStore, LicenseEntitlementResolver, signLicense } from "@crossengin/operate-runtime";
 import { buildProfileFromTemplate } from "@crossengin/residency";
@@ -301,5 +303,104 @@ describe("OperateHttpServer — data-residency edge routing", () => {
     });
     const res = await httpServer.dispatch(reqWithTenant("/v1/products", "key-manager", TENANT), null);
     expect(res.status).toBe(200);
+  });
+});
+
+/**
+ * The sibling of `compile.test.ts`' option-forwarding fence, one hop out.
+ *
+ * That one reads `compile.ts` as text and asserts every option `buildOperateGateway` accepts and
+ * `GatewayRuntime` also accepts appears in the `new GatewayRuntime({…})` literal. It was written
+ * because ADR-0386's fix was silently dropped at exactly such a literal, and the drop was invisible
+ * three ways at once: the caller passes its options inside a conditional **spread**, which bypasses
+ * TypeScript's excess-property check; the field is optional on the target; and its default there was
+ * the strict one, so the drop produced a *safe* wrong answer rather than a crash.
+ *
+ * `buildOperateHttpServer` → `buildOperateGateway` is the hop before it, and it is covered **per
+ * field and not as a class**: `node.test.ts`' *"is forwarded on again by buildOperateHttpServer,
+ * which is the unfenced hop"* pins `allowUncoveredSettlement` by name and says in so many words
+ * that the general rule is somebody else's open end. This is that rule. The two compose rather than
+ * duplicating — a per-field pin belongs with the wiring chain it is part of, which is why it is in
+ * `node.test.ts`, and the class belongs with the literal it is about, which is here.
+ *
+ * It is ADR-0386's shape with one difference that makes it worse: `allowUncoveredSettlement`
+ * defaults to `false` in the compiler, and `false` means **the settlement-coverage guard is not
+ * built** — so dropping that spread fails in the *permissive* direction, where ADR-0386's dropped
+ * field failed in the strict one. Measured by deleting the three-line spread: `tsc` exits **0**,
+ * and **2** of this app's 5,080 tests fail — this fence and that per-field pin, which is the pair
+ * doing its job rather than one covering for the other. And the boot line is unaffected by
+ * construction, because `node.ts` hands the flag to `surveySettlementCoverage` directly: the survey
+ * reads the flag and the guard list is built one hop further in, so a deployment would be told
+ * `2 of 3 guarded` with nothing guarded.
+ *
+ * The unit is the **intersection** of the two interfaces' field names rather than everything the
+ * app accepts, which is what keeps it free of a maintained list: the app has 29 options and the
+ * gateway 30, 16 are shared, and only a shared one can be dropped here. A `notForwarded` map in
+ * `compile.test.ts`'s shape would otherwise need 13 entries, and ADR-0288's lesson is that such a
+ * list is the thing that goes wrong.
+ *
+ * `compile.ts` is read by relative path as **text**, which is the idiom `deployment-defaults.test.ts`
+ * in this app already uses for `deploy/`: no build output is consulted, so the fence answers on a
+ * fresh checkout, and a path that stopped resolving fails by name rather than silently emptying the
+ * population.
+ */
+describe("buildOperateHttpServer's option forwarding", () => {
+  const serverSrc = readFileSync(new URL("./server.ts", import.meta.url), "utf8");
+  const compileSrc = readFileSync(
+    new URL("../../../packages/operate-runtime/src/compile.ts", import.meta.url),
+    "utf8",
+  );
+
+  /** The field names declared on an interface, by name, from the source. */
+  function interfaceFields(text: string, name: string): readonly string[] {
+    const start = text.indexOf(`export interface ${name} `);
+    expect(start, `interface ${name} not found`).toBeGreaterThan(-1);
+    const open = text.indexOf("{", start);
+    let depth = 0;
+    let end = open;
+    for (let i = open; i < text.length; i += 1) {
+      if (text[i] === "{") depth += 1;
+      else if (text[i] === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          end = i;
+          break;
+        }
+      }
+    }
+    return [...text.slice(open, end).matchAll(/^\s{2}readonly (\w+)\??:/gm)].map(
+      (m) => m[1] as string,
+    );
+  }
+
+  const accepted = interfaceFields(serverSrc, "BuildOperateHttpServerOptions");
+  const gatewayAccepts = new Set([
+    ...interfaceFields(compileSrc, "OperateGatewayOptions"),
+    ...interfaceFields(compileSrc, "OperateRuntimeOptions"),
+  ]);
+  const shared = accepted.filter((f) => gatewayAccepts.has(f)).sort();
+
+  it("forwards every option it shares with the gateway", () => {
+    const call = serverSrc.indexOf("buildOperateGateway(options.manifest, {");
+    expect(call, "the buildOperateGateway call moved").toBeGreaterThan(-1);
+    const literal = serverSrc.slice(call, serverSrc.indexOf("\n  });", call));
+    expect(literal.length, "the forwarding literal read as empty").toBeGreaterThan(500);
+
+    const dropped = shared.filter((f) => !new RegExp(`\\b${f}\\b`).test(literal));
+    expect(
+      dropped,
+      `these options reach buildOperateHttpServer, are accepted by buildOperateGateway, and are ` +
+        `not forwarded to it — so they are silently discarded`,
+    ).toEqual([]);
+  });
+
+  it("reads both interfaces, so the assertion above is not vacuous", () => {
+    // Floors on both sides and on the intersection, because this fence's whole failure mode is a
+    // reader that stopped matching: an empty `shared` makes the assertion above pass over nothing.
+    expect(accepted.length, "BuildOperateHttpServerOptions read as empty").toBeGreaterThan(20);
+    expect(gatewayAccepts.size, "the gateway's option interfaces read as empty").toBeGreaterThan(20);
+    expect(shared.length, "the shared option set read as empty").toBeGreaterThanOrEqual(16);
+    // And the member this fence was written for is in it.
+    expect(shared).toContain("allowUncoveredSettlement");
   });
 });

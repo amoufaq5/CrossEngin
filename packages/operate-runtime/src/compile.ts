@@ -56,6 +56,8 @@ import {
   journalPostingGuard,
   lockedDocumentGuard,
   postedEntryImmutabilityGuard,
+  SETTLEMENT_COVERAGE_DOCUMENTS,
+  settlementCoverageGuard,
   type WriteGuard,
 } from "./write-guards.js";
 import {
@@ -70,6 +72,7 @@ import {
   whtCertificateClearingEffect,
   type WriteEffect,
 } from "./write-effects.js";
+import { lifecycleStateField } from "./list-query.js";
 import { buildAgingHandler, type AgingSpec } from "./aging-handler.js";
 import { buildEntitlementHandler } from "./entitlement-handler.js";
 import { buildUsageHandler } from "./usage-handler.js";
@@ -166,6 +169,29 @@ export interface OperateRuntimeOptions {
   readonly financeRoles?: readonly RoleName[];
   /** Runtime data invariants checked before each write (e.g. balanced journal postings). */
   readonly writeGuards?: readonly WriteGuard[];
+  /**
+   * Accepts knowingly that a document may be marked settled while completed payments do not cover
+   * its total — the state in which the aging subledger reports nothing open and the GL control
+   * account still carries the residual, with nothing reconciling the two.
+   *
+   * Default `false`, so the guard is on. `--allow-plaintext-phi`'s shape and deliberately not
+   * ADR-0340's no-hatch shape, and the two halves of that argument are:
+   *
+   * - **Refusing breaks nothing that was right.** ADR-0338's premise, and it holds here: a
+   *   document reading `paid` while its receivable is still on the books and its subledger shows
+   *   nothing is not a deployment serving this correctly, so nothing that worked stops working.
+   *   Measured on the seven packs, the population is three lifecycle transitions, all in
+   *   `erp-core`.
+   * - **An uncovered settlement is degraded-but-recoverable.** Record the payment and the two
+   *   views reconcile; the guard's own detail names that act. That is the difference from an
+   *   unevaluated ABAC obligation, which is the *opposite* of what the manifest declares and which
+   *   nothing a tenant does can repair — so unlike that one, this is a state an operator may
+   *   knowingly accept, and accepting it earns a flag rather than a refusal with no way past it.
+   *
+   * It does **not** suppress the boot survey: a deployment that passes this is still told which of
+   * its settleable documents are now unguarded, because the whole defect was the silence.
+   */
+  readonly allowUncoveredSettlement?: boolean;
   /** Side effects run after a successful write (e.g. auto-generating a reversal entry). */
   readonly writeEffects?: readonly WriteEffect[];
   /** Extra effects appended after the resolved base effects (e.g. entity-event emission) — additive. */
@@ -269,7 +295,10 @@ function buildDefaultPlans(manifest: Manifest): Map<string, readonly LiteralDefa
 }
 
 /** Guards inferred from the manifest's shape; opt out by passing `writeGuards: []`. */
-function defaultWriteGuards(manifest: Manifest): readonly WriteGuard[] {
+function defaultWriteGuards(
+  manifest: Manifest,
+  allowUncoveredSettlement: boolean,
+): readonly WriteGuard[] {
   const names = new Set((manifest.entities ?? []).map((e) => e.name));
   const guards: WriteGuard[] = [];
   if (names.has("JournalEntry") && names.has("JournalLine")) {
@@ -332,6 +361,44 @@ function defaultWriteGuards(manifest: Manifest): readonly WriteGuard[] {
         reverseHint: "cancel it instead",
       }),
     );
+  }
+  // A document may not enter its settled state while completed payments do not cover its total.
+  // Built from `SETTLEMENT_COVERAGE_DOCUMENTS` rather than listed again here, so the guards that
+  // exist and the boot survey's claim about which documents are covered read **one** declaration.
+  //
+  // Gated on `Payment` as well as the document, which every settlement effect below is too: with no
+  // Payment entity there is nothing to read, so the guard would drain an entity the manifest does
+  // not declare — harmless on the in-memory store and a missing table on `--store pg-columns`.
+  //
+  // **Last, and the order is load-bearing rather than incidental** — measured live, because the
+  // first version of this had it the other way round and the comment claimed this one. A plain
+  // `PATCH {"state":"paid"}` on an invoice in `sent` satisfies *both* guards: `sent` is one of
+  // Invoice's locked states, so the edit is refused whatever the coverage. Coverage-first answered
+  // `uncovered_settlement: 70.00 of 120.00 still owed`, whose remedy — record the payment — would
+  // **not** let that PATCH through, because the locked guard would then refuse it. ADR-0334's rule
+  // is that naming a fix which cannot work is worse than naming none. Locked-first answers
+  // `invoice_locked … void it instead`, which is true and complete.
+  //
+  // Everything this guard is for still reaches it, which is why last costs nothing: a `transition`
+  // (the locked guard returns null on that operation by design, so `mark_paid` lands here), a
+  // `create`, an update from an unlocked state — `draft` is Invoice's only one, and `draft → paid`
+  // is no declared transition — and anything at all on `Bill`, which has no locked-document guard.
+  //
+  // `stateField` comes from the entity's own lifecycle rather than from the guard's `state`
+  // fallback, and that is a correctness fix rather than a generalisation: the guard reads the field
+  // by name, so on a manifest whose lifecycle drives `status` — which `validateWorkflows` accepts,
+  // and which is the normal shape for `Opportunity.stage`, `WorkOrder.status` and
+  // `Enrollment.status` — it read `after["state"]`, got `undefined`, and returned `null` for every
+  // write **while the boot survey went on naming the entity as guarded**. ADR-0337's falsely-true
+  // direction on the one surface built to make the gap legible. Reachable from a tenant's own
+  // activated manifest, which is the path this guard is wired into. An entity with no lifecycle
+  // keeps the fallback, because a plain `PATCH {"state":…}` is exactly what it is for.
+  if (!allowUncoveredSettlement && names.has("Payment")) {
+    for (const doc of SETTLEMENT_COVERAGE_DOCUMENTS) {
+      if (!names.has(doc.entity)) continue;
+      const stateField = lifecycleStateField(manifest, doc.entity);
+      guards.push(settlementCoverageGuard(stateField === null ? doc : { ...doc, stateField }));
+    }
   }
   return guards;
 }
@@ -733,7 +800,8 @@ export function compileOperateServer(
     // comment wanted; the same narrow function called twice was not.
     classifiedFields: classifiedFieldIndex,
     writeMaskMode: options.writeMaskMode ?? "explicit_only",
-    writeGuards: options.writeGuards ?? defaultWriteGuards(manifest),
+    writeGuards:
+      options.writeGuards ?? defaultWriteGuards(manifest, options.allowUncoveredSettlement ?? false),
     writeEffects: [
       ...(options.writeEffects ?? defaultWriteEffects(manifest, options.clock, options.settingsStore)),
       ...(options.additionalWriteEffects ?? []),
