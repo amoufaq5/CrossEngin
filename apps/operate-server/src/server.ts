@@ -1,6 +1,6 @@
 import type { ForwardedProto, HttpMethod, PipelineExecution } from "@crossengin/api-gateway";
 import type { AbacBatchEvaluator, AbacEvaluator, SensitiveFieldPolicy } from "@crossengin/auth";
-import type { CursorSealer } from "@crossengin/operate-runtime";
+import type { CursorSealer, OpenApiCoverageGap } from "@crossengin/operate-runtime";
 import type { CursorSealingMode } from "./cursor-encryption.js";
 import type { IdempotencyStore, RateLimitChecker } from "@crossengin/api-gateway-runtime";
 import type { Manifest } from "@crossengin/kernel/manifest";
@@ -223,6 +223,12 @@ export interface BuildOperateHttpServerOptions {
   readonly allowUncoveredSettlement?: boolean;
   /** Allocates document numbers for sequence-defaulted fields on create. */
   readonly allocator?: SequenceAllocator;
+  /**
+   * Absences in this deployment's API description that only this app knows — the paths it
+   * serves ahead of route matching. A thunk, read on the first request, because three of the
+   * four such mounts happen after this function returns.
+   */
+  readonly openApiCoverage?: () => readonly OpenApiCoverageGap[];
   /** Backs the `/v1/admin/settings` endpoints + runtime numbering overrides. */
   readonly settingsStore?: SettingsStore;
   /** Roles permitted to manage tenant settings. */
@@ -399,6 +405,9 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
         }
       : {}),
     ...(options.allocator !== undefined ? { allocator: options.allocator } : {}),
+    ...(options.openApiCoverage !== undefined
+      ? { openApiCoverage: options.openApiCoverage }
+      : {}),
     ...(options.settingsStore !== undefined ? { settingsStore: options.settingsStore } : {}),
     ...(options.adminRoles !== undefined ? { adminRoles: options.adminRoles as never } : {}),
     ...(options.entitlementResolver !== undefined ? { entitlementResolver: options.entitlementResolver } : {}),

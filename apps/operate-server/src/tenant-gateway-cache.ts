@@ -1,3 +1,4 @@
+import { API_KEY_HEADER } from "@crossengin/api-gateway";
 import {
   ManifestSchema,
   resolveManifest,
@@ -27,7 +28,7 @@ function headerValue(headers: RawHttpRequest["headers"], name: string): string |
 }
 
 function requestToken(raw: RawHttpRequest): string | null {
-  const apiKey = headerValue(raw.headers, "x-api-key");
+  const apiKey = headerValue(raw.headers, API_KEY_HEADER);
   if (apiKey !== null) return apiKey;
   const auth = headerValue(raw.headers, "authorization");
   if (auth === null) return null;

@@ -1,5 +1,6 @@
 import type { HttpMethod, RouteDefinition } from "@crossengin/api-gateway";
 import { renderPathTemplate } from "@crossengin/api-gateway";
+import type { OpenApiCoverageGap } from "@crossengin/operate-runtime";
 
 import { AUTH_TOKEN_PATH } from "./auth-token-route.js";
 import { BOUNCE_WEBHOOK_PATH_PREFIX } from "./bounce-webhook-routes.js";
@@ -262,6 +263,40 @@ export const servedSurface = (input: {
   outOfRegistry: mountedOutOfRegistryPaths(input.mounted),
   perTenantManifests: input.perTenantManifests ? { enumerable: false } : null,
 });
+
+/**
+ * The out-of-registry surfaces this deployment mounted, as the coverage gaps an API description
+ * carries — one per `(method, path)` pair, so a reader learns the path and the method rather than
+ * only that something is missing.
+ *
+ * Which matters most for exactly one of the five: `POST /v1/auth/token` is the **login**, the first
+ * route any client calls, and a document that merely said "some paths are not described" would
+ * leave a client unable to discover how to authenticate against the API it is reading.
+ *
+ * `reach` is **`ordering`** for every entry and not `shape`, because all five declare
+ * `describable: true` — the bodies exist and this emitter is not given them. That is the honest
+ * word and it is the one that tells the next person the follow-up is wiring rather than a format
+ * change (`pg-unreachable-stores.ts`'s distinction, which is why `describable` is a field here).
+ *
+ * The caller passes a set each mount site has added itself to, rather than one derived from the
+ * flags a second time: three of the four mounts run after the gateway is built and two of their
+ * conditions are compound, so a re-derivation is where the declaration and the mount drift.
+ */
+export const coverageFromMountedSurfaces = (
+  mounted: ReadonlySet<OutOfRegistrySurfaceKind>,
+): readonly OpenApiCoverageGap[] =>
+  mountedOutOfRegistryPaths(mounted).map(({ method, path, kind }) => {
+    const surface = OUT_OF_REGISTRY_SURFACES[kind];
+    const where = surface.pathKind === "prefix" ? `${path}…` : path;
+    return {
+      kind: "surface_outside_registry" as const,
+      reach: "ordering" as const,
+      detail:
+        `${method} ${where} is served and is not described here. It is mounted by ` +
+        `\`${surface.mountedBy}\` ahead of route matching, so no route registry holds it. ` +
+        surface.note,
+    };
+  });
 
 /** The registered routes an OpenAPI document cannot carry, with the reason per route. */
 export const undescribableRegisteredRoutes = (

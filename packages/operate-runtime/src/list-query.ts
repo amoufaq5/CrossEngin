@@ -67,7 +67,22 @@ export interface ParsedListQuery {
   readonly unserved: readonly UnservedListSurface[];
 }
 
-const RESERVED_PARAMS = new Set(["limit", "cursor", "sort", "order", "fields", "q"]);
+/**
+ * The six query parameters a list route reads by name, rather than as a field filter.
+ *
+ * Exported because a document describing this surface must read the parser's own declaration and
+ * not a second copy of it (ADR-0288's maintained list, wrong four times here). It was module-private
+ * while the only consumer was the loop below; the moment something else enumerates the surface, a
+ * private constant means that consumer restates it and the two drift.
+ *
+ * `cursor`, `order` and `fields` are the three `ListConfig` is silent about — `cursor` and `order`
+ * are read straight off the query here, and `fields` is parsed by `parseFields`, whose signature has
+ * no config parameter at all — so this list is the only place all six are named together.
+ */
+export const RESERVED_LIST_PARAMS = ["limit", "cursor", "sort", "order", "fields", "q"] as const;
+export type ReservedListParam = (typeof RESERVED_LIST_PARAMS)[number];
+
+const RESERVED_PARAMS: ReadonlySet<string> = new Set(RESERVED_LIST_PARAMS);
 
 /**
  * Parses a `?fields=a,b,c` projection into a field list, or null when absent

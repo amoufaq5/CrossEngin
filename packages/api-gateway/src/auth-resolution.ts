@@ -87,6 +87,17 @@ export interface AuthSchemeSupport {
  * refused: reserving `?api_key=` commits only to never *accepting* it, which is already the
  * decision, so a client using another spelling is no worse off than before.
  */
+/**
+ * The HTTP header `api_key_header` is presented in.
+ *
+ * One spelling, read by `authenticate`, by this module's own prose below and by anything describing
+ * this surface. It was a bare literal in the request path with that prose beside it as a second
+ * copy, so a third reader was one edit from disagreeing with the parser about which header carries
+ * a credential — ADR-0288's maintained list, in a place where a stale copy reads as a documented
+ * capability.
+ */
+export const API_KEY_HEADER = "x-api-key";
+
 export const AUTH_SCHEME_SUPPORT: Readonly<Record<AuthScheme, AuthSchemeSupport>> = Object.freeze({
   bearer_jwt: {
     treatment: "served",
@@ -96,7 +107,7 @@ export const AUTH_SCHEME_SUPPORT: Readonly<Record<AuthScheme, AuthSchemeSupport>
   },
   api_key_header: {
     treatment: "served",
-    recognisedFrom: "an x-api-key header",
+    recognisedFrom: `an ${API_KEY_HEADER} header`,
     reason: "resolved here against the deployment's opaque-token lookup",
   },
   anonymous: {
@@ -121,7 +132,7 @@ export const AUTH_SCHEME_SUPPORT: Readonly<Record<AuthScheme, AuthSchemeSupport>
     treatment: "refused",
     recognisedFrom: "an api_key query parameter",
     reason:
-      "refused deliberately and not merely unbuilt: a credential in a URL is copied into access logs, proxy logs and Referer, which is ADR-0301's argv rule one transport over — present the key in x-api-key instead",
+      `refused deliberately and not merely unbuilt: a credential in a URL is copied into access logs, proxy logs and Referer, which is ADR-0301's argv rule one transport over — present the key in ${API_KEY_HEADER} instead`,
   },
   mtls: {
     treatment: "refused",
@@ -139,6 +150,75 @@ export const AUTH_SCHEME_SUPPORT: Readonly<Record<AuthScheme, AuthSchemeSupport>
 
 export const authSchemeTreatment = (scheme: AuthScheme): AuthSchemeTreatment =>
   AUTH_SCHEME_SUPPORT[scheme].treatment;
+
+/**
+ * How a *served* scheme is presented, in OpenAPI's Security Scheme vocabulary — the machine
+ * spelling of `recognisedFrom`, kept beside it so the two cannot come to disagree.
+ *
+ * Field names are OpenAPI's own (`in`, and `name` for the header), so an emitter copies rather than
+ * translates; `key` is the `components.securitySchemes` key a `security` requirement names and is
+ * the one field that is not part of the object.
+ *
+ * A **total map with `null` for every scheme this build does not serve**, fenced in both directions
+ * by `securityDocMatchesTreatment()`. Both halves are load-bearing and they fail oppositely: a
+ * served scheme with no entry is a credential the API accepts and no client is told about, while a
+ * refused scheme *with* an entry is the worse direction, because a `securitySchemes` entry is a
+ * **definition** — a generator reads it as supported and emits a client method for it — so
+ * publishing one for `api_key_query` would invite precisely the request ADR-0384 refuses, in the
+ * document that exists to describe the refusal.
+ */
+export interface SecuritySchemeDoc {
+  readonly key: string;
+  readonly type: "http" | "apiKey";
+  /** `http` only. */
+  readonly scheme?: "bearer";
+  /** `http` only. */
+  readonly bearerFormat?: string;
+  /** `apiKey` only. */
+  readonly in?: "header";
+  /** `apiKey` only — the header name. OpenAPI calls this field `name`. */
+  readonly name?: string;
+  readonly description: string;
+}
+
+export const AUTH_SCHEME_SECURITY_DOC: Readonly<Record<AuthScheme, SecuritySchemeDoc | null>> =
+  Object.freeze({
+    bearer_jwt: {
+      key: "bearerAuth",
+      type: "http",
+      scheme: "bearer",
+      bearerFormat: "JWT",
+      description:
+        "An Ed25519-signed JWT in the Authorization header. Verified against the configured JWKS, " +
+        "then exp, nbf, iss and aud — each required unless the deployment relaxes it by name.",
+    },
+    api_key_header: {
+      key: "apiKeyAuth",
+      type: "apiKey",
+      in: "header",
+      name: API_KEY_HEADER,
+      description: "A deployment-issued opaque key. Resolved against the deployment's own lookup.",
+    },
+    anonymous: null,
+    basic: null,
+    hmac_signature: null,
+    api_key_query: null,
+    mtls: null,
+    bearer_opaque: null,
+  });
+
+/**
+ * The schemes whose security doc and treatment disagree — empty, and asserted so.
+ *
+ * Returned rather than thrown because this is a fence over a constant: the value is what a test
+ * asserts, and a thrown invariant at module load would take the whole gateway down for a
+ * documentation defect.
+ */
+export const securityDocMatchesTreatment = (): readonly AuthScheme[] =>
+  AUTH_SCHEMES.filter(
+    (s) =>
+      (AUTH_SCHEME_SECURITY_DOC[s] !== null) !== (AUTH_SCHEME_SUPPORT[s].treatment === "served"),
+  );
 
 /**
  * The schemes a credential can be recognised as. Derived, so widening the parser is a change to the

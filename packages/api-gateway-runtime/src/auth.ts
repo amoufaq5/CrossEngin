@@ -1,4 +1,5 @@
 import {
+  API_KEY_HEADER,
   type AuthOutcome,
   type AuthScheme,
   type IncomingRequest,
@@ -332,7 +333,7 @@ export function parseAuthHeader(request: IncomingRequest): ParseAuthHeaderResult
       return { kind: "credential", scheme: "basic", token: trimmed.slice(6).trim() };
     }
   }
-  const apiKeyHeader = request.headers["x-api-key"];
+  const apiKeyHeader = request.headers[API_KEY_HEADER];
   if (apiKeyHeader !== undefined) {
     return { kind: "credential", scheme: "api_key_header", token: apiKeyHeader.trim() };
   }

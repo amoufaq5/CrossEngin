@@ -292,7 +292,7 @@ describe("renderPathTemplate", () => {
   it("refuses a wildcard under the openapi grammar, naming its position", () => {
     // Shape, not wiring: OAS 3.1 has no multi-segment path variable, so rendering `{suffix}` would
     // describe a path matching one segment where the route matches any number.
-    const segs: readonly PathSegment[] = [
+    const segs: PathSegment[] = [
       { kind: "literal", value: "v1" },
       { kind: "literal", value: "files" },
       { kind: "wildcard" },
@@ -358,7 +358,7 @@ describe("OPENAPI_PATH_ITEM_FIELD", () => {
 });
 
 describe("pathTemplateCollisions", () => {
-  const at = (operationId: string, method: RouteDefinition["method"], segs: readonly PathSegment[]): RouteDefinition => ({
+  const at = (operationId: string, method: RouteDefinition["method"], segs: PathSegment[]): RouteDefinition => ({
     ...route,
     operationId,
     method,
@@ -402,7 +402,7 @@ describe("pathTemplateCollisions", () => {
   });
 
   it("does not collide the same path under different methods", () => {
-    const segs: readonly PathSegment[] = [
+    const segs: PathSegment[] = [
       { kind: "literal", value: "v1" },
       { kind: "literal", value: "admin" },
       { kind: "literal", value: "settings" },

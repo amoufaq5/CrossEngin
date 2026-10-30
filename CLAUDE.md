@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 20,729 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 20,892 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -2843,6 +2843,101 @@ report; `apps/operate-web` has none).
   a figure asserted from an earlier slice's number instead of measured, which is register P3.1's class
   inside a fence about a dropped field.
 
+  ADR-0392 is the sixth user-directed increment and the class is **a source named without being
+  measured**. The register's P1.17 says *"no OpenAPI document exists at all (the cheapest
+  high-leverage piece, derivable from `CompiledOperateServer.routeSpecs`)"* — and that remedy is
+  **refuted**, which is the one kind of staleness that costs an increment rather than a correction
+  (P3.1's own clause about checking a remedy as well as its facts). `routeSpecs` is **334** against
+  `InMemoryRouteRegistry.list()`'s **338** bare, **340** on `--store pg` and **341** with
+  `--credential-login`, so a document derived from it would omit 7 of 341 routes **with no refusal
+  and no note** — ADR-0337's falsely-complete direction, in the one artifact whose whole job is to
+  be the account of what is served. The class is **wrong when written** and the evidence is clean:
+  `git log -S` puts the register entry in `2b98f46` (2026-10-13) and `InMemoryRouteRegistry` in
+  `compile.ts` in `3ed174e` (2026-08-11), an ancestor two months earlier — so the wider source
+  already existed when the entry named the narrower one. **And the first correction to it was
+  wrong too**, which is the refuter-on-the-corrections clause landing on the author: "the complete
+  enumeration already exists: `routes.list()`" is false by **five**, because three interceptor
+  wrappers in `node.ts` and one `WebhookRoute` matched inside `OperateHttpServer.dispatch` serve
+  `/health`, `/readyz`, `POST /v1/auth/token` and the two webhooks, and **none is in any registry,
+  any matcher or any handler map**. One of the five is the **login**, the first route any client
+  calls.
+  The design decision that carries it is the **thunk**: `openapi.read` is registered inside
+  `compileOperateServer` and its handler reads `routes.list()` on the **first request**, memoised —
+  so registration order is irrelevant *by construction* rather than by a comment asking the next
+  person to register it last, and each per-tenant compiled server answers from its own registry, so
+  ADR-0314's boot/tenant divergence is structurally impossible rather than checked. The same shape
+  is forced a second time for the out-of-registry enumeration, and there it is measured rather than
+  preferred: **three of the four mounts wrap `dispatchTarget` *after* `buildOperateHttpServer`
+  returns** (`node.ts:4852`, `:4973`, `:5015` against `:3863`) and two of their conditions are
+  compound, so a value could only be computed from the flags a second time — ADR-0288's shape — and
+  a thunk over a set each mount site adds itself to keeps the declaration and the mount one fact.
+  Proven live: the gap count moves **4 → 5** when `--credential-login` is added, and that mount is
+  one of the three.
+  The split is **report a declared structural absence, refuse a renderable-route failure**, with
+  both refusals measured empty across all seven resolved packs (0 wildcards, 0 collisions, 0
+  undescribable fields; 916.6–998.5 KiB per document) so refusing breaks nothing that worked
+  (ADR-0338's rule). `reach` on a coverage gap borrows `pg-unreachable-stores.ts`'s `ordering`
+  versus `shape` distinction, because that is the one deciding whether the next reader should wire
+  something or change a format.
+  Four alternatives are refused **on measurement** and each keeps its figure: a `deepObject`
+  `filter` parameter is **wrong** rather than lossy (the server reads `?tax_id[gt]=`, so a generated
+  client would emit requests this API ignores, and ignoring a filter widens the answer — ADR-0359);
+  dropping the eight bracketed operators would make the grammar live in prose; a
+  `components/parameters` `$ref` dedupe saves **70 KiB of 915**, a factor of 2.21 and **7.7%**, for a
+  second place a reader must look — and that measurement confirmed `limit` cannot be shared from the
+  other direction, repeating ×46 rather than ×51 because five list operations carry a different
+  `maxLimit`; and publishing without a credential is refused on a **comparison** rather than on
+  caution, since `meta.schema.read` sits beside it, is already served to every authenticated
+  principal, and discloses **more** (per-entity role lists, unfiltered).
+  Three things were sharper than the feature. **The security scheme objects were invalid**: the
+  first draft typed them `Record<string, JsonSchema>` and emitted `{"type":"object"}`, a valid JSON
+  Schema and an **illegal** OpenAPI Security Scheme Object, so the document would have been
+  unparseable at the one key describing its own authentication — ADR-0337's direction inside the
+  increment whose subject is a falsely-complete document. They are derived from
+  `AUTH_SCHEME_SECURITY_DOC` now, a total map fenced against `AUTH_SCHEME_SUPPORT`'s treatment in
+  both directions, because the dangerous half is a **refused** scheme *with* an entry: a
+  `securitySchemes` entry is a **definition** a generator emits a client method for, so publishing
+  one for `api_key_query` would invite exactly the request ADR-0384 refuses.
+  **`x-api-key` was spelled twice** — a bare literal in `authenticate` and a prose copy in
+  `AUTH_SCHEME_SUPPORT.recognisedFrom` — so a document would have been the third;
+  `API_KEY_HEADER` is the one spelling and both prose copies interpolate it.
+  And **`served-surface.ts` was callerless**, which this increment's own earlier commit created:
+  it gains two real callers (the document's coverage and a boot line), while
+  `auditOutOfRegistrySurfaces` is deliberately **not** called at boot, because it compares the
+  declaration against the mounting source *as text* and the source is not shipped — in the built
+  output `import.meta.url` names `dist/node.js`, so a boot-time call would read the compiler's
+  rendering of `node.ts` and report drift on a correct deployment. The first draft of the boot
+  survey called it and was wrong.
+  **Four of the increment's own doc-comment claims were refuted by its own review, two of them
+  misleading in the dangerous direction.** *"seven stages before `match_route`"* is 3 and 2
+  (`match_route`'s 1-based ordinal transposed into a distance; seven before index 6 is index −1).
+  `LIST_PARAMETER_COMPLEMENT_NOTE` **enumerated three outcomes where there are four** — `?q=term` on
+  an entity declaring no searchable field is a **400 `search_not_served`**, and since this operation
+  omits `q` for exactly those entities while `q` is **not a field**, the note's own first rule told
+  such a reader the omission meant it was ignored: **the note written to stop a document's silence
+  reading as permission had the same defect it names.** *"An unsortable `?sort` falls back to the
+  declared default order"* is true for a minority, `defaultSort` being `[]` on **34 of `erp-core`'s
+  51** list configs — the same majority the paragraph above it cites as the reason not to refuse.
+  And *"6 of 14 probed inputs"* named no probe set and **understated** the divergence (8 of 18 with
+  bounds held equal, 14 of 18 against the real `Invoice` config). All four are corrected with their
+  measurements — and **the two tests that found them had pinned the defects as the intended
+  behaviour**, so fixing the prose broke them, which is ADR-0372's class arriving inside the review
+  that produced it.
+  **And the increment pushed a red typecheck and did not notice for four commits**, which is the
+  process failure worth more than the code. `routes.test.ts` assigned a `readonly PathSegment[]`
+  into `RouteDefinition.pathSegments`, which `z.array()` infers **mutable**, so
+  `pnpm --filter @crossengin/api-gateway typecheck` exited 2 while that package's 242 tests were
+  green — ADR-0307's split verbatim, vitest transpiling through esbuild and never typechecking. Two
+  reasons nothing caught it, and both are by design: the pre-commit hook runs only
+  `pnpm --filter @crossengin/testing test`, so it cannot see a typecheck failure in another package,
+  and ADR-0382's CI `pnpm -r typecheck` is the thing that *would* have — so the branch's CI was red
+  from that commit until the fix. **Run both, per package, before committing**, which this file
+  already says. A **second spelling of `x-api-key`** also survived the one-spelling fix, in
+  `tenant-gateway-cache.ts`'s `requestToken()` — the site that decides *which tenant's gateway
+  serves the request* — so the claim held for `api-gateway-runtime` and not for `operate-server`;
+  the three occurrences left are each independent by design (Anthropic's own outbound header, a
+  redaction denylist of header names, and the out-of-workspace dev demo).
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -3507,6 +3602,37 @@ packages exist at only one layer, noted below where that is true.
   `conflict_idempotency_mismatch` draws. The parameter is **required** on all four call sites, since
   neither default is correct — `[]` loses every diagnosis and "all fields" gives the wrong
   instruction.
+  **It also emits this deployment's own API description** (ADR-0392), in four modules.
+  `openapi-schema.ts` derives a response, create and update schema per entity over
+  **`resolvedFields`** — the aperture decision, measured: `entity.fields` totals **426** against
+  **630** resolved on `erp-core` and **51 of 51** entities differ, the 204 being exactly 51 × 4
+  `auditable` trait fields, so a document over the narrow set would be wrong about every entity in
+  the pack. `serverFillsOnCreate(field, wiring)` takes the **wiring** and not the field alone,
+  because of what decides a create request's obligations: of 395 `required` resolved fields only
+  **136** must be supplied by the caller under any wiring, **242** are server-filled whatever the
+  deployment and **17** depend on whether a settings store and a sequence allocator are wired — so
+  the manifest alone overstates the obligation **2.9x**, and a document ignoring the wiring would
+  promise a server-filled field on a deployment that cannot fill it.
+  `UNDESCRIBABLE_FIELD_KINDS` has one member and it is a **shape** answer: `duration`'s wire type is
+  undecided on purpose (ADR-0334), so inventing one would be the document deciding a question four
+  ADRs left open — measured **zero** `duration` fields across all seven resolved packs, so the entry
+  is a reserved answer rather than a live hole.
+  `openapi-list-params.ts` is the query grammar, **nine parameters per filterable field** (the bare
+  `eq` shorthand plus one per `FILTER_OPS` member) because `parseListQuery` reads exactly that and
+  because OpenAPI forbids two parameters sharing `(name, in)`, so a `deepObject` named `filter`
+  cannot coexist with the bare form *and* would describe a surface the server does not serve. A
+  filter parameter's schema is `{type: "string"}` and the declared value type goes in the
+  description, on a measured reason: an uncomparable value is **not** a 400, because
+  `filterPredicate` answers the constant `TRUE` for `ne` and `FALSE` otherwise, so
+  `?amount[gt]=n/a` returns zero rows and `?amount[ne]=n/a` returns **every** row, both under a 200
+  — a numeric `type` would be a constraint only the client enforces.
+  `openapi.ts` assembles the document and **refuses** rather than reports when a *served* route
+  cannot be rendered, which is the design's one load-bearing asymmetry: a declared structural
+  absence is an `x-crossengin-coverage` gap a reader can act on, while a route silently missing from
+  `paths` is a document describing a different API (ADR-0337). `openapi-handler.ts` holds the thunk,
+  the memo and the 401 backstop, plus `OPENAPI_PATH_SEGMENTS` / `OPENAPI_PATH` /
+  `OPENAPI_OPERATION_ID` as one spelling each — the path was briefly an array in `compile.ts` and a
+  string in `node.ts`'s boot line, caught by a `TS2304` rather than by looking.
 - **`operate-runtime-pg`** — Postgres `EntityStore` implementations plus the serving-side
   stores.
   **`public.ce_unaccent(text)` is the one accent fold, named by the predicate and by the index**
@@ -3723,6 +3849,36 @@ packages exist at only one layer, noted below where that is true.
   `iss`/`aud` entry under *What's actually left*). The schema is also the only place the repo writes
   down what an mtls or hmac credential consists of — a specification of code that does not exist,
   with no structural reference anywhere, so deleting it would be free and would destroy it.
+  **`API_KEY_HEADER` is the one spelling of the header a key is presented in** (ADR-0392), read by
+  `authenticate`, by this module's own `recognisedFrom` prose and by anything describing the surface.
+  It was a bare literal in the request path with that prose beside it as a second copy, so a third
+  reader was one edit from disagreeing with the parser about which header carries a credential —
+  ADR-0288's maintained list, in a place where a stale copy reads as a documented capability.
+  **`AUTH_SCHEME_SECURITY_DOC` is how a served scheme is presented, in OpenAPI's Security Scheme
+  vocabulary** — the machine spelling of `recognisedFrom`, kept beside it so the two cannot drift,
+  with OpenAPI's own field names (`in`, and `name` for the header) so an emitter copies rather than
+  translates. A **total map with `null` for every scheme this build does not serve**, fenced both
+  ways by `securityDocMatchesTreatment()`, and the two halves fail oppositely: a served scheme with
+  no entry is a credential no client is told about, while a refused scheme *with* an entry is the
+  worse direction, because a `securitySchemes` entry is a **definition** a generator emits a client
+  method for — so publishing one for `api_key_query` would invite precisely the request ADR-0384
+  refuses, in the document that exists to describe the refusal. The first draft of that document
+  typed these as `JsonSchema` and emitted `{"type":"object"}`: a valid JSON Schema and an **illegal**
+  Security Scheme Object, `object` not being one of OpenAPI's five, so the document would have been
+  unparseable at the one key describing its own authentication.
+  **`routes.ts` renders a route's path, which nothing in the workspace could** (ADR-0392).
+  `RouteDefinition` carries `pathSegments` and no path string, and three modules compiled that array
+  to a matcher while none rendered it. `renderPathTemplate(segments, grammar)` answers over
+  `PATH_SEGMENT_RENDER`, a total map from grammar (`openapi` | `express`) to segment kind to
+  `rendered`/`refused` — `openapi` refuses `wildcard`, because a path variable matches one segment
+  and a wildcard matches any number, so describing one as a parameter would send a generated client
+  to a path the server does not serve. The render is sound **by the schema**: a literal segment's
+  value is `/^[a-zA-Z0-9._-]+$/`, which admits no brace. `pathParameterSchemaPattern` anchors the
+  segment's own pattern, and `pathTemplateCollisions` **anonymises `{x}` → `{}`**, because OpenAPI
+  treats two templates differing only in a variable's name as the same path while `matchRoute`
+  separates them by registration order — so a Paths Object would hold one and omit the other.
+  `OPENAPI_PATH_ITEM_FIELD` is a total map over `HttpMethod` with `CONNECT → null`, the Path Item
+  Object having no field for it.
 - **`api-gateway-runtime`** — that pipeline as real middleware. EdDSA JWT verification with
   iss/aud/exp/nbf and a JWT-vs-header tenant cross-check, opaque-token matching, body
   parsing, handler dispatch, handler 4xx/5xx → deny/error mapping, classification-driven
@@ -6497,6 +6653,38 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   to build anyway) and one declaring `meta.extends`, whose parents contribute roles `roles` does not
   hold and whose lineage is the cache's to resolve rather than a second resolution here.
 
+  **`served-surface.ts` declares the five paths no route registry holds** (ADR-0392), because
+  `routes.list()` reads as the complete answer and is not: three `dispatchTarget` interceptor
+  wrappers in `node.ts` and one `WebhookRoute` matched inside `OperateHttpServer.dispatch` serve
+  `/health`, `/readyz`, `POST /v1/auth/token`, the bounce webhook and the Stripe webhook, and all
+  five are invisible to `list()`, to `matchRoute` and to `HandlerRegistry.operationIds()` alike.
+  One of them is the **login**, the first route any client calls. Declared rather than derived,
+  because the mechanism is a closure over a dispatch target and there is no object to enumerate;
+  the cost is drift, which `auditOutOfRegistrySurfaces` pays off by comparing the declaration
+  against the source **in both directions** — the forward arm on each surface's `mountSymbol` and
+  the backward arm on the *count* of each mechanism, so a sixth interceptor is a finding rather
+  than a path nothing describes. The forward arm reads the **symbol and not the path** on a
+  measurement that inverted the obvious check: four of the five paths appear nowhere as a literal
+  in `node.ts` or `server.ts`, each reaching its mount through its own constant, so "the declared
+  path appears in the mounting source" would have fired on four surfaces today and on all five
+  after the cleanup — a fence reporting its own subject improving.
+  **That audit is a test fence and is deliberately not called at boot**: it compares the
+  declaration against the source *as text* and the source is not shipped, so in the built output
+  `import.meta.url` names `dist/node.js` and a boot-time call would read the compiler's rendering
+  of `node.ts` and report drift on a correct deployment. `served-surface.test.ts` reads the real
+  `node.ts` and `server.ts` from disk for it. `coverageFromMountedSurfaces` is the other reader,
+  turning the declaration into the document's coverage gaps — one per `(method, path)` pair, so a
+  client learns the login's method and path rather than only that something is missing, and
+  `reach: "ordering"` on every one because all five declare `describable: true`.
+  The set each gap comes from is a **mutable set every mount site adds itself to**, read through
+  `openApiCoverage`'s thunk, because three of the four mounts wrap `dispatchTarget` *after*
+  `buildOperateHttpServer` returns (`:4852`, `:4973`, `:5015` against `:3863`) and two of their
+  conditions are compound — so a set computed up front from the flags would be a second spelling of
+  *is this mounted*. Verified live: the gap count moves **4 → 5** when `--credential-login` is
+  added. The `[openapi]` boot line is the third reader, saying how many registered routes the
+  document describes and how many served paths sit outside every registry — said either way,
+  including when nothing is withheld.
+
   **And both registry list handlers refuse a parameter they used to drop** (ADR-0365).
   `parseRegistryListQuery` is one parser with the status vocabulary as its **argument**, which is why
   it is one: the two handlers differ in nothing else, and two copies is how both came to drop
@@ -7644,6 +7832,20 @@ isolated copy of the package instead, which is the better answer when more than 
   and is not. It also fences ADR-0301's `--api-key`-on-argv instance by name and the documented
   bootstrap's step ordering. What it cannot see is whether a flag the compose passes is one this
   deployment should pass, which is the per-flag judgement the register's P0.3 entry holds.
+  **And a path served ahead of route matching is outside every registry, so it is outside anything
+  derived from one** (ADR-0392) — the **eleventh** reading, and the second not about source code.
+  Three interceptor wrappers and one `WebhookRoute` serve five paths by closing over a dispatch
+  target rather than registering, so `InMemoryRouteRegistry.list()`, `matchRoute` and
+  `HandlerRegistry.operationIds()` are each short by the same five, **one of them the login**. No
+  fake and no real database is relevant: every route the registry *does* hold is derived, matched
+  and served correctly, and what is wrong is that the registry is not the surface. The register's
+  own P1.17 makes the sharper version of the same mistake one layer in, naming
+  `CompiledOperateServer.routeSpecs` where the registry was already the wider source — 334 against
+  375 on the shipped compose. There is no object to enumerate, so the fence is a **declaration**
+  (`served-surface.ts`) compared against the mounting source in both directions, which is
+  `pg-storeless-tables.ts`' shape for a surface instead of a table; and the emitter declares the
+  gap generically whatever the declaration carries, so a dropped enumeration degrades the document
+  to a weaker true statement rather than a false one.
   **And a query that is missing a predicate satisfies all of them** (ADR-0359), which is the blind
   spot the rules share rather than a seventh reading. Every one of them asks whether a column
   exists, whether an `INSERT` is complete, whether a live database admits a value, whether a CHECK
@@ -11193,9 +11395,20 @@ three make the rest honest, cheap or verifiable.
 17. **14 packages, 15,006 source lines, zero importers**: `active-active`, `compliance`,
     `data-lineage`, `deploy`, `edge`, `finops`, `migration`, `ml-training`, `pwa`, `rate-limiting`,
     `sdk-clients`, `security`, `sso`, `workflow-signal-bridge` — ~17% of the package count, built,
-    typechecked and tested on every sweep for code no deployment reaches. Also: **no OpenAPI
+    typechecked and tested on every sweep for code no deployment reaches. ~~Also: **no OpenAPI
     document exists at all** (the cheapest high-leverage piece, derivable from
-    `CompiledOperateServer.routeSpecs`), `finops` means per-tenant gross margin is unknowable while
+    `CompiledOperateServer.routeSpecs`)~~ — **the OpenAPI half is closed by ADR-0392, which refuted
+    that remedy**: `routeSpecs` is 334 against the registry's 341, so a document derived from it
+    omits 7 routes silently, and the registry itself is short by the **five paths served ahead of
+    route matching** (the health pair, the login and the two webhooks). `GET /v1/meta/openapi`
+    serves an OpenAPI 3.1 document derived from the live registry, read through a thunk at request
+    time so registration order cannot make it wrong; verified live at **341 of 341 routes described,
+    0 missing in either direction**. What remains of this clause is the *other* half — the 14
+    zero-importer packages, `finops`, the CSP builder, the `xlsx` export — plus the document's own
+    two declared gaps: **which role may call an operation** (`RouteDefinition` carries no role field
+    and `requiredScopes` is `[]` workspace-wide, so the facts never pass the registry) and the five
+    out-of-registry surfaces' **bodies**, which are declared with their paths rather than described.
+    `finops` means per-tenant gross margin is unknowable while
     revenue is metered, `security`'s zero importers take the CSP builder with them (the shipped
     header is one hardcoded string), and one of eight view kinds is rendered while every list view
     advertises an `xlsx` export nothing can produce.
@@ -11758,7 +11971,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 386 records; 307 Accepted, 79 Proposed (the
+title or status change cannot drift. 387 records; 308 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

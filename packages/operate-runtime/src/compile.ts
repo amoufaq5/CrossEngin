@@ -7,7 +7,7 @@ import type {
 } from "@crossengin/auth";
 import type { ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { PathSegment, RouteDefinition } from "@crossengin/api-gateway";
-import type { Manifest } from "@crossengin/kernel/manifest";
+import { manifestHash, type Manifest } from "@crossengin/kernel/manifest";
 import {
   GatewayRuntime,
   HandlerRegistry,
@@ -73,6 +73,12 @@ import {
   type WriteEffect,
 } from "./write-effects.js";
 import { lifecycleStateField } from "./list-query.js";
+import {
+  buildOpenApiHandler,
+  OPENAPI_OPERATION_ID,
+  OPENAPI_PATH_SEGMENTS,
+} from "./openapi-handler.js";
+import type { OpenApiCoverageGap } from "./openapi.js";
 import { buildAgingHandler, type AgingSpec } from "./aging-handler.js";
 import { buildEntitlementHandler } from "./entitlement-handler.js";
 import { buildUsageHandler } from "./usage-handler.js";
@@ -161,6 +167,25 @@ export interface OperateRuntimeOptions {
   readonly cursorSealer?: CursorSealer;
   /** Allocates document numbers for sequence-defaulted fields on create. */
   readonly allocator?: SequenceAllocator;
+  /**
+   * Absences in this deployment's API description that the emitter cannot see for itself — chiefly
+   * the paths served *ahead* of route matching, which are in no registry and which only the
+   * deploying app knows.
+   *
+   * A **thunk**, read on the first request, for the same reason `describe` is one and measured the
+   * same way: of the four out-of-registry mounts in `node.ts`, three wrap the dispatch target
+   * *after* `buildOperateHttpServer` has returned (`node.ts:4852`, `:4973`, `:5015` against `:3863`),
+   * so a value passed here could only ever be computed from the flags a second time. Two of those
+   * conditions are compound, which is where a second spelling drifts — so a thunk over a set each
+   * mount site adds itself to keeps the declaration and the mount one fact.
+   *
+   * Optional, and a dropped value is safe **by construction** rather than by a check: the emitter
+   * declares `surface_outside_registry` generically whatever this carries, so forgetting it
+   * degrades the document to a weaker true statement and never to a false one. That matters because
+   * this is a forwarding-literal hop of exactly the shape ADR-0386 and ADR-0391 each found a field
+   * dropped from, both times silently — so the field is designed so that the drop cannot lie.
+   */
+  readonly openApiCoverage?: () => readonly OpenApiCoverageGap[];
   /** Backs the admin settings endpoints + runtime numbering overrides. */
   readonly settingsStore?: SettingsStore;
   /** Roles permitted to read/write tenant settings. Defaults to {"erp_admin"}. */
@@ -864,6 +889,41 @@ export function compileOperateServer(
       schema: buildUiSchema(manifest),
       principalRoles: options.principalRoles,
       ...(options.settingsStore !== undefined ? { settingsStore: options.settingsStore } : {}),
+    }),
+  );
+
+  // This deployment's own API description, derived from the registry above rather than from
+  // `routeSpecs`. Registered beside `meta.schema.read` because they are one family — manifest-driven
+  // metadata, ungated, each handler self-authorizing — and because the comparison decides the
+  // authorization: this one discloses strictly *less* than that one already does.
+  //
+  // `describe` is a thunk and is read on the first request, which is what makes this registration's
+  // POSITION irrelevant. `extraRoutes` are registered forty lines below, and on the shipped compose
+  // those are 38 of the 375 routes a request reaches; a snapshot taken here would omit every one of
+  // them with no refusal and no note, which is the falsely-complete direction (ADR-0337).
+  routes.register(literalRoute(OPENAPI_OPERATION_ID, "GET", [...OPENAPI_PATH_SEGMENTS]));
+  handlers.register(
+    OPENAPI_OPERATION_ID,
+    buildOpenApiHandler({
+      describe: () => ({
+        manifest,
+        routes: routes.list(),
+        routeSpecs,
+        wiring: {
+          settingsStore: options.settingsStore !== undefined,
+          allocator: options.allocator !== undefined,
+        },
+        title: manifest.meta?.name ?? "CrossEngin Operate",
+        // The manifest hash and deliberately not `manifest.meta.version`. OpenAPI's `info.version`
+        // is the version of the *described contract*, and `meta.version` is a pack author's
+        // declaration that moves when they choose it to — so it can sit at `0.1.0` across a
+        // breaking entity change, which is the one thing this field must not do. The hash is
+        // derived, so it moves exactly when the contract does, and it is already the identity the
+        // activation flow and the reviewer's diff compare. The author's own figure is in the
+        // description, where being advisory is honest.
+        version: manifestHash(manifest),
+        coverage: options.openApiCoverage?.() ?? [],
+      }),
     }),
   );
 

@@ -50,6 +50,7 @@ import {
   type EntityStore,
   type SequenceAllocator,
   type SettingsStore,
+  OPENAPI_PATH,
 } from "@crossengin/operate-runtime";
 import { type PgConnection } from "@crossengin/kernel-pg";
 import {
@@ -252,7 +253,13 @@ import {
   buildPostgresReadinessCheck,
   HEALTH_PATHS,
 } from "./health.js";
-import { STRIPE_WEBHOOK_PATH } from "./served-surface.js";
+import {
+  coverageFromMountedSurfaces,
+  servedSurface,
+  STRIPE_WEBHOOK_PATH,
+  undescribableRegisteredRoutes,
+  type OutOfRegistrySurfaceKind,
+} from "./served-surface.js";
 import {
   AUTH_TOKEN_PATH,
   buildAuthTokenInterceptor,
@@ -1396,6 +1403,17 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     conn !== undefined && (options.stripeWebhookSecret !== null || options.stripeApiKey !== null)
       ? new PostgresSubscriptionStore(conn, schemaOpt)
       : undefined;
+  /**
+   * Which out-of-registry surfaces this process mounted — added to **at each mount site** rather
+   * than derived from the flags a second time.
+   *
+   * Three of the four mounts wrap `dispatchTarget` after `buildOperateHttpServer` has returned and
+   * two of their conditions are compound, so a set computed up front from `options` would be a
+   * second spelling of "is this mounted" — the shape ADR-0288 has been wrong about four times here.
+   * `openApiCoverage` is a thunk for exactly this: the document reads the set on its first request,
+   * by which time every mount has recorded itself.
+   */
+  const mountedOutOfRegistry = new Set<OutOfRegistrySurfaceKind>();
   let webhookRoute: WebhookRoute | undefined;
   if (options.stripeWebhookSecret !== null && conn !== undefined && subscriptionStore !== undefined) {
     const secret = options.stripeWebhookSecret;
@@ -1406,6 +1424,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     if (options.planCatalogFile !== null) {
       planLimits = buildPlanCatalog(JSON.parse(await readFile(options.planCatalogFile, "utf8"))).toLookup();
     }
+    mountedOutOfRegistry.add("stripe_webhook");
     webhookRoute = {
       method: "POST",
       path: STRIPE_WEBHOOK_PATH,
@@ -3862,6 +3881,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       : undefined;
   const { httpServer, gateway } = buildOperateHttpServer({
     manifest,
+    // Read on the document's first request, not here — by then every mount has recorded itself.
+    openApiCoverage: () => coverageFromMountedSurfaces(mountedOutOfRegistry),
     store,
     apiKeys,
     cursorSealing,
@@ -4848,6 +4869,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         onError: (err, target) =>
           console.error(`[bounce-webhook] store failure for tenant ${target.tenantId}`, err),
       });
+      mountedOutOfRegistry.add("bounce_webhook");
       const inner = dispatchTarget;
       dispatchTarget = {
         dispatch: async (raw, body): Promise<RawHttpResponse> =>
@@ -4969,6 +4991,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       onRefusal: (info) => console.info(`[auth] login refused ${info.refusal}: ${info.detail}`),
       onError: (err) => console.error("[auth] login store failure", err),
     });
+    mountedOutOfRegistry.add("credential_login");
     const inner = dispatchTarget;
     dispatchTarget = {
       dispatch: async (raw, body): Promise<RawHttpResponse> =>
@@ -5011,6 +5034,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           info.error ?? "",
         ),
     });
+    // Two surfaces behind one interceptor, which is why `INTERCEPTOR_KINDS` counts three mounts
+    // and five kinds are declared.
+    mountedOutOfRegistry.add("liveness");
+    mountedOutOfRegistry.add("readiness");
     const inner = dispatchTarget;
     dispatchTarget = {
       dispatch: async (raw, body): Promise<RawHttpResponse> =>
@@ -5021,6 +5048,42 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         `${HEALTH_PATHS.readiness} (readiness, ` +
         `${conn !== undefined ? "checks postgres" : "no declared dependency"})`,
     );
+  }
+
+  // What this deployment's own API description covers, said either way — including when nothing is
+  // withheld, because "we checked and found nothing" cannot be claimed from the absence of a line.
+  // Placed here rather than beside the gateway because the mounted set is only complete once every
+  // interceptor above has recorded itself, which is the same ordering `openApiCoverage`'s thunk
+  // exists for.
+  {
+    const surface = servedSurface({
+      registered: gateway.routes.list(),
+      mounted: mountedOutOfRegistry,
+      perTenantManifests: options.perTenantManifests,
+    });
+    const undescribable = undescribableRegisteredRoutes(surface.registered);
+    const describedCount = surface.registered.length - undescribable.length;
+    console.info(
+      `[openapi] serving ${OPENAPI_PATH} — describing ${describedCount.toString()} of ` +
+        `${surface.registered.length.toString()} registered routes; ` +
+        `${surface.outOfRegistry.length.toString()} served path(s) sit outside every route ` +
+        `registry and are declared as coverage gaps rather than described` +
+        `${surface.perTenantManifests === null ? "" : "; per-tenant manifests are served from their own registries, which this document does not enumerate"}`,
+    );
+    if (undescribable.length > 0) {
+      // A refusal rather than a gap: the handler answers 500 and names these, because a route
+      // silently absent from `paths` is a document describing a different API (ADR-0337).
+      console.error(
+        `[openapi] ${undescribable.length.toString()} registered route(s) cannot be rendered as an` +
+          ` OpenAPI path, so the document is REFUSED rather than emitted partially: ` +
+          undescribable.map((r) => r.operationId).join(", "),
+      );
+    }
+    // `auditOutOfRegistrySurfaces` is deliberately NOT called here. It compares the declaration
+    // against the mounting source **as text**, and the source is not shipped: in the built output
+    // `import.meta.url` names `dist/node.js`, so a boot-time call would read the compiler's
+    // rendering of this file and report drift on a deployment that is correct. It is a test fence,
+    // and `served-surface.test.ts` reads the real `node.ts` and `server.ts` from disk for it.
   }
 
   poller?.start();

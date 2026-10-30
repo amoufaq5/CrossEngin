@@ -28,6 +28,8 @@ export interface JsonSchema {
   readonly additionalProperties?: boolean;
   readonly description?: string;
   readonly oneOf?: readonly JsonSchema[];
+  readonly minimum?: number;
+  readonly maximum?: number;
   readonly $ref?: string;
 }
 
