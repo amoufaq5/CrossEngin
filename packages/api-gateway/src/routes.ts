@@ -279,6 +279,151 @@ export const negotiateVersion = (
   }
 };
 
+export const PATH_TEMPLATE_GRAMMARS = ["openapi", "express"] as const;
+export type PathTemplateGrammar = (typeof PATH_TEMPLATE_GRAMMARS)[number];
+
+/**
+ * Whether each grammar can express each segment kind. A total map over the product rather than two
+ * `switch`es, so a fourth `PathSegment` kind is a compile error at both grammars instead of a
+ * segment one renderer silently drops — and dropping one does not shorten a path, it **changes
+ * which requests it matches**.
+ *
+ * `openapi: wildcard` is the one `refused`, and it is a shape refusal rather than a wiring one:
+ * OpenAPI 3.1's path templating has no multi-segment variable (RFC 6570 reserved expansion is not
+ * part of the Paths Object), so `{suffix}` would describe a path matching exactly one segment where
+ * the route matches any number. Measured across every pack at both the shipped and the maximal flag
+ * set: **zero** routes carry a wildcard, and the only construction site is `compilePathPattern`'s
+ * `*` arm — so the refusal has no member today, which is exactly when it is cheapest to be right.
+ */
+export const PATH_SEGMENT_RENDER: Readonly<
+  Record<PathTemplateGrammar, Readonly<Record<PathSegment["kind"], "rendered" | "refused">>>
+> = {
+  openapi: { literal: "rendered", parameter: "rendered", wildcard: "refused" },
+  express: { literal: "rendered", parameter: "rendered", wildcard: "rendered" },
+};
+
+export type PathTemplateRender =
+  | { readonly template: string; readonly refused: null }
+  | { readonly template: null; readonly refused: "wildcard_not_expressible"; readonly at: number };
+
+/**
+ * Renders a route's segments back into a path template — the inverse of `compilePathPattern` for
+ * the `express` grammar, and the form an OpenAPI Paths Object key takes for `openapi`.
+ *
+ * It lives here because this module holds both the inverse and `tryMatchSegments`, the only
+ * consumer that walks the array rather than compiling it to a `RegExp`; three modules compile a
+ * pattern and none rendered one, so a caller wanting a path string had no answer and
+ * `RouteDefinition` has no path field (ADR-0355).
+ *
+ * The render is unambiguous by the schema rather than by convention: a literal's value is
+ * `/^[a-zA-Z0-9._-]+$/`, which admits neither brace nor colon, so `{id}` in the output can only
+ * have come from a parameter segment and `:id` only from one under the express grammar.
+ */
+export const renderPathTemplate = (
+  segments: readonly PathSegment[],
+  grammar: PathTemplateGrammar,
+): PathTemplateRender => {
+  const parts: string[] = [];
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    if (seg === undefined) continue;
+    if (PATH_SEGMENT_RENDER[grammar][seg.kind] === "refused") {
+      return { template: null, refused: "wildcard_not_expressible", at: i };
+    }
+    if (seg.kind === "literal") {
+      parts.push(seg.value);
+    } else if (seg.kind === "parameter") {
+      parts.push(grammar === "openapi" ? `{${seg.name}}` : `:${seg.name}`);
+    } else {
+      // `express` is the only grammar that renders a wildcard; `openapi` returned above.
+      parts.push("*");
+    }
+  }
+  return { template: `/${parts.join("/")}`, refused: null };
+};
+
+/**
+ * The anchored regular expression a path parameter's declared pattern becomes in an OpenAPI
+ * parameter *schema*, or `null` when the segment declares none.
+ *
+ * In the schema and deliberately not in the template: OpenAPI path templating carries a name and
+ * nothing else, so a pattern rendered into the key would be part of the path's identity and two
+ * routes differing only in it would read as two paths. Anchored because `tryMatchSegments` anchors
+ * it too (`new RegExp(\`^${p.pattern}$\`)`), so an unanchored copy here would describe a parameter
+ * the matcher refuses. Exactly one route in the workspace declares a pattern — `platform.users.get`
+ * carrying `UUID_SEGMENT_PATTERN` — and it is load-bearing: it is what separates
+ * `GET /v1/platform/users/stats` from `GET /v1/platform/users/{id}` independently of registration
+ * order.
+ */
+export const pathParameterSchemaPattern = (
+  segment: Extract<PathSegment, { kind: "parameter" }>,
+): string | null => (segment.pattern === null ? null : `^${segment.pattern}$`);
+
+/**
+ * The OpenAPI 3.1 Path Item Object field each HTTP method is described by, or `null` for the one
+ * method the object has no field for.
+ *
+ * `CONNECT` is that one: OAS 3.1's Path Item Object declares get/put/post/delete/options/head/
+ * patch/trace and nothing else, so a `CONNECT` route is undescribable by shape rather than by
+ * omission — a map keyed on the eight would have made it a lookup miss, which reads as a method
+ * somebody forgot. Measured: zero `CONNECT` routes exist, and `OPTIONS` is in the enum with no
+ * producer either (see `corsPreflightResponse`'s unreachable arm).
+ */
+export const OPENAPI_PATH_ITEM_FIELD: Readonly<Record<HttpMethod, string | null>> = {
+  GET: "get",
+  HEAD: "head",
+  POST: "post",
+  PUT: "put",
+  PATCH: "patch",
+  DELETE: "delete",
+  OPTIONS: "options",
+  TRACE: "trace",
+  CONNECT: null,
+};
+
+/**
+ * Route sets that render to one OpenAPI `(path, method)` pair, which the Paths Object cannot hold.
+ *
+ * Compared on the **anonymised** template — parameter names replaced by a placeholder — because
+ * OAS 3.1 states that templated paths with the same hierarchy but different templated names are
+ * identical and MUST NOT both exist, so `{id}` and `{dispatchId}` in the same position collide
+ * while being distinct `RouteDefinition`s the matcher separates by registration order.
+ *
+ * Measured zero at both flag sets today (375 routes over 218 distinct templates, 421 over 262) —
+ * and reachable from a manifest rather than hypothetical, which is why this is a function over a
+ * route set and not a one-off assertion: an entity whose slug lands in a reserved namespace with a
+ * transition named after an existing sub-path produces one, and the matcher then serves the entity
+ * route while the other stays registered and unreachable.
+ */
+export const pathTemplateCollisions = (
+  routes: readonly RouteDefinition[],
+): readonly {
+  readonly method: HttpMethod;
+  readonly template: string;
+  readonly operationIds: readonly string[];
+}[] => {
+  const byKey = new Map<string, { method: HttpMethod; template: string; ids: string[] }>();
+  for (const route of routes) {
+    const rendered = renderPathTemplate(route.pathSegments, "openapi");
+    if (rendered.template === null) continue;
+    const anonymised = rendered.template.replace(/\{[^}]*\}/g, "{}");
+    const key = `${route.method} ${anonymised}`;
+    const entry = byKey.get(key);
+    if (entry === undefined) {
+      byKey.set(key, { method: route.method, template: anonymised, ids: [route.operationId] });
+    } else {
+      entry.ids.push(route.operationId);
+    }
+  }
+  const out: { method: HttpMethod; template: string; operationIds: readonly string[] }[] = [];
+  for (const entry of byKey.values()) {
+    if (entry.ids.length > 1) {
+      out.push({ method: entry.method, template: entry.template, operationIds: entry.ids });
+    }
+  }
+  return out;
+};
+
 export const compilePathPattern = (
   template: string,
 ): readonly PathSegment[] => {

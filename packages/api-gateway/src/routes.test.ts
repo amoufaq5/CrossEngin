@@ -1,11 +1,19 @@
 import { describe, expect, it } from "vitest";
+import { HTTP_METHODS } from "./requests.js";
 import {
+  OPENAPI_PATH_ITEM_FIELD,
+  PATH_SEGMENT_RENDER,
+  PATH_TEMPLATE_GRAMMARS,
   ROUTE_MATCH_OUTCOMES,
   RouteDefinitionSchema,
   VERSION_NEGOTIATION_STRATEGIES,
   compilePathPattern,
   matchRoute,
   negotiateVersion,
+  pathParameterSchemaPattern,
+  pathTemplateCollisions,
+  renderPathTemplate,
+  type PathSegment,
   type RouteDefinition,
 } from "./routes.js";
 
@@ -243,5 +251,175 @@ describe("compilePathPattern", () => {
       name: "id",
       pattern: "[a-z0-9]+",
     });
+  });
+});
+
+describe("renderPathTemplate", () => {
+  it("renders a literal + parameter path in both grammars", () => {
+    const segs = route.pathSegments;
+    expect(renderPathTemplate(segs, "openapi")).toEqual({
+      template: "/v1/tenants/{id}",
+      refused: null,
+    });
+    expect(renderPathTemplate(segs, "express")).toEqual({
+      template: "/v1/tenants/:id",
+      refused: null,
+    });
+  });
+
+  it("round-trips through compilePathPattern, its inverse, for the express grammar", () => {
+    // The property that makes the renderer trustworthy rather than merely plausible: the module
+    // already held the parse, so the render can be checked against it instead of against a
+    // hand-written expectation. Covers all three segment kinds including the wildcard.
+    for (const template of [
+      "/v1/tenants/:id",
+      "/v1/tenants/:id/transitions/:name",
+      "/v1/files/:id/*",
+      "/v1/tenants/:id([0-9a-f-]+)",
+      "/health",
+    ]) {
+      const segments = compilePathPattern(template);
+      const rendered = renderPathTemplate(segments, "express");
+      // A declared pattern is deliberately NOT rendered back into the express template — it goes
+      // into the parameter's schema — so the round trip is on the segment *shape*, and the pattern
+      // is asserted separately below.
+      expect(compilePathPattern(rendered.template ?? "")).toEqual(
+        segments.map((s) => (s.kind === "parameter" ? { ...s, pattern: null } : s)),
+      );
+    }
+  });
+
+  it("refuses a wildcard under the openapi grammar, naming its position", () => {
+    // Shape, not wiring: OAS 3.1 has no multi-segment path variable, so rendering `{suffix}` would
+    // describe a path matching one segment where the route matches any number.
+    const segs: readonly PathSegment[] = [
+      { kind: "literal", value: "v1" },
+      { kind: "literal", value: "files" },
+      { kind: "wildcard" },
+    ];
+    expect(renderPathTemplate(segs, "openapi")).toEqual({
+      template: null,
+      refused: "wildcard_not_expressible",
+      at: 2,
+    });
+    // …and the express grammar renders the same segments, which is what makes the map two-valued
+    // rather than a blanket refusal.
+    expect(renderPathTemplate(segs, "express").template).toBe("/v1/files/*");
+  });
+
+  it("renders an empty segment list as the root path", () => {
+    expect(renderPathTemplate([], "openapi").template).toBe("/");
+  });
+
+  it("declares a render for every (grammar, segment kind) pair", () => {
+    // Totality is the fence: a fourth segment kind must be a compile error at both grammars rather
+    // than a segment one renderer drops, because a dropped segment does not shorten a path, it
+    // changes which requests it matches.
+    expect(PATH_TEMPLATE_GRAMMARS).toHaveLength(2);
+    const kinds: readonly PathSegment["kind"][] = ["literal", "parameter", "wildcard"];
+    for (const grammar of PATH_TEMPLATE_GRAMMARS) {
+      for (const kind of kinds) {
+        expect(PATH_SEGMENT_RENDER[grammar][kind], `${grammar}.${kind}`).toMatch(
+          /^(rendered|refused)$/,
+        );
+      }
+    }
+    // Exactly one cell is refused, and it is the one the prose argues for.
+    const refused = PATH_TEMPLATE_GRAMMARS.flatMap((g) =>
+      kinds.filter((k) => PATH_SEGMENT_RENDER[g][k] === "refused").map((k) => `${g}.${k}`),
+    );
+    expect(refused).toEqual(["openapi.wildcard"]);
+  });
+});
+
+describe("pathParameterSchemaPattern", () => {
+  it("anchors a declared pattern and answers null for none", () => {
+    // Anchored because `tryMatchSegments` anchors it too, so an unanchored copy would describe a
+    // parameter the matcher refuses.
+    expect(
+      pathParameterSchemaPattern({ kind: "parameter", name: "id", pattern: "[0-9a-f]{8}" }),
+    ).toBe("^[0-9a-f]{8}$");
+    expect(pathParameterSchemaPattern({ kind: "parameter", name: "id", pattern: null })).toBeNull();
+  });
+});
+
+describe("OPENAPI_PATH_ITEM_FIELD", () => {
+  it("answers for every HTTP method, and only CONNECT has no field", () => {
+    // A total map rather than a lookup over the eight OAS fields: a miss reads as a method somebody
+    // forgot, where `null` states that the Path Item Object has no field for it.
+    for (const method of HTTP_METHODS) {
+      expect(method in OPENAPI_PATH_ITEM_FIELD, method).toBe(true);
+    }
+    const undescribable = HTTP_METHODS.filter((m) => OPENAPI_PATH_ITEM_FIELD[m] === null);
+    expect(undescribable).toEqual(["CONNECT"]);
+    expect(OPENAPI_PATH_ITEM_FIELD.GET).toBe("get");
+    expect(OPENAPI_PATH_ITEM_FIELD.DELETE).toBe("delete");
+  });
+});
+
+describe("pathTemplateCollisions", () => {
+  const at = (operationId: string, method: RouteDefinition["method"], segs: readonly PathSegment[]): RouteDefinition => ({
+    ...route,
+    operationId,
+    method,
+    pathSegments: segs,
+  });
+
+  it("finds none when every rendered template is distinct", () => {
+    expect(
+      pathTemplateCollisions([
+        at("a.read", "GET", [{ kind: "literal", value: "a" }, { kind: "parameter", name: "id", pattern: null }]),
+        at("b.read", "GET", [{ kind: "literal", value: "b" }, { kind: "parameter", name: "id", pattern: null }]),
+      ]),
+    ).toEqual([]);
+  });
+
+  it("collides two routes whose templates differ only in the parameter's NAME", () => {
+    // The OAS equivalence test, and the reason the comparison is on the anonymised template: two
+    // distinct `RouteDefinition`s the matcher separates by registration order are ONE path to a
+    // Paths Object, which cannot hold both.
+    const found = pathTemplateCollisions([
+      at("notification.read", "POST", [
+        { kind: "literal", value: "v1" },
+        { kind: "literal", value: "notifications" },
+        { kind: "parameter", name: "id", pattern: null },
+        { kind: "literal", value: "read" },
+      ]),
+      at("notifications.read_state.mark", "POST", [
+        { kind: "literal", value: "v1" },
+        { kind: "literal", value: "notifications" },
+        { kind: "parameter", name: "dispatchId", pattern: null },
+        { kind: "literal", value: "read" },
+      ]),
+    ]);
+    expect(found).toEqual([
+      {
+        method: "POST",
+        template: "/v1/notifications/{}/read",
+        operationIds: ["notification.read", "notifications.read_state.mark"],
+      },
+    ]);
+  });
+
+  it("does not collide the same path under different methods", () => {
+    const segs: readonly PathSegment[] = [
+      { kind: "literal", value: "v1" },
+      { kind: "literal", value: "admin" },
+      { kind: "literal", value: "settings" },
+    ];
+    expect(pathTemplateCollisions([at("s.read", "GET", segs), at("s.update", "PUT", segs)])).toEqual(
+      [],
+    );
+  });
+
+  it("skips a wildcard route rather than counting it as a collision", () => {
+    // It renders to no openapi template at all, so it can neither collide nor be described — the
+    // honest answer is that the document omits it, which is the caller's finding to report.
+    expect(
+      pathTemplateCollisions([
+        at("w.one", "GET", [{ kind: "literal", value: "f" }, { kind: "wildcard" }]),
+        at("w.two", "GET", [{ kind: "literal", value: "f" }, { kind: "wildcard" }]),
+      ]),
+    ).toEqual([]);
   });
 });
