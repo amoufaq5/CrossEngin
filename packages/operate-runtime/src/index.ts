@@ -6,6 +6,7 @@ export * from "./decimal.js";
 export * from "./decimal-store.js";
 export * from "./list-value-types.js";
 export * from "./list-query.js";
+export * from "./openapi-schema.js";
 export * from "./list-drain.js";
 export * from "./cursor-seal.js";
 export * from "./operations.js";
