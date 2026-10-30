@@ -11,9 +11,32 @@ import type { Manifest } from "@crossengin/kernel/manifest";
 import type { Entity, Trait } from "@crossengin/types/meta-schema";
 
 import { listQueryParameters, LIST_PARAMETER_COMPLEMENT_NOTE } from "./openapi-list-params.js";
-import { entitySchemas, type CreateWiring, type JsonSchema } from "./openapi-schema.js";
+import { entitySchemas, type JsonSchema } from "./openapi-schema.js";
 import { entityCamel } from "./slugs.js";
 import type { RouteSpec } from "./operations.js";
+
+/**
+ * Where this deployment's API description is served, under which operation id, and in which media
+ * type — the one spelling of all four, and **here rather than in `openapi-handler.ts`** because the
+ * emitter needs them too: it describes its own route's success response, and the handler module
+ * imports this one, so putting them there and importing them back would be a module cycle over
+ * `const` bindings.
+ *
+ * The segments are what `compileOperateServer` registers and the rendered path is what a boot line
+ * and a document reader are told, so the two cannot come to disagree: the path was otherwise a
+ * `["v1", "meta", "openapi"]` array in one file and a `/v1/meta/openapi` string in another, which
+ * is the second-spelling shape this increment already had to fix once for `x-api-key`.
+ *
+ * `OPENAPI_MEDIA_TYPE` is the OpenAPI Initiative's own registration, carrying the version parameter
+ * so a reader learns which version it holds without parsing the body. Supplying it is load-bearing
+ * rather than cosmetic and it is checked against the adapter: `outgoingResponseFromJson` fills
+ * `content-type` **only when absent**, so this survives, where a second header set would be
+ * silently discarded.
+ */
+export const OPENAPI_PATH_SEGMENTS: readonly string[] = ["v1", "meta", "openapi"];
+export const OPENAPI_PATH = `/${OPENAPI_PATH_SEGMENTS.join("/")}`;
+export const OPENAPI_OPERATION_ID = "meta.openapi.read";
+export const OPENAPI_MEDIA_TYPE = "application/openapi+json;version=3.1.0";
 
 /**
  * A fact about this API the document provably cannot carry.
@@ -27,6 +50,7 @@ import type { RouteSpec } from "./operations.js";
 export const OPENAPI_COVERAGE_KINDS = [
   "undeclared_authorization",
   "undeclared_parameters",
+  "undeclared_success_response",
   "surface_outside_registry",
   "per_tenant_surface",
 ] as const;
@@ -38,7 +62,11 @@ export interface OpenApiCoverageGap {
   readonly detail: string;
 }
 
-export const OPENAPI_REFUSALS = ["wildcard_path", "path_collision"] as const;
+export const OPENAPI_REFUSALS = [
+  "wildcard_path",
+  "path_collision",
+  "method_not_describable",
+] as const;
 export type OpenApiRefusalKind = (typeof OPENAPI_REFUSALS)[number];
 
 export interface OpenApiRefusal {
@@ -53,7 +81,10 @@ export interface OpenApiEmitInput {
   readonly routes: readonly RouteDefinition[];
   /** The manifest-derived specs, which carry the entity attribution and the list config. */
   readonly routeSpecs: readonly RouteSpec[];
-  readonly wiring: CreateWiring;
+  /**
+   * The manifest-derived specs are the whole of what the schemas need: see `entitySchemas` for why
+   * this takes no deployment wiring, which it did until both arms that read one were measured.
+   */
   readonly title: string;
   /** Identifies the described contract. The manifest hash, so the version moves iff the API does. */
   readonly version: string;
@@ -121,21 +152,70 @@ const handlerErrorSchema: JsonSchema = {
 
 const ref = (name: string): JsonSchema => ({ $ref: `#/components/schemas/${name}` });
 
-const errorResponses = (): Readonly<Record<string, unknown>> => ({
-  "400": {
-    description: "The request names a surface this deployment does not serve.",
-    content: { "application/json": { schema: ref("HandlerError") } },
+/**
+ * The content map for a status **two** producers can answer with two different shapes.
+ *
+ * This is not a hedge. A 401 or a 403 reaches a caller from either the gateway pipeline or the
+ * handler behind it, and the two serialise differently: a pipeline denial goes through
+ * `problems.ts`, which sets `content-type: application/problem+json` and an RFC 9457 body, while a
+ * handler refusal is a `{kind: "json"}` output whose body `runtime.ts` preserves verbatim — so
+ * `application/json` with `{error, detail}`, the `HandlerError` shape.
+ *
+ * Declaring one of them was wrong, and it was wrong on **the live producer**: measured through the
+ * real handlers, an anonymous `invoice.list` answers `401 {"error":"tenant_required",…}` and a
+ * principal holding an ungranted role answers `403 {"error":"forbidden",…}`, both `application/json`
+ * — while this function declared `application/problem+json` + `Problem` for both, three lines under
+ * `problemSchema`'s own description stating the rule correctly. The gateway's 401 is reachable too
+ * (eleven `authenticationRequired` sites, all before route matching), so replacing one declaration
+ * with the other would have been the same defect pointing the other way.
+ *
+ * Both media types are therefore declared on both, which is also robust to the one configuration
+ * that moves the 403: the gateway's `forbidden` arm is gated on `route.requiredScopes.length > 0`,
+ * and that is `[]` on every route in the workspace — the same measurement `undeclared_authorization`
+ * rests on — so today only the handler can produce it, and a deployment that declares a scope gets
+ * the other shape with no document change.
+ */
+const twoProducerDenial = (description: string): Readonly<Record<string, unknown>> => ({
+  description,
+  content: {
+    "application/problem+json": { schema: ref("Problem") },
+    "application/json": { schema: ref("HandlerError") },
   },
-  "401": {
-    description:
-      "No usable credential. A credential presented in a scheme this build does not serve is " +
+});
+
+/**
+ * The denials every operation can answer with.
+ *
+ * **400 is deliberately absent**, because it is reachable on the `list` action and nowhere else:
+ * all four of its producers in `handlers.ts` (`unservedRefused`, `cursorRefused`,
+ * `addressingRefused`, `storeRefused`) sit inside `case "list":`, and the association module emits
+ * no 400 at all. Declaring it everywhere cost a false sentence on 287 of 338 operations — its
+ * description names a query-surface mechanism a read, a create or a transition does not have, and
+ * measured, a read with junk query parameters answers **200**, a delete of a missing id **404**, a
+ * failed create **422** and a unique violation **409**. `listErrorResponses` adds it back where the
+ * sentence is true.
+ */
+const errorResponses = (): Readonly<Record<string, unknown>> => ({
+  "401": twoProducerDenial(
+    "No usable credential. A credential presented in a scheme this build does not serve is " +
       "refused here by name rather than treated as anonymous (ADR-0384) — including `?api_key=`, " +
       "which is recognised and refused.",
-    content: { "application/problem+json": { schema: ref("Problem") } },
-  },
-  "403": {
-    description: "The principal's roles do not grant this operation on this entity.",
-    content: { "application/problem+json": { schema: ref("Problem") } },
+  ),
+  "403": twoProducerDenial(
+    "The principal's roles do not grant this operation on this entity.",
+  ),
+});
+
+/** `errorResponses` plus the 400 only a list query can produce. */
+const listErrorResponses = (): Readonly<Record<string, unknown>> => ({
+  ...errorResponses(),
+  "400": {
+    description:
+      "The request names a list surface this deployment does not serve — a filter on a field that " +
+      "is not filterable, an operator outside the eight, a search on an entity with no searchable " +
+      "field, a cursor not issued for this request, or a sort/filter naming a classified field " +
+      "while rows are being withheld.",
+    content: { "application/json": { schema: ref("HandlerError") } },
   },
 });
 
@@ -150,26 +230,45 @@ const listResponseSchema = (entityRef: string): JsonSchema => ({
         "Terminate the walk on `nextCursor === null` and nothing else: a page may be short or " +
         "even empty while the cursor is non-null, because rows a record-level policy withholds are " +
         "dropped after the store's slice (ADR-0345).",
-      properties: { nextCursor: { type: ["string", "null"] } },
+      // `limit` is the page size that was applied, which the real response carries and this
+      // declaration omitted — measured, a list answers `page: {"limit":100,"nextCursor":null}`.
+      // Both keys are always present and so is `page` itself, which is why all three are required:
+      // a client branching on `page === undefined` would be writing a branch the server never takes.
+      properties: { limit: { type: "integer" }, nextCursor: { type: ["string", "null"] } },
+      required: ["limit", "nextCursor"],
     },
   },
-  required: ["data"],
+  required: ["data", "page"],
 });
 
 /**
  * Builds an OpenAPI 3.1 document for the surface a route registry holds.
  *
  * The input is the **registry's own list**, not `CompiledOperateServer.routeSpecs`: the register's
- * P1.17 names the latter and it is a strict subset, describing 334 of the 375 routes the shipped
- * compose serves. `routeSpecs` is still taken, for the two things only it carries — which entity a
- * route is about, and its `ListConfig`.
+ * P1.17 names the latter and it is a strict subset. `routeSpecs` is derived from the manifest and
+ * so does not grow with a flag, which is what makes the gap widen with configuration — 334 against
+ * the registry's **338** on a bare `erp-core` compile, and 334 against the shipped compose's
+ * **375**. (Both denominators are correct and they are two different deployments; a reader comparing
+ * them without the configuration attached would think one of them wrong.) `routeSpecs` is still
+ * taken, for the two things only it carries — which entity a route is about, and its `ListConfig`.
  *
  * It **refuses** rather than reports when a *served* route cannot be rendered, and that split is
  * the design's one load-bearing asymmetry. A declared structural absence (nobody can express which
  * role may call a route) is a named gap a reader can act on; a route silently missing from `paths`
  * is a document that describes a different API, which is the falsely-complete direction (ADR-0337).
- * Both refusals are measured empty today — zero wildcard routes and zero collisions across all
- * seven packs at both flag sets — so refusing breaks nothing that worked (ADR-0338's rule).
+ * All three refusals are measured empty today — zero wildcard routes, zero collisions and zero
+ * CONNECT routes across all seven packs at both flag sets — so refusing breaks nothing that worked
+ * (ADR-0338's rule).
+ *
+ * `method_not_describable` is the third, and it exists because this function **had that defect
+ * while arguing against it**: a CONNECT route was dropped with a bare `continue`, so the document
+ * answered `refused: null` over 341 routes and emitted 340 operations, with the path and the
+ * operationId nowhere in it and no coverage gap — verified, through a schema-valid route the real
+ * registry accepted. The asymmetry was the finding rather than the drop: `wildcard_path` has the
+ * same reach, the same zero population and the same one construction site, and was refused, while
+ * this was not. A CONNECT route is a *shape* refusal for the same reason — the Path Item Object has
+ * no field for the method, so there is no honest way to describe it — which is why
+ * `OPENAPI_PATH_ITEM_FIELD` answering `null` is the whole test and no method is named here.
  */
 export const buildOpenApiDocument = (input: OpenApiEmitInput): OpenApiEmit => {
   const collisions = pathTemplateCollisions(input.routes);
@@ -204,6 +303,23 @@ export const buildOpenApiDocument = (input: OpenApiEmitInput): OpenApiEmit => {
       },
     };
   }
+  const undescribableMethods = input.routes.filter(
+    (r) => OPENAPI_PATH_ITEM_FIELD[r.method] === null,
+  );
+  if (undescribableMethods.length > 0) {
+    return {
+      document: null,
+      refused: {
+        kind: "method_not_describable",
+        detail:
+          `A served route uses ${undescribableMethods.map((r) => r.method).join(", ")}, which a ` +
+          `Path Item Object has no field for, so OpenAPI 3.1 cannot describe the operation at all. ` +
+          `Emitting the document without it would answer success while omitting a route this ` +
+          `deployment serves.`,
+        operationIds: undescribableMethods.map((r) => r.operationId),
+      },
+    };
+  }
 
   const traits: readonly Trait[] = input.manifest.traits ?? [];
   const entities: readonly Entity[] = input.manifest.entities ?? [];
@@ -215,7 +331,7 @@ export const buildOpenApiDocument = (input: OpenApiEmitInput): OpenApiEmit => {
   const undescribableFields: { entity: string; field: string; reason: string }[] = [];
 
   for (const entity of entities) {
-    const built = entitySchemas(entity, traits, input.wiring);
+    const built = entitySchemas(entity, traits);
     const base = entityCamel(entity.name);
     const name = `${base.charAt(0).toUpperCase()}${base.slice(1)}`;
     schemas[name] = built.response;
@@ -227,12 +343,13 @@ export const buildOpenApiDocument = (input: OpenApiEmitInput): OpenApiEmit => {
   }
 
   const paths: Record<string, Record<string, unknown>> = {};
+  const missingSuccessResponse: string[] = [];
   for (const route of input.routes) {
     const rendered = renderPathTemplate(route.pathSegments, "openapi");
     const template = rendered.template;
     if (template === null) continue; // unreachable: refused above.
     const field = OPENAPI_PATH_ITEM_FIELD[route.method];
-    if (field === null) continue; // CONNECT, which the Path Item Object has no field for.
+    if (field === null) continue; // unreachable: refused above as `method_not_describable`.
 
     const spec = specByOperation.get(route.operationId);
     const entityName =
@@ -260,13 +377,27 @@ export const buildOpenApiDocument = (input: OpenApiEmitInput): OpenApiEmit => {
         ? listQueryParameters(spec.listConfig)
         : [];
 
+    const isList = spec?.action === "list";
     const operation: Record<string, unknown> = {
       operationId: route.operationId,
       ...(pathParams.length + queryParams.length > 0
         ? { parameters: [...pathParams, ...queryParams] }
         : {}),
-      responses: { ...errorResponses() },
+      responses: isList ? { ...listErrorResponses() } : { ...errorResponses() },
     };
+
+    if (route.operationId === OPENAPI_OPERATION_ID) {
+      // The one route with no `RouteSpec` whose response this module owns and can therefore
+      // describe. Worth doing rather than leaving to the generic gap below, because it is the
+      // sharpest member: the document could not describe its own success response, which also hid
+      // its non-default media type — a generated client had no way to learn it from the document.
+      (operation["responses"] as Record<string, unknown>)["200"] = {
+        description: "This document.",
+        content: { [OPENAPI_MEDIA_TYPE]: { schema: { type: "object" } } },
+      };
+    } else if (spec === undefined || entityName === null) {
+      missingSuccessResponse.push(`${route.method} ${template}`);
+    }
 
     if (spec !== undefined && entityName !== null) {
       const responses = operation["responses"] as Record<string, unknown>;
@@ -343,6 +474,26 @@ export const buildOpenApiDocument = (input: OpenApiEmitInput): OpenApiEmit => {
         "no route registry and `paths` is silent about them. `paths` is therefore a complete " +
         "account of the routed surface and a lower bound on the served one.",
     },
+    // Reported rather than refused, and the direction is why: a route described with only its
+    // denials is falsely-INcomplete — a generated client gets no success type for it and the
+    // document says the route can only fail — where a route missing from `paths` entirely is
+    // falsely-complete. The first costs a capability, the second describes a different API. What
+    // makes it a gap rather than a silence is that the set is *named*: these are the registry routes
+    // with no `RouteSpec`, so this emitter has no entity to derive a body schema from.
+    ...(missingSuccessResponse.length > 0
+      ? [
+          {
+            kind: "undeclared_success_response" as const,
+            reach: "ordering" as const,
+            detail:
+              `${String(missingSuccessResponse.length)} operation(s) declare only their denials, ` +
+              `because the route carries no \`RouteSpec\` and so names no entity whose schema a ` +
+              `success body could reference: ${missingSuccessResponse.join(", ")}. Each returns a ` +
+              `real body; the shapes are not derivable from the manifest, so the facts exist one ` +
+              `level up and this emitter is not given them.`,
+          },
+        ]
+      : []),
     ...input.coverage,
   ];
 

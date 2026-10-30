@@ -909,10 +909,6 @@ export function compileOperateServer(
         manifest,
         routes: routes.list(),
         routeSpecs,
-        wiring: {
-          settingsStore: options.settingsStore !== undefined,
-          allocator: options.allocator !== undefined,
-        },
         title: manifest.meta?.name ?? "CrossEngin Operate",
         // The manifest hash and deliberately not `manifest.meta.version`. OpenAPI's `info.version`
         // is the version of the *described contract*, and `meta.version` is a pack author's

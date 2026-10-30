@@ -11,7 +11,7 @@ import {
   entitySchemas,
   fieldRequestSchema,
   fieldResponseSchema,
-  serverFillsOnCreate,
+  omittableOnCreate,
 } from "./openapi-schema.js";
 
 const KINDS: readonly PrimitiveFieldType["kind"][] = [
@@ -135,39 +135,43 @@ describe("FIELD_RESPONSE_SCHEMAS / FIELD_REQUEST_SCHEMAS", () => {
   });
 });
 
-describe("serverFillsOnCreate", () => {
-  it("treats a literal or expression default as filled whatever the wiring", () => {
-    const none = { settingsStore: false, allocator: false };
-    expect(serverFillsOnCreate(field("a", { kind: "text" }, { default: { kind: "literal", value: "x" } }), none)).toBe(true);
-    expect(serverFillsOnCreate(field("b", { kind: "datetime" }, { default: { kind: "expression", expression: "now()" } }), none)).toBe(true);
+describe("omittableOnCreate", () => {
+  it("treats a literal or expression default as omittable", () => {
+    expect(omittableOnCreate(field("a", { kind: "text" }, { default: { kind: "literal", value: "x" } }))).toBe(true);
+    expect(omittableOnCreate(field("b", { kind: "datetime" }, { default: { kind: "expression", expression: "now()" } }))).toBe(true);
   });
 
-  it("makes a sequence default depend on the allocator, which is deployment wiring", () => {
+  it("treats a sequence default as omittable UNCONDITIONALLY, because validateBody does", () => {
+    // The arm that used to read `wiring.allocator`. `buildValidationPlans` sets
+    // `serverManaged: f.default?.kind === "sequence"` and `validateBody` skips a `serverManaged`
+    // rule with no reference to any wiring, so such a field is never a client obligation — measured
+    // live, a create omitting `invoice_number` with no allocator wired answers 201 and stores
+    // `undefined`. Reading the allocator made the document stricter than the server on 14 of
+    // `erp-core`'s fields, in contradiction of the comment four lines above it.
     const f = field("n", { kind: "text" }, { default: { kind: "sequence", sequence: "s" } });
-    expect(serverFillsOnCreate(f, { settingsStore: false, allocator: false })).toBe(false);
-    expect(serverFillsOnCreate(f, { settingsStore: false, allocator: true })).toBe(true);
+    expect(omittableOnCreate(f)).toBe(true);
   });
 
-  it("gates the settings fills on a settings store, where ui-schema's sibling does not", () => {
-    // `isServerDefaulted` in ui-schema.ts treats `currency_amount` as filled unconditionally. That
-    // is wrong for a request schema: with no settings store nothing fills it, so the field really
-    // is a client obligation and a document saying otherwise promises a fill that cannot happen.
-    const amount = field("amount", { kind: "currency_amount" });
-    const currency = field("currency", { kind: "text" });
-    const due = field("due_date", { kind: "date" });
-    for (const f of [amount, currency, due]) {
-      expect(serverFillsOnCreate(f, { settingsStore: false, allocator: false }), f.name).toBe(false);
-      expect(serverFillsOnCreate(f, { settingsStore: true, allocator: false }), f.name).toBe(true);
+  it("treats a settings-fillable field as a client obligation, because the fill is per tenant", () => {
+    // There is deliberately no settings arm. `applySettingsDefaults` fills a currency field only
+    // when the tenant's `defaults.currency` is set and `due_date` only when
+    // `finance.defaultPaymentTermsDays` is, so the obligation is a property of the TENANT while
+    // this document is one per compiled server. Measured live: a create carrying exactly the old
+    // required set answered 422 naming `currency` and `due_date` on a fresh tenant and 201 once
+    // those settings were populated, so the old answer was wrong in the understating direction on
+    // every tenant's first invoice. Overstating costs a caller nothing, because a caller's value
+    // always wins over a default.
+    for (const f of [
+      field("amount", { kind: "currency_amount" }),
+      field("currency", { kind: "text" }),
+      field("due_date", { kind: "date" }),
+    ]) {
+      expect(omittableOnCreate(f), f.name).toBe(false);
     }
   });
 
   it("answers false for an ordinary required field with no default", () => {
-    expect(
-      serverFillsOnCreate(field("name", { kind: "text" }, { required: true }), {
-        settingsStore: true,
-        allocator: true,
-      }),
-    ).toBe(false);
+    expect(omittableOnCreate(field("name", { kind: "text" }, { required: true }))).toBe(false);
   });
 });
 
@@ -194,7 +198,7 @@ describe("entitySchemas over the real erp-core pack", () => {
       own += e.fields.length;
       resolved += resolvedFields(e, traits).length;
       props += Object.keys(
-        entitySchemas(e, traits, { settingsStore: false, allocator: false }).response.properties ?? {},
+        entitySchemas(e, traits).response.properties ?? {},
       ).length;
     }
     expect(own).toBe(426);
@@ -204,7 +208,7 @@ describe("entitySchemas over the real erp-core pack", () => {
   });
 
   it("carries the four trait fields a narrow read would omit", () => {
-    const v = entitySchemas(entity("Vendor"), traits, { settingsStore: false, allocator: false });
+    const v = entitySchemas(entity("Vendor"), traits);
     const names = Object.keys(v.response.properties ?? {});
     for (const n of ["created_at", "updated_at", "created_by", "updated_by"]) {
       expect(names, n).toContain(n);
@@ -212,34 +216,61 @@ describe("entitySchemas over the real erp-core pack", () => {
     expect(names).toContain("id");
   });
 
-  it("requires 153 of 395 declared-required fields unwired, and 136 fully wired", () => {
+  it("requires exactly the 139 required fields that carry no default, of 395 declared", () => {
     // The figure that separates a usable create schema from an unusable one: a naive
-    // `field.required === true` read overstates a client's obligations by 2.6x to 2.9x, because
-    // `validateBody` runs AFTER defaults are applied. The spread between the two wirings is the
-    // 14 sequence-defaulted fields plus the three settings-fillable ones, and it is why this takes
-    // a `CreateWiring` — the honest required set is a property of the manifest AND the deployment.
+    // `field.required === true` read overstates a client's obligations by 2.84x, because
+    // `validateBody` runs AFTER defaults are applied.
+    //
+    // This used to assert 153 unwired and 136 wired, and the spread WAS the defect: the 14
+    // sequence-defaulted fields are never a client obligation (validateBody skips them with no
+    // reference to the wiring) and the 3 settings-fillable ones always are (the fill depends on the
+    // tenant's own settings row, which no document serving every tenant can be right about). So the
+    // test pinned both halves of ADR-0392's own understating defect as the intended behaviour —
+    // ADR-0372's class — and the honest property is that there is no spread at all.
+    //
+    // Derived rather than hardcoded on the right-hand side: the assertion is that the document's
+    // required set IS "required and carrying no default", which a reader can check, with 139 beside
+    // it only so a change in the pack moves a named number rather than silently agreeing.
     let declared = 0;
-    let unwired = 0;
-    let wired = 0;
+    let noDefault = 0;
+    let required = 0;
     for (const e of entities) {
-      declared += resolvedFields(e, traits).filter((f) => f.required === true).length;
-      unwired += entitySchemas(e, traits, { settingsStore: false, allocator: false }).create.required?.length ?? 0;
-      wired += entitySchemas(e, traits, { settingsStore: true, allocator: true }).create.required?.length ?? 0;
+      const fields = resolvedFields(e, traits);
+      declared += fields.filter((f) => f.required === true).length;
+      noDefault += fields.filter((f) => f.required === true && f.default === undefined).length;
+      required += entitySchemas(e, traits).create.required?.length ?? 0;
     }
     expect(declared).toBe(395);
-    expect(unwired).toBe(153);
-    expect(wired).toBe(136);
+    expect(required).toBe(noDefault);
+    expect(required).toBe(139);
+  });
+
+  it("names currency and due_date as required, which is the understating defect's exact members", () => {
+    // The three live members, by name, so the fix cannot be reverted while the suite stays green:
+    // `Invoice.currency`, `Invoice.due_date` and `Bill.due_date` were dropped from `required` by a
+    // settings arm that read whether a settings STORE was wired, while the fill reads the tenant's
+    // own settings VALUES. Every deployment wires a store — `ResolvedStores.settingsStore` is not
+    // optional — so all three were understated on every tenant until its settings were populated.
+    const inv = entitySchemas(entity("Invoice"), traits).create.required ?? [];
+    const bill = entitySchemas(entity("Bill"), traits).create.required ?? [];
+    expect(inv).toContain("currency");
+    expect(inv).toContain("due_date");
+    expect(bill).toContain("due_date");
+    // And the other half of the same fix: a sequence-defaulted field is omittable, so the document
+    // is not stricter than the server either.
+    expect(inv).not.toContain("invoice_number");
+    expect(bill).not.toContain("bill_number");
   });
 
   it("describes every field of every entity — nothing undescribable in any pack entity", () => {
     const undescribable = entities.flatMap(
-      (e) => entitySchemas(e, traits, { settingsStore: true, allocator: true }).undescribable,
+      (e) => entitySchemas(e, traits).undescribable,
     );
     expect(undescribable).toEqual([]);
   });
 
   it("leaves an update body wholly optional and sets no additionalProperties anywhere", () => {
-    const v = entitySchemas(entity("Invoice"), traits, { settingsStore: true, allocator: true });
+    const v = entitySchemas(entity("Invoice"), traits);
     expect(v.update.required).toBeUndefined();
     // Measured rather than cautious: an unknown key is accepted, stored and echoed by the JSONB and
     // in-memory stores and silently dropped by the column store, so `false` would be false of two
@@ -253,7 +284,7 @@ describe("entitySchemas over the real erp-core pack", () => {
     // `rec_` + base36 is the GENERATOR's shape; `resolveRecordId` keeps a caller-supplied id as
     // given. A pattern would describe a constraint this API does not have, which is the
     // falsely-specific direction of a falsely-complete description.
-    const id = entitySchemas(entity("Vendor"), traits, { settingsStore: false, allocator: false })
+    const id = entitySchemas(entity("Vendor"), traits)
       .response.properties?.["id"];
     expect(id?.type).toBe("string");
     expect(id?.pattern).toBeUndefined();

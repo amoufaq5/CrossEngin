@@ -141,8 +141,18 @@ export const FIELD_RESPONSE_SCHEMAS: {
  * and the request is always the wider — measured through the real converters for the four kinds
  * where it matters:
  *
- * - `decimal(10,2)` accepts the JSON number `10.5`, and the strings `"1e3"`, `" 10.25 "`,
- *   `"+10.25"` and the over-precise `"10.555"`, while emitting `"10.50"` / `"1000.00"` / `"10.56"`.
+ * - `decimal(10,2)` accepts the JSON number `10.5` and the strings `"1e3"`, `" 10.25 "` and
+ *   `"+10.25"`, while emitting `"10.50"` / `"1000.00"`. It does **not** accept the over-precise
+ *   `"10.555"`, which an earlier draft listed here and which is a **422** —
+ *   `precision: amount must have at most 2 decimal place(s)`, because `validateBody`'s own comment
+ *   states the rule that a client literal carrying more precision than the field holds is refused
+ *   rather than rounded. `toDecimalWire` *would* emit `"10.56"` for it, which is what that draft
+ *   conflated: what the converter can render is not what a request may send. The three surviving
+ *   examples are what the two maps rest on and they reproduce exactly. The emitted request schema
+ *   is correspondingly a little wider than the server — `oneOf: [string, number]` with no pattern
+ *   and no precision bound — which is the same deliberate choice a filter parameter's bare
+ *   `{type: "string"}` rests on: a constraint only the client enforces would still be a false
+ *   statement about what this API accepts, and here it would reject `"1e3"`, which it takes.
  * - `datetime` accepts any RFC 3339 instant carrying an offset — `2026-01-31T19:00:00+09:00` and
  *   `…​.1Z` both normalise to the 24-character UTC form — and the request parser additionally
  *   admits a space separator and a lowercase `z`, which a client validating `format: "date-time"`
@@ -205,48 +215,49 @@ export const fieldResponseSchema = (type: FieldType): JsonSchema | null =>
 export const fieldRequestSchema = (type: FieldType): JsonSchema | null =>
   wrap(type, FIELD_REQUEST_SCHEMAS);
 
-/** Whether the create path fills this field when the client omits it. */
-export interface CreateWiring {
-  /** `--store`'s settings store is wired, so a settings-driven default can fill a field. */
-  readonly settingsStore: boolean;
-  /** A sequence allocator is wired, so a `sequence` default can fill one. */
-  readonly allocator: boolean;
-}
-
 /**
- * Whether the server fills this field on create, so a client need not send it even when the
- * manifest marks it `required`.
+ * Whether a client may omit this field on create even though the manifest marks it `required`.
  *
- * This is the question that separates 395 from 136, and getting it wrong overstates a create
- * request's obligations by **2.9x**: of 630 resolved fields in `erp-core`, 395 are `required` and
- * only ~139 carry no default at all — 140 have a `literal` default, 102 an `expression` one (every
- * trait-contributed `created_at`/`updated_at`), and 14 a `sequence`. `validateBody` runs *after*
- * defaults are applied, under its own comment saying so, which is what makes the distinction real
- * rather than cosmetic.
+ * It answers a question about the **client's obligation**, which is what a request schema's
+ * `required` array means — deliberately not "does the server fill it", which is the name this
+ * function used to carry and is what produced both of the defects it no longer has. The two differ
+ * in exactly the places that mattered: a `sequence` field is one the server fills *only when an
+ * allocator is wired* and one the client is *never obliged to send*, and a settings-defaulted field
+ * is one the server fills *for some tenants*.
  *
- * Two arms depend on **deployment wiring** rather than on the manifest, which is why this takes a
- * `CreateWiring` instead of a field alone: a `sequence` default fills nothing when no allocator is
- * wired (`applyEntitySequences` returns the body unchanged), and the settings-driven currency and
- * due-date defaults fill nothing without a settings store. So the honest `required` set is a
- * property of the manifest *and* the deployment, and a document that ignored that would promise a
- * server-filled field on a deployment that cannot fill it.
+ * Measured on `erp-core`: of **630** resolved fields, **395** are `required`, and the three default
+ * kinds account for 140 `literal`, 102 `expression` (every trait-contributed `created_at` /
+ * `updated_at`) and 14 `sequence` — every one of them on a `required` field. So the document's
+ * create obligation is **139**, a factor of **2.84** below the manifest's own `required` count, and
+ * the figure is exactly *the required fields that carry no default at all*, which is a statement a
+ * reader can check rather than a number to trust. `validateBody` runs **after** defaults are
+ * applied, under its own comment saying so, which is what makes the distinction real.
  *
- * `serverManaged` is deliberately not consulted here: `validateBody` skips such a field
- * unconditionally, so it is never a client obligation whatever the wiring.
+ * The `sequence` arm is unconditional, and its comment used to say so while the code did not:
+ * `buildValidationPlans` sets `serverManaged: f.default?.kind === "sequence"` and `validateBody`
+ * skips a `serverManaged` rule **unconditionally**, so such a field is never a client obligation
+ * whatever the wiring. Reading the allocator here made the document *stricter than the server* on
+ * 14 of `erp-core`'s fields — measured, a create omitting `invoice_number` with no allocator wired
+ * answers **201** and stores `invoice_number: undefined`. Overstating is the safe direction, which
+ * is why it survived; it was still a false sentence in a published contract, and it masked the
+ * defect underneath, which is that nothing refuses that record.
+ *
+ * There is **no settings arm**, and its absence is the load-bearing decision. `applySettingsDefaults`
+ * fills a currency field only when the tenant's `defaults.currency` is set and `due_date` only when
+ * `finance.defaultPaymentTermsDays` is, so the obligation differs **per tenant** — while
+ * `/v1/meta/openapi` serves one document per compiled server, memoised, for every tenant that
+ * reaches it. A settings-dependent `required` set is therefore not expressible in this document at
+ * all, and the arm that read `settingsStore !== undefined` was answering a question about the
+ * deployment that only the tenant's own row can answer. Measured live through the real create
+ * handler: a request carrying exactly the old document's required set answered **422** naming
+ * `currency` and `due_date` on a fresh tenant and **201** once those settings were populated — so
+ * the old answer was wrong in the understating direction on every tenant's first invoice, on three
+ * live fields (`Invoice.currency`, `Invoice.due_date`, `Bill.due_date`). A client that sends a
+ * field the server would have defaulted loses nothing: a caller's value always wins.
  */
-export const serverFillsOnCreate = (field: Field, wiring: CreateWiring): boolean => {
+export const omittableOnCreate = (field: Field): boolean => {
   const kind = field.default?.kind;
-  if (kind === "literal" || kind === "expression") return true;
-  if (kind === "sequence") return wiring.allocator;
-  // The settings-driven fills, read off `settingsDefaultPlan`'s own predicate rather than copied
-  // from `ui-schema.ts`'s `isServerDefaulted`, which treats `currency_amount` as filled
-  // **unconditionally** — wrong here, because without a settings store nothing fills it and the
-  // field is a client obligation after all.
-  if (wiring.settingsStore) {
-    if (field.name === "currency" || field.type.kind === "currency_amount") return true;
-    if (field.name === "due_date") return true;
-  }
-  return false;
+  return kind === "literal" || kind === "expression" || kind === "sequence";
 };
 
 export interface EntitySchemas {
@@ -281,12 +292,14 @@ export interface EntitySchemas {
  * dropped by the column store, so the two stores answer one create with different bodies. `false`
  * would be false of two of the three; `true` would promise the column store's drop is a round trip.
  * Saying nothing is the only honest answer, and the asymmetry is reported instead.
+ *
+ * All three schemas are a function of **the manifest alone** — this took a `CreateWiring` until the
+ * two arms that read it were measured, and neither survived: see `omittableOnCreate`. That is a
+ * property worth keeping rather than an accident, because `/v1/meta/openapi` memoises one document
+ * per compiled server and serves it to every tenant that reaches it, so a schema varying with
+ * anything *but* the manifest cannot be right for all of them at once.
  */
-export const entitySchemas = (
-  entity: Entity,
-  customTraits: readonly Trait[],
-  wiring: CreateWiring,
-): EntitySchemas => {
+export const entitySchemas = (entity: Entity, customTraits: readonly Trait[]): EntitySchemas => {
   const fields = resolvedFields(entity, customTraits);
   const responseProps: Record<string, JsonSchema> = {
     id: {
@@ -313,7 +326,7 @@ export const entitySchemas = (
     responseProps[field.name] = resp;
     createProps[field.name] = req;
     updateProps[field.name] = req;
-    if (field.required === true && !serverFillsOnCreate(field, wiring)) {
+    if (field.required === true && !omittableOnCreate(field)) {
       createRequired.push(field.name);
     }
   }

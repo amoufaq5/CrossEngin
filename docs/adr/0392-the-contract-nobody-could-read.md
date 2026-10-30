@@ -385,3 +385,252 @@ where the correspondence is a compile-time obligation rather than two packages' 
 - ADR-0337 (a falsely-true control is the compliance failure), ADR-0338 (refusing breaks nothing
   that was right), ADR-0359 (which-rows versus order), ADR-0361 (the aperture class), ADR-0384
   (`AUTH_SCHEME_SUPPORT`), ADR-0386 and ADR-0391 (a field dropped from a forwarding literal).
+
+---
+
+## Addendum — the adversarial pass
+
+Two read-only analyses ran against the commit: one aimed at every claim the increment's own code
+and prose made, one asking whether the emitted document is a valid OpenAPI 3.1.0 document at all.
+Between them they returned 19 findings. **Nine changed code**, and I verified every one of those
+myself before acting on it — register P3.1's rule, which earns its third clause here: a correction
+is exactly as liable to be wrong as the claim it replaces, and two of these were.
+
+The validity pass is the cleanest result and is worth stating first: **zero MUST violations across
+three documents**, with 33 of 33 injected violations caught by its own checker, so it is
+non-vacuous. Every `$ref` resolves (1,399 occurrences, 155 distinct targets, 155 defined, no dead
+components and no nested `$ref`), every templated path variable is declared `in: "path", required:
+true` over 232 templated operations, all 305 `pattern` values compile under `/u`, and the whole
+document round-trips `JSON.parse(JSON.stringify(…))` byte-identically with zero `undefined` across
+33,455 keys. The one MUST it found reachable had **zero members in the shipped packs** and is fixed
+below. The official 3.1 meta-schema still could not be *executed* — it is JSON Schema 2020-12 using
+`$dynamicRef` and the only validator here is `ajv@6`, draft-07 — so the pass fetched it and
+cross-checked the clause list by hand instead, which confirmed coverage and turned up one thing
+worth keeping: `components.properties.schemas` carries **no key pattern**, so the
+`^[a-zA-Z0-9.\-_]+$` requirement is prose-only and a schema-driven validator would not have caught
+a violation of it. Checking it by hand was not redundant.
+
+### The worst finding was this increment's own stated worst defect, in its own code
+
+`buildOpenApiDocument`'s doc comment says a route silently missing from `paths` "is a document that
+describes a different API, which is the falsely-complete direction (ADR-0337)" and that such a route
+is **refused**. Three screens below it, `if (field === null) continue;` dropped a CONNECT route with
+no refusal, no coverage gap and no trace. Verified: a schema-valid CONNECT route that the real
+registry accepts gives **341 routes in, 340 operations out, `refused: null`**, `/v1/tunnel` absent
+from `paths` and `tunnel.open` nowhere in the document.
+
+The asymmetry was the finding rather than the drop. `wildcard_path` is refused on exactly the same
+grounds — a *shape* refusal, zero members, one construction site — and this increment's own argument
+for it ("the refusal has no member today, which is exactly when it is cheapest to be right") applies
+without a word changed. `method_not_describable` is the third refusal, keyed on
+`OPENAPI_PATH_ITEM_FIELD` answering `null` rather than on a named method, so the test is the same
+one the Path Item Object imposes.
+
+### The create schema understated the obligation, live, on every tenant's first invoice
+
+`serverFillsOnCreate`'s settings arm read whether a settings **store** was wired.
+`applySettingsDefaults` fills a currency field only when the tenant's `defaults.currency` is set and
+`due_date` only when `finance.defaultPaymentTermsDays` is — so the obligation is a property of the
+**tenant**, and `ResolvedStores.settingsStore` is not optional, so every deployment wires a store and
+all three live fields were dropped from `required` for every tenant until its settings were
+populated. Measured through the real handler on a real Postgres as the non-owner `serving` role:
+
+| request | before | after |
+|---|---|---|
+| the document's `InvoiceCreate.required` | **422** `currency`, `due_date` | **201**, `invoice_number: "INV-2026-00001"` |
+| that same body on a settings-populated tenant | 201 | 201 |
+
+The members are `Invoice.currency`, `Invoice.due_date` and `Bill.due_date`. **The fix is to drop the
+arm**, and the reason it cannot be repaired instead is structural: `/v1/meta/openapi` memoises one
+document per compiled server and serves it to every tenant that reaches it, so a settings-dependent
+`required` set is not expressible in this document at all. Overstating costs a caller nothing,
+because a caller's value always wins over a default.
+
+The sibling arm failed the other way. `if (kind === "sequence") return wiring.allocator;` sat four
+lines under a comment saying `serverManaged` is "deliberately not consulted here: `validateBody`
+skips such a field unconditionally, so it is never a client obligation whatever the wiring" — which
+is exactly right and is what the line above it broke, on 14 of `erp-core`'s fields. Measured: a
+create omitting `invoice_number` with **no** allocator wired answers 201 and stores `undefined`.
+
+With both arms gone, `CreateWiring` had no reader and is **deleted**, and the function is renamed
+`omittableOnCreate` — because the name was the cause. "Does the server fill it" and "may a client
+omit it" differ in precisely the two places that went wrong, and only the second is what a request
+schema's `required` array means. The document's obligation is now **139 of 395 declared**, uniformly,
+and the figure is exactly *the required fields that carry no default*, which a reader can check.
+
+### Both 401 shapes are live on one route, so the document declares both
+
+`errorResponses()` declared `application/problem+json` + `Problem` for 401 and 403, three lines under
+`problemSchema`'s own description stating the rule correctly. On an entity route both are **handler**
+refusals, and `runtime.ts` preserves a handler's body verbatim — so the wire shape is
+`application/json` with `{error, detail}`, the document's own `HandlerError`.
+
+Declaring `HandlerError` instead would have been the same defect reversed, and the live run shows why
+in two lines on the same path:
+
+```
+GET /v1/invoices, no credential        → 401 application/json          {"error":"tenant_required",…}
+GET /v1/invoices, x-api-key: nope      → 401 application/problem+json  {"type":"…/authentication-required",…}
+```
+
+The first is the handler, the second the gateway. Both statuses now declare both media types, which
+is also robust to the one configuration that moves the 403: the gateway's `forbidden` arm is gated on
+`route.requiredScopes.length > 0`, and that is `[]` on every route in the workspace.
+
+### 400 was declared on 287 operations that cannot produce one
+
+All four of its producers in `handlers.ts` sit inside `case "list":` and the association module emits
+none, so the declaration carried a false sentence — its description names a query-surface mechanism a
+read, a create or a transition does not have. Measured: a read with junk query parameters answers
+**200**, a delete of a missing id **404**, a failed create **422**, a unique violation **409**.
+`listErrorResponses()` adds it back on the 51 list operations, where the sentence is true, and the
+test that asserted it on *every* operation is replaced by one asserting it on the list operations and
+nowhere else — **ADR-0372's class**, the defect written down as the specification.
+
+### A transition name reaches a path segment, and nothing validated it
+
+The increment claimed the render is unambiguous "by the schema rather than by convention: a literal's
+value is `/^[a-zA-Z0-9._-]+$/`". The schema says so and **is parsed nowhere** — `RouteDefinitionSchema`
+has two occurrences in the workspace, its own declaration and the `z.infer` beside it — so the
+refinement is one nobody runs (ADR-0362's class). And it is reachable: `TransitionSchema.name` is
+`z.string().min(1)` and `entityRouteSpecs` does `lit(t.name)`. On a deep copy of the real `erp-core`,
+four shapes all cross-validated:
+
+| transition name | rendered template | cost |
+|---|---|---|
+| `a/b` | `/v1/invoices/{id}/a/b` | a four-component template the matcher cannot serve |
+| `{id}` | `/v1/invoices/{id}/{id}` | two template expressions, one Parameter Object — OAS 3.1 forbids it |
+| `has space` | a raw space in a path | not a valid URI segment unencoded |
+| `üñî` | unencoded non-ASCII | — |
+
+The fix is **one level up**, in the kernel, because the broken route exists whether or not anybody
+emits a document (ADR-0348's split: a property of the manifest alone is decidable by a pack author,
+by `crossengin validate` and by the reviewer approving what the Architect designed). Cost measured
+zero: **107 declared transitions over 59 distinct names** across the seven source packs, every one
+matching, with `[a-y_]` the entire character set in use. Verified through the real CLI:
+
+```
+crossengin validate <core with transitions[0] renamed>
+  "{id}"        exit=1  transition name '{id}' is not usable as a URL path segment…
+  "a/b"         exit=1  transition name 'a/b' …
+  "has space"   exit=1  transition name 'has space' …
+  "send"        exit=0  ACCEPTED
+```
+
+The regex is a second spelling of the gateway's, pinned by a test that reads that file as text — and
+the reason is **not** the cycle one would assume. Measured: neither package depends on the other, and
+`api-gateway`'s entire dependency set is `config`, `testing`, `typescript`, `vitest` and `zod`. So an
+import would not be cyclic; it would be a new edge from the manifest layer to the request edge, which
+is backwards and would spend the one property that makes `api-gateway` embeddable.
+
+### Five smaller ones, each with its measurement
+
+- **A filterable field named `limit`, `cursor`, `fields`, `sort`, `order` or `q`** emitted a
+  duplicate `(name, in)` pair, which OAS 3.1 forbids — and the duplicate was worse than two names
+  for one thing, because `parseListQuery` tests `RESERVED_PARAMS.has(key)` on the **raw** key, so
+  `?limit=5` is read as the page size and the filter is dropped with no `unserved` entry. A
+  generated client keeping the second entry would send a filter value as a pagination bound. Zero
+  members across the packs (375 list configs, 1,270 filterable instances) and reachable from a
+  manifest, since `FIELD_NAME_REGEX` admits all six and `RESERVED_ENTITY_FIELD_NAMES` is only
+  `id`/`tenant_id`. The bare form is omitted for such a field and every bracketed operator — which
+  **is** served — says so.
+- **Six operations declared only their denials**, including this document's own route, so the
+  document could not describe its own success response and hid its non-default media type. Not a
+  spec violation (the MUST is "at least one response") but a real generator defect, and
+  falsely-*in*complete rather than falsely-complete, which is why it is a declared gap
+  (`undeclared_success_response`, naming the set) rather than a refusal. `meta.openapi.read` gets
+  its real 200, because it is the one of the six whose response this module owns.
+- **The published `bearer_jwt` description claimed `nbf` is required and relaxable by name.**
+  `REQUIRED_JWT_CLAIM_COSTS` is keyed on `exp | iss | aud`, and `--jwt-optional-claim nbf` is
+  refused **by name** in `cli.ts` with its reason. A false security statement in client-facing
+  prose, contradicted by an explicit refusal in the same repository, copied from
+  `AUTH_SCHEME_SUPPORT.bearer_jwt.reason` — which carried it too and is corrected with it, so what
+  was an internal inaccuracy did not become a published one. `nbf` **is** checked when present, so
+  the description says that instead. This was the one finding **nothing caught** in the first
+  mutation pass, and it now has a fence in `api-gateway-runtime`, the package where both facts are
+  visible.
+- **`per_tenant_surface` had no producer** — one occurrence, its own enum member, which is this
+  repository's most-found class, committed in the increment that named it — **and**
+  `openApiCoverage` was dropped at the per-tenant `buildOperateHttpServer` call site, so a tenant's
+  own gateway served a document declaring none of the five out-of-registry paths, the login among
+  them. The two halves are one fix: the per-tenant site forwards the thunk and declares the gap,
+  which gives the enum member the producer it never had. The drop was safe in *direction* — the
+  generic `surface_outside_registry` gap still fires, which is what `compile.ts`'s "the drop cannot
+  lie" argument buys — and was still a capability loss on the one serving path where coverage is
+  weakest. ADR-0386's and ADR-0391's class, for the third time, in the increment that cites them.
+- **The list response's `page` omitted `limit` and was not required.** The real response is
+  `page: {"limit":100,"nextCursor":null}` and `page` is always present, so a client branching on
+  `page === undefined` would be writing a branch the server never takes.
+
+### Two claims corrected, and the figures re-derived
+
+`FIELD_REQUEST_SCHEMAS`' justification listed the over-precise `"10.555"` among what a
+`decimal(10,2)` accepts. It is a **422** — `precision: amount must have at most 2 decimal place(s)`
+— and `validation.ts`'s own comment states the rule that a client literal carrying more precision
+than the field holds is refused rather than rounded. What the draft conflated is that
+`toDecimalWire` *would* render `"10.56"` for it: what the converter can emit is not what a request
+may send. The other three examples reproduce exactly, so the two-map decision stands on them.
+
+`serverFillsOnCreate`'s own doc said "only ~139 [of 630] carry no default at all". 139 is the
+**required**-and-no-default count; the 630-scoped figure is **374**. And the `$ref`-dedupe refusal
+cited "70 KiB = 7.7%" where the saving re-measured on this document is **73.7 KiB = 7.8%** — the
+factor is 2.21 on every measurement and the refusal rests on "a second place a reader must look for
+an 8% saving", which holds at any of the three, but a refusal argued from a measurement should not
+understate what it refuses.
+
+The byte figures moved because the document grew (two media types per denial, a longer complement
+note, the document's own response). Re-measured per pack: core **948.4 KiB / 338 routes**, retail
+997.2 / 352, healthcare 1008.5 / 357, grocery **1033.4 / 365** (the widest), construction 963.8 /
+343, education 1000.4 / 357, government 1003.5 / 357 — zero refusals and zero undescribable fields
+on all seven. And the route-count denominators are two configurations rather than a contradiction:
+334 `routeSpecs` against the registry's **338** on a bare compile, and against the shipped compose's
+**375**, because `routeSpecs` is manifest-derived and does not grow with a flag. Both sites now say
+which deployment they mean.
+
+### What the pass did not refute
+
+Thirteen figures reproduce exactly (630 / 426 / 395 / 204; 375 entities, 243 with no sortable field,
+23 with no searchable, 0 `duration`; 2,006 parameter objects; 155 schemas; the 2.21 dedupe factor;
+both named `limit`-parser divergences; `routeSpecs` a strict subset with 0 orphans). The transition
+route taking no body is confirmed against the real handler — `POST invoice.send` with
+`{state:"HACKED", invoice_number:"OVERWRITTEN"}` answers 200 with the state the workflow declares
+and the number untouched — so emitting no `requestBody` is right. `entitySchemas` reading
+`resolvedFields` is confirmed as one aperture with no second read. Both implemented refusals are
+confirmed empty on the real route sets, and `pathTemplateCollisions`' anonymisation is confirmed as
+OAS 3.1's path-template equivalence rule correctly applied.
+
+### Live verification
+
+Against the throwaway PG 16.13 cluster as the non-owner `serving` role, through the real binary at
+`--pack erp-core --store pg --credential-login`:
+
+| check | result |
+|---|---|
+| boot line | `describing 341 of 341 registered routes; 5 served path(s) sit outside every route registry` |
+| `GET /v1/meta/openapi` | **200**, `content-type: application/openapi+json;version=3.1.0`, 975,031 bytes, 187 paths / 341 operations / 155 schemas |
+| its own 200 | declared, content key `application/openapi+json;version=3.1.0` |
+| 401 + 403 content | both media types on **341 of 341** operations, 0 wrong |
+| 400 | on **51** list operations, **0** elsewhere, 0 list operations missing it |
+| success-response gap | names the 6 spec-less routes; `meta.openapi.read` correctly absent from the no-2xx set |
+| `page` | `{limit: integer, nextCursor: [string,null]}`, both required, `page` required |
+| `InvoiceCreate.required` | `[account_id, currency, due_date, issue_date]` |
+| create with that body | **201**, `invoice_number` server-allocated |
+| create with the pre-fix body | **422** naming `currency` and `due_date` |
+| `bearerAuth.description` | `…then exp, iss and aud — each required… A \`nbf\` claim is honoured when present and is never required.` |
+
+**Thirteen mutations, thirteen caught**, each reversed by the same string replacement that made it
+after asserting the mutation was present: the CONNECT refusal removed; the settings arm restored;
+the sequence arm made wiring-dependent again; 400 restored everywhere; `problem+json` alone on
+401/403; `page.limit` dropped; the shadowed bare filter re-emitted; the success-response gap
+removed; the transition-name refusal removed; its regex widened to admit a brace; `nbf` restored as
+required-and-relaxable; `nbf` dropped entirely; and the per-tenant `openApiCoverage` dropped.
+
+### What this leaves
+
+| Question | Owner | Deadline |
+|---|---|---|
+| `undeclared_success_response` names six routes and describes none. Four are `operate-server`'s own and their shapes are known — closing it means either a second spec kind for a non-entity route or hand-written response schemas at the registration site. | Platform | 2026-12-15 |
+| The `x-crossengin-coverage` array carries `surface_outside_registry` **six times** on a real boot — once generically from the emitter, five times from `coverageFromMountedSurfaces`, one per mounted path. That is by design (the generic entry explains the class, the five name the members) and it reads as duplication. A `members` field on one gap would be cleaner and is a contract change. | Platform | _N/A_ |
+| A general `RouteDefinitionSchema` parse at registration, which would make the literal-segment regex true of every producer rather than of the one that takes a name from a manifest. `routes.register` is on the hot path of nothing, so the cost is a boot-time parse per route. | Platform | 2026-12-15 |
+| The `in` filter's description no longer promises the repeated-parameter spelling its `{type: "string"}` schema forbids, which understates the server by one equivalent form. Emitting `{type: "array", items: …}` for that one arm would need `style`/`explode` stated and is the alternative. | Platform | _N/A_ |
+| With no allocator wired, a `sequence`-defaulted field is created as `undefined` and **nothing refuses it** — the document is now honest about not requiring it, and the record is still written without the number its own uniqueness declaration is about. | Platform | 2026-12-15 |

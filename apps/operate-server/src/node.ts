@@ -4727,6 +4727,31 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           // `buildOperateHttpServer`: a tenant serving its own activated manifest serves the same
           // tenant's users, so a revoked membership must stop working there as well.
           ...(sessionRevocation !== undefined ? { sessionRevocation } : {}),
+          // Dropped here until review found it, and the drop was the exact shape the field was
+          // designed against: `compileOperateServer` registers `/v1/meta/openapi` unconditionally,
+          // so a tenant **does** get the route, and without this the document it serves declared
+          // none of the five paths mounted ahead of route matching — including the login, the first
+          // route any client calls. Safe in direction (the generic `surface_outside_registry` gap
+          // still fires, which is what that field's "the drop cannot lie" argument bought) and a
+          // real capability loss on the one serving path where coverage is weakest.
+          //
+          // `per_tenant_surface` gets its producer here, which is the whole reason it is declared
+          // on this call site rather than the boot one: it was a modelled value with **no**
+          // producer anywhere in the workspace — one occurrence, its own enum member — which is
+          // this repository's most-found class, committed in the increment that named it.
+          openApiCoverage: () => [
+            ...coverageFromMountedSurfaces(mountedOutOfRegistry),
+            {
+              kind: "per_tenant_surface" as const,
+              reach: "ordering" as const,
+              detail:
+                `This document describes tenant ${tenantId}'s own activated manifest, compiled by ` +
+                `its own gateway. The paths listed as outside every registry are the ` +
+                `**deployment's** and are served by the default server for every tenant; the ` +
+                `entity surface below is this tenant's alone and will differ from another ` +
+                `tenant's at the same URLs.`,
+            },
+          ],
           apiKeys,
           allocator,
           settingsStore,

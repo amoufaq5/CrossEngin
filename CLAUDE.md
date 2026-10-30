@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 20,892 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 20,912 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -2938,6 +2938,61 @@ report; `apps/operate-web` has none).
   the three occurrences left are each independent by design (Anthropic's own outbound header, a
   redaction denylist of header names, and the out-of-workspace dev demo).
 
+  **And then an adversarial pass over the commit found nine code-changing defects, the worst of
+  them the increment's own stated worst defect present in its own code** (ADR-0392's addendum).
+  `buildOpenApiDocument`'s doc comment says a route silently missing from `paths` *"is a document
+  that describes a different API, which is the falsely-complete direction (ADR-0337)"* and that such
+  a route is **refused** — and three screens below it a CONNECT route was dropped with a bare
+  `continue`: measured through a schema-valid route the real registry accepts, **341 routes in, 340
+  operations out, `refused: null`**, with the path and the operationId nowhere in the document and
+  no coverage gap. The asymmetry is the finding rather than the drop, because `wildcard_path` has
+  the same reach, the same zero population and the same single construction site and *was* refused,
+  on this increment's own argument that a refusal with no member is cheapest to be right.
+  The second is **live on every tenant's first invoice**: `serverFillsOnCreate`'s settings arm read
+  whether a settings *store* was wired while `applySettingsDefaults` fills a currency field only
+  when the tenant's `defaults.currency` is set — so the obligation is a property of the **tenant**,
+  `ResolvedStores.settingsStore` is not optional, and three live fields were dropped from `required`
+  for every tenant until its settings were populated. Measured on a real cluster as a non-owner, the
+  document's own required set answered **422** naming `currency` and `due_date` and **201** once
+  those settings existed. **Dropping the arm is the fix and it cannot be repaired instead**:
+  `/v1/meta/openapi` memoises one document per compiled server for every tenant, so a
+  settings-dependent `required` set is inexpressible there. The sibling arm failed the other way —
+  `if (kind === "sequence") return wiring.allocator;` four lines under a comment saying
+  `serverManaged` is never a client obligation whatever the wiring, which is right and is what the
+  line above it broke on 14 fields. With both arms gone `CreateWiring` had no reader and is
+  **deleted**, and the function is `omittableOnCreate`, **because the name was the cause**: *does
+  the server fill it* and *may a client omit it* differ in exactly the two places that went wrong,
+  and only the second is what a `required` array means. The obligation is **139 of 395** now,
+  uniformly, and is exactly *the required fields carrying no default*.
+  Three more were wrong about what a caller gets. **Both 401 shapes are live on one route** —
+  `GET /v1/invoices` with no credential answers `application/json {"error":"tenant_required"}` from
+  the handler and with an unrecognised api-key `application/problem+json` from the gateway — so
+  declaring either one alone was wrong and both are declared; **400 was declared on 287 operations
+  that cannot produce one**, all four of its producers sitting inside `case "list":` (measured: a
+  read with junk query parameters is 200, a delete of a missing id 404, a failed create 422), with
+  the test that asserted it everywhere being ADR-0372's class again; and the list response's `page`
+  omitted the `limit` it always carries. **A transition name reaches a path segment unvalidated**,
+  which refutes this increment's own claim that the render is unambiguous *"by the schema"* — that
+  schema is `RouteDefinitionSchema`, which has two occurrences in the workspace and **no parse
+  site** (ADR-0362's class), so `{id}` rendered `/v1/invoices/{id}/{id}`, two template expressions
+  against one Parameter Object, and `a/b` rendered a path the matcher cannot serve, both on a
+  manifest `validateManifest` accepted. Fixed **one level up** in the kernel, because the broken
+  route exists whether or not anybody emits a document (ADR-0348's split), at a measured cost of
+  zero: 107 declared transitions over 59 distinct names, every one matching, `[a-y_]` the whole
+  character set in use. Beside them: a filterable field named `limit` emitted a **duplicate
+  `(name, in)`** whose bare form the parser discards as the page size (zero members, reachable from
+  a manifest); six operations declared only their denials, including **this document's own route**,
+  so it could not describe its own success response or its non-default media type; the published
+  `bearer_jwt` description claimed **`nbf` is required and relaxable**, which `cli.ts` refuses by
+  name — a false security statement in client-facing prose, and the one finding the first mutation
+  pass did not catch; and `per_tenant_surface` had **no producer** while `openApiCoverage` was
+  dropped at the per-tenant call site, which is ADR-0386's and ADR-0391's class for the third time,
+  in the increment citing them, with the two halves closing as one fix. The validity pass is the
+  clean result: **zero MUST violations** across three documents, 33 of 33 injected violations caught,
+  1,399 `$ref`s resolving with no dead components, and the one reachable MUST having zero members in
+  the shipped packs. Thirteen mutations, thirteen caught; byte figures re-derived per pack (core
+  **948.4 KiB / 338 routes**, grocery 1033.4 / 365 the widest).
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -3607,12 +3662,26 @@ packages exist at only one layer, noted below where that is true.
   **`resolvedFields`** — the aperture decision, measured: `entity.fields` totals **426** against
   **630** resolved on `erp-core` and **51 of 51** entities differ, the 204 being exactly 51 × 4
   `auditable` trait fields, so a document over the narrow set would be wrong about every entity in
-  the pack. `serverFillsOnCreate(field, wiring)` takes the **wiring** and not the field alone,
-  because of what decides a create request's obligations: of 395 `required` resolved fields only
-  **136** must be supplied by the caller under any wiring, **242** are server-filled whatever the
-  deployment and **17** depend on whether a settings store and a sequence allocator are wired — so
-  the manifest alone overstates the obligation **2.9x**, and a document ignoring the wiring would
-  promise a server-filled field on a deployment that cannot fill it.
+  the pack. `omittableOnCreate(field)` answers whether a client may omit a `required`
+  field, which is what a request schema's `required` array means — and **it took a `CreateWiring`
+  until both arms that read one were measured and neither survived** (ADR-0392's addendum). The name
+  was the cause: *does the server fill it* and *may a client omit it* differ in exactly the two
+  places that went wrong. A `sequence` field is omittable **unconditionally**, because
+  `buildValidationPlans` sets `serverManaged` on it and `validateBody` skips such a rule with no
+  reference to any wiring (measured: a create omitting `invoice_number` with no allocator answers
+  201 and stores `undefined`), so reading the allocator made the document *stricter than the server*
+  on 14 fields in contradiction of the comment four lines above it. And there is **no settings arm**,
+  because `applySettingsDefaults` fills a currency field only when the tenant's `defaults.currency`
+  is set — so the obligation is a property of the **tenant** while `/v1/meta/openapi` memoises one
+  document per compiled server for all of them, which makes a settings-dependent `required` set
+  inexpressible here. That arm was live and understating on three fields (`Invoice.currency`,
+  `Invoice.due_date`, `Bill.due_date`): measured on a real cluster as a non-owner, a create carrying
+  exactly the old document's required set answered **422** naming two of them and **201** once the
+  tenant's settings existed. Overstating costs a caller nothing, since a caller's value always wins
+  over a default. So the obligation is **139 of 395** resolved `required` fields, uniformly, and the
+  figure is exactly *the required fields that carry no default* — a statement a reader can check
+  rather than a number to trust — against 140 `literal`, 102 `expression` and 14 `sequence`
+  defaults, every one of them on a `required` field.
   `UNDESCRIBABLE_FIELD_KINDS` has one member and it is a **shape** answer: `duration`'s wire type is
   undecided on purpose (ADR-0334), so inventing one would be the document deciding a question four
   ADRs left open — measured **zero** `duration` fields across all seven resolved packs, so the entry
@@ -3626,13 +3695,41 @@ packages exist at only one layer, noted below where that is true.
   `filterPredicate` answers the constant `TRUE` for `ne` and `FALSE` otherwise, so
   `?amount[gt]=n/a` returns zero rows and `?amount[ne]=n/a` returns **every** row, both under a 200
   — a numeric `type` would be a constraint only the client enforces.
+  A filterable field whose **name is one of the six fixed parameters** gets no bare form, because
+  `parseListQuery` tests `RESERVED_PARAMS.has(key)` on the raw key — so `?limit=5` is the page size
+  and the filter is dropped with no `unserved` entry, while `?limit[eq]=5` is served. Emitting it was
+  two defects at once: a duplicate `(name, in)`, which OAS 3.1 forbids, and a described surface the
+  parser discards, which is ADR-0359's class inside the emitter written to describe ADR-0359's
+  refusal. Measured **zero members** across the seven packs and reachable from a manifest, since
+  `FIELD_NAME_REGEX` admits all six names.
   `openapi.ts` assembles the document and **refuses** rather than reports when a *served* route
   cannot be rendered, which is the design's one load-bearing asymmetry: a declared structural
   absence is an `x-crossengin-coverage` gap a reader can act on, while a route silently missing from
-  `paths` is a document describing a different API (ADR-0337). `openapi-handler.ts` holds the thunk,
-  the memo and the 401 backstop, plus `OPENAPI_PATH_SEGMENTS` / `OPENAPI_PATH` /
-  `OPENAPI_OPERATION_ID` as one spelling each — the path was briefly an array in `compile.ts` and a
-  string in `node.ts`'s boot line, caught by a `TS2304` rather than by looking.
+  `paths` is a document describing a different API (ADR-0337). **Three refusals, and the third was
+  this function's own defect**: `method_not_describable` covers a method the Path Item Object has no
+  field for, which a bare `continue` used to drop — 341 routes in, 340 operations out,
+  `refused: null`, nothing in the document naming it — while `wildcard_path` beside it, with the
+  same reach and the same zero population, was refused. Keyed on `OPENAPI_PATH_ITEM_FIELD` answering
+  `null` rather than on a named method, so the test is the one the specification imposes.
+  **401 and 403 declare both media types**, because two producers answer those statuses with two
+  shapes: a gateway denial is `application/problem+json` through `problems.ts` and a handler refusal
+  is `application/json` with `{error, detail}` preserved verbatim by `runtime.ts`. Both are live on
+  one route — no credential gives the first, an unrecognised api-key the second — so declaring
+  either alone was wrong. **400 is on the list operations alone**, because all four of its producers
+  sit inside `case "list":` and the association module emits none; declaring it everywhere put a
+  false sentence on 287 of 338 operations, naming a query-surface mechanism a read, a create or a
+  transition does not have. The response silence that remains is **declared**:
+  `undeclared_success_response` names every operation described with only its denials — the registry
+  routes with no `RouteSpec`, so no entity's schema can be referenced — and that is a gap rather
+  than a refusal because it is falsely-*in*complete, which costs a capability where a missing path
+  describes a different API. `meta.openapi.read` is the one of the six whose response this module
+  owns, so it declares its real 200 and its non-default media type.
+  `openapi-handler.ts` holds the thunk, the memo and the 401 backstop; `OPENAPI_PATH_SEGMENTS` /
+  `OPENAPI_PATH` / `OPENAPI_OPERATION_ID` / `OPENAPI_MEDIA_TYPE` are one spelling each and live in
+  `openapi.ts` with the handler re-exporting them, because the emitter needs them to describe its own
+  route's response and the handler imports the emitter, so the other direction is a module cycle over
+  `const` bindings. (The path was briefly an array in `compile.ts` and a string in `node.ts`'s boot
+  line, caught by a `TS2304` rather than by looking.)
 - **`operate-runtime-pg`** — Postgres `EntityStore` implementations plus the serving-side
   stores.
   **`public.ce_unaccent(text)` is the one accent fold, named by the predicate and by the index**
@@ -7845,7 +7942,20 @@ isolated copy of the package instead, which is the better answer when more than 
   (`served-surface.ts`) compared against the mounting source in both directions, which is
   `pg-storeless-tables.ts`' shape for a surface instead of a table; and the emitter declares the
   gap generically whatever the declaration carries, so a dropped enumeration degrades the document
-  to a weaker true statement rather than a false one.
+  to a weaker true statement rather than a false one. **And the enumeration was dropped once, at the
+  per-tenant gateway** (ADR-0392's addendum) — a forwarding literal's optional field, which is
+  ADR-0386's and ADR-0391's class for the third time, so the fence over it reads `node.ts` as text
+  and asserts both `buildOperateHttpServer` call sites pass the thunk. The degradation argument held
+  (the generic gap still fired), which is exactly why nothing else caught it.
+  **And a method the document's own format cannot carry is outside them too** (ADR-0392's addendum),
+  which is the same reading one level in and the sharpest instance of it, because the function that
+  dropped it is the function whose doc comment refuses exactly that. A CONNECT route is schema-valid,
+  the real registry accepts it, `renderPathTemplate` renders its path — and a bare `continue` left
+  **341 routes in, 340 operations out, `refused: null`** with the operationId nowhere. No rule over
+  the artifact asks it: the route is well-formed, its columns are irrelevant, and what is wrong is
+  that one format has no field for one method. The fence is the refusal, keyed on
+  `OPENAPI_PATH_ITEM_FIELD` answering `null`, so the test is the one the specification imposes rather
+  than a list of methods somebody maintains.
   **And a query that is missing a predicate satisfies all of them** (ADR-0359), which is the blind
   spot the rules share rather than a seventh reading. Every one of them asks whether a column
   exists, whether an `INSERT` is complete, whether a live database admits a value, whether a CHECK
@@ -11408,6 +11518,22 @@ three make the rest honest, cheap or verifiable.
     two declared gaps: **which role may call an operation** (`RouteDefinition` carries no role field
     and `requiredScopes` is `[]` workspace-wide, so the facts never pass the registry) and the five
     out-of-registry surfaces' **bodies**, which are declared with their paths rather than described.
+    **An adversarial pass over that commit then found nine code-changing defects in it**, and the
+    three worth carrying forward are the ones that change what the document *says* rather than what
+    it omits: a CONNECT route was silently dropped from `paths` by the very function whose doc
+    comment refuses exactly that; the create schema **understated** a client's obligation on three
+    live fields, measured as a **422** through the real handler on every tenant whose settings were
+    not yet populated; and 401/403 declared the wrong media type, with both shapes turning out to be
+    live on one route. All nine are closed and thirteen mutations are caught; a third gap kind,
+    `undeclared_success_response`, now names the six operations described with only their denials.
+    **The validity question is separately answered**: zero OpenAPI 3.1 MUST violations across three
+    documents, 1,399 `$ref`s resolving with no dead components, and the one reachable MUST (a
+    duplicate `(name, in)` from a filterable field named like a fixed parameter) having zero members
+    in the shipped packs and now fenced. What is still unchecked is the **whole specification**: no
+    validator ran, because there is none in the workspace (`ajv` is transitive at 6.x, draft-07) and
+    the official 3.1 meta-schema needs 2020-12 with `$dynamicRef` — so the clauses checked are the
+    ones a derived document is most likely to violate, by hand, and a real validator in CI is the
+    follow-up.
     `finops` means per-tenant gross margin is unknowable while
     revenue is metered, `security`'s zero importers take the CSP builder with them (the shipped
     header is one hardcoded string), and one of eight view kinds is rendered while every list view

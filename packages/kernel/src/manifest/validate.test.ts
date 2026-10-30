@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 import { RESERVED_ENTITY_FIELD_NAMES } from "../ddl/resolution.js";
 import { ManifestSchema, type Manifest } from "./types.js";
@@ -899,6 +901,95 @@ describe("validateManifest — workflows", () => {
       },
     };
     expect(() => validateManifest(m)).toThrow(/unknown entity 'Mystery'/);
+  });
+
+  it("agrees with the gateway's own literal-segment regex, read as text", () => {
+    // The two spellings cannot be one import — see `PATH_SAFE_TRANSITION_NAME`'s own comment for
+    // why, which is NOT the cycle one would assume — so the agreement is pinned the way
+    // `manifest-event-names.ts` pins its grammar: by reading the other file.
+    const routes = readFileSync(
+      new URL("../../../api-gateway/src/routes.ts", import.meta.url),
+      "utf8",
+    );
+    const here = readFileSync(new URL("./validate.ts", import.meta.url), "utf8");
+    const mine = /const PATH_SAFE_TRANSITION_NAME = (\/\^.*\$\/);/.exec(here)?.[1];
+    expect(mine).toBe("/^[a-zA-Z0-9._-]+$/");
+    // The gateway's literal segment, in `PathSegmentSchema`.
+    expect(routes).toContain(`z.literal("literal"), value: z.string().regex(${String(mine)})`);
+  });
+
+  it("refuses a transition name that cannot be a URL path segment", () => {
+    // A transition's name becomes a literal path segment of its own route, and nothing constrained
+    // its characters: `TransitionSchema.name` is `z.string().min(1)` and `entityRouteSpecs` does
+    // `lit(t.name)`. `RouteDefinitionSchema` declares the right regex for a literal segment and is
+    // parsed NOWHERE — two hits in the workspace, its own declaration and a `z.infer` — so the
+    // refinement is one nobody runs (ADR-0362's class).
+    //
+    // Measured on a deep copy of the real `erp-core`, all four of these cross-validated before:
+    // `a/b` renders `/v1/invoices/{id}/a/b`, a four-component template the matcher cannot serve;
+    // `{id}` renders `/v1/invoices/{id}/{id}`, two template expressions against one Parameter
+    // Object, which OAS 3.1 forbids; and the other two render a raw space and an unencoded
+    // non-ASCII segment.
+    for (const name of ["a/b", "{id}", "has space", "ün", "a?b", "a#b", ""]) {
+      const m: Manifest = {
+        manifestVersion: "1.0",
+        meta: baseMeta,
+        entities: [
+          {
+            name: "Prescription",
+            fields: [
+              { name: "qty", type: { kind: "integer" } },
+              { name: "status", type: { kind: "text" } },
+            ],
+          },
+        ],
+        workflows: {
+          lifecycle: {
+            kind: "entityLifecycle",
+            entity: "Prescription",
+            stateField: "status",
+            states: [{ name: "pending" }, { name: "done", category: "terminal" }],
+            initialState: "pending",
+            transitions: [{ name, from: ["pending"], to: "done", trigger: { kind: "userAction" } }],
+          },
+        },
+      };
+      expect(() => validateManifest(m), JSON.stringify(name)).toThrow(
+        /not usable as a URL path segment|at least 1|too_small/,
+      );
+    }
+  });
+
+  it("accepts the shapes every shipped transition name uses — the negative control", () => {
+    // 107 declared transitions over 59 distinct names across the seven source packs, every one
+    // matching, with `[a-y_]` the entire character set in use. So the refusal above costs nothing
+    // today, which is exactly when it is cheapest to be right.
+    for (const name of ["send", "mark_paid", "void", "submit-for-review", "v2.approve", "x1"]) {
+      const m: Manifest = {
+        manifestVersion: "1.0",
+        meta: baseMeta,
+        entities: [
+          {
+            name: "Prescription",
+            fields: [
+              { name: "qty", type: { kind: "integer" } },
+              { name: "status", type: { kind: "text" } },
+            ],
+          },
+        ],
+        workflows: {
+          lifecycle: {
+            kind: "entityLifecycle",
+            entity: "Prescription",
+            stateField: "status",
+            states: [{ name: "pending" }, { name: "done", category: "terminal" }],
+            initialState: "pending",
+            transitions: [{ name, from: ["pending"], to: "done", trigger: { kind: "userAction" } }],
+          },
+        },
+      };
+      expect(() => validateManifest(m), name).not.toThrow();
+    }
   });
 
   it("propagates workflow validation errors with the workflow path", () => {

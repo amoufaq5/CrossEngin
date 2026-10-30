@@ -61,6 +61,17 @@ export interface AuthSchemeSupport {
 }
 
 /**
+ * The HTTP header `api_key_header` is presented in.
+ *
+ * One spelling, read by `authenticate`, by this module's own prose below and by anything describing
+ * this surface. It was a bare literal in the request path with that prose beside it as a second
+ * copy, so a third reader was one edit from disagreeing with the parser about which header carries
+ * a credential — ADR-0288's maintained list, in a place where a stale copy reads as a documented
+ * capability.
+ */
+export const API_KEY_HEADER = "x-api-key";
+
+/**
  * How this gateway treats each of the eight `AUTH_SCHEMES`, as **one total map**.
  *
  * It is the map because the three things that used to be maintained separately are all derived from
@@ -87,23 +98,13 @@ export interface AuthSchemeSupport {
  * refused: reserving `?api_key=` commits only to never *accepting* it, which is already the
  * decision, so a client using another spelling is no worse off than before.
  */
-/**
- * The HTTP header `api_key_header` is presented in.
- *
- * One spelling, read by `authenticate`, by this module's own prose below and by anything describing
- * this surface. It was a bare literal in the request path with that prose beside it as a second
- * copy, so a third reader was one edit from disagreeing with the parser about which header carries
- * a credential — ADR-0288's maintained list, in a place where a stale copy reads as a documented
- * capability.
- */
-export const API_KEY_HEADER = "x-api-key";
-
 export const AUTH_SCHEME_SUPPORT: Readonly<Record<AuthScheme, AuthSchemeSupport>> = Object.freeze({
   bearer_jwt: {
     treatment: "served",
     recognisedFrom: "an Authorization header with the Bearer auth-scheme",
     reason:
-      "verified here: EdDSA signature against the configured JWKS, then exp, nbf, iss and aud",
+      "verified here: EdDSA signature against the configured JWKS, then exp, iss and aud; nbf is " +
+      "honoured when present and never required",
   },
   api_key_header: {
     treatment: "served",
@@ -188,9 +189,17 @@ export const AUTH_SCHEME_SECURITY_DOC: Readonly<Record<AuthScheme, SecuritySchem
       type: "http",
       scheme: "bearer",
       bearerFormat: "JWT",
+      // `nbf` is deliberately absent from the required list, and saying "exp, nbf, iss and aud"
+      // here was a false security statement in client-facing prose: `REQUIRED_JWT_CLAIM_COSTS` is
+      // keyed on `exp | iss | aud` alone, so `nbf` is neither required by default nor relaxable —
+      // `--jwt-optional-claim nbf` is refused **by name** with its reason, because an absent `nbf`
+      // means *valid from issuance*, which is coherent. It is still checked when present. The wrong
+      // list was copied from `AUTH_SCHEME_SUPPORT.bearer_jwt.reason`, which carried it too and is
+      // corrected with it, so what was an internal inaccuracy did not become a published one.
       description:
         "An Ed25519-signed JWT in the Authorization header. Verified against the configured JWKS, " +
-        "then exp, nbf, iss and aud — each required unless the deployment relaxes it by name.",
+        "then exp, iss and aud — each required unless the deployment relaxes it by name. A `nbf` " +
+        "claim is honoured when present and is never required.",
     },
     api_key_header: {
       key: "apiKeyAuth",

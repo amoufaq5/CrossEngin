@@ -45,7 +45,12 @@ const FILTER_OP_PROSE: Readonly<Record<FilterOp, string>> = {
   gte: "greater than or equal to",
   lt: "less than",
   lte: "less than or equal to",
-  in: "one of (comma-separated, or the parameter repeated)",
+  // Comma-separated only, though the server also accepts the parameter repeated. The repeated form
+  // is an array under OpenAPI's default `style: form`, which `schema: {type: "string"}` forbids —
+  // and that schema is deliberate for every operator (see the module doc), so promising a spelling
+  // the schema rejects would make the description and the schema disagree about one parameter. No
+  // capability is lost: the two forms parse to the identical filter, verified.
+  in: "one of (comma-separated)",
   contains: "containing (case-insensitive substring)",
 };
 
@@ -133,19 +138,40 @@ export const listQueryParameters = (
     // The bare form first: `FILTER_KEY_RE` makes the bracket optional and `parseFilterKey` defaults
     // the operator to `eq`, so `?field=value` is a real parameter and not a shorthand the document
     // may leave out.
-    out.push({
-      name: field,
-      in: "query",
-      required: false,
-      description: `Filter: \`${field}\` equal to this value.${typeNote}`,
-      schema: { type: "string" },
-    });
+    //
+    // **Except where the field's own name is one of the fixed parameters**, where the bare form is
+    // not a surface at all: `parseListQuery` tests `RESERVED_PARAMS.has(key)` on the *raw* key, so
+    // for a field named `limit` the request `?limit=5` is read as the page size and the filter is
+    // dropped with no `unserved` entry — while `?limit[eq]=5` is served normally. Emitting it was
+    // two defects at once: a second query parameter of that name, which OAS 3.1 forbids (two
+    // parameters MUST NOT share `(name, in)`), and a described filter the parser discards, which is
+    // ADR-0359's class inside the emitter written to describe ADR-0359's refusal. Measured zero
+    // members across all seven packs — 375 list configs, 1,270 filterable instances, no name
+    // collision — and reachable from a manifest, since `FIELD_NAME_REGEX` admits all six names and
+    // `RESERVED_ENTITY_FIELD_NAMES` is only `id`/`tenant_id`. Zero members is exactly when it is
+    // cheapest to be right, which is the same argument the two shape refusals rest on.
+    const shadowed = (RESERVED_LIST_PARAMS as readonly string[]).includes(field);
+    if (!shadowed) {
+      out.push({
+        name: field,
+        in: "query",
+        required: false,
+        description: `Filter: \`${field}\` equal to this value.${typeNote}`,
+        schema: { type: "string" },
+      });
+    }
+    // A shadowed field keeps every bracketed operator — those are served — and says so, because the
+    // absence of the bare form is otherwise the document going quiet about exactly the spelling a
+    // reader would try first.
+    const shadowNote = shadowed
+      ? ` The bare \`?${field}=\` is **not** this filter: that name is the fixed \`${field}\` parameter above, which the parser reads first.`
+      : "";
     for (const op of FILTER_OPS) {
       out.push({
         name: `${field}[${op}]`,
         in: "query",
         required: false,
-        description: `Filter: \`${field}\` ${FILTER_OP_PROSE[op]} this value.${typeNote}`,
+        description: `Filter: \`${field}\` ${FILTER_OP_PROSE[op]} this value.${typeNote}${shadowNote}`,
         schema: { type: "string" },
       });
     }

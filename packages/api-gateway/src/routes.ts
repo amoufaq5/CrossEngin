@@ -315,9 +315,23 @@ export type PathTemplateRender =
  * pattern and none rendered one, so a caller wanting a path string had no answer and
  * `RouteDefinition` has no path field (ADR-0355).
  *
- * The render is unambiguous by the schema rather than by convention: a literal's value is
- * `/^[a-zA-Z0-9._-]+$/`, which admits neither brace nor colon, so `{id}` in the output can only
- * have come from a parameter segment and `:id` only from one under the express grammar.
+ * **The render is unambiguous because each producer validates, and not because the schema does** —
+ * which is the correction worth carrying, since the schema says the right thing and is applied by
+ * nothing. `PathSegmentSchema` bounds a literal's value to `/^[a-zA-Z0-9._-]+$/`, admitting neither
+ * brace nor colon, so on a parsed route `{id}` can only have come from a parameter segment and
+ * `:id` only from one under the express grammar. But `RouteDefinitionSchema` has **two** occurrences
+ * in the workspace — its own declaration and the `z.infer` beside it — and no parse site at all, so
+ * `PathSegment["value"]` is a plain `string` and that refinement is one nobody runs (ADR-0362's
+ * class: the type annotation standing in for the parse).
+ *
+ * What makes the property true is therefore upstream, per producer. The one that takes a literal
+ * from *manifest* data is `entityRouteSpecs`, which puts a transition's name straight into a
+ * segment, and it was unvalidated: a transition named `{id}` rendered `/v1/invoices/{id}/{id}` —
+ * two template expressions against one Parameter Object, which OAS 3.1 forbids — and one named
+ * `a/b` rendered a path the matcher cannot serve, both on a manifest `validateManifest` accepted.
+ * `PATH_SAFE_TRANSITION_NAME` in the kernel refuses both now, against this same character set, with
+ * a test reading this file to pin the agreement. A producer that hand-writes a literal is on the
+ * author, and a parse of the whole `RouteDefinition` would be the general answer.
  */
 export const renderPathTemplate = (
   segments: readonly PathSegment[],

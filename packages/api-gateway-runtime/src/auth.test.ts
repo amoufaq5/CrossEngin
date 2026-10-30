@@ -5,6 +5,7 @@ import {
   signEd25519,
 } from "@crossengin/crypto";
 import {
+  AUTH_SCHEME_SECURITY_DOC,
   RECOGNISABLE_AUTH_SCHEMES,
   type IncomingRequest,
 } from "@crossengin/api-gateway";
@@ -646,5 +647,54 @@ describe("authSchemeToken", () => {
   it("refuses an over-long first word rather than truncating it", () => {
     expect(authSchemeToken(`${"A".repeat(41)} abc`)).toBeNull();
     expect(authSchemeToken(`${"A".repeat(40)} abc`)).toBe("A".repeat(40));
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// The published description of `bearer_jwt` against the claims this build can require.
+//
+// `AUTH_SCHEME_SECURITY_DOC.bearer_jwt.description` is **client-facing prose**: it is emitted into
+// `components.securitySchemes` of this deployment's OpenAPI document, so a false statement in it is
+// a false statement about this API's authentication. It said "exp, nbf, iss and aud — each required
+// unless the deployment relaxes it by name", and `nbf` is in neither set: `REQUIRED_JWT_CLAIM_COSTS`
+// is keyed on `exp | iss | aud`, and `--jwt-optional-claim nbf` is refused BY NAME because an
+// absent `nbf` means *valid from issuance*. Nothing caught it, which is why this fence exists — the
+// contradiction was between a published description and a refusal message in the same repository.
+//
+// The fence lives here rather than in `api-gateway` because this is the package where both facts
+// are visible: `REQUIRED_JWT_CLAIMS` is declared here and `api-gateway` does not depend on it.
+// ---------------------------------------------------------------------------------------------
+
+describe("the published bearer_jwt description names the claims this build requires", () => {
+  const description = AUTH_SCHEME_SECURITY_DOC.bearer_jwt?.description ?? "";
+
+  it("names every requirable claim", () => {
+    expect(description).not.toBe("");
+    for (const claim of REQUIRED_JWT_CLAIMS) {
+      expect(description, claim).toContain(claim);
+    }
+  });
+
+  it("does not describe a claim this build cannot require as required or relaxable", () => {
+    // The sentence promising "each required unless the deployment relaxes it by name" may only
+    // enumerate `REQUIRED_JWT_CLAIMS`. `nbf` is checked when present and is never required, so
+    // naming it in that clause tells a client a token without it is refused; it is accepted.
+    const clause = /then ([^—]+)—\s*each required unless the deployment relaxes it by name/.exec(
+      description,
+    );
+    expect(clause, "the required-claims clause must be present and parseable").not.toBeNull();
+    const named = (clause?.[1] ?? "")
+      .split(/,| and /)
+      .map((s) => s.trim())
+      .filter((s) => s !== "");
+    expect([...named].sort()).toEqual([...REQUIRED_JWT_CLAIMS].sort());
+    expect(named).not.toContain("nbf");
+  });
+
+  it("still says nbf is honoured, because it is — the claim is checked when present", () => {
+    // Not merely absent from the required list: `verifyBearerJwt` refuses a token whose `nbf` is in
+    // the future, so a description silent about it would understate what this gateway enforces.
+    expect(description).toContain("nbf");
+    expect(description).toMatch(/nbf.*honoured when present/);
   });
 });

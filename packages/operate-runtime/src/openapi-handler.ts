@@ -1,6 +1,18 @@
 import type { Handler, HandlerOutput } from "@crossengin/api-gateway-runtime";
 
-import { buildOpenApiDocument, type OpenApiEmit, type OpenApiEmitInput } from "./openapi.js";
+import {
+  buildOpenApiDocument,
+  OPENAPI_MEDIA_TYPE,
+  type OpenApiEmit,
+  type OpenApiEmitInput,
+} from "./openapi.js";
+
+export {
+  OPENAPI_MEDIA_TYPE,
+  OPENAPI_OPERATION_ID,
+  OPENAPI_PATH,
+  OPENAPI_PATH_SEGMENTS,
+} from "./openapi.js";
 
 // Spelled here as it is in `handlers.ts` and `ui-schema.ts`, which is this package's convention for
 // a two-line response builder. Deliberate rather than overlooked: there is no *fact* in it that two
@@ -8,30 +20,6 @@ import { buildOpenApiDocument, type OpenApiEmit, type OpenApiEmitInput } from ".
 function json(status: number, body: unknown): HandlerOutput {
   return { kind: "json", status, body };
 }
-
-/**
- * The registered media type for an OpenAPI document, with the version parameter the OpenAPI
- * Initiative's own registration defines — so a reader learns which version it holds without
- * parsing the body.
- *
- * Supplying it is load-bearing rather than cosmetic and it is checked against the adapter:
- * `outgoingResponseFromJson` fills `content-type` **only when absent**, so this survives, where a
- * second header set would be silently discarded.
- */
-export const OPENAPI_MEDIA_TYPE = "application/openapi+json;version=3.1.0";
-
-/**
- * Where this deployment's API description is served, and under which operation id — the one
- * spelling of both.
- *
- * The segments are what `compileOperateServer` registers and the rendered path is what a boot line
- * and a document reader are told, so the two cannot come to disagree: the path was otherwise a
- * `["v1", "meta", "openapi"]` array in one file and a `/v1/meta/openapi` string in another, which
- * is the second-spelling shape this increment already had to fix once for `x-api-key`.
- */
-export const OPENAPI_PATH_SEGMENTS: readonly string[] = ["v1", "meta", "openapi"];
-export const OPENAPI_PATH = `/${OPENAPI_PATH_SEGMENTS.join("/")}`;
-export const OPENAPI_OPERATION_ID = "meta.openapi.read";
 
 export interface OpenApiHandlerContext {
   /**
@@ -54,8 +42,8 @@ export interface OpenApiHandlerContext {
  *
  * **Memoised on the first request**, which composes with the thunk above rather than fighting it:
  * by the time any request arrives, registration is complete, so one computation is both correct and
- * the only one. The measured cost settles it — 916.6 KiB of JSON over 338 routes and 155 schemas
- * for `erp-core`, and 998.5 KiB for `erp-grocery`, the widest of the seven — so per-request assembly
+ * the only one. The measured cost settles it — 948.4 KiB of JSON over 338 routes and 155 schemas
+ * for `erp-core`, and 1033.4 KiB for `erp-grocery`, the widest of the seven — so per-request assembly
  * would hand a poller a megabyte of work for a document that
  * cannot change while the process lives. A refusal is memoised too, because it is a property of the
  * route set and the route set is fixed.
@@ -68,8 +56,9 @@ export interface OpenApiHandlerContext {
  * and treating it differently would be a distinction neither surface supports.
  *
  * The check is a **backstop** and is not claimed to be reachable: the gateway's auth stage refuses
- * an anonymous request seven stages before `match_route`, so on the real pipeline a handler never
- * sees a null principal. It is kept for `dischargeAbac`'s reason — a guard a path can no longer
+ * an anonymous request two stages before `match_route` (`authenticate` is stage 5 and `match_route`
+ * is stage 7), so on the real pipeline a handler never sees a null principal. An earlier draft said
+ * "seven stages before", which transposed that stage's own 1-based ordinal into a distance. It is kept for `dischargeAbac`'s reason — a guard a path can no longer
  * reach is still the thing that makes the handler correct when called directly, which every test
  * and every future embedder does.
  *

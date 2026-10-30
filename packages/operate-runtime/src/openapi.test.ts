@@ -23,6 +23,7 @@ import { describe, expect, it } from "vitest";
 import { compileOperateServer } from "./compile.js";
 import {
   OPENAPI_COVERAGE_KINDS,
+  OPENAPI_MEDIA_TYPE,
   buildOpenApiDocument,
   type OpenApiCoverageGap,
   type OpenApiEmitInput,
@@ -54,7 +55,6 @@ const emitFor = (manifest: Manifest, role: string, coverage: readonly OpenApiCov
       manifest,
       routes,
       routeSpecs: compiled.routeSpecs,
-      wiring: { settingsStore: false, allocator: false },
       title: "CrossEngin",
       version: "manifest-hash",
       coverage,
@@ -144,7 +144,6 @@ const fixtureInput = (routes: readonly RouteDefinition[]): OpenApiEmitInput => (
   manifest: FIXTURE_MANIFEST,
   routes,
   routeSpecs: [],
-  wiring: { settingsStore: false, allocator: false },
   title: "F",
   version: "v",
   coverage: [],
@@ -231,6 +230,39 @@ describe("buildOpenApiDocument — refusals", () => {
     expect(emit.document).toBeNull();
     expect(emit.refused?.kind).toBe("wildcard_path");
     expect(emit.refused?.operationIds).toEqual(["files.download"]);
+  });
+
+  it("refuses a served CONNECT route rather than dropping it from paths", () => {
+    // The refusal this module argued for and did not implement. `OPENAPI_PATH_ITEM_FIELD[CONNECT]`
+    // is `null` because a Path Item Object has no field for the method, and the loop used to drop
+    // such a route with a bare `continue` — so the document answered `refused: null` over 341
+    // routes and emitted 340 operations, with the path and the operationId nowhere in it and no
+    // coverage gap. Verified against the real registry, which accepts a schema-valid CONNECT route.
+    //
+    // The asymmetry was the finding rather than the drop: `wildcard_path` above has the same reach,
+    // the same zero population and the same single construction site, and was refused.
+    const emit = buildOpenApiDocument(
+      fixtureInput([
+        fixtureRoute("rt_fixtureconn1", "tunnel.open", "CONNECT", [lit("v1"), lit("tunnel")]),
+      ]),
+    );
+    expect(emit.document).toBeNull();
+    expect(emit.refused?.kind).toBe("method_not_describable");
+    expect(emit.refused?.operationIds).toEqual(["tunnel.open"]);
+    expect(emit.refused?.detail).toContain("CONNECT");
+  });
+
+  it("refuses the CONNECT route even beside a describable one, rather than emitting the rest", () => {
+    // The non-vacuity control, and the shape the defect took: with one ordinary route beside it the
+    // old code emitted a perfectly well-formed document that was short by exactly one operation.
+    const emit = buildOpenApiDocument(
+      fixtureInput([
+        fixtureRoute("rt_fixtureokget1", "widget.read", "GET", [lit("v1"), lit("widgets")]),
+        fixtureRoute("rt_fixtureconn2", "tunnel.open", "CONNECT", [lit("v1"), lit("tunnel")]),
+      ]),
+    );
+    expect(emit.document).toBeNull();
+    expect(emit.refused?.kind).toBe("method_not_describable");
   });
 
   it("refuses two routes whose templates differ only in a variable's name", () => {
@@ -541,14 +573,44 @@ describe("buildOpenApiDocument — what each action takes", () => {
     expect(operationFor("payment.delete")["requestBody"]).toBeUndefined();
   });
 
-  it("describes the gateway's own denials on every operation", () => {
-    const uncovered = documentOperations(PATHS)
-      .filter((o) => {
-        const r = o.operation["responses"] as Record<string, unknown>;
-        return r["401"] === undefined || r["403"] === undefined || r["400"] === undefined;
-      })
-      .map((o) => String(o.operation["operationId"]));
-    expect(uncovered).toEqual([]);
+  it("describes a 401 and a 403 on every operation, each with BOTH producers' media types", () => {
+    const wrong: string[] = [];
+    for (const o of documentOperations(PATHS)) {
+      const r = o.operation["responses"] as Record<string, Record<string, unknown>>;
+      for (const status of ["401", "403"]) {
+        const content = r[status]?.["content"] as Record<string, unknown> | undefined;
+        // Two producers answer these statuses with two shapes: a gateway denial goes through
+        // `problems.ts` as `application/problem+json`, and a handler refusal is preserved verbatim
+        // as `application/json` with `{error, detail}`. This used to declare `problem+json` alone
+        // and that was wrong on the LIVE producer — measured, an anonymous `invoice.list` answers
+        // `401 {"error":"tenant_required",…}` and an ungranted role `403 {"error":"forbidden",…}`,
+        // both `application/json`. Declaring only the handler's shape would have been the same
+        // defect reversed, because the gateway's 401 is reachable from eleven sites.
+        if (content?.["application/problem+json"] === undefined) wrong.push(`${o.operation["operationId"]}:${status}:problem`);
+        if (content?.["application/json"] === undefined) wrong.push(`${o.operation["operationId"]}:${status}:json`);
+      }
+    }
+    expect(wrong).toEqual([]);
+  });
+
+  it("describes a 400 on the list operations and on nothing else", () => {
+    // This test asserted a 400 on EVERY operation, which was the defect: all four of its producers
+    // in `handlers.ts` sit inside `case "list":` and the association module emits none, so the
+    // declaration carried a false sentence on 287 of 338 operations — its description names a
+    // query-surface mechanism a read, a create or a transition does not have. Measured, a read
+    // with junk query parameters answers 200, a delete of a missing id 404, a failed create 422.
+    // ADR-0372's class: the defect written down as the specification.
+    const listIds = new Set(
+      CORE_EMIT.compiled.routeSpecs.filter((s) => s.action === "list").map((s) => s.operationId),
+    );
+    expect(listIds.size).toBeGreaterThan(40);
+    const wrong: string[] = [];
+    for (const o of documentOperations(PATHS)) {
+      const id = String(o.operation["operationId"]);
+      const has = (o.operation["responses"] as Record<string, unknown>)["400"] !== undefined;
+      if (has !== listIds.has(id)) wrong.push(`${id}:${has ? "declared" : "absent"}`);
+    }
+    expect(wrong).toEqual([]);
   });
 });
 
@@ -574,18 +636,20 @@ describe("buildOpenApiDocument — a page is not described as a record", () => {
       type: "array",
       items: { $ref: "#/components/schemas/Payment" },
     });
-    expect(schema["required"]).toEqual(["data"]);
+    // `page` is required, because it is always present — a client branching on `page === undefined`
+    // would be writing a branch the server never takes.
+    expect(schema["required"]).toEqual(["data", "page"]);
     // The walk's termination rule rides on the page object, because a short or empty page with a
     // non-null cursor is legal under row filtering (ADR-0345).
-    expect(String((props["page"] as Record<string, unknown>)["description"])).toContain(
-      "nextCursor === null",
-    );
-    expect(
-      ((props["page"]!["properties"] as Record<string, unknown>)["nextCursor"] as Record<
-        string,
-        unknown
-      >)["type"],
-    ).toEqual(["string", "null"]);
+    const page = props["page"] as Record<string, unknown>;
+    expect(String(page["description"])).toContain("nextCursor === null");
+    const pageProps = page["properties"] as Record<string, Record<string, unknown>>;
+    expect(pageProps["nextCursor"]!["type"]).toEqual(["string", "null"]);
+    // `limit` is the page size that was applied. The real response carries it — measured,
+    // `page: {"limit":100,"nextCursor":null}` — and this declaration omitted it, so both keys are
+    // asserted present and required.
+    expect(pageProps["limit"]!["type"]).toBe("integer");
+    expect(page["required"]).toEqual(["limit", "nextCursor"]);
   });
 
   it("describes a read 200 as the bare entity, and never as a page", () => {
@@ -668,6 +732,46 @@ describe("buildOpenApiDocument — x-crossengin-coverage", () => {
     // Measured zero across the pack — the only undescribable kind is `duration`, which no pack
     // declares — so the key's absence is the honest state and its *presence* would be the finding.
     expect(DOC["x-crossengin-undescribable-fields"]).toBeUndefined();
+  });
+
+  it("declares the operations described with only their denials, and names them", () => {
+    // Falsely-INcomplete rather than falsely-complete, which is why it is a gap and not a refusal:
+    // a generated client gets no success type for the route and the document says it can only
+    // fail. What makes it a gap rather than a silence is that the set is named — these are the
+    // registry routes with no `RouteSpec`, so no entity's schema can be referenced for a body.
+    const gaps = DOC["x-crossengin-coverage"] as readonly OpenApiCoverageGap[];
+    const gap = gaps.find((g) => g.kind === "undeclared_success_response");
+    expect(gap).toBeDefined();
+    expect(gap?.reach).toBe("ordering");
+
+    // The set is exactly the spec-less routes, minus this document's own route, which IS described.
+    const specIds = new Set(CORE_EMIT.compiled.routeSpecs.map((s) => s.operationId));
+    const expected = CORE_EMIT.routes.filter(
+      (r) => !specIds.has(r.operationId) && r.operationId !== "meta.openapi.read",
+    );
+    expect(expected.length).toBeGreaterThan(0);
+    for (const route of expected) {
+      const template = renderPathTemplate(route.pathSegments, "openapi").template;
+      expect(gap?.detail, route.operationId).toContain(`${route.method} ${String(template)}`);
+    }
+
+    // And each of them really does carry no 2xx, which is the fact the gap reports.
+    for (const route of expected) {
+      const op = operationFor(route.operationId);
+      const codes = Object.keys(op["responses"] as Record<string, unknown>);
+      expect(codes.filter((c) => c.startsWith("2")), route.operationId).toEqual([]);
+    }
+  });
+
+  it("describes its own success response, media type included", () => {
+    // The sharpest member of the gap above, and the one this module can close: the document could
+    // not describe its own 200, which also hid the non-default media type it is served with — so a
+    // generated client had no way to learn that from the document at all.
+    const op = operationFor("meta.openapi.read");
+    const ok = (op["responses"] as Record<string, Record<string, unknown>>)["200"];
+    expect(ok).toBeDefined();
+    expect(Object.keys(ok?.["content"] as Record<string, unknown>)).toEqual([OPENAPI_MEDIA_TYPE]);
+    expect(OPENAPI_MEDIA_TYPE).toContain("3.1.0");
   });
 });
 

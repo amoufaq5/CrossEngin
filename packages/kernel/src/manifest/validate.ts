@@ -88,6 +88,21 @@ function rootSegment(path: string): string {
 
 const AUDITABLE_TRAIT = "auditable";
 
+/**
+ * The characters a transition name may use, because it becomes a URL path segment.
+ *
+ * Deliberately a second spelling of `PathSegmentSchema`'s own literal-segment regex rather than an
+ * import, and the reason is measured rather than the cycle one would assume: **neither package
+ * depends on the other** — `@crossengin/api-gateway`'s whole dependency set is `config`, `testing`,
+ * `typescript`, `vitest` and `zod`, and kernel names it nowhere. So importing it would not be
+ * cyclic; it would be a *new* edge from the manifest layer to the request edge, which is backwards
+ * (the gateway compiles what the manifest declares) and would spend the one property that makes
+ * `api-gateway` embeddable. `manifest-event-names.ts` is under a genuinely cyclic version of the
+ * same bind and answers it the same way: pin the agreement in a test that reads the other file as
+ * text.
+ */
+const PATH_SAFE_TRANSITION_NAME = /^[a-zA-Z0-9._-]+$/;
+
 export interface ClassifiedFieldRef {
   readonly entity: string;
   readonly field: string;
@@ -451,6 +466,37 @@ function validateWorkflows(
 
       const existing = entityTransitions.get(workflow.entity) ?? new Set<string>();
       for (const t of workflow.transitions) {
+        // A transition's name becomes a **path segment**, and until now nothing constrained its
+        // characters: `TransitionSchema.name` is `z.string().min(1)` and `entityRouteSpecs` puts it
+        // straight into a literal segment. `RouteDefinitionSchema` declares the right regex for a
+        // literal and is parsed **nowhere** — two hits in the workspace, its own declaration and a
+        // `z.infer` — so `PathSegment`'s `value` is a plain `string` and the refinement is one
+        // nobody runs (ADR-0362's class: the type annotation standing in for the parse).
+        //
+        // Measured on a deep copy of the real `erp-core`, four shapes all cross-validated: `a/b`
+        // renders `/v1/invoices/{id}/a/b`, a four-component template the **matcher cannot serve**
+        // because it matches one literal segment whose value contains the slash; `{id}` renders
+        // `/v1/invoices/{id}/{id}`, two template expressions against one Parameter Object, which
+        // OAS 3.1 forbids outright; `has space` renders a raw space; and a non-ASCII name renders
+        // unencoded. So the two costs are a route a client calls and gets `no_route` for, and a
+        // structurally invalid API description — and the second is why this is refused here rather
+        // than in the emitter: the broken route exists whether or not anyone emits a document, so
+        // the honest place is the one that owns the manifest (ADR-0348's split — a property of the
+        // manifest alone is decidable by a pack author, by `crossengin validate` and by the
+        // reviewer approving what the Architect designed).
+        //
+        // The pattern is `RouteDefinitionSchema`'s own literal-segment set, and the cost is
+        // measured zero: across the seven source packs, **107 declared transitions over 59 distinct
+        // names**, every one matching, with `[a-y_]` the entire character set in use.
+        if (!PATH_SAFE_TRANSITION_NAME.test(t.name)) {
+          throw new ManifestValidationError(
+            `workflows.${name}.transitions`,
+            `transition name '${t.name}' is not usable as a URL path segment: it must match ` +
+              `${String(PATH_SAFE_TRANSITION_NAME)}. The name becomes a literal segment of the ` +
+              `transition's own route, so anything else yields a path the router cannot serve or ` +
+              `an API description that cannot be rendered`,
+          );
+        }
         existing.add(t.name);
       }
       entityTransitions.set(workflow.entity, existing);

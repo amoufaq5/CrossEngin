@@ -655,3 +655,91 @@ describe("LIST_PARAMETER_COMPLEMENT_NOTE — each clause against the parser and 
     expect(LIST_PARAMETER_COMPLEMENT_NOTE).toContain(`the ${word!} listed`);
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// A filterable field whose name is one of the fixed parameters.
+// ---------------------------------------------------------------------------------------------
+
+describe("a filterable field named like a fixed parameter", () => {
+  /** A config whose filterable fields collide with the fixed parameter names. */
+  const shadowing = (fields: readonly string[]): ListConfig => ({
+    defaultLimit: 25,
+    maxLimit: 250,
+    defaultSort: [],
+    sortableFields: ["name"],
+    filterableFields: [...fields],
+    searchableFields: ["name"],
+    fields: ["id", "name", ...fields],
+  });
+
+  const duplicates = (params: readonly ParameterDoc[]): readonly string[] => {
+    const seen = new Set<string>();
+    const dups = new Set<string>();
+    for (const p of params) {
+      const key = `${p.name}|${p.in}`;
+      if (seen.has(key)) dups.add(p.name);
+      seen.add(key);
+    }
+    return [...dups].sort();
+  };
+
+  it("emits no duplicate (name, in) pair, which OAS 3.1 forbids", () => {
+    // Two parameters sharing `(name, in)` is a Parameter Object MUST-violation: a strict generator
+    // fails outright and a lenient one silently produces a wrong client. Measured before the fix,
+    // a config with `filterableFields: ["q", "limit"]` emitted 24 parameters with `limit` and `q`
+    // each declared twice.
+    for (const name of RESERVED_LIST_PARAMS) {
+      expect(duplicates(listQueryParameters(shadowing([name]))), name).toEqual([]);
+    }
+    expect(duplicates(listQueryParameters(shadowing([...RESERVED_LIST_PARAMS])))).toEqual([]);
+  });
+
+  it("omits the bare form, because the parser reads that name as the fixed parameter", () => {
+    // And this is why omitting it is honest rather than merely valid: `parseListQuery` tests
+    // `RESERVED_PARAMS.has(key)` on the RAW key, so for a field named `limit` the request
+    // `?limit=5` is read as the page size and the filter is dropped with no `unserved` entry —
+    // a described surface the server discards, which is ADR-0359's class.
+    const params = listQueryParameters(shadowing(["limit"]));
+    expect(params.filter((p) => p.name === "limit")).toHaveLength(1);
+    expect(params.find((p) => p.name === "limit")?.description).toContain("Page size");
+    // The live parser, so the claim is measured rather than reasoned.
+    const parsed = parseListQuery({ limit: "5" }, shadowing(["limit"]));
+    expect(parsed.query.filters).toEqual([]);
+    expect(parsed.query.limit).toBe(5);
+    expect(parsed.unserved).toEqual([]);
+  });
+
+  it("keeps every bracketed operator, which IS served, and says the bare form is not the filter", () => {
+    const params = listQueryParameters(shadowing(["limit"]));
+    for (const op of FILTER_OPS) {
+      const p = params.find((x) => x.name === `limit[${op}]`);
+      expect(p, op).toBeDefined();
+      expect(p?.description, op).toContain("not** this filter");
+    }
+    // Served, measured: the bracketed form reaches `filters` where the bare one does not.
+    const parsed = parseListQuery({ "limit[eq]": "5" }, shadowing(["limit"]));
+    expect(parsed.query.filters).toEqual([{ field: "limit", op: "eq", value: "5" }]);
+  });
+
+  it("leaves an ordinary field's bare form alone — the negative control", () => {
+    const params = listQueryParameters(shadowing(["tax_id"]));
+    const bare = params.find((p) => p.name === "tax_id");
+    expect(bare).toBeDefined();
+    expect(bare?.description).toContain("equal to this value");
+    expect(bare?.description).not.toContain("not** this filter");
+    expect(duplicates(params)).toEqual([]);
+  });
+
+  it("has zero members across the pack, which is when a fence is cheapest", () => {
+    // Reachable from a manifest — `FIELD_NAME_REGEX` admits all six names and
+    // `RESERVED_ENTITY_FIELD_NAMES` is only `id`/`tenant_id` — and declared by nothing today.
+    const hits: string[] = [];
+    for (const [name, config] of CONFIGS) {
+      for (const field of config.filterableFields) {
+        if ((RESERVED_LIST_PARAMS as readonly string[]).includes(field)) hits.push(`${name}.${field}`);
+      }
+    }
+    expect(hits).toEqual([]);
+    expect(CONFIGS.length).toBeGreaterThan(40);
+  });
+});

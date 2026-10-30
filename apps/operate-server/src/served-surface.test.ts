@@ -157,3 +157,40 @@ describe("undescribableRegisteredRoutes", () => {
     expect(found).toEqual([{ operationId: "files.get", reason: "wildcard_path" }]);
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// Every gateway this binary builds gets the coverage thunk.
+// ---------------------------------------------------------------------------------------------
+
+describe("openApiCoverage reaches every gateway, not just the boot one", () => {
+  it("is passed at every buildOperateHttpServer call site", () => {
+    // `node.ts` has two: the boot gateway and the per-tenant one. Only the first forwarded this,
+    // so a tenant fetching `/v1/meta/openapi` from its own gateway got a document declaring NONE
+    // of the five paths mounted ahead of route matching — including `POST /v1/auth/token`, the
+    // login, which `coverageFromMountedSurfaces`' own doc singles out as the one that matters.
+    //
+    // Read as text for ADR-0386's and ADR-0391's reason: a forwarding literal's dropped field and
+    // a present one are identical to the type system, because the target field is optional. The
+    // drop was safe in DIRECTION — the generic `surface_outside_registry` gap still fires, which is
+    // what `compile.ts`'s "the drop cannot lie" argument buys — and was still a capability loss on
+    // the one serving path where coverage is weakest.
+    const sites = [...NODE_TS.matchAll(/buildOperateHttpServer\(\{/g)];
+    expect(sites.length).toBe(2);
+    // Each call's object literal runs to the matching close; `openApiCoverage:` must appear inside
+    // both. Sliced from one site to the next rather than brace-matched, which is enough here
+    // because the two are far apart and nothing else in between mentions the field.
+    const bounds = [...sites.map((m) => m.index ?? 0), NODE_TS.length];
+    for (let i = 0; i < sites.length; i++) {
+      const body = NODE_TS.slice(bounds[i]!, bounds[i + 1]!);
+      expect(body, `call site ${String(i + 1)}`).toContain("openApiCoverage:");
+    }
+  });
+
+  it("gives per_tenant_surface a producer, which it did not have", () => {
+    // A modelled value with no producer anywhere — one occurrence, its own enum member — which is
+    // this repository's most-found class, committed in the increment that named it. The per-tenant
+    // call site is the one place it can honestly be declared, so the two halves of the finding are
+    // one fix.
+    expect(NODE_TS).toContain('kind: "per_tenant_surface"');
+  });
+});
