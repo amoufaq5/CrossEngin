@@ -252,6 +252,7 @@ import {
   buildPostgresReadinessCheck,
   HEALTH_PATHS,
 } from "./health.js";
+import { STRIPE_WEBHOOK_PATH } from "./served-surface.js";
 import {
   AUTH_TOKEN_PATH,
   buildAuthTokenInterceptor,
@@ -1407,7 +1408,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     }
     webhookRoute = {
       method: "POST",
-      path: "/v1/webhooks/stripe",
+      path: STRIPE_WEBHOOK_PATH,
       handle: async (body, headers) => {
         const payload = new TextDecoder().decode(body ?? new Uint8Array());
         const signatureHeader = firstHeader(headers["stripe-signature"]) ?? "";
