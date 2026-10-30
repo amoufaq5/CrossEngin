@@ -1,6 +1,7 @@
 import { resolvedFields } from "@crossengin/kernel/ddl";
 import type { Manifest } from "@crossengin/kernel/manifest";
 
+import { FILTER_OPS } from "./store.js";
 import type { FilterOp, ListFilter, ListQuery, ListSearch, ListSort } from "./store.js";
 
 export const DEFAULT_PAGE_SIZE = 50;
@@ -46,7 +47,11 @@ export interface ListConfig {
  * returns the right rows in the wrong order, which is not the same kind of wrong as a page holding
  * rows the caller asked to exclude.
  */
-export const UNSERVED_LIST_REASONS = ["not_filterable", "not_searchable"] as const;
+export const UNSERVED_LIST_REASONS = [
+  "not_filterable",
+  "not_searchable",
+  "operator_not_served",
+] as const;
 export type UnservedListReason = (typeof UNSERVED_LIST_REASONS)[number];
 
 export interface UnservedListSurface {
@@ -330,9 +335,27 @@ export function parseListQuery(
     if (!filterable.has(parsed.field)) {
       // Only when it names a real field of the entity. `?utm_source=x` names nothing and is left
       // alone; `?tax_id=X` on an entity that has `tax_id` and declines to filter it is refused.
+      //
+      // The field is checked BEFORE the operator, so `?tax_id=X` and `?tax_id[regex]=X` answer
+      // identically. That is the whole of the bypass this ordering closes: the field is the binding
+      // constraint — no operator makes an unfilterable field filterable — so naming the operator
+      // first would send the caller to fix the one thing that was not blocking them, and would
+      // leave two requests with one problem answering two different ways.
       if (fields.has(parsed.field)) {
         unserved.push({ surface: "filter", reason: "not_filterable", field: parsed.field });
       }
+      continue;
+    }
+    if (parsed.op === null) {
+      // A FILTERABLE field named with an unserved operator. Before this, `parseFilterKey` answered
+      // `null` and the loop `continue`d above both refusals — so the predicate was dropped in
+      // silence and the response carried every row, which is the same wrong answer ADR-0359 closed
+      // on the field-name axis and left open on this one. It was also a *bypass* of that refusal,
+      // four characters wide: `?tax_id=X` was a 400 and `?tax_id[regex]=X` a 200 over every row.
+      //
+      // Reached only for a field the entity serves, so `fields.has` needs no second test here —
+      // `filterableFields` is a subset of `fields` by construction.
+      unserved.push({ surface: "filter", reason: "operator_not_served", field: parsed.field });
       continue;
     }
     if (parsed.op === "in") {
@@ -363,13 +386,31 @@ export function parseListQuery(
   };
 }
 
-const FILTER_KEY_RE = /^([a-z][a-z0-9_]*)(?:\[(eq|ne|gt|gte|lt|lte|in|contains)\])?$/;
+/**
+ * A filter key is a field name with an optional `[op]` bracket. The operator is **not** enumerated
+ * in this pattern: the alternation used to spell `(eq|ne|gt|gte|lt|lte|in|contains)` while
+ * `FILTER_OPS` is the exported constant eight lines away in `store.ts`, which is ADR-0288's
+ * maintained list — correct today, since both carried the same eight in the same order, and wrong
+ * the moment a ninth operator lands, because this copy is the one that decides whether a key parses
+ * at all. So the bracket is captured loosely and `FILTER_OPS` adjudicates it.
+ */
+const FILTER_KEY_RE = /^([a-z][a-z0-9_]*)(?:\[([a-z_]+)\])?$/;
+const SERVED_FILTER_OPS: ReadonlySet<string> = new Set(FILTER_OPS);
 
-/** Parses a filter param key: `field` → eq, `field[op]` → that operator. */
-function parseFilterKey(key: string): { field: string; op: FilterOp } | null {
+/**
+ * Parses a filter param key.
+ *
+ * `null` means the key is not a filter key at all. A parsed key with `op: null` means it names a
+ * field and an operator this store does not serve — a distinction the caller needs, because
+ * dropping such a filter changes *which rows come back* and must be refused rather than ignored.
+ */
+function parseFilterKey(key: string): { field: string; op: FilterOp | null } | null {
   const m = FILTER_KEY_RE.exec(key);
   if (m === null) return null;
-  return { field: m[1]!, op: (m[2] as FilterOp | undefined) ?? "eq" };
+  const field = m[1]!;
+  const opRaw = m[2];
+  if (opRaw === undefined) return { field, op: "eq" };
+  return { field, op: SERVED_FILTER_OPS.has(opRaw) ? (opRaw as FilterOp) : null };
 }
 
 /** Splits an `in` filter value into a list (repeated param or comma-separated). */

@@ -10,6 +10,7 @@ import {
   withheldAddressing,
   type ListConfig,
 } from "./list-query.js";
+import { FILTER_OPS } from "./store.js";
 import type { ListQuery } from "./store.js";
 
 function manifestWithListView(): Manifest {
@@ -238,6 +239,48 @@ describe("parseListQuery", () => {
     it("reports every offending filter, so a report is not a first-hit sample", () => {
       const r = parseListQuery({ secret: "x", description: "y" }, config);
       expect(r.unserved.map((u) => u.field)).toEqual(["secret", "description"]);
+    });
+
+    it("reports an unserved OPERATOR on a filterable field, which used to drop in silence", () => {
+      // The operator axis of the same defect ADR-0359 closed for the field-name axis.
+      // `parseFilterKey` answered `null` for an unrecognised bracket and the loop `continue`d above
+      // both refusals, so the predicate vanished and the response carried every row — the rows the
+      // caller asked to exclude, under a 200.
+      for (const key of ["name[regex]", "name[bogus]", "name[startswith]"]) {
+        const r = parseListQuery({ [key]: "A" }, config);
+        expect(r.unserved, key).toEqual([
+          { surface: "filter", reason: "operator_not_served", field: "name" },
+        ]);
+        expect(r.query.filters, key).toEqual([]);
+      }
+    });
+
+    it("answers identically for `?secret=` and `?secret[regex]=`, which closes the bypass", () => {
+      // The sharp half: before this, `?secret=X` was a 400 and `?secret[regex]=X` was a 200 over
+      // every row — four characters defeating the refusal. The field is checked BEFORE the operator
+      // because the field is the binding constraint: no operator makes an unfilterable field
+      // filterable, so two requests with one problem must not answer two different ways.
+      const plain = parseListQuery({ secret: "X" }, config).unserved;
+      const bracketed = parseListQuery({ "secret[regex]": "X" }, config).unserved;
+      expect(bracketed).toEqual(plain);
+      expect(bracketed).toEqual([{ surface: "filter", reason: "not_filterable", field: "secret" }]);
+    });
+
+    it("still ignores an unserved operator on a field naming nothing", () => {
+      // `fields.has` gates this exactly as it gates `not_filterable`: `?utm_source[regex]=x` is an
+      // ordinary unknown query parameter and every HTTP surface ignores one.
+      expect(parseListQuery({ "utm_source[regex]": "x" }, config).unserved).toEqual([]);
+    });
+
+    it("serves every operator FILTER_OPS declares, so the refusal set is its exact complement", () => {
+      // The regex used to spell the operator list a second time, eight lines from `FILTER_OPS` in
+      // store.ts — ADR-0288's maintained list, correct only while the two agreed. Deriving it means
+      // a ninth operator is served the moment it is declared, rather than refused by a stale copy.
+      for (const op of FILTER_OPS) {
+        const r = parseListQuery({ [`name[${op}]`]: "A" }, config);
+        expect(r.unserved, op).toEqual([]);
+        expect(r.query.filters?.[0]?.op, op).toBe(op);
+      }
     });
   });
 });

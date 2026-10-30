@@ -777,6 +777,14 @@ const UNSERVED_LIST_OUTPUTS: Readonly<
     remedy:
       "free-text search spans the view's visible text-like columns and this entity declares none, so `?q` previously matched every row; filter on a specific field instead",
   },
+  operator_not_served: {
+    error: "filter_operator_not_served",
+    reason: "that filter operator is not one this API serves",
+    // The one remedy of the three the CALLER can act on, which is why it names the operators rather
+    // than a manifest declaration: the field is filterable and only the bracket is wrong.
+    remedy:
+      "the served operators are eq, ne, gt, gte, lt, lte, in and contains, and a bare `?field=value` means eq; an unrecognised bracket was previously ignored and the response carried every row",
+  },
 };
 
 /**
