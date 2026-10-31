@@ -104,6 +104,7 @@ function extendingManifest(slug: string, entityName: string, over: Partial<Manif
 
 function compile(manifest: Manifest): OperateHttpServer {
   const { httpServer } = buildOperateHttpServer({
+    edgeTrust: "untrusted",
     manifest,
     store: new InMemoryEntityStore(),
     apiKeys: API_KEYS,
@@ -834,6 +835,7 @@ describe("per-tenant gateways — observability parity", () => {
       source,
       build: (manifest) =>
         buildOperateHttpServer({
+          edgeTrust: "untrusted",
           manifest,
           store: new InMemoryEntityStore(),
           apiKeys: API_KEYS,

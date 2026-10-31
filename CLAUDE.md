@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 386 records). Earlier versions of this file
+in `docs/adr/index.md` (generated; it carries its own count). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 21,036 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 21,069 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -3046,6 +3046,74 @@ report; `apps/operate-web` has none).
   rather than wired unsigned"*. True of a **short** secret and false of an **absent** one, with
   `page-dispatch.test.ts` pinning the unsigned behaviour as intended (ADR-0372's class).
 
+  ADR-0394 is the eighth user-directed increment and the class is **a fact about the connection the
+  gateway cannot establish**. It takes the last member of register P1.11 and finds that the missing
+  producer was never a property of `mtls`: five facts were in that state, and the field declared to
+  decide which of them may be believed — `IncomingRequestBuildOptions.trustedProxy?: boolean` — had
+  **one reference in the whole workspace, its own declaration**. Zero readers, zero writers, no test.
+  So `forwardedFor`, `forwardedProto` and `forwardedHost` were derived from caller-settable headers
+  **unconditionally**, `clientCertSha256` and `tlsVersion` had no producer at all, and
+  `stageValidateTls` — one of the 17 — had recorded `tls_not_reported` on every request of every
+  deployment since Phase 1, which is the honest string for *nobody told me*, read by nothing.
+  The crux is that `mtls` is the only served scheme where **this gateway does not verify the
+  credential**. The other three establish the fact from bytes plus a key they hold; a TLS handshake
+  happens at the **edge**, so what arrives is a fingerprint in a header and the only decision
+  available is whether to believe it. Serving it is therefore **declaring a trust boundary** rather
+  than implementing a verifier — which is what `trustedProxy` was for — so `EdgeTrust` is required at
+  the one derivation point both transports converge on, the two headers are **fixed** rather than
+  configurable (a configurable name invites an operator to point it at a header their edge does not
+  *overwrite*), and `--mtls-client` without `--trusted-edge-client-cert` is refused **at parse**,
+  which is what lets one gate key stand for a scheme needing two facts. Default off, and that
+  direction is the decision: ADR-0338's premise holds, while default *on* would manufacture a
+  falsely-true control where today there is an honest refusal.
+  Live as a non-owner, the arm the design turns on is one request sent twice: the **identical**
+  forged header is **200** on the trusted deployment and **401** on the untrusted one. Beside it, a
+  malformed forwarded fingerprint records `anonymous` / `no_credential_skipped` — byte-identical to
+  presenting nothing, so it is *no credential* rather than a refused one — an unenrolled one records
+  `credential_not_found` with the fingerprint on the record and absent from the body, and
+  `stageValidateTls` **denies a weak TLS version for the first time**, while the untrusted arm passes
+  the same header so a caller can neither claim a version nor force a denial.
+  Three things were sharper than the defect, and two are mine. **The increment reproduced ADR-0386's
+  dropped-field defect in the increment citing it**: `mtlsClientLookup` went onto
+  `GatewayRuntimeOptions` and `BuildOperateHttpServerOptions` and not onto `OperateGatewayOptions`,
+  so the conditional spread dropped it with `tsc` exiting 0 — and the symptom was **two boot lines
+  disagreeing in one process**, found by a live boot. ADR-0386's own fence could not have caught it:
+  it compares the fields *both* interfaces declare, so it finds a field dropped from the literal and
+  is blind to one never added to the outer interface at all. The reverse direction is fenced now, at
+  a measured cost of six declarations. **And a claim this file carries about `hmac_signature` was
+  transposed onto `mtls` and then acted on** — "in `STRONG_AUTH_SCHEMES` and in
+  `SCHEMES_REQUIRING_HTTPS`" — so `mtls` was added to the second, which is **deliberately** absent
+  because an mtls credential *is* the transport; a Phase-1 test title said so and refused the change.
+  Register P3.1's class, inside the increment, caught by the test rather than by the author. The
+  third is `sha256("")`, which passes the 64-hex shape test and is the one well-formed value that
+  cannot denote a certificate: refused by name at **both** the request path and the enrolment, so an
+  operator who sees it in a log from an edge in `client_auth mode request` cannot configure it in.
+  **Two more came out of sweeping, and the first is a live documentation defect rather than a
+  figure**: inserting the two flags into `--help` **split `--hmac-key`'s continuation lines from
+  their own flag**, so the text told an operator that `--trusted-edge-client-cert` — a boolean
+  taking no value — was *"repeatable; all four fields required"* and needed
+  `REQUEST_SIGNING_SECRET`. ADR-0364's addendum class, and the three `toContain`s this increment had
+  just written **passed straight through it**, because an order-independent assertion cannot see an
+  orphaned continuation; the block fence replacing them reads an entry as its definition line plus
+  every line indented past the description column, and its own first draft broke the block on
+  `/^\s*--/`, which cuts `--mtls-client`'s entry short since that entry names
+  `--trusted-edge-client-cert` — the boundary is a **column** (`/^ {2}--/`) and not a prefix. The
+  second is the figure pair above (one caller, three, five, 17), asserted rather than counted in
+  both the field's doc comment and this file.
+  **One consequence is the opposite direction from everything else here and is stated rather than
+  guarded**: every other effect of the gate fails closed into a refusal, while `request.scheme` —
+  previously taken from `x-forwarded-proto` unconditionally, now `--scheme`'s value unless the edge
+  is declared — is **inside the HMAC canonical message**, so a signing deployment behind a TLS
+  terminator would see every signature fail `signature_mismatch` (the client signs `https`, the
+  gateway computes `http`). Measured small twice over: the shipped compose passes **`--scheme
+  https`**, so its scheme is unchanged whatever the gate decides, and `hmac_signature` needs two
+  flags no compose passes. Either flag is the remedy, which is why there is no boot refusal — it
+  would have to guess which, over a condition (*is there a terminator in front of me*) this ADR
+  establishes the process cannot know. Nothing else reads `request.scheme`:
+  `requiresHttpsTransport` and `SCHEMES_REQUIRING_HTTPS` have **zero callers** between them, and
+  `forwardedFor`'s only reader is callerless — which is why the other four facts were gated with no
+  behaviour change at all.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -3974,8 +4042,9 @@ packages exist at only one layer, noted below where that is true.
   **`AUTH_SCHEME_SUPPORT` says which of the eight this build serves, and it is a total map**
   (ADR-0384) — so a ninth scheme is a compile error rather than a scheme the request path silently
   treats as anonymous, which is what four of them were. Four `AUTH_SCHEME_TREATMENTS` —
-  `served` (2: `bearer_jwt`, `api_key_header`), `refused` (3: `basic`, `api_key_query`, `mtls` —
-  recognised on the wire and denied by name), `indistinguishable` (2) and `not_a_credential` (1,
+  `served` (4 since ADR-0394: `bearer_jwt`, `api_key_header`, `mtls`, `hmac_signature`), `refused`
+  (2: `basic`, `api_key_query` — recognised on the wire and denied by name),
+  `indistinguishable` (1) and `not_a_credential` (1,
   `anonymous`, which is the value recorded when nothing was presented and so is not a credential to
   serve or refuse). **`indistinguishable` is the member that earns its place**, and its two members
   are the ones nothing on the wire can separate — not the ones that are merely unimplemented, which
@@ -3985,10 +4054,12 @@ packages exist at only one layer, noted below where that is true.
   HMAC wire format authenticates a payload, which is why stage 12 `validate_request_signature`
   exists); and `bearer_opaque` is claimed by `bearer_jwt`'s own `Bearer ` prefix, where a
   token-shape test would **grant** rather than refuse, because the only opaque lookup available
-  matches whole api-key strings — a capability decision, not a parser one. `mtls` is **refused**
-  rather than indistinguishable, because its recognising field exists (`clientCertSha256`) and only
-  its *producer* is missing, so the arm is correct and unreachable until a terminator populates it.
-  Each carries its reason rather than an arm that cannot fire (ADR-0334).
+  matches whole api-key strings — a capability decision, not a parser one. `mtls` was **refused**
+  rather than indistinguishable, because its recognising field existed (`clientCertSha256`) and only
+  its *producer* was missing — and that reason **expired by being acted on** rather than being
+  withdrawn (ADR-0394): the producer exists now, so the scheme is `served`. What survives from the
+  old entry is that a *fourth treatment* for it was rightly refused — the treatment was never the
+  distinction. Each carries its reason rather than an arm that cannot fire (ADR-0334).
   `RECOGNISABLE_AUTH_SCHEMES` and
   `SERVED_AUTH_SCHEMES` are **derived** from the map and never restated, which is what makes the
   literal pin on the second one a fence rather than a second spelling.
@@ -3997,6 +4068,28 @@ packages exist at only one layer, noted below where that is true.
   withdrawn: the stated ground was that no wire position had been **chosen**, and choosing a
   dedicated header is a position that commits to no shared namespace. `bearer_opaque` cannot follow,
   because the position it would need is `Authorization: Bearer`, which `bearer_jwt` holds.
+  **`mtls` is `served` since ADR-0394 by the same shape of expiry**, and it leaves `refused` with
+  two members whose refusals a caller can **provoke** — which is what makes
+  `formatAuthSchemeSurvey`'s unconditional `refusing … by name` clause true, retiring ADR-0384's own
+  flagged finding by construction rather than by a special case. `mtls` is the one served scheme
+  **this gateway does not verify**: the other three establish the fact from bytes plus a key they
+  hold, and a TLS handshake happens at the edge, so what arrives is the edge's assertion and the only
+  decision available is whether to believe it. It is therefore reachable exactly when a deployment
+  declares its edge trusted — see `EdgeTrust` under `api-gateway-runtime`.
+  **`mtls` is deliberately *not* in `SCHEMES_REQUIRING_HTTPS`**, which reads as an omission and has
+  been taken for one twice: the predicate is *this credential must not travel in the clear*, and an
+  mtls credential **is** the transport, so the question is a category error rather than false. The
+  `hmac_signature` sentence below — "in `AUTH_SCHEMES` since Phase 1, in `STRONG_AUTH_SCHEMES` and in
+  `SCHEMES_REQUIRING_HTTPS`" — is about **that** scheme, and transposing it onto `mtls` is what
+  produced the second mistake (ADR-0394).
+  `CLIENT_CERT_FINGERPRINT_HEADER` (`CrossEngin-Client-Cert-Sha256`) and `TLS_VERSION_HEADER`
+  (`CrossEngin-Tls-Version`, in `requests.ts` with the TLS vocabulary) are **fixed rather than
+  configurable**, which is the one wire decision in that scheme and a security property rather than
+  a convention: a configurable name invites an operator to point it at a header their edge does not
+  *overwrite*, and a header the edge merely forwards is one a caller sets.
+  `EMPTY_CERTIFICATE_FINGERPRINT` is `sha256("")` refused by name at both the request path and the
+  enrolment, because **no certificate is zero bytes** — so it is the one well-formed value that
+  cannot denote a certificate, and its only meaning is that the edge asked for one and got none.
   `REQUEST_SIGNATURE_HEADER` (`CrossEngin-Request-Signature`) lives here beside `API_KEY_HEADER` and
   **not** beside the signer in `@crossengin/crypto`, on the split this file already draws for the
   api-key header: crypto owns the *value* — the canonical message, the grammar, the sign and the
@@ -4096,6 +4189,34 @@ packages exist at only one layer, noted below where that is true.
   optional-with-a-default, which is ADR-0386's finding applied before it could happen again, since an
   optional field defaulting to the *safe* value makes its own omission unobservable.
 
+  **`EdgeTrust` is the declaration every forwarded fact is read under** (ADR-0394), and it replaced
+  `IncomingRequestBuildOptions.trustedProxy?: boolean`, which had **one reference in the whole
+  workspace: its own declaration** — zero readers, zero writers, no test. So the trust gate every
+  forwarded fact needed was declared and never consulted, and five caller-settable facts were
+  derived unconditionally: `forwardedFor`, `forwardedProto`, `forwardedHost`, plus (with no producer
+  at all) `clientCertSha256` and `tlsVersion`. A two-member union `"trusted" | "untrusted"` rather
+  than a boolean, because `trustedProxy: false` cannot be read — "there is no proxy" or "there is one
+  we do not trust" — and because a union leaves room for a third member that *verifies* the hop.
+  **Required** on `BuildIncomingRequestInput`, so a third transport cannot arrive without deciding;
+  `buildIncomingRequest` has **one** non-test caller and both of this repo's transports reach it
+  through that one builder, which is why gating there means **a sixth forwarded fact cannot arrive
+  ungated** — and required-ness then propagates to `OperateHttpServerOptions`, where each transport
+  states its own answer (three `buildOperateHttpServer` call sites). Five interfaces declare it;
+  measure the figure rather than reading it, since the first draft of this sentence and of the field's
+  own doc comment both said "two call sites" and that is wrong on every reading. Untrusted, the facts are **absent** (`[]`, `null`) and not merely ignored, because
+  `computeOriginIp` reads `forwardedFor[0]` in preference to the socket's peer — so a believed header
+  *replaces* the one fact here that cannot be forged. `input.*` wins over the header for the two TLS
+  facts, which is the ordering a transport that terminates TLS **itself** needs.
+  **It is also what made `stageValidateTls` able to fire.** That stage is one of the 17 and had
+  recorded `tls_not_reported` on every request of every deployment since Phase 1 — the honest string
+  for *nobody told me* — because `tlsVersion` had no producer; nothing read it. Live, it now records
+  three states (`tls_not_reported` pass / `weak_tls_tls_1_0` **deny** / `tls_tls_1_2` pass) where
+  only the first was possible, and the untrusted arm still passes a forwarded `TLSv1.0`, so a caller
+  can neither claim a version nor **force** a denial.
+  `parseForwardedTlsVersion` accepts the edge's own spellings (13 of them) so a Caddyfile forwarding
+  `{http.request.tls.version}` needs no transformation in the proxy config, and answers `null` for an
+  unrecognised one — *not reported*, which leaves the stage passing, because reading an unparseable
+  version as weak would deny every request on an edge whose spelling the map does not know.
   **A credential this build does not serve is recognised and refused, where it used to be
   unrecognised and served** (ADR-0384). `authenticate` had no arm for an unserved scheme, so
   `bearer_opaque` with no matcher, `basic`, `mtls` and `hmac_signature` reached the **no-credential
@@ -11616,6 +11737,18 @@ three make the rest honest, cheap or verifiable.
     `bearer_opaque`, whose position `bearer_jwt` holds. Implementing any of the three is a
     scheme-by-scheme product decision and `mtls` is dearest in *deployment* terms (no edge in this
     workspace forwards a client certificate).
+    **`mtls` is the third to close, by ADR-0394**, and the "dearest in deployment terms" reading was
+    right about the cost and wrong about where it falls. The deployment half is real — a Caddy
+    `client_auth` block, which cannot be a default because `require_and_verify` refuses every client
+    presenting no certificate — and the expensive part was neither that nor a verifier: serving
+    `mtls` meant **declaring a trust boundary**, because it is the only served scheme where this
+    gateway does not verify the credential (the handshake happens at the edge, so what arrives is an
+    assertion in a header). That boundary was the increment and `mtls` one member of it: the field
+    declared to decide which forwarded facts may be believed had **zero readers**, so five
+    caller-settable facts were derived unconditionally and `stageValidateTls` had been unable to fire
+    since Phase 1. What is left of P1.11 is `basic` and `api_key_query`, refused by name with their
+    reasons, and `bearer_opaque`, which can have no wire position while `bearer_jwt` holds
+    `Authorization: Bearer`.
 
     The original entry, kept because its measurements are what the fix rests on: *"The refusal is
     honest and named"* was true of **`basic` alone** — the only unserved scheme the parser could
@@ -12293,7 +12426,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 388 records; 309 Accepted, 79 Proposed (the
+title or status change cannot drift. 389 records; 310 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

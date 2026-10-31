@@ -113,6 +113,39 @@ export interface HmacKeyLookup {
   lookup(request: IncomingRequest, keyId: string): Promise<HmacKeyLookupResult | null>;
 }
 
+/**
+ * What an enrolled client certificate resolves to.
+ *
+ * Field for field `HmacKeyLookupResult` **minus `keyBytes`**, and that one absence is the whole
+ * character of this scheme rather than a simplification. The hmac seam hands back key material
+ * *because* the gateway does the verifying — ADR-0393's rule that a deployment chooses which key and
+ * this gateway decides whether the signature is good, so a `verify(keyId, …)` seam would let a
+ * deployment answer "valid" with nothing having verified anything. Here there is no such hazard and
+ * no such guarantee: the handshake happened at the edge, the fingerprint is the edge's assertion, and
+ * there is nothing for this process to check it against. A lookup that answers is *enrolment*, not
+ * verification, which is why the type carries no secret and why the trust declaration is what the
+ * security rests on.
+ */
+export interface MtlsClientLookupResult {
+  readonly principalRef: string;
+  readonly scopes: readonly string[];
+  readonly tenantId: string | null;
+}
+
+export interface MtlsClientLookup {
+  /**
+   * Resolves a verified certificate fingerprint to an enrolled client, or `null` when this
+   * deployment has enrolled no such certificate.
+   *
+   * The fingerprint is already normalised and shape-checked by `buildIncomingRequest`, so a lookup
+   * receives 64 lowercase hex characters or is not called — it must not re-derive it from the header,
+   * which would read a value the trust gate may have dropped. The **request is passed** for
+   * `HmacKeyLookup.lookup`'s reason: a deployment can scope an enrolment per host or path prefix
+   * without a second seam.
+   */
+  lookup(request: IncomingRequest, fingerprint: string): Promise<MtlsClientLookupResult | null>;
+}
+
 export interface GatewayRuntimeOptions {
   readonly routes: RouteRegistry;
   readonly handlers: HandlerRegistry;
@@ -134,6 +167,7 @@ export interface GatewayRuntimeOptions {
   readonly clockSkewSeconds?: number;
   readonly opaqueTokenLookup?: OpaqueTokenLookup;
   readonly hmacKeyLookup?: HmacKeyLookup;
+  readonly mtlsClientLookup?: MtlsClientLookup;
   /**
    * The symmetric window, in seconds, a request signature's timestamp may sit either side of now.
    *
@@ -192,6 +226,7 @@ export class GatewayRuntime {
   private readonly clockSkewSeconds: number;
   private readonly opaqueTokenLookup: OpaqueTokenLookup | null;
   private readonly hmacKeyLookup: HmacKeyLookup | null;
+  private readonly mtlsClientLookup: MtlsClientLookup | null;
   private readonly requestSignatureToleranceSeconds: number;
   private readonly clock: { now(): Date };
   private readonly defaultApiVersion: string;
@@ -211,6 +246,7 @@ export class GatewayRuntime {
     this.clockSkewSeconds = opts.clockSkewSeconds ?? 30;
     this.opaqueTokenLookup = opts.opaqueTokenLookup ?? null;
     this.hmacKeyLookup = opts.hmacKeyLookup ?? null;
+    this.mtlsClientLookup = opts.mtlsClientLookup ?? null;
     this.requestSignatureToleranceSeconds =
       opts.requestSignatureToleranceSeconds ?? DEFAULT_REQUEST_SIGNATURE_TOLERANCE_SECONDS;
     this.clock = opts.clock ?? { now: () => new Date() };
@@ -424,6 +460,7 @@ export class GatewayRuntime {
       jwtVerifierConfigured: this.jwksProvider !== null,
       opaqueLookupConfigured: this.opaqueTokenLookup !== null,
       hmacKeyLookupConfigured: this.hmacKeyLookup !== null,
+      mtlsClientLookupConfigured: this.mtlsClientLookup !== null,
     };
   }
 
@@ -739,8 +776,12 @@ export class GatewayRuntime {
           query: ctx.request.query,
           // The **digest** the request already carries, not the bytes: `bodySha256` is on the typed
           // `IncomingRequest` where `rawBody` is not, so this arm needs no cast — and it is computed
-          // once per request by the adapter, so covering it is free. `IncomingRequestSchema` refuses
-          // a non-empty body with no digest, so `null` here means an empty body and nothing else.
+          // once per request by the adapter, so covering it is free. `null` here means an empty body
+          // and nothing else, which is a property of `buildIncomingRequest` — it derives the digest
+          // from the bytes through `bodyHashFromBytes`, whose only `null` is the empty-body case.
+          // This used to credit `IncomingRequestSchema` with refusing a non-empty body carrying no
+          // digest; that refinement exists and is never run, because nothing parses that schema on
+          // the request path. The guarantee is the adapter's.
           bodySha256: ctx.request.bodySha256,
           host: ctx.request.host,
           scheme: ctx.request.scheme,
@@ -787,13 +828,89 @@ export class GatewayRuntime {
       });
       return null;
     }
-    // Unreachable while `SERVED_AUTH_SCHEMES` is exactly the three schemes with an arm above, which is
+    if (parsed.scheme === "mtls") {
+      if (this.mtlsClientLookup === null) {
+        // `scheme_not_supported` for the hmac arm's reason: nothing looked the fingerprint up, so
+        // "not found" would be a claim about a lookup that never happened.
+        ctx.authOutcome = "scheme_not_supported";
+        const env = authenticationRequired({
+          reason: `auth scheme mtls is not accepted here: no client-certificate registry is configured, so no certificate can be resolved; this deployment serves ${this.servedSchemeList()}`,
+          wwwAuthenticate: this.authChallenge(),
+          correlationId: ctx.request.correlationId ?? undefined,
+        });
+        rec.record({
+          stage: "authenticate",
+          outcome: "deny",
+          startedAt,
+          completedAt: this.now(),
+          reason: "no_mtls_client_lookup",
+          problemTypeUri: env.body.type,
+          responseStatus: env.body.status,
+        });
+        return env;
+      }
+      // There is deliberately **no malformed arm** here, where the other three served schemes each
+      // have one, and the absence is structural rather than an omission: a fingerprint reaches this
+      // stage only through `buildIncomingRequest`, which drops it unless the edge is trusted and then
+      // puts it through `parseForwardedClientCertFingerprint`. So by the time `recogniseCredential`
+      // can answer `mtls` at all, the token is 64 lowercase hex characters — there is no shape left
+      // to refuse. `credential_malformed` would also be the wrong *subject*: it is a claim about what
+      // a caller sent, and on this path the caller sent no credential at all. The edge did.
+      const enrolled = await this.mtlsClientLookup.lookup(ctx.request, parsed.token);
+      if (enrolled === null) {
+        ctx.authOutcome = "credential_not_found";
+        const env = authenticationRequired({
+          reason: "client certificate not accepted",
+          wwwAuthenticate: this.authChallenge(),
+          correlationId: ctx.request.correlationId ?? undefined,
+        });
+        rec.record({
+          stage: "authenticate",
+          outcome: "deny",
+          startedAt,
+          completedAt: this.now(),
+          // The fingerprint is on the record and not in the response, on the hmac arm's rule and for
+          // a stronger reason: a certificate's sha256 is public — it is derived from the certificate
+          // the client presents to anyone it connects to — so it is not a secret to withhold, and it
+          // is the one fact that tells an operator "a real certificate arrived and is not enrolled"
+          // apart from "a trusted edge is forwarding rubbish". Unlike the hmac key id it is not an
+          // oracle either, because there is nothing to forge: a caller who could choose a fingerprint
+          // has already defeated the trust boundary, and one who cannot learns nothing from a 401.
+          reason: `mtls_certificate_not_enrolled_${parsed.token}`,
+          problemTypeUri: env.body.type,
+          responseStatus: env.body.status,
+        });
+        return env;
+      }
+      // No verification step between the lookup and this line, and that is the whole shape of the
+      // scheme rather than a missing check: the other three arms each have one (a JWKS signature, an
+      // opaque-token match, an HMAC recomputation) because each holds something to check the
+      // credential against. Here the handshake happened at the edge and the gateway holds nothing,
+      // so a resolved enrolment *is* the authentication, and what stands behind it is the deployment's
+      // declaration that the edge performs mutual TLS and overwrites the header. That declaration is
+      // enforced one layer out, in `buildIncomingRequest`, which is why this arm can be this short.
+      ctx.authOutcome = "authenticated";
+      ctx.authScheme = "mtls";
+      ctx.authPrincipalRef = enrolled.principalRef;
+      ctx.authScopes = enrolled.scopes;
+      ctx.tenantId = enrolled.tenantId;
+      rec.record({
+        stage: "authenticate",
+        outcome: "pass",
+        startedAt,
+        completedAt: this.now(),
+        reason: "mtls_certificate_enrolled",
+      });
+      return null;
+    }
+    // Unreachable while `SERVED_AUTH_SCHEMES` is exactly the schemes with an arm above, which is
     // what `runtime-auth-schemes.test.ts`'s "the stage and the support map agree" asserts in both
     // directions — the fence the type system cannot give, because `support.treatment === "served"`
-    // does not narrow `parsed.scheme`. A third served scheme declared in `AUTH_SCHEME_SUPPORT` and
+    // does not narrow `parsed.scheme`. A further served scheme declared in `AUTH_SCHEME_SUPPORT` and
     // not implemented here lands on this line and **fails closed**, which is the only safe
     // disposition: the alternative, falling through to the served path, would authenticate a scheme
-    // nothing verified.
+    // nothing verified. (The count was written out as "three" and is derived by that test, so it is
+    // left unstated here rather than maintained — it has already been two and three and is now four.)
     ctx.authOutcome = "scheme_not_supported";
     const env = authenticationRequired({
       reason: `auth scheme ${parsed.scheme} is declared served and has no authenticator in this gateway; this deployment serves ${this.servedSchemeList()}`,

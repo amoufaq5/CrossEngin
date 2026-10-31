@@ -19,28 +19,33 @@ const ALL: AuthSchemeServingInput = {
   jwtVerifierConfigured: true,
   opaqueLookupConfigured: true,
   hmacKeyLookupConfigured: true,
+  mtlsClientLookupConfigured: true,
 };
 const NEITHER: AuthSchemeServingInput = {
   jwtVerifierConfigured: false,
   opaqueLookupConfigured: false,
   hmacKeyLookupConfigured: false,
+  mtlsClientLookupConfigured: false,
 };
 const API_KEY_ONLY: AuthSchemeServingInput = {
   jwtVerifierConfigured: false,
   opaqueLookupConfigured: true,
   hmacKeyLookupConfigured: false,
+  mtlsClientLookupConfigured: false,
 };
 const SIGNATURE_ONLY: AuthSchemeServingInput = {
   jwtVerifierConfigured: false,
   opaqueLookupConfigured: false,
   hmacKeyLookupConfigured: true,
+  mtlsClientLookupConfigured: false,
 };
 
 describe("servedAuthSchemesFor", () => {
-  it("all configured serves all three", () => {
+  it("all configured serves every served scheme, in AUTH_SCHEMES order", () => {
     expect(servedAuthSchemesFor(ALL)).toEqual([
       "bearer_jwt",
       "api_key_header",
+      "mtls",
       "hmac_signature",
     ]);
   });
@@ -59,6 +64,7 @@ describe("servedAuthSchemesFor", () => {
         jwtVerifierConfigured: true,
         opaqueLookupConfigured: false,
         hmacKeyLookupConfigured: false,
+        mtlsClientLookupConfigured: false,
       }),
     ).toEqual(["bearer_jwt"]);
   });
@@ -124,7 +130,7 @@ describe("authSchemesByTreatment", () => {
 describe("formatAuthSchemeSurvey", () => {
   it("names the served schemes, the refusals and the indistinguishable one", () => {
     const line = formatAuthSchemeSurvey(ALL);
-    expect(line).toContain("serving bearer_jwt, api_key_header and hmac_signature");
+    expect(line).toContain("serving bearer_jwt, api_key_header, mtls and hmac_signature");
     expect(line).toContain("refusing");
     for (const scheme of authSchemesByTreatment("refused")) {
       expect(line).toContain(scheme);
@@ -203,19 +209,27 @@ describe("formatAuthSchemeSurvey", () => {
     }
   });
 
-  // The three refusals render in `AUTH_SCHEMES` order (`api_key_query`, `basic`, `mtls`) and not
-  // alphabetically or by treatment, which is what the order-preservation assertion above pins; this
-  // one pins the conjunction, so a list rendered as `a, b, c` is a visible change.
-  it("uses 'and' for two and a comma list for three", () => {
-    // Both arms of `joinNames` exercised on one line: three served and three refused read as comma
-    // lists, and the two-member form is asserted on a deployment that configures exactly two.
-    expect(formatAuthSchemeSurvey(ALL)).toContain("bearer_jwt, api_key_header and hmac_signature");
-    expect(formatAuthSchemeSurvey(ALL)).toContain("api_key_query, basic and mtls");
+  // The refusals render in `AUTH_SCHEMES` order (`api_key_query`, `basic`) and not alphabetically
+  // or by treatment, which is what the order-preservation assertion above pins; this one pins the
+  // conjunction, so a list rendered as `a, b, c` is a visible change.
+  //
+  // Serving `mtls` moved which clause exercises which arm, and the test is better for it: the
+  // comma-list arm is now the **served** clause (four members) and the two-member arm is the
+  // **refused** one, so both are asserted on the same line for one input instead of needing a
+  // second deployment shape for the short form. `mtls` sits between `api_key_header` and
+  // `hmac_signature` because that is its position in `AUTH_SCHEMES`, which is the order-preservation
+  // property restated.
+  it("uses 'and' for two and a comma list for more", () => {
+    expect(formatAuthSchemeSurvey(ALL)).toContain(
+      "bearer_jwt, api_key_header, mtls and hmac_signature",
+    );
+    expect(formatAuthSchemeSurvey(ALL)).toContain("api_key_query and basic");
     expect(
       formatAuthSchemeSurvey({
         jwtVerifierConfigured: true,
         opaqueLookupConfigured: true,
         hmacKeyLookupConfigured: false,
+        mtlsClientLookupConfigured: false,
       }),
     ).toContain("serving bearer_jwt and api_key_header");
     // And the one-member form, which the indistinguishable clause is now the only user of.

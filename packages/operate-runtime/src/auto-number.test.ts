@@ -62,6 +62,7 @@ async function invoke(
     scheme: "https",
     bodyBytes: null,
     clientIp: "203.0.113.1",
+    edgeTrust: "untrusted",
   });
   return handler({
     request,

@@ -10,6 +10,7 @@ const manifest = await loadBuiltinPack("erp-retail");
 
 function handler() {
   return buildEdgeFetchHandler({
+    edgeTrust: "untrusted",
     manifest,
     apiKeys: [
       parseApiKeySpec(`key-cashier:cashier:${TENANT}`),
@@ -103,6 +104,7 @@ describe("fetchToRaw", () => {
 
   it("answers an oversized request with a 413 problem document, not a 500", async () => {
     const h = buildEdgeFetchHandler({
+      edgeTrust: "untrusted",
       manifest,
       apiKeys: [parseApiKeySpec(`k:store_manager:${TENANT}`)],
       maxRequestBodyBytes: 1024,

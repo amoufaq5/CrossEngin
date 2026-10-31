@@ -40,6 +40,7 @@ describe("rawToIncoming", () => {
       scheme: "https",
       id: "req_1",
       receivedAt: "2026-06-03T12:00:00.000Z",
+      edgeTrust: "untrusted",
     });
     expect(incoming.method).toBe("POST");
     expect(incoming.path).toBe("/v1/products");
@@ -54,7 +55,13 @@ describe("rawToIncoming", () => {
     const incoming = rawToIncoming(
       { method: "GET", url: "/", headers: {} },
       null,
-      { method: "GET", scheme: "http", id: "r", receivedAt: "2026-06-03T12:00:00.000Z" },
+      {
+        method: "GET",
+        scheme: "http",
+        id: "r",
+        receivedAt: "2026-06-03T12:00:00.000Z",
+        edgeTrust: "untrusted",
+      },
     );
     expect(incoming.host).toBe("localhost");
     expect(incoming.clientIp).toBe("127.0.0.1");

@@ -78,6 +78,7 @@ function getReq(target: string, token: string): IncomingRequest {
     scheme: "https",
     bodyBytes: null,
     clientIp: "203.0.113.1",
+    edgeTrust: "untrusted",
   });
 }
 
@@ -97,6 +98,7 @@ function writeReq(
     scheme: "https",
     bodyBytes: new TextEncoder().encode(JSON.stringify(body)),
     clientIp: "203.0.113.1",
+    edgeTrust: "untrusted",
   });
 }
 

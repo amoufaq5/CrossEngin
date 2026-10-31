@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { parseForwardedClientCertFingerprint } from "@crossengin/api-gateway";
 import type { IncomingRequest, ResolvedPrincipal } from "@crossengin/api-gateway";
 import {
   InMemoryJwksProvider,
@@ -146,6 +147,56 @@ export function parseHmacKeySpec(raw: string): HmacKeySpec {
     );
   }
   return { keyId: f.first, role: f.role, tenantId: f.tenantId, principalId: f.principalId };
+}
+
+/** One enrolled client-certificate fingerprint → (role, tenant, principal) binding. */
+export interface MtlsClientSpec {
+  /** The certificate's sha256, lowercase hex — see `parseMtlsClientSpec`. */
+  readonly fingerprint: string;
+  readonly role: string;
+  readonly tenantId: string;
+  /** Always named by the spec, for `parseHmacKeySpec`'s reason. */
+  readonly principalId: string;
+}
+
+/**
+ * Parses a `fingerprint:role:tenant:principalId` spec, with **all four fields required**.
+ *
+ * The third caller of `parseCredentialSpecFields`, and the one where the shared grammar is most
+ * clearly earned: this flag carries **no secret of any kind**, which is a stronger statement than
+ * `--hmac-key`'s. A key id is public because it travels in a header; a certificate fingerprint is
+ * public because it is derived from the certificate the client presents to *anyone it connects to*,
+ * so there is nothing here an operator could leak by putting it on a command line, and no
+ * environment route is needed at all (ADR-0301 is satisfied by the flag carrying nothing secret
+ * rather than by moving something off it).
+ *
+ * The fingerprint is validated against the contract's own pattern rather than merely non-empty,
+ * which is the one check this parser adds over its siblings. A spec whose first field is not 64 hex
+ * characters can never match a fingerprint `buildIncomingRequest` produces — that function
+ * normalises and shape-checks before the value reaches the request — so such an enrolment is
+ * *unmatchable*, and silently accepting it would leave an operator with a registry whose rows cannot
+ * fire and nothing saying why. Case-folded, for the same reason the request path folds: an operator
+ * pasting `openssl`'s uppercase output names the same certificate.
+ *
+ * The principal is required for `parseHmacKeySpec`'s measured reason, which applies unchanged:
+ * `ResolvedPrincipalSchema.principalId` is `z.string().uuid()`, so neither the fingerprint nor
+ * anything derived from it is a legal value, and a derived id naming no `meta.users` row breaks
+ * every per-person surface through a foreign key.
+ */
+export function parseMtlsClientSpec(raw: string): MtlsClientSpec {
+  const f = parseCredentialSpecFields(raw, "--mtls-client", "fingerprint");
+  const fingerprint = parseForwardedClientCertFingerprint(f.first);
+  if (fingerprint === null) {
+    throw new Error(
+      `invalid --mtls-client (fingerprint must be a certificate's sha256 as 64 hex characters; no other value can ever match a request): ${JSON.stringify(raw)}`,
+    );
+  }
+  if (f.principalId === null) {
+    throw new Error(
+      `invalid --mtls-client (principalId is required and must be a provisioned meta.users UUID; an enrolled certificate may not share a placeholder principal): ${JSON.stringify(raw)}`,
+    );
+  }
+  return { fingerprint, role: f.role, tenantId: f.tenantId, principalId: f.principalId };
 }
 
 export interface PrincipalWiring {
@@ -313,6 +364,14 @@ export function buildPrincipalWiring(
      * eight call sites state something they do not care about.
      */
     readonly hmacKeys?: readonly HmacKeySpec[];
+    /**
+     * The enrolled client certificates, so the resolver can answer who each one is.
+     *
+     * Present for `hmacKeys`' measured reason: the authenticate stage sets `authPrincipalRef` from
+     * the registry and `resolve_principal` runs one stage later, so a lookup without a registration
+     * is a 401 for a credential that was just accepted.
+     */
+    readonly mtlsClients?: readonly MtlsClientSpec[];
   } = {},
 ): PrincipalWiring {
   const now = opts.now ?? (() => new Date());
@@ -331,6 +390,24 @@ export function buildPrincipalWiring(
       // The api-key path's `service_account` arm exists precisely for the form that does not.
       principalKind: "user",
       authScheme: "hmac_signature",
+      grantedScopes: [spec.role],
+      mfaProofAgeSeconds: null,
+      resolvedAt: now().toISOString(),
+    });
+  }
+  for (const spec of opts.mtlsClients ?? []) {
+    // Registered under the principal reference, matching the hmac loop above and for the same
+    // reason: `resolveMtlsClients` answers `principalRef: spec.principalId`.
+    apiKeyResolver.register(spec.principalId, {
+      principalId: spec.principalId,
+      tenantId: spec.tenantId,
+      // `user` unconditionally, earned by the grammar exactly as the hmac loop's is:
+      // `parseMtlsClientSpec` requires the principal, so there is no bare form and no shared
+      // placeholder. A client certificate is also the one credential here that is *issued to* a
+      // named holder, so a certificate standing for a service account would be a certificate whose
+      // subject nobody checked.
+      principalKind: "user",
+      authScheme: "mtls",
       grantedScopes: [spec.role],
       mfaProofAgeSeconds: null,
       resolvedAt: now().toISOString(),

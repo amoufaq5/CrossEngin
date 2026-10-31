@@ -51,6 +51,7 @@ async function invoke(
     scheme: "https",
     bodyBytes: null,
     clientIp: "203.0.113.1",
+    edgeTrust: "untrusted",
     ...(query !== undefined ? { query } : {}),
   });
   return handler({
@@ -148,6 +149,7 @@ describe("buildWhtReconciliationHandler — authorization", () => {
         scheme: "https",
         bodyBytes: null,
         clientIp: "203.0.113.1",
+        edgeTrust: "untrusted",
       }),
       route: {} as never,
       principal: null,

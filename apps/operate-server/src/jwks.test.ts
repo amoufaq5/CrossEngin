@@ -186,6 +186,7 @@ describe("operate-server — authenticates a JWT via a remote JWKS", () => {
     const token = `${header}.${payload}.${sig}`;
 
     const { httpServer } = buildOperateHttpServer({
+      edgeTrust: "untrusted",
       manifest,
       store: new InMemoryEntityStore(),
       apiKeys: [],

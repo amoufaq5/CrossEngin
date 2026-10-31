@@ -387,7 +387,10 @@ describe("buildOpenApiDocument — security is derived from the gateway's own ma
     // ADR-0384 exists to refuse, which is the dangerous direction and the one a mutation adding an
     // entry takes. Checked two ways — by name, and by the shape that would carry `?api_key=`,
     // because a key named anything at all with `in: "query"` is the same disclosure.
-    for (const scheme of ["api_key_query", "basic", "mtls"] as const) {
+    // `mtls` left this list by being **served** rather than by the argument being withdrawn: it
+    // now carries a `type: mutualTLS` entry, which is correct — a generated client configures a key
+    // pair in its TLS stack and sets no header, so the entry invites no request this API refuses.
+    for (const scheme of ["api_key_query", "basic"] as const) {
       expect(AUTH_SCHEME_SUPPORT[scheme].treatment).toBe("refused");
       expect(AUTH_SCHEME_SECURITY_DOC[scheme]).toBeNull();
     }

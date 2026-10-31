@@ -96,6 +96,7 @@ function fixtureRequest(overrides: Partial<IncomingRequest> = {}): IncomingReque
     scheme: "https",
     bodyBytes: null,
     clientIp: "203.0.113.1",
+    edgeTrust: "untrusted",
     ...((): Partial<Parameters<typeof buildIncomingRequest>[0]> => {
       const o = overrides as Partial<IncomingRequest>;
       return {

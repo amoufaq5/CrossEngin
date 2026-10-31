@@ -1,6 +1,7 @@
 import type { Manifest } from "@crossengin/kernel/manifest";
 import { InMemoryEntityStore, type EntityStore, type OperateServer } from "@crossengin/operate-runtime";
 
+import type { EdgeTrust } from "@crossengin/api-gateway-runtime";
 import type { RawHttpRequest, RawHttpResponse } from "./http.js";
 import {
   readLimitedBody,
@@ -144,6 +145,20 @@ export interface BuildEdgeFetchHandlerOptions {
   readonly maxRequestBodyBytes?: number | null;
   /** Per-route overrides, longest path prefix winning (ADR-0331). */
   readonly maxRequestBodyRoutes?: readonly RouteBodyLimit[];
+  /**
+   * Whether to believe a request's forwarded facts. **Required, with no default.**
+   *
+   * Required although every edge runtime this handler targets *is* behind a TLS terminator, which is
+   * the tempting reason to default it `"trusted"` — and the reason not to is that the two facts are
+   * different: being behind a terminator makes the forwarded values *available*, and trusting them
+   * requires that nothing else can reach this handler and that the terminator **overwrites** rather
+   * than appends. A Worker bound to a route only Cloudflare fronts satisfies that; one invoked
+   * directly, or fronted by something that forwards a client's own header, does not. The library
+   * cannot tell which, and `defaultScheme: "https"` below is exactly the shape of assumption this
+   * increment exists to stop making silently — that line asserts the connection was TLS because the
+   * deployment is *usually* behind TLS, which is a guess the gateway then records as fact.
+   */
+  readonly edgeTrust: EdgeTrust;
 }
 
 export interface EdgeFetchHandler {
@@ -163,6 +178,7 @@ export function buildEdgeFetchHandler(options: BuildEdgeFetchHandlerOptions): Ed
     store: options.store ?? new InMemoryEntityStore(),
     apiKeys: options.apiKeys,
     defaultScheme: "https",
+    edgeTrust: options.edgeTrust,
     ...(options.jwt !== undefined ? { jwt: options.jwt } : {}),
     ...(options.now !== undefined ? { now: options.now } : {}),
   });

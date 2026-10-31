@@ -18,6 +18,22 @@ export const STRONG_AUTH_SCHEMES: ReadonlySet<AuthScheme> = new Set([
   "hmac_signature",
 ]);
 
+/**
+ * The schemes whose credential must not travel in the clear.
+ *
+ * `mtls` is **deliberately absent** and serving it does not change that, which is worth writing
+ * down because it reads as an omission and was twice taken for one. The predicate is *this
+ * credential needs the transport encrypted*, and an mtls credential **is** the transport: the
+ * certificate is presented inside the handshake, so there is no value that could travel in the
+ * clear and the question is a category error rather than false. `auth-resolution.test.ts` has
+ * carried that position in a test title since Phase 1 — *"mtls IS the auth + transport"*.
+ *
+ * I added `mtls` here while serving it, on a sentence in `CLAUDE.md` that says `hmac_signature`
+ * "has been in `AUTH_SCHEMES` since Phase 1, in `STRONG_AUTH_SCHEMES` and in
+ * `SCHEMES_REQUIRING_HTTPS`" — a claim about a **different scheme**, transposed onto this one and
+ * then acted on. ADR-0384, which the transposition was attributed to, mentions neither constant.
+ * The test refused the change; the measurement would have, had it been taken.
+ */
 export const SCHEMES_REQUIRING_HTTPS: ReadonlySet<AuthScheme> = new Set([
   "bearer_jwt",
   "bearer_opaque",
@@ -97,6 +113,73 @@ export const REQUEST_SIGNATURE_HEADER = "CrossEngin-Request-Signature";
 export const REQUEST_SIGNATURE_HEADER_LOWER = REQUEST_SIGNATURE_HEADER.toLowerCase();
 
 /**
+ * The header a **trusted edge** puts a verified client-certificate fingerprint in, for `mtls`.
+ *
+ * Fixed here rather than configurable, which is the one wire decision in that scheme and is a
+ * security property rather than a convention. A configurable name invites an operator to point it at
+ * a header their edge does not *overwrite*, and a header the edge merely forwards is one a caller
+ * sets: the whole value of mutual TLS is that the fingerprint is the edge's assertion and not the
+ * client's claim. Naming it here means the declaration an operator makes
+ * (`--trusted-edge-client-cert`) is about their edge stripping **this** header, which is checkable
+ * against a Caddyfile, where "whichever header you chose" is not.
+ *
+ * Same split as `API_KEY_HEADER` and `REQUEST_SIGNATURE_HEADER`: this package owns which position on
+ * the wire carries a thing. It differs from both in who *computes* the value — a client computes an
+ * api key's and a signature's, and here the client computes nothing and the edge computes everything,
+ * which is why the header is only ever read under a trust declaration.
+ *
+ * No `X-` prefix (RFC 6648), following the two above.
+ */
+export const CLIENT_CERT_FINGERPRINT_HEADER = "CrossEngin-Client-Cert-Sha256";
+
+/** Lower-cased, because `IncomingRequest.headers` is normalised that way by the adapter. */
+export const CLIENT_CERT_FINGERPRINT_HEADER_LOWER = CLIENT_CERT_FINGERPRINT_HEADER.toLowerCase();
+
+/** A client-certificate fingerprint as the contract requires it: lowercase hex sha256. */
+export const CLIENT_CERT_FINGERPRINT_PATTERN = /^[0-9a-f]{64}$/;
+
+/**
+ * `sha256("")`, refused by name because **no certificate is zero bytes**.
+ *
+ * It passes the pattern above — 64 lowercase hex characters — and its only possible meaning is that
+ * the edge was asked for a client certificate, got none, and hashed the nothing it had. So this is
+ * the one value in the whole 2^256 space that is well-formed and cannot denote a certificate, and
+ * refusing it can never refuse a real one.
+ *
+ * The refusal is **by value and not by enrolment**, which is the half that matters: an operator who
+ * sees this digest in a log and enrols it with `--mtls-client` would otherwise authenticate *every
+ * certificate-less request* as that principal. Reachable from `client_auth mode request`, where a
+ * request with no certificate still reaches the proxy — `require_and_verify` refuses it at the
+ * handshake, so the shipped recipe does not produce it, which bounds the exposure without closing
+ * it. A shape test cannot see the one weakness this value has, which is that it is the digest of
+ * nothing — ADR-0377's rule for the published placeholder, one credential over.
+ */
+export const EMPTY_CERTIFICATE_FINGERPRINT =
+  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+/**
+ * Normalises and validates a fingerprint an edge forwarded, answering `null` for anything else.
+ *
+ * Validated **here and not only in the schema**, because `IncomingRequestSchema` is never parsed on
+ * the request path — see the note on its `superRefine` — so this is the only thing between a trusted
+ * edge forwarding a malformed value and `recogniseCredential` handing it to the `mtls` arm as a
+ * credential. A trusted edge is trusted to be honest, not to be correctly configured.
+ *
+ * Case-folded first: Caddy's `{http.request.tls.client.fingerprint}` is lowercase hex, and an edge
+ * emitting the uppercase spelling is naming the same certificate, so refusing it would be refusing a
+ * correct deployment over a presentation detail. Folding before matching is why the pattern needs
+ * only the one case.
+ */
+export function parseForwardedClientCertFingerprint(value: string | null): string | null {
+  if (value === null) return null;
+  const folded = value.trim().toLowerCase();
+  if (!CLIENT_CERT_FINGERPRINT_PATTERN.test(folded)) return null;
+  // After the shape test, because this value's problem is its *meaning* and not its form.
+  if (folded === EMPTY_CERTIFICATE_FINGERPRINT) return null;
+  return folded;
+}
+
+/**
  * How this gateway treats each of the eight `AUTH_SCHEMES`, as **one total map**.
  *
  * It is the map because the three things that used to be maintained separately are all derived from
@@ -108,11 +191,13 @@ export const REQUEST_SIGNATURE_HEADER_LOWER = REQUEST_SIGNATURE_HEADER.toLowerCa
  * answered **201**, with `authOutcome: "anonymous"` and the two stage reasons `no_credential` and
  * `no_credential_skipped` — byte-identical to a request that presented nothing.
  *
- * A third member of `AUTH_SCHEME_TREATMENTS` would be tempting for `mtls`, whose recognising field
- * exists and has no producer. It is `refused` rather than a fourth kind because the *treatment* is
- * the same — refuse by name — and what differs is the reason, which the record carries. ADR-0331's
- * rule read the other way: two facts stay apart when their **remedies** differ, and both of these
- * have the same remedy for a caller (present a credential this gateway serves).
+ * `mtls` was `refused` here until its recognising field got a producer, on the stated ground that
+ * "the refusal is reachable only once a terminator populates it" — and that reason **expired by being
+ * acted on** rather than by being withdrawn. It is `served` now, and the thing worth keeping from the
+ * old entry is that it was right to refuse a *fourth treatment* for it: the treatment was never the
+ * distinction, the reason was. What separates `mtls` from the other three served schemes is not how
+ * this gateway treats it but **who establishes the fact** — see its own entry — and that belongs in a
+ * reason, which is where it is.
  *
  * The two `indistinguishable` members are deliberately not given a wire position in order to be
  * refused. A refusal arm is a wire commitment too, and a *partial* one is the defect restated: a
@@ -161,10 +246,10 @@ export const AUTH_SCHEME_SUPPORT: Readonly<Record<AuthScheme, AuthSchemeSupport>
       `refused deliberately and not merely unbuilt: a credential in a URL is copied into access logs, proxy logs and Referer, which is ADR-0301's argv rule one transport over — present the key in ${API_KEY_HEADER} instead`,
   },
   mtls: {
-    treatment: "refused",
-    recognisedFrom: "the request's clientCertSha256",
+    treatment: "served",
+    recognisedFrom: `a ${CLIENT_CERT_FINGERPRINT_HEADER} header from a trusted edge`,
     reason:
-      "no edge forwards a client certificate: IncomingRequest.clientCertSha256 has no producer in this workspace and the shipped Caddyfile declares no client_auth, so the refusal is reachable only once a terminator populates it",
+      `resolved here against the deployment's client-certificate registry — and it is the one served scheme this gateway does not *verify*. The other three establish the fact from bytes plus a key they hold: bearer_jwt checks a signature, api_key_header looks the token up, hmac_signature recomputes the MAC. A TLS handshake happens at the edge, so what arrives is the edge's assertion in ${CLIENT_CERT_FINGERPRINT_HEADER}, and the only decision available here is whether to believe it. So the scheme is reachable exactly when a deployment declares that its edge performs mutual TLS and overwrites that header, which is what makes the fingerprint the edge's statement rather than the caller's`,
   },
   bearer_opaque: {
     treatment: "indistinguishable",
@@ -195,7 +280,16 @@ export const authSchemeTreatment = (scheme: AuthScheme): AuthSchemeTreatment =>
  */
 export interface SecuritySchemeDoc {
   readonly key: string;
-  readonly type: "http" | "apiKey";
+  /**
+   * `mutualTLS` is OpenAPI 3.1's own type for a client certificate and takes **no** further fields —
+   * which is the honest shape here and not a shortcut: the credential is the TLS connection, so
+   * there is no header for a generated client to set. That the deployment reads a forwarded
+   * fingerprint is an implementation detail of *this* gateway's position behind an edge, and
+   * publishing `CrossEngin-Client-Cert-Sha256` as an `apiKey` header would be the falsely-true
+   * direction — it would tell a generator the value is something a client may send, which is
+   * precisely what the trust declaration exists to make false.
+   */
+  readonly type: "http" | "apiKey" | "mutualTLS";
   /** `http` only. */
   readonly scheme?: "bearer";
   /** `http` only. */
@@ -253,10 +347,23 @@ export const AUTH_SCHEME_SECURITY_DOC: Readonly<Record<AuthScheme, SecuritySchem
         "identical request. Unlike a static key this cannot be sent as a literal — the client " +
         "computes it per request from its own copy of the signing key.",
     },
+    mtls: {
+      key: "mutualTlsAuth",
+      type: "mutualTLS",
+      // No `in`/`name`: see the note on `SecuritySchemeDoc.type`. The description is the one place a
+      // client author learns that the certificate is presented to the *edge* — a generated client
+      // configures a key pair in its TLS stack, which is not something an OpenAPI document can
+      // express at all, so saying it in prose is the whole of what can be said.
+      description:
+        "A client certificate presented in the TLS handshake. The deployment's edge performs mutual " +
+        "TLS and asserts the verified certificate's sha256 fingerprint to this gateway, which " +
+        "resolves it against a registry of enrolled fingerprints. Present the certificate to the " +
+        "edge; there is no header for a client to set, and the gateway reads the edge's assertion " +
+        "only where the deployment has declared that edge trusted.",
+    },
     anonymous: null,
     basic: null,
     api_key_query: null,
-    mtls: null,
     bearer_opaque: null,
   });
 
@@ -523,11 +630,17 @@ export interface AuthResolutionResult {
  *
  * It has no caller on the request path and keeping it unwired is deliberate, so the reason belongs
  * here rather than in an ADR nobody reads at the call site. Of its clauses, six are duplicated by
- * `api-gateway-runtime`: the TLS floor by `stageValidateTls` (and again by
- * `IncomingRequestSchema.superRefine`, which refuses `tls_1_0`/`tls_1_1` at parse), the anonymous
- * arm by the authenticate stage's no-credential path, and the JWT `exp`/`nbf`/`iss`/`aud` quartet by
- * `verifyBearerJwt`. One is unique to it — the scheme allow-list, which the runtime's stage now
- * reads from `AUTH_SCHEME_SUPPORT` instead.
+ * `api-gateway-runtime`: the TLS floor by `stageValidateTls`, the anonymous arm by the authenticate
+ * stage's no-credential path, and the JWT `exp`/`nbf`/`iss`/`aud` quartet by `verifyBearerJwt`. One
+ * is unique to it — the scheme allow-list, which the runtime's stage now reads from
+ * `AUTH_SCHEME_SUPPORT` instead.
+ *
+ * This sentence used to add "and again by `IncomingRequestSchema.superRefine`, which refuses
+ * `tls_1_0`/`tls_1_1` at parse", and that was **false**: nothing parses `IncomingRequestSchema` on
+ * the request path — its only non-test references are its own declaration, the `IncomingRequest`
+ * type alias it infers, and comments like this one claiming it enforces something. So the TLS floor
+ * had one implementation and not two, the duplication count was six and not seven, and the
+ * refinement is a statement about what a well-formed request *is* rather than a check anything runs.
  *
  * The HMAC freshness window **used to be the second**, on the stated ground that no runtime path had
  * one because `hmac_signature` was refused. It is served now, so there is a live window, and the two

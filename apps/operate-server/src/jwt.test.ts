@@ -52,6 +52,7 @@ function makeServer(): OperateHttpServer {
     requiredClaims: new Set(REQUIRED_JWT_CLAIMS),
   };
   return buildOperateHttpServer({
+    edgeTrust: "untrusted",
     manifest,
     store: new InMemoryEntityStore(),
     apiKeys: [],

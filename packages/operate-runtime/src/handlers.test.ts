@@ -85,6 +85,7 @@ async function invoke(
     scheme: "https",
     bodyBytes: null,
     clientIp: "203.0.113.1",
+    edgeTrust: "untrusted",
   });
   return handler({
     request,
@@ -263,6 +264,7 @@ describe("operate handlers — transactional effects", () => {
         scheme: "https",
         bodyBytes: null,
         clientIp: "203.0.113.1",
+        edgeTrust: "untrusted",
       }),
       route: routeFromSpec(spec),
       principal: principal("retail_admin"),
@@ -432,6 +434,7 @@ async function call(
       scheme: "https",
       bodyBytes: null,
       clientIp: "203.0.113.1",
+      edgeTrust: "untrusted",
     }),
     route: routeFromSpec(spec),
     principal: principal(opts.role),
@@ -844,6 +847,7 @@ async function hit(
       scheme: "https",
       bodyBytes: null,
       clientIp: "203.0.113.1",
+      edgeTrust: "untrusted",
       ...(opts.query !== undefined ? { query: opts.query } : {}),
     }),
     route: routeFromSpec(spec),

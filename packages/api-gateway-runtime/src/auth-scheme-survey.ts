@@ -6,14 +6,17 @@ import {
 } from "@crossengin/api-gateway";
 
 /**
- * The three configuration facts that narrow `SERVED_AUTH_SCHEMES` to what a *deployment* can
- * actually authenticate.
+ * The configuration facts that narrow `SERVED_AUTH_SCHEMES` to what a *deployment* can actually
+ * authenticate — one per served scheme, so the count is a property of `SERVED_SCHEME_GATE` below
+ * rather than a number in this sentence. It said "three" with a following clause reading "Both are
+ * read off", which is the drift a written count invites: it was right for two facts and then for
+ * neither.
  *
- * Both are read off a live `GatewayRuntime` through its `authSchemeServing` getter rather than
+ * Each is read off a live `GatewayRuntime` through its `authSchemeServing` getter rather than
  * re-derived by the caller, which is the whole reason the getter exists: a boot line computed from
- * the same two booleans the options were built from is a second derivation of one fact, and
- * ADR-0361's finding is that two readers agreeing is not evidence either is right — there, one
- * narrow read was duplicated across eight call sites and three of them were wrong.
+ * the same booleans the options were built from is a second derivation of one fact, and ADR-0361's
+ * finding is that two readers agreeing is not evidence either is right — there, one narrow read was
+ * duplicated across eight call sites and three of them were wrong.
  */
 export interface AuthSchemeServingInput {
   /** A JWKS provider reaches the runtime, so `bearer_jwt` can be verified. */
@@ -31,6 +34,20 @@ export interface AuthSchemeServingInput {
    * compile.
    */
   readonly hmacKeyLookupConfigured: boolean;
+  /**
+   * A client-certificate registry reaches the runtime, so an `mtls` fingerprint can be resolved.
+   *
+   * **This single fact stands for two**, which is the one thing to know before changing it: serving
+   * `mtls` needs a registry *and* a trusted edge, because without the edge declaration the
+   * fingerprint never reaches the request at all (`buildIncomingRequest` drops it) and a registry
+   * alone would report the scheme served while no request could carry a credential — the
+   * falsely-true direction. Rather than give one scheme two gate keys, which `SERVED_SCHEME_GATE`
+   * cannot express and which would leave `GATE_SUBJECT` unable to name which half is missing,
+   * `--mtls-client` is **refused at parse** without `--trusted-edge-client-cert`, so a configured
+   * registry implies a trusted edge and one key is sound. The inertness is refused where an operator
+   * can act on it instead of reported after boot (ADR-0364's and ADR-0368's shape).
+   */
+  readonly mtlsClientLookupConfigured: boolean;
 }
 
 /**
@@ -42,11 +59,12 @@ export interface AuthSchemeServingInput {
  * configuration says, which is the shape of defect this increment is about.
  */
 const SERVED_SCHEME_GATE: Readonly<
-  Record<"bearer_jwt" | "api_key_header" | "hmac_signature", keyof AuthSchemeServingInput>
+  Record<"bearer_jwt" | "api_key_header" | "hmac_signature" | "mtls", keyof AuthSchemeServingInput>
 > = Object.freeze({
   bearer_jwt: "jwtVerifierConfigured",
   api_key_header: "opaqueLookupConfigured",
   hmac_signature: "hmacKeyLookupConfigured",
+  mtls: "mtlsClientLookupConfigured",
 });
 
 const isGatedScheme = (scheme: AuthScheme): scheme is keyof typeof SERVED_SCHEME_GATE =>
@@ -74,6 +92,11 @@ const GATE_SUBJECT: Readonly<Record<keyof AuthSchemeServingInput, string>> = Obj
   jwtVerifierConfigured: "no JWKS verifier configured",
   opaqueLookupConfigured: "no opaque-token lookup configured",
   hmacKeyLookupConfigured: "no HMAC signing-key lookup configured",
+  // Names the registry and not the edge declaration, although the fact stands for both: the two are
+  // ordered by the CLI's own refusal, so a deployment reaching this clause has *neither*, and
+  // "--mtls-client" is the flag whose absence it can act on first. Naming the edge would send an
+  // operator to declare a trust boundary and then meet a second absence.
+  mtlsClientLookupConfigured: "no client-certificate registry configured",
 });
 
 /** The schemes this deployment can authenticate: served by the binary **and** configured here. */
@@ -140,6 +163,13 @@ export function formatAuthSchemeSurvey(input: AuthSchemeServingInput): string {
   const sentences = [
     `auth schemes: serving ${joinNames([...served])}`,
     ...unconfigured,
+    // ADR-0384 shipped this clause and recorded, as its own unfixed finding, that it claimed a
+    // refusal no deployment could reach: `mtls` was `refused` while its recognising field had no
+    // producer, so a caller could not provoke the refusal the line advertised. Serving `mtls` fixes
+    // that **by construction** rather than by a special case — the two members left are `basic` and
+    // `api_key_query`, and both are reachable by any caller who sends `Authorization: Basic …` or
+    // `?api_key=…`. So the clause is unconditional and now true, which is the shape to keep: a
+    // condition here would have been a second place to encode which refusals are reachable.
     `refusing ${joinNames([...refused])} by name`,
     // Phrased for however many members there are rather than for two: this clause read "a request
     // in **either**" while `indistinguishable` was `bearer_opaque` and `hmac_signature`, and

@@ -271,9 +271,16 @@ describe("AUTH_SCHEME_SECURITY_DOC is a valid OpenAPI Security Scheme Object", (
       expect(OPENAPI_SECURITY_SCHEME_TYPES).toContain(doc.type);
     }
     expect(OPENAPI_SECURITY_SCHEME_TYPES).not.toContain("object" as never);
-    // The two types this build emits, pinned as a literal so adding a third is a visible change
-    // here rather than an untested arm of `SECURITY_SCHEME_FIELD_RULES`.
-    expect([...new Set(nonNullDocs().map(([, d]) => d.type))].sort()).toEqual(["apiKey", "http"]);
+    // The types this build emits, pinned as a literal so adding one is a visible change here
+    // rather than an untested arm of `SECURITY_SCHEME_FIELD_RULES`. `mutualTLS` arrived with
+    // `mtls` and is the case that comment anticipated: that map already carried the arm
+    // (`required: ["type"], optional: ["description"]`), so serving the scheme **exercised** a rule
+    // that had been written and never reached rather than needing one added.
+    expect([...new Set(nonNullDocs().map(([, d]) => d.type))].sort()).toEqual([
+      "apiKey",
+      "http",
+      "mutualTLS",
+    ]);
   });
 
   it("an apiKey doc carries `in` and `name` and no `scheme` or `bearerFormat`", () => {
@@ -396,7 +403,12 @@ describe("the `key` field", () => {
     const keys = nonNullDocs().map(([, d]) => d.key);
     expect(keys.length).toBe(SERVED_AUTH_SCHEMES.length);
     expect(new Set(keys).size).toBe(keys.length);
-    expect([...keys].sort()).toEqual(["apiKeyAuth", "bearerAuth", "requestSignatureAuth"]);
+    expect([...keys].sort()).toEqual([
+      "apiKeyAuth",
+      "bearerAuth",
+      "mutualTlsAuth",
+      "requestSignatureAuth",
+    ]);
   });
 
   it("is a legal components.securitySchemes key", () => {
@@ -553,6 +565,7 @@ describe("the served set and the doc set agree", () => {
       "api_key_header",
       "bearer_jwt",
       "hmac_signature",
+      "mtls",
     ]);
   });
 

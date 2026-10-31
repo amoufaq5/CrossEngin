@@ -14,5 +14,66 @@
 # does NOT use this; it talks to the web app's own /api proxy over the internal net.
 api.{$DOMAIN} {
 	encode zstd gzip
-	reverse_proxy api:8787
+	reverse_proxy api:8787 {
+		# Strip the two headers the API reads as facts about the TLS connection, ALWAYS and
+		# unconditionally — including on this deployment, which declares no trusted edge and
+		# therefore drops them at the gateway too.
+		#
+		# This is the belt to that braces, and the two are not redundant: the gateway's check is
+		# "did my operator declare this hop trustworthy", and this one is "did a client set this
+		# header". A deployment that later passes --trusted-edge-client-cert turns the gateway's
+		# check off, and then THIS is the only thing standing between a caller and a forged client
+		# certificate. It is here rather than in the commented block below so that enabling mutual
+		# TLS is adding one block, not editing two.
+		header_up -CrossEngin-Client-Cert-Sha256
+		header_up -CrossEngin-Tls-Version
+	}
 }
+
+# ---------------------------------------------------------------------------
+# Mutual TLS (client certificates), which this stack does NOT enable.
+#
+# Not a default because `require_and_verify` refuses every client that presents no
+# certificate — including the browser UI's own proxy and every existing integration —
+# so turning it on is a deployment decision about who may reach the API at all.
+#
+# Enabling it is three steps and the order matters:
+#
+#   1. Replace the `api.{$DOMAIN}` block above with the one below.
+#   2. Pass `--trusted-edge-client-cert` to the `api` service's command.
+#   3. Enrol each certificate: `--mtls-client <sha256>:<role>:<tenant>:<principalId>`,
+#      where the sha256 is `openssl x509 -in client.crt -outform der |
+#      openssl dgst -sha256 -r | cut -d" " -f1` — the fingerprint of the DER
+#      certificate, which is what Caddy's placeholder emits.
+#
+# Step 2 without step 1 is the dangerous order and is why this comment spells it out:
+# the flag tells the gateway to believe a forwarded fingerprint, so declaring it while
+# Caddy is not setting one leaves the API trusting a header anything upstream can send.
+# The gateway cannot detect that — a header its edge set and a header a caller set are
+# the same bytes — which is the whole reason the trust is declared rather than inferred.
+#
+# Also note: `docker-compose.yml` publishes `127.0.0.1:8787` so the documented bootstrap
+# curls work. That port BYPASSES Caddy, so with `--trusted-edge-client-cert` declared, a
+# process on the VM can reach the API directly and forge any fingerprint. That is bounded
+# by the population that can already `docker compose exec`, but if this deployment enables
+# mutual TLS and treats a client certificate as an authorization boundary, remove the
+# `ports:` key from the `api` service and run the bootstrap through `docker compose exec`.
+#
+#   api.{$DOMAIN} {
+#   	encode zstd gzip
+#   	tls {
+#   		client_auth {
+#   			mode require_and_verify
+#   			trust_pool file /etc/caddy/client-ca.crt
+#   		}
+#   	}
+#   	reverse_proxy api:8787 {
+#   		# SET, not append: this overwrites whatever the client sent, which is what makes
+#   		# the fingerprint the edge's assertion rather than the caller's claim. With
+#   		# `require_and_verify` the placeholder is never empty, because a request with no
+#   		# valid certificate does not reach the proxy at all.
+#   		header_up CrossEngin-Client-Cert-Sha256 {http.request.tls.client.fingerprint}
+#   		header_up CrossEngin-Tls-Version {http.request.tls.version}
+#   	}
+#   }
+# ---------------------------------------------------------------------------

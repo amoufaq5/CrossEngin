@@ -276,6 +276,7 @@ describe("SLO enforcement on the live request stream", () => {
       ],
     });
     const { httpServer } = buildOperateHttpServer({
+      edgeTrust: "untrusted",
       manifest,
       store: new InMemoryEntityStore(),
       apiKeys: [parseApiKeySpec(`key-manager:store_manager:${TENANT}`)],

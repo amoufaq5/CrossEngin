@@ -23,6 +23,7 @@ import { describe, expect, it } from "vitest";
  */
 const here = dirname(fileURLToPath(import.meta.url));
 const COMPOSE = resolve(here, "../../../deploy/docker-compose.yml");
+const CADDYFILE = resolve(here, "../../../deploy/Caddyfile");
 const README = resolve(here, "../../../deploy/README.md");
 const ORACLE = resolve(here, "../../../deploy/ORACLE.md");
 
@@ -921,5 +922,104 @@ describe("the cross-document reference README's abridgement needs", () => {
     // are now counted at seventeen in both places that count them.
     expect(readme).toMatch(/Fifteen of the sixteen tables/);
     expect([...readme.matchAll(/manifest's \*\*seventeen\*\* sections/g)].length).toBe(2);
+  });
+});
+
+/**
+ * The Caddyfile's **live** directives, with every comment line removed.
+ *
+ * Read this way and not as raw text because the two questions this file is asked have opposite
+ * answers in the same artifact: *is mutual TLS enabled* (no, and the fence must not be satisfied by
+ * the commented block that documents it) and *is enabling it documented* (yes, in exactly that
+ * block). A single read gets one of them wrong, and getting the first one wrong is the dangerous
+ * direction — it would report the stack as requiring client certificates when it does not.
+ *
+ * ADR-0390's own class, one file over: there `pgDumpCommands` stripped markdown code spans on the
+ * convention that a command in prose is always in backticks, and the live defect shipped as a code
+ * span. The lesson is that a fence resting on *formatting* is one the next author satisfies by
+ * changing the formatting, so here the discriminator is structural — Caddy's comment syntax is a
+ * leading `#`, which is unambiguous.
+ */
+function caddyLiveDirectives(): string {
+  const src = readFileSync(CADDYFILE, "utf8");
+  expect(src.length, "deploy/Caddyfile is empty").toBeGreaterThan(500);
+  return src
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith("#"))
+    .join("\n");
+}
+
+describe("deploy/Caddyfile — the edge the trust declaration is about", () => {
+  const live = caddyLiveDirectives();
+  const raw = readFileSync(CADDYFILE, "utf8");
+
+  /**
+   * The belt to the gateway's braces, and the one assertion here that guards a live security
+   * property rather than a default.
+   *
+   * The two are not redundant: the gateway's check is *did my operator declare this hop
+   * trustworthy*, and this one is *did a client set this header*. A deployment that later passes
+   * `--trusted-edge-client-cert` turns the first off, and then this strip is the only thing between
+   * a caller and a forged client certificate — so it has to be in the **live** block rather than in
+   * the commented recipe, which is what this reads the stripped text to prove.
+   */
+  it("strips the two edge-asserted headers unconditionally", () => {
+    expect(live).toContain("header_up -CrossEngin-Client-Cert-Sha256");
+    expect(live).toContain("header_up -CrossEngin-Tls-Version");
+  });
+
+  /**
+   * Mutual TLS is **not** enabled, and must not become a default by accident.
+   *
+   * `require_and_verify` refuses every client presenting no certificate — including the browser
+   * UI's own proxy and every existing integration — so turning it on is a decision about who may
+   * reach the API at all, not a hardening default (ADR-0338's rule read the other way: something
+   * does work today).
+   */
+  it("does not enable client_auth", () => {
+    expect(live).not.toContain("client_auth");
+    expect(live).not.toContain("require_and_verify");
+    // And the header is never *set* in the live block, only deleted: setting it is what makes the
+    // gateway trust a value, so a `header_up X {placeholder}` here with no `client_auth` above it
+    // would assert a certificate nobody verified.
+    expect(live).not.toMatch(/header_up CrossEngin-Client-Cert-Sha256/);
+  });
+
+  /**
+   * And enabling it **is** documented, in the one place an operator doing it will look.
+   *
+   * The ordering clause is the load-bearing half: passing the flag without the Caddy block is the
+   * dangerous order, because the gateway then believes a header anything upstream can send and
+   * cannot detect that — a header its edge set and a header a caller set are the same bytes.
+   */
+  it("documents how to enable it, including the order and the published-port residual", () => {
+    expect(raw).toContain("client_auth");
+    expect(raw).toContain("--trusted-edge-client-cert");
+    expect(raw).toContain("--mtls-client");
+    // The fingerprint an operator must compute, and it must be the DER one — Caddy's placeholder
+    // emits the certificate's own sha256, so a PEM digest would never match.
+    expect(raw).toMatch(/outform der/);
+    expect(raw).toContain("{http.request.tls.client.fingerprint}");
+    // The two hazards, each named rather than left to be discovered.
+    expect(raw).toMatch(/dangerous order/);
+    expect(raw).toMatch(/BYPASSES Caddy|bypasses Caddy/);
+  });
+
+  /**
+   * The compose file does **not** declare the edge trusted, and the reason is this stack's own
+   * published port rather than caution.
+   *
+   * `docker-compose.yml` publishes `127.0.0.1:8787` so the documented bootstrap curls work
+   * (ADR-0364's addendum), and that port bypasses Caddy — so declaring the edge trusted would let
+   * any process on the VM forge a fingerprint. Withheld with its reason, which is the shape
+   * ADR-0376 established for a default that reads as a free win and is not.
+   */
+  it("is not declared trusted on the shipped compose, and the Caddyfile says why", () => {
+    const compose = readFileSync(COMPOSE, "utf8");
+    expect(compose).not.toContain("--trusted-edge-client-cert");
+    expect(compose).not.toContain("--mtls-client");
+    // Non-vacuity: the flag exists and the compose does pass its siblings, so the absence above is
+    // a withheld default and not a flag nothing could pass.
+    expect(compose).toContain("--credential-login");
   });
 });

@@ -60,6 +60,7 @@ function getRequest(): IncomingRequest {
     scheme: "https",
     bodyBytes: null,
     clientIp: "203.0.113.7",
+    edgeTrust: "untrusted",
   });
 }
 
@@ -217,6 +218,7 @@ function authedRequest(): IncomingRequest {
     scheme: "https",
     bodyBytes: null,
     clientIp: "203.0.113.7",
+    edgeTrust: "untrusted",
   });
 }
 

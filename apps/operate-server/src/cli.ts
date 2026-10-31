@@ -46,7 +46,7 @@ import {
 import { CREDENTIAL_PEPPER_VAR, TOKEN_SIGNING_KEY_VAR } from "./credential-auth-env.js";
 import type { SetCredentialOptions } from "./set-credential.js";
 import { NEW_PASSWORD_VAR } from "./set-credential.js";
-import { parseHmacKeySpec, parseJwksKeySpec } from "./principals.js";
+import { parseHmacKeySpec, parseJwksKeySpec, parseMtlsClientSpec } from "./principals.js";
 import { BUILTIN_PACK_NAMES } from "./manifest-source.js";
 import { DEFAULT_ADMIN_ROLES } from "./recipient-resolver.js";
 import { MIN_FAX_SUPPRESSION_THRESHOLD } from "@crossengin/notification-providers";
@@ -143,6 +143,23 @@ export interface ServeOptions {
    * environment by `request-signing.ts` and reachable through no flag at all.
    */
   readonly hmacKeys: readonly string[];
+  /**
+   * `--mtls-client fingerprint:role:tenant:principalId`, repeatable.
+   *
+   * Carries **nothing secret**, which is a stronger statement than `--hmac-key`'s and is why there
+   * is no environment route beside it: a certificate's sha256 is derived from material the client
+   * presents to everyone it connects to, so there is no value here `ps` could disclose.
+   */
+  readonly mtlsClients: readonly string[];
+  /**
+   * Whether the hop in front of this process performs mutual TLS and **overwrites**
+   * `CrossEngin-Client-Cert-Sha256`, `CrossEngin-Tls-Version` and the `x-forwarded-*` headers.
+   *
+   * The declaration every forwarded fact is read under. It is a statement about the *network*, which
+   * is why it is a flag and not something the gateway could establish: nothing in this process can
+   * tell a header its edge set from one a caller set.
+   */
+  readonly trustedEdgeClientCert: boolean;
   readonly jwksKeys: readonly string[];
   readonly jwksFile: string | null;
   readonly jwksUrl: string | null;
@@ -613,6 +630,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let defaultScheme: "http" | "https" = "http";
   const apiKeys: string[] = [];
   const hmacKeys: string[] = [];
+  const mtlsClients: string[] = [];
+  let trustedEdgeClientCert = false;
   const jwksKeys: string[] = [];
   let jwksFile: string | null = null;
   let jwksUrl: string | null = null;
@@ -797,6 +816,24 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
         hmacKeys.push(spec);
       }
       i += consumed();
+    } else if (arg === "--mtls-client" || arg.startsWith("--mtls-client=")) {
+      {
+        // Validated here as well as at boot, for `--hmac-key`'s stated reason: the parser can answer
+        // with a usage error and the help text (exit 2) where `resolveMtlsClients` can only report an
+        // absence, and `parseMtlsClientSpec` is pure so there is nothing to defer. It is the one of
+        // the three credential specs whose first field has a *shape* to check, so this is also where
+        // an unmatchable enrolment is caught rather than accepted into a registry that cannot fire.
+        const spec = takeValue(arg, next, "--mtls-client");
+        try {
+          parseMtlsClientSpec(spec);
+        } catch (err) {
+          throw new CliUsageError(err instanceof Error ? err.message : String(err));
+        }
+        mtlsClients.push(spec);
+      }
+      i += consumed();
+    } else if (arg === "--trusted-edge-client-cert") {
+      trustedEdgeClientCert = true;
     } else if (arg === "--jwks-key" || arg.startsWith("--jwks-key=")) {
       {
         // Validated here as well as at boot, and that is not redundancy: the parser can answer
@@ -1920,6 +1957,24 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
         " same pepper the login verifies with, so a grant with no login mounted is silently inert",
     );
   }
+  // The refusal that lets `mtlsClientLookupConfigured` be **one** gate key for a scheme that needs
+  // two facts. Without the edge declaration `buildIncomingRequest` drops the forwarded fingerprint,
+  // so no request can carry an mtls credential and a registry alone would report the scheme served
+  // while nothing could authenticate — the falsely-true direction (ADR-0337). Refused at parse
+  // rather than reported at boot because the remedy is a flag the operator is already typing, which
+  // is where `--credential-admin-role`'s refusal above draws the same line.
+  //
+  // One-directional on purpose: `--trusted-edge-client-cert` **without** `--mtls-client` is
+  // legitimate and not refused. The declaration governs every forwarded fact — `x-forwarded-for`,
+  // `x-forwarded-proto`, `x-forwarded-host` and the TLS version — so a deployment behind a trusted
+  // edge that serves no client certificates still wants its client IPs and its TLS floor believed.
+  if (mtlsClients.length > 0 && !trustedEdgeClientCert) {
+    throw new CliUsageError(
+      "--mtls-client requires --trusted-edge-client-cert: a forwarded client-certificate" +
+        " fingerprint is dropped unless the edge is declared trusted, so an enrolment with no" +
+        " declaration is silently unmatchable",
+    );
+  }
   if (platformUserRoutes && store === "memory") {
     throw new CliUsageError(
       "--platform-user-routes requires a Postgres store (--store pg or pg-columns): the registry is" +
@@ -2082,6 +2137,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     schema,
     apiKeys,
     hmacKeys,
+    mtlsClients,
+    trustedEdgeClientCert,
     jwksKeys,
     jwksFile,
     jwksUrl,
@@ -2532,6 +2589,22 @@ Options:
                        key with no secret set refuses the boot. principalId must
                        be a provisioned meta.users UUID: unlike --api-key there
                        is no bare form and no shared placeholder principal.
+  --mtls-client <spec> Enrolled client certificate
+                       fingerprint:role:tenant:principalId (repeatable; all four
+                       fields required). The fingerprint is the certificate's
+                       sha256 as 64 hex chars — openssl x509 -outform der |
+                       openssl dgst -sha256. Nothing here is secret, so there is
+                       no environment route: a fingerprint is derived from what
+                       the client presents to everyone. Requires
+                       --trusted-edge-client-cert, without which the forwarded
+                       fingerprint is dropped and the enrolment cannot match.
+  --trusted-edge-client-cert
+                       Believe this request's forwarded facts: the edge performs
+                       mutual TLS and OVERWRITES CrossEngin-Client-Cert-Sha256,
+                       CrossEngin-Tls-Version and x-forwarded-*. Without it those
+                       headers are dropped, because a caller can set any of them.
+                       Legitimate on its own: it governs client IPs and the TLS
+                       floor whether or not any certificate is enrolled.
   --jwks-key <spec>    JWKS public key kid:base64-ed25519-pubkey (repeatable)
   --jwks-file <file>   JSON [{kid, publicKeyBase64}, ...] of the IdP's keys
   --jwks-url <url>     Remote JWKS endpoint (cached, refetched on kid rotation)

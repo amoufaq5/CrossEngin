@@ -4,6 +4,7 @@ import type { CursorSealer, OpenApiCoverageGap } from "@crossengin/operate-runti
 import type { CursorSealingMode } from "./cursor-encryption.js";
 import type {
   HmacKeyLookup,
+  MtlsClientLookup,
   IdempotencyStore,
   RateLimitChecker,
 } from "@crossengin/api-gateway-runtime";
@@ -24,11 +25,13 @@ import {
   type WriteMaskMode,
 } from "@crossengin/operate-runtime";
 
+import type { EdgeTrust } from "@crossengin/api-gateway-runtime";
 import { parseMethod, rawToIncoming, splitTarget, type RawHttpRequest, type RawHttpResponse } from "./http.js";
 import {
   buildPrincipalWiring,
   type ApiKeySpec,
   type HmacKeySpec,
+  type MtlsClientSpec,
   type JwtVerifyConfig,
 } from "./principals.js";
 import { applyTenantStatusGate, type TenantStatusGateOptions } from "./tenant-status-gate.js";
@@ -73,6 +76,16 @@ export interface OperateHttpServerOptions {
   readonly gateway: OperateServer;
   readonly webhookRoute?: WebhookRoute;
   readonly regionGuard?: RegionGuardConfig;
+  /**
+   * Whether to believe a request's forwarded facts. **Required**, and passed unconditionally.
+   *
+   * Required on both this interface and `BuildOperateHttpServerOptions` because the literal that
+   * forwards between them is a conditional spread, which bypasses TypeScript's excess-property
+   * check — so an optional field dropped there typechecks, and ADR-0391 measured exactly that
+   * shape silently disarming a whole increment while `tsc` exited 0. Required at both ends, the
+   * drop is a compile error at the literal.
+   */
+  readonly edgeTrust: EdgeTrust;
   readonly defaultScheme?: ForwardedProto;
   readonly idGenerator?: () => string;
   readonly now?: () => Date;
@@ -102,6 +115,7 @@ export class OperateHttpServer {
   private readonly webhookRoute: WebhookRoute | null;
   private readonly regionGuard: RegionGuardConfig | null;
   private readonly scheme: ForwardedProto;
+  private readonly edgeTrust: EdgeTrust;
   private readonly idGenerator: () => string;
   private readonly now: () => Date;
   private readonly onExecution: ((execution: PipelineExecution) => void) | null;
@@ -111,6 +125,7 @@ export class OperateHttpServer {
     this.webhookRoute = opts.webhookRoute ?? null;
     this.regionGuard = opts.regionGuard ?? null;
     this.scheme = opts.defaultScheme ?? "http";
+    this.edgeTrust = opts.edgeTrust;
     this.idGenerator = opts.idGenerator ?? defaultRequestId;
     this.now = opts.now ?? (() => new Date());
     this.onExecution = opts.onExecution ?? null;
@@ -128,12 +143,19 @@ export class OperateHttpServer {
     // Data-residency edge routing (pre-auth): route/deny by the request's tenant hint before dispatch.
     const residency = await this.checkResidency(raw);
     if (residency !== null) return residency;
-    const forwardedProto = headerScheme(raw) ?? this.scheme;
+    // `x-forwarded-proto` is read **only from a trusted edge**, which is the fifth member of the
+    // same class as the certificate and the TLS version: it is a caller-settable header, and before
+    // the trust declaration existed this line let any caller tell the gateway its own connection was
+    // https. Untrusted, the configured `defaultScheme` is what this process knows — the scheme it
+    // was told it is serving on — which is the honest answer rather than a caller's claim.
+    const forwardedProto =
+      this.edgeTrust === "trusted" ? (headerScheme(raw) ?? this.scheme) : this.scheme;
     const incoming = rawToIncoming(raw, body, {
       method,
       scheme: forwardedProto,
       id: this.idGenerator(),
       receivedAt: this.now().toISOString(),
+      edgeTrust: this.edgeTrust,
     });
     const { response, execution } = await this.gateway.runtime.handleRequest(incoming);
     if (this.onExecution !== null) {
@@ -260,6 +282,8 @@ export interface BuildOperateHttpServerOptions {
   readonly jobInvokeActionRoles?: ReadonlyMap<string, ReadonlySet<string>>;
   /** Deployment-injected admin routes (e.g. marketplace pack install), registered ungated. */
   readonly extraRoutes?: readonly ExtraGatewayRoute[];
+  /** Whether to believe a request's forwarded facts. Required — see `OperateHttpServerOptions`. */
+  readonly edgeTrust: EdgeTrust;
   readonly defaultScheme?: ForwardedProto;
   readonly now?: () => Date;
   readonly idGenerator?: () => string;
@@ -355,6 +379,20 @@ export interface BuildOperateHttpServerOptions {
    * optional *within* the group because its absence has a correct answer
    * (`DEFAULT_REQUEST_SIGNATURE_TOLERANCE_SECONDS`) where the lookup's does not.
    */
+  /**
+   * The enrolled client-certificate registry, present exactly when this deployment declared
+   * `--mtls-client` **and** `--trusted-edge-client-cert`.
+   *
+   * Grouped like `requestSigning` and for its reason: the lookup answers *which principal this
+   * certificate is* and the specs are what lets the resolver answer one stage later, so a lookup
+   * without the specs is a 401 for a credential that was just accepted. There is no tolerance
+   * sibling here because there is nothing to time — the credential is the connection, not a
+   * timestamped message.
+   */
+  readonly mtlsClients?: {
+    readonly lookup: MtlsClientLookup;
+    readonly clients: readonly MtlsClientSpec[];
+  };
   readonly requestSigning?: {
     readonly lookup: HmacKeyLookup;
     /**
@@ -405,6 +443,7 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
   const wiring = buildPrincipalWiring(options.apiKeys, {
     ...(options.now !== undefined ? { now: options.now } : {}),
     ...(options.requestSigning !== undefined ? { hmacKeys: options.requestSigning.keys } : {}),
+    ...(options.mtlsClients !== undefined ? { mtlsClients: options.mtlsClients.clients } : {}),
   });
   // Decorated here rather than inside `buildPrincipalWiring`: the directory needs a connection and
   // this is the seam that already takes deployment-supplied collaborators, so the api-key and JWT
@@ -436,6 +475,9 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     principalRoles: wiring.principalRoles,
     principalResolver,
     opaqueTokenLookup: wiring.opaqueTokenLookup,
+    ...(options.mtlsClients !== undefined
+      ? { mtlsClientLookup: options.mtlsClients.lookup }
+      : {}),
     ...(options.requestSigning !== undefined
       ? {
           hmacKeyLookup: options.requestSigning.lookup,
@@ -492,6 +534,7 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
   }
   const httpServer = new OperateHttpServer({
     gateway,
+    edgeTrust: options.edgeTrust,
     ...(options.webhookRoute !== undefined ? { webhookRoute: options.webhookRoute } : {}),
     ...(options.regionGuard !== undefined ? { regionGuard: options.regionGuard } : {}),
     ...(options.defaultScheme !== undefined ? { defaultScheme: options.defaultScheme } : {}),

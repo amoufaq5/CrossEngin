@@ -1,5 +1,5 @@
 import { HTTP_METHODS, type HttpMethod } from "@crossengin/api-gateway";
-import { buildIncomingRequest } from "@crossengin/api-gateway-runtime";
+import { buildIncomingRequest, type EdgeTrust } from "@crossengin/api-gateway-runtime";
 import type { ForwardedProto } from "@crossengin/api-gateway";
 import type { IncomingRequest } from "@crossengin/api-gateway";
 
@@ -30,6 +30,13 @@ export interface MapRequestOptions {
   readonly scheme: ForwardedProto;
   readonly id: string;
   readonly receivedAt: string;
+  /**
+   * Whether to believe this request's forwarded facts — threaded, never defaulted.
+   *
+   * Required here as it is on `BuildIncomingRequestInput`, so the two transports that reach
+   * `rawToIncoming` each state their position and a third cannot arrive without one.
+   */
+  readonly edgeTrust: EdgeTrust;
 }
 
 /**
@@ -76,5 +83,6 @@ export function rawToIncoming(
     scheme: opts.scheme,
     bodyBytes: body,
     clientIp: raw.remoteAddress ?? "127.0.0.1",
+    edgeTrust: opts.edgeTrust,
   });
 }

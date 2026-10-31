@@ -23,6 +23,7 @@ import { HandlerRegistry } from "./dispatcher.js";
 import {
   GatewayRuntime,
   type HmacKeyLookup,
+  type MtlsClientLookup,
   type OpaqueTokenLookup,
 } from "./runtime.js";
 import {
@@ -101,12 +102,24 @@ const ALWAYS_UNKNOWN: OpaqueTokenLookup = { async lookup() { return null; } };
  * still comes from the credential rather than from the scheme.
  */
 const HMAC_NO_SUCH_KEY: HmacKeyLookup = { async lookup() { return null; } };
+/** Configured and enrolling nothing — the mtls counterpart, for the same reason. */
+const MTLS_NO_SUCH_CLIENT: MtlsClientLookup = { async lookup() { return null; } };
+const ENROLLED_FINGERPRINT = "b".repeat(64);
+/** Configured and enrolling exactly one certificate, so the served path can be exercised. */
+const MTLS_ONE_CLIENT: MtlsClientLookup = {
+  async lookup(_request, fingerprint) {
+    return fingerprint === ENROLLED_FINGERPRINT
+      ? { principalRef: USER, scopes: [], tenantId: TENANT }
+      : null;
+  },
+};
 
 function buildRuntime(
   opts: {
     readonly jwks?: InMemoryJwksProvider;
     readonly opaque?: OpaqueTokenLookup;
     readonly hmac?: HmacKeyLookup;
+    readonly mtls?: MtlsClientLookup;
   } = {},
 ): GatewayRuntime {
   return new GatewayRuntime({
@@ -133,6 +146,7 @@ function buildRuntime(
     ...(opts.jwks !== undefined ? { jwksProvider: opts.jwks } : {}),
     ...(opts.opaque !== undefined ? { opaqueTokenLookup: opts.opaque } : {}),
     ...(opts.hmac !== undefined ? { hmacKeyLookup: opts.hmac } : {}),
+    ...(opts.mtls !== undefined ? { mtlsClientLookup: opts.mtls } : {}),
   });
 }
 
@@ -240,13 +254,57 @@ describe("stageAuthenticate — a refused scheme is named, not served anonymousl
     expect(stageReason(execution, "authenticate")).toBe("scheme_unsupported_api_key_query");
   });
 
-  it("mtls is refused by name", async () => {
+  /**
+   * `mtls` was in this block as "refused by name" until its recognising field got a producer, and
+   * the replacement is two tests rather than one because the scheme has two refusals with different
+   * subjects: *this deployment serves no certificates* and *this certificate is not enrolled*. The
+   * old test's assertion survives as the first of them, which is the honest reading of what it was
+   * checking all along — the refusal it pinned was a deployment-configuration refusal wearing a
+   * scheme-support refusal's name.
+   */
+  it("mtls with no registry is refused as unsupported, not as an unknown certificate", async () => {
     const { response, execution } = await buildRuntime({ opaque: ALWAYS_UNKNOWN }).handleRequest(
       request({ clientCertSha256: "a".repeat(64) }),
     );
     expect(response.status).toBe(401);
+    // `scheme_not_supported` and never `credential_not_found`: nothing looked the fingerprint up,
+    // so "not found" would be a claim about a lookup that never happened (ADR-0331).
     expect(execution.authOutcome).toBe("scheme_not_supported");
-    expect(stageReason(execution, "authenticate")).toBe("scheme_unsupported_mtls");
+    expect(stageReason(execution, "authenticate")).toBe("no_mtls_client_lookup");
+  });
+
+  it("an unenrolled certificate is refused as a credential, and the record names it", async () => {
+    const presented = "a".repeat(64);
+    const { response, execution } = await buildRuntime({
+      opaque: ALWAYS_UNKNOWN,
+      mtls: MTLS_ONE_CLIENT,
+    }).handleRequest(request({ clientCertSha256: presented }));
+    expect(response.status).toBe(401);
+    expect(execution.authOutcome).toBe("credential_not_found");
+    // The fingerprint is on the record, so an operator can tell a real certificate that is not
+    // enrolled from a trusted edge forwarding rubbish — and it is **not** in the body.
+    expect(stageReason(execution, "authenticate")).toBe(
+      `mtls_certificate_not_enrolled_${presented}`,
+    );
+    expect(new TextDecoder().decode(response.bodyBytes ?? new Uint8Array())).not.toContain(
+      presented,
+    );
+  });
+
+  it("an enrolled certificate authenticates, with no verification step of its own", async () => {
+    const { response, execution } = await buildRuntime({
+      opaque: ALWAYS_UNKNOWN,
+      mtls: MTLS_ONE_CLIENT,
+    }).handleRequest(request({ clientCertSha256: ENROLLED_FINGERPRINT }));
+    expect(response.status).toBe(201);
+    expect(execution.authOutcome).toBe("authenticated");
+    expect(stageReason(execution, "authenticate")).toBe("mtls_certificate_enrolled");
+    // The principal resolves one stage later, which is the half an `mtlsClients` group without its
+    // specs would break: `authPrincipalRef` is set here and `resolve_principal` reads it, so a
+    // registry wired without the registrations is a 401 for a credential that was just accepted.
+    expect(stageReason(execution, "resolve_principal")).toBe("principal_resolved");
+    expect(execution.finalStage).toBe("emit_audit");
+    expect(execution.finalOutcome).toBe("pass");
   });
 
   /**
@@ -459,6 +517,7 @@ describe("the stage and the support map agree", () => {
       "api_key_header",
       "bearer_jwt",
       "hmac_signature",
+      "mtls",
     ]);
   });
 
@@ -497,6 +556,12 @@ describe("the stage and the support map agree", () => {
       opaque: ALWAYS_UNKNOWN,
       jwks: new InMemoryJwksProvider({ keys: [] }),
       hmac: HMAC_NO_SUCH_KEY,
+      // Configured and enrolling nothing, for the reason stated above — measured: without it this
+      // test fails `mtls: expected 'scheme_not_supported' not to be 'scheme_not_supported'`, which
+      // is this fence catching a served scheme whose configuration the harness forgot rather than
+      // one whose arm is missing. The two are indistinguishable from the outcome alone, which is
+      // exactly why every served scheme has to be configured here.
+      mtls: MTLS_NO_SUCH_CLIENT,
     });
     for (const [scheme, req] of samples) {
       const { response, execution } = await runtime.handleRequest(req);
@@ -524,6 +589,7 @@ describe("the stage and the support map agree", () => {
       jwtVerifierConfigured: false,
       opaqueLookupConfigured: false,
       hmacKeyLookupConfigured: false,
+      mtlsClientLookupConfigured: false,
     });
     expect(
       buildRuntime({
@@ -532,11 +598,13 @@ describe("the stage and the support map agree", () => {
         }),
         opaque: ALWAYS_UNKNOWN,
         hmac: HMAC_NO_SUCH_KEY,
+        mtls: MTLS_NO_SUCH_CLIENT,
       }).authSchemeServing,
     ).toEqual({
       jwtVerifierConfigured: true,
       opaqueLookupConfigured: true,
       hmacKeyLookupConfigured: true,
+      mtlsClientLookupConfigured: true,
     });
   });
 

@@ -156,6 +156,7 @@ function req(
     scheme: "https",
     bodyBytes: body === undefined ? null : new TextEncoder().encode(JSON.stringify(body)),
     clientIp: "203.0.113.1",
+    edgeTrust: "untrusted",
   });
 }
 
@@ -654,6 +655,69 @@ describe("buildOperateGateway's option forwarding", () => {
       `these options reach buildOperateGateway and are not forwarded to GatewayRuntime; either ` +
         `forward them or declare why in notForwarded above`,
     ).toEqual([]);
+  });
+
+  /**
+   * The **other direction**, and the one ADR-0386's fence could not see.
+   *
+   * That check reads the fields `OperateGatewayOptions` declares and asserts each reaches the
+   * literal, so it finds a field *dropped from the literal* and is blind to one **never added to
+   * this interface at all**: such a field is not in `accepted`, so there is nothing to compare and
+   * the intersection the fence works over is empty for it.
+   *
+   * `mtlsClientLookup` is why this exists. It was added to `GatewayRuntimeOptions` and to
+   * `BuildOperateHttpServerOptions` and left off `OperateGatewayOptions`, so the conditional spread
+   * in `server.ts` dropped it in silence with `tsc` exiting 0 — ADR-0386's exact mechanism, third
+   * occurrence, in the increment citing it. Every test passed; the symptom was two boot lines
+   * disagreeing in one process, found by a live boot.
+   *
+   * Measured before writing: of `GatewayRuntimeOptions`' 18 fields, **6** are unreachable from
+   * `buildOperateGateway`, and every one is either built by the compile step or a runtime default
+   * nobody surfaces — so the declaration below is six lines rather than a list that will grow
+   * faster than it is read.
+   */
+  it("exposes every runtime option it does not deliberately withhold", () => {
+    // Read across the package boundary as text, the idiom `manifest-event-names.ts` uses for
+    // kernel's grammar and `served-surface.test.ts` for `node.ts`: importing the type would give a
+    // type and not its *field names*, which is the thing being compared.
+    const runtimeSource = readFileSync(
+      new URL("../../api-gateway-runtime/src/runtime.ts", import.meta.url),
+      "utf8",
+    );
+    const runtimeAccepts = interfaceFields(runtimeSource, "GatewayRuntimeOptions");
+    expect(runtimeAccepts.length).toBeGreaterThan(12);
+
+    // Runtime options this compile step deliberately does not surface, each with its reason.
+    const notExposed: Readonly<Record<string, string>> = Object.freeze({
+      routes: "the compile step derives the route registry from the manifest",
+      handlers: "same: the handlers are what compiling a manifest produces",
+      redactionRegistry: "same, from the manifest's classifications",
+      clockSkewSeconds: "a runtime default; no deployment has asked to set it",
+      idempotencyTtlSeconds: "same",
+      defaultApiVersion: "same",
+    });
+
+    const exposed = new Set([
+      ...interfaceFields(source, "OperateGatewayOptions"),
+      ...interfaceFields(source, "OperateRuntimeOptions"),
+    ]);
+    const unreachable = runtimeAccepts.filter((f) => !exposed.has(f) && !(f in notExposed));
+    expect(
+      unreachable,
+      `these GatewayRuntime options cannot be set through buildOperateGateway; either declare them ` +
+        `on OperateGatewayOptions and forward them, or add them to notExposed with a reason`,
+    ).toEqual([]);
+
+    // Non-vacuity in both directions: the declaration names only fields the runtime really has, and
+    // the comparison is over a non-empty exposed set.
+    for (const f of Object.keys(notExposed)) {
+      expect(runtimeAccepts, `${f} is declared not-exposed and is not a runtime option`).toContain(
+        f,
+      );
+    }
+    expect(exposed.size).toBeGreaterThan(20);
+    // And the field that occasioned this check is exposed, so the test would have failed before it.
+    expect(exposed.has("mtlsClientLookup")).toBe(true);
   });
 
   /**

@@ -2138,6 +2138,137 @@ describe("--credential-login", () => {
   });
 });
 
+describe("--mtls-client and --trusted-edge-client-cert", () => {
+  const base = ["--pack", "erp-core"];
+  const F1 = "a".repeat(64);
+  const P1 = "00000000-0000-4000-8000-000000000001";
+  const SPEC = `${F1}:erp_admin:tenant-a:${P1}`;
+
+  it("defaults to off, with no enrolment and no trust", () => {
+    const opts = parseServeArgs(base);
+    expect(opts.mtlsClients).toEqual([]);
+    expect(opts.trustedEdgeClientCert).toBe(false);
+  });
+
+  it("parses both, repeatably", () => {
+    const opts = parseServeArgs([
+      ...base,
+      "--trusted-edge-client-cert",
+      "--mtls-client",
+      SPEC,
+      `--mtls-client=${"b".repeat(64)}:hr_manager:tenant-b:${P1}`,
+    ]);
+    expect(opts.trustedEdgeClientCert).toBe(true);
+    expect(opts.mtlsClients).toHaveLength(2);
+  });
+
+  it("validates the spec at parse, so a usage error names the flag and exits 2", () => {
+    // Validated here as well as at boot, for `--hmac-key`'s stated reason: the parser can answer
+    // with the help text where `resolveMtlsClients` can only report an absence. This is also the
+    // one of the three credential specs whose first field has a shape, so an unmatchable enrolment
+    // is caught here rather than accepted into a registry that can never fire.
+    expect(() =>
+      parseServeArgs([...base, "--trusted-edge-client-cert", "--mtls-client", "nope:r:t:p"]),
+    ).toThrow(/--mtls-client/);
+    expect(() =>
+      parseServeArgs([...base, "--trusted-edge-client-cert", "--mtls-client", `${F1}:erp_admin:t`]),
+    ).toThrow(/principalId is required/);
+  });
+
+  /**
+   * The refusal that lets `mtlsClientLookupConfigured` be one gate key for a scheme needing two
+   * facts: without the declaration `buildIncomingRequest` drops the forwarded fingerprint, so a
+   * registry alone would report the scheme served while nothing could authenticate — ADR-0337's
+   * falsely-true direction.
+   */
+  it("refuses --mtls-client without --trusted-edge-client-cert", () => {
+    expect(() => parseServeArgs([...base, "--mtls-client", SPEC])).toThrow(
+      /requires --trusted-edge-client-cert/,
+    );
+    expect(() => parseServeArgs([...base, "--mtls-client", SPEC])).toThrow(/unmatchable/);
+  });
+
+  /**
+   * And the converse is **not** refused, which is the asymmetry worth pinning: the declaration
+   * governs every forwarded fact — `x-forwarded-for`, `x-forwarded-proto`, `x-forwarded-host` and
+   * the TLS version — so a deployment behind a trusted edge that serves no client certificates
+   * still wants its client IPs and its TLS floor believed. A symmetric refusal would make the
+   * broader capability unreachable without the narrower one.
+   */
+  it("accepts --trusted-edge-client-cert alone", () => {
+    const opts = parseServeArgs([...base, "--trusted-edge-client-cert"]);
+    expect(opts.trustedEdgeClientCert).toBe(true);
+    expect(opts.mtlsClients).toEqual([]);
+  });
+
+  it("documents both flags in --help", () => {
+    // The help text is the only place the *stripping* requirement reaches an operator who has not
+    // read the Caddyfile, and it is the half that makes the declaration true rather than merely
+    // permissive.
+    const help = helpText;
+    expect(help).toContain("--mtls-client");
+    expect(help).toContain("--trusted-edge-client-cert");
+    expect(help).toMatch(/OVERWRITES|overwrites/);
+  });
+
+  /**
+   * Each flag's continuation lines belong to **that** flag, which three `toContain`s cannot see.
+   *
+   * This exists because inserting these two entries split `--hmac-key`'s continuation from its own
+   * flag, so `--help` told an operator that a boolean taking no value was "repeatable; all four
+   * fields required" and needed `REQUEST_SIGNING_SECRET` — ADR-0364's addendum class, documentation
+   * that cannot be followed, and invisible to every order-independent assertion above.
+   *
+   * Read as blocks rather than as one string: a help entry is its `--flag` line plus every
+   * following line indented past the description column, which is structural and does not rest on
+   * the prose's wording.
+   */
+  it("keeps each flag's continuation under its own flag", () => {
+    // A flag *definition* sits at exactly two spaces of indent and a continuation at the
+    // description column, so the block boundary is `/^ {2}--/` and **not** `/^\s*--/`. That
+    // distinction is load-bearing rather than pedantic: `--mtls-client`'s own continuation names
+    // `--trusted-edge-client-cert`, so the lax pattern cuts its block two lines early — a defect in
+    // the first draft of this helper, which would have reported the fixed text as still broken.
+    const FLAG_DEF = /^ {2}--/;
+    const blockFor = (flag: string): string => {
+      const lines = helpText.split("\n");
+      const start = lines.findIndex(
+        (l) => FLAG_DEF.test(l) && (l.trimStart().startsWith(`${flag} `) || l.trim() === flag),
+      );
+      expect(start, `${flag} is absent from --help`).toBeGreaterThanOrEqual(0);
+      const out = [lines[start] ?? ""];
+      for (const line of lines.slice(start + 1)) {
+        if (FLAG_DEF.test(line)) break;
+        out.push(line);
+      }
+      return out.join("\n");
+    };
+
+    const hmac = blockFor("--hmac-key");
+    const mtls = blockFor("--mtls-client");
+    const trust = blockFor("--trusted-edge-client-cert");
+
+    // The orphaned text, back where it belongs and nowhere else.
+    expect(hmac).toContain("REQUEST_SIGNING_SECRET");
+    expect(mtls).not.toContain("REQUEST_SIGNING_SECRET");
+    expect(trust).not.toContain("REQUEST_SIGNING_SECRET");
+    // A flag taking no value is never described as repeatable or as having fields.
+    expect(trust).not.toMatch(/repeatable|fields required/);
+    // And each block carries the fact only it is about, so none is an empty shell that would
+    // satisfy the three negatives above by saying nothing at all.
+    expect(mtls).toMatch(/sha256/);
+    expect(mtls).toContain("--trusted-edge-client-cert");
+    expect(trust).toMatch(/OVERWRITES|overwrites/);
+    for (const [name, block] of [
+      ["--hmac-key", hmac],
+      ["--mtls-client", mtls],
+      ["--trusted-edge-client-cert", trust],
+    ] as const) {
+      expect(block.split("\n").length, `${name}'s help block is a single line`).toBeGreaterThan(2);
+    }
+  });
+});
+
 describe("parseSetCredentialArgs", () => {
   const USER = "22222222-2222-4222-8222-222222222222";
 

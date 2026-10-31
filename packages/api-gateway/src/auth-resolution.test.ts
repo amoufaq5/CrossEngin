@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   AUTH_OUTCOMES,
@@ -20,6 +21,9 @@ import {
   schemeRequiresHttps,
   type ParsedAuthCredential,
   type ResolvedPrincipal,
+  CLIENT_CERT_FINGERPRINT_PATTERN,
+  EMPTY_CERTIFICATE_FINGERPRINT,
+  parseForwardedClientCertFingerprint,
 } from "./auth-resolution.js";
 
 const baseJwt: ParsedAuthCredential = {
@@ -429,8 +433,13 @@ describe("AUTH_SCHEME_SUPPORT", () => {
     }
   });
 
-  it("the three served schemes are the three the runtime authenticates", () => {
-    expect(SERVED_AUTH_SCHEMES).toEqual(["bearer_jwt", "api_key_header", "hmac_signature"]);
+  it("the served schemes are the ones the runtime authenticates", () => {
+    expect(SERVED_AUTH_SCHEMES).toEqual([
+      "bearer_jwt",
+      "api_key_header",
+      "mtls",
+      "hmac_signature",
+    ]);
   });
 
   /**
@@ -478,9 +487,35 @@ describe("AUTH_SCHEME_SUPPORT", () => {
     expect(notCredentials).toEqual(["anonymous"]);
   });
 
-  it("the three refused schemes are named", () => {
+  /**
+   * Two, and both are **reachable by any caller**, which is what makes the boot line's unconditional
+   * "refusing … by name" clause true. ADR-0384 shipped that clause and recorded as its own unfixed
+   * finding that it claimed a refusal no deployment could reach, because `mtls` was refused while
+   * its recognising field had no producer. Serving `mtls` retired that by construction rather than
+   * by a special case in the line, so this assertion is now also the fence over that claim: a
+   * scheme added here whose refusal a caller cannot provoke makes the boot line false again.
+   */
+  /**
+   * The one well-formed value that cannot denote a certificate, refused at both ends.
+   *
+   * Refused **by value**, so enrolling it does not make it work — which is the arm that matters: an
+   * operator seeing this digest in a log from an edge in `client_auth mode request` could otherwise
+   * enrol it and authenticate every certificate-less request as that principal.
+   */
+  it("refuses sha256(\"\") as a forwarded fingerprint, because no certificate is zero bytes", () => {
+    expect(CLIENT_CERT_FINGERPRINT_PATTERN.test(EMPTY_CERTIFICATE_FINGERPRINT)).toBe(true);
+    expect(parseForwardedClientCertFingerprint(EMPTY_CERTIFICATE_FINGERPRINT)).toBeNull();
+    expect(parseForwardedClientCertFingerprint(EMPTY_CERTIFICATE_FINGERPRINT.toUpperCase())).toBeNull();
+    // Non-vacuity: a different well-formed fingerprint is accepted, so the refusal is about this
+    // value and not about the parser having stopped working.
+    expect(parseForwardedClientCertFingerprint("a".repeat(64))).toBe("a".repeat(64));
+    // And it really is the digest it claims to be, computed rather than copied.
+    expect(createHash("sha256").update("").digest("hex")).toBe(EMPTY_CERTIFICATE_FINGERPRINT);
+  });
+
+  it("the refused schemes are named, and a caller can provoke each", () => {
     const refused = AUTH_SCHEMES.filter((s) => AUTH_SCHEME_SUPPORT[s].treatment === "refused");
-    expect([...refused].sort()).toEqual(["api_key_query", "basic", "mtls"]);
+    expect([...refused].sort()).toEqual(["api_key_query", "basic"]);
   });
 
   /**
@@ -520,21 +555,27 @@ describe("AUTH_SCHEME_SUPPORT", () => {
    * that the two are *allowed* to disagree: strength is a property of the scheme and serving is a
    * property of this deployment, so a later reader must not "fix" one against the other.
    *
-   * It was two members and is now one. `hmac_signature` left by being **served**, which confirms
-   * the property rather than weakening it — the set did not change, the treatment did — and `mtls`
-   * remains, strong and unserved, because no edge in this workspace forwards a client certificate.
+   * **This replaces a test whose subject no longer exists**, rather than relaxing it. That one was
+   * titled "deliberately includes a scheme this gateway does not serve" and pinned
+   * `strongUnserved === ["mtls"]`; it went two members → one → **zero** as `hmac_signature` and
+   * then `mtls` were served, and a judgement with no case left is not a judgement (ADR-0375's
+   * reason for deleting `anchoringWouldBury` rather than flipping its map). Relaxing it to `[]`
+   * would have left an assertion that passes for every possible input, which reads as coverage it
+   * does not provide.
+   *
+   * What is asserted instead is the stronger fact that became true: **every strong scheme is
+   * served**, so the disagreement the set permits is currently empty. Written as an equality to the
+   * whole set rather than as "unserved is empty", so the next strong scheme added has to be served
+   * or say here why not — which is the same obligation the old test carried, pointing the other way.
    */
-  it("STRONG_AUTH_SCHEMES deliberately includes a scheme this gateway does not serve", () => {
-    const strongUnserved = [...STRONG_AUTH_SCHEMES].filter(
-      (s) => AUTH_SCHEME_SUPPORT[s].treatment !== "served",
-    );
-    expect([...strongUnserved].sort()).toEqual(["mtls"]);
-    // Non-vacuity on the other side: a strong scheme that *is* served is the case this set would be
-    // wrong to exclude, and there are now two of them.
+  it("every strong scheme is served, and the set may still disagree with the map", () => {
     const strongServed = [...STRONG_AUTH_SCHEMES].filter(
       (s) => AUTH_SCHEME_SUPPORT[s].treatment === "served",
     );
-    expect([...strongServed].sort()).toEqual(["bearer_jwt", "hmac_signature"]);
+    expect([...strongServed].sort()).toEqual([...STRONG_AUTH_SCHEMES].sort());
+    // Non-vacuity: the set is not empty, so the equality above is a claim about three members and
+    // not a tautology over none.
+    expect(STRONG_AUTH_SCHEMES.size).toBe(3);
   });
 });
 

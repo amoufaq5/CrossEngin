@@ -21,6 +21,7 @@ import {
   type IdempotencyStore,
   type JwksProvider,
   type HmacKeyLookup,
+  type MtlsClientLookup,
   type OpaqueTokenLookup,
   type PrincipalResolver,
   type PrincipalRoles,
@@ -1095,6 +1096,23 @@ export interface OperateGatewayOptions extends OperateRuntimeOptions {
   readonly principalResolver?: PrincipalResolver;
   readonly opaqueTokenLookup?: OpaqueTokenLookup;
   readonly hmacKeyLookup?: HmacKeyLookup;
+  /**
+   * The enrolled client-certificate registry, for `mtls`.
+   *
+   * **Declared here for the reason the `requiredJwtClaims` note below gives, which this field
+   * demonstrated by being omitted.** It was added to `GatewayRuntimeOptions` and to
+   * `BuildOperateHttpServerOptions` and left off *this* interface, so the conditional spread in
+   * `server.ts` dropped it with `tsc` exiting 0 — and the symptom was two boot lines disagreeing in
+   * one process: `edge trust: … serving 1 enrolled certificate(s)` beside `mtls is served by this
+   * binary and has no client-certificate registry configured`. Found by a live boot, exactly as
+   * ADR-0386's instance was found by a live request.
+   *
+   * Worth knowing: ADR-0386's fence over this literal could not have caught it. That test compares
+   * the fields **both** interfaces declare, so it finds a field dropped from the forwarding literal
+   * and is blind to one never added to this interface at all — the intersection is empty for such a
+   * field, so there is nothing to compare. See `compile.test.ts` for the widened check.
+   */
+  readonly mtlsClientLookup?: MtlsClientLookup;
   readonly requestSignatureToleranceSeconds?: number;
   readonly idempotencyStore?: IdempotencyStore;
   readonly rateLimitChecker?: RateLimitChecker;
@@ -1140,6 +1158,9 @@ export function buildOperateGateway(
     redactionRegistry: compiled.redactionRegistry,
     ...(options.opaqueTokenLookup !== undefined ? { opaqueTokenLookup: options.opaqueTokenLookup } : {}),
     ...(options.hmacKeyLookup !== undefined ? { hmacKeyLookup: options.hmacKeyLookup } : {}),
+    ...(options.mtlsClientLookup !== undefined
+      ? { mtlsClientLookup: options.mtlsClientLookup }
+      : {}),
     ...(options.requestSignatureToleranceSeconds !== undefined
       ? { requestSignatureToleranceSeconds: options.requestSignatureToleranceSeconds }
       : {}),

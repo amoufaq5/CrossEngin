@@ -240,6 +240,7 @@ import {
   formatScopeRoleReading,
   parseApiKeySpec,
   parseHmacKeySpec,
+  parseMtlsClientSpec,
   parseJwksKeySpec,
   type JwksKeySpec,
   type JwtVerifyConfig,
@@ -249,6 +250,7 @@ import {
   formatRequestSigningSurvey,
   resolveRequestSigning,
 } from "./request-signing.js";
+import { formatEdgeTrustSurvey, resolveMtlsClients } from "./mtls-client.js";
 import {
   formatApiKeySpecSource,
   resolveApiKeySpecs,
@@ -1008,6 +1010,24 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   } else {
     console.info(`[auth] ${formatRequestSigningSurvey(requestSigning)}`);
   }
+  /**
+   * The trust declaration, and the enrolled certificates it makes readable.
+   *
+   * Said **either way**, including when nothing is declared, because what wants confirming here is a
+   * *refusal* — which is harder to confirm by trying it than a capability is (ADR-0376's rule, and
+   * `formatAuthSchemeSurvey`'s own argument one line down). Before this increment the forwarded
+   * facts were derived unconditionally and no line said so, so an operator had no way to learn that
+   * their `x-forwarded-for` was a caller's claim.
+   *
+   * `resolveMtlsClients` cannot report `edge_untrusted` from this path — the CLI refuses that
+   * combination at parse — so the arm an operator reaches here is `no_clients`, which is the
+   * ordinary state of every deployment that has not asked for the scheme.
+   */
+  const mtlsClientSpecs = options.mtlsClients.map(parseMtlsClientSpec);
+  const mtlsClients = resolveMtlsClients(mtlsClientSpecs, options.trustedEdgeClientCert);
+  console.info(
+    `[auth] ${formatEdgeTrustSurvey(options.trustedEdgeClientCert, mtlsClients)}`,
+  );
   const { store, allocator, settingsStore, conn, columnKey } = await resolveStore(
     options,
     manifest,
@@ -3924,6 +3944,13 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     allowUncoveredSettlement: options.allowUncoveredSettlement,
     ...(abac !== undefined ? { abac } : {}),
     ...(sessionRevocation !== undefined ? { sessionRevocation } : {}),
+    // Unconditional, so a drop at this literal is a compile error rather than a silent safe
+    // default — ADR-0391's finding, and the reason `edgeTrust` is required at both ends of the
+    // forwarding literal in `server.ts`.
+    edgeTrust: options.trustedEdgeClientCert ? "trusted" : "untrusted",
+    ...(mtlsClients.kind === "configured"
+      ? { mtlsClients: { lookup: mtlsClients.lookup, clients: mtlsClientSpecs } }
+      : {}),
     ...(requestSigning.kind === "configured"
       ? { requestSigning: { lookup: requestSigning.lookup, keys: hmacKeySpecs } }
       : {}),
@@ -4766,6 +4793,19 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           // does — which means a signed request is routed to a tenant's own gateway and would then
           // find no scheme to authenticate it. Dropping it here is the shape ADR-0392's addendum
           // found live at this very call site with `openApiCoverage`, so the two travel together.
+          // The trust declaration is a property of the **deployment's network position**, not of a
+          // tenant, so a per-tenant gateway gets the same answer the boot one does: the hop in front
+          // of this process is the same hop whichever tenant's manifest is being served. Required at
+          // both ends, so this is a compile error if dropped rather than the silent revert the two
+          // comments below record happening twice at this very literal.
+          edgeTrust: options.trustedEdgeClientCert ? "trusted" : "untrusted",
+          // And the enrolled certificates, for the signing keys' reason one credential over: an
+          // `--mtls-client` spec *names its tenant*, so the lookup resolves `ctx.tenantId` from the
+          // credential and a certificate-authenticated request is routed to that tenant's own
+          // gateway — which would then find no registry to resolve it against.
+          ...(mtlsClients.kind === "configured"
+            ? { mtlsClients: { lookup: mtlsClients.lookup, clients: mtlsClientSpecs } }
+            : {}),
           ...(requestSigning.kind === "configured"
             ? { requestSigning: { lookup: requestSigning.lookup, keys: hmacKeySpecs } }
             : {}),

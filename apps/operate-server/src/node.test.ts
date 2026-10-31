@@ -15,6 +15,7 @@ const manifest = await loadBuiltinPack("erp-retail");
 
 function httpServer() {
   return buildOperateHttpServer({
+    edgeTrust: "untrusted",
     manifest,
     store: new InMemoryEntityStore(),
     apiKeys: [parseApiKeySpec(`key-manager:store_manager:${TENANT}`)],

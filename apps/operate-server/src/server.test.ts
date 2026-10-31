@@ -21,6 +21,7 @@ const API_KEYS = [
 
 function makeServer(): OperateHttpServer {
   const { httpServer } = buildOperateHttpServer({
+    edgeTrust: "untrusted",
     manifest,
     store: new InMemoryEntityStore(),
     apiKeys: API_KEYS,
@@ -160,6 +161,7 @@ describe("OperateHttpServer — offline license entitlement gate", () => {
       expiresAt: "2027-01-01T00:00:00.000Z",
     });
     const { httpServer } = buildOperateHttpServer({
+      edgeTrust: "untrusted",
       manifest,
       store: new InMemoryEntityStore(),
       apiKeys: API_KEYS,
@@ -191,6 +193,7 @@ describe("OperateHttpServer — offline license entitlement gate", () => {
       expiresAt: "2027-01-01T00:00:00.000Z",
     });
     const { httpServer } = buildOperateHttpServer({
+      edgeTrust: "untrusted",
       manifest,
       store: new InMemoryEntityStore(),
       apiKeys: API_KEYS,
@@ -209,6 +212,7 @@ describe("OperateHttpServer — webhook route (signature-authenticated, bypasses
   function serverWithWebhook() {
     const calls: Array<{ body: string; sig: string | undefined }> = [];
     const { httpServer } = buildOperateHttpServer({
+      edgeTrust: "untrusted",
       manifest,
       store: new InMemoryEntityStore(),
       apiKeys: API_KEYS,
@@ -259,6 +263,7 @@ describe("OperateHttpServer — data-residency edge routing", () => {
   function regionServer(region: string): OperateHttpServer {
     const directory = new InMemoryTenantResidencyDirectory([[TENANT, euOnly]]);
     const { httpServer } = buildOperateHttpServer({
+      edgeTrust: "untrusted",
       manifest,
       store: new InMemoryEntityStore(),
       apiKeys: API_KEYS,
@@ -295,6 +300,7 @@ describe("OperateHttpServer — data-residency edge routing", () => {
     // Empty directory → the tenant has no profile → the guard doesn't constrain it, even in a
     // region that would be forbidden for an eu-only tenant. The hint matches the key's tenant.
     const { httpServer } = buildOperateHttpServer({
+      edgeTrust: "untrusted",
       manifest,
       store: new InMemoryEntityStore(),
       apiKeys: API_KEYS,
