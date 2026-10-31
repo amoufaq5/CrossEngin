@@ -20,6 +20,7 @@ import {
   type Handler,
   type IdempotencyStore,
   type JwksProvider,
+  type HmacKeyLookup,
   type OpaqueTokenLookup,
   type PrincipalResolver,
   type PrincipalRoles,
@@ -1093,6 +1094,8 @@ export function compileOperateServer(
 export interface OperateGatewayOptions extends OperateRuntimeOptions {
   readonly principalResolver?: PrincipalResolver;
   readonly opaqueTokenLookup?: OpaqueTokenLookup;
+  readonly hmacKeyLookup?: HmacKeyLookup;
+  readonly requestSignatureToleranceSeconds?: number;
   readonly idempotencyStore?: IdempotencyStore;
   readonly rateLimitChecker?: RateLimitChecker;
   readonly clock?: { now(): Date };
@@ -1136,6 +1139,10 @@ export function buildOperateGateway(
     rateLimitChecker: options.rateLimitChecker ?? new InMemoryRateLimitChecker({ limit: 10_000 }),
     redactionRegistry: compiled.redactionRegistry,
     ...(options.opaqueTokenLookup !== undefined ? { opaqueTokenLookup: options.opaqueTokenLookup } : {}),
+    ...(options.hmacKeyLookup !== undefined ? { hmacKeyLookup: options.hmacKeyLookup } : {}),
+    ...(options.requestSignatureToleranceSeconds !== undefined
+      ? { requestSignatureToleranceSeconds: options.requestSignatureToleranceSeconds }
+      : {}),
     ...(options.jwksProvider !== undefined ? { jwksProvider: options.jwksProvider } : {}),
     ...(options.jwtIssuer !== undefined ? { jwtIssuer: options.jwtIssuer } : {}),
     ...(options.jwtAudience !== undefined ? { jwtAudience: options.jwtAudience } : {}),

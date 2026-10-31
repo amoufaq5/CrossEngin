@@ -1,5 +1,6 @@
 import {
   API_KEY_HEADER,
+  REQUEST_SIGNATURE_HEADER_LOWER,
   type AuthOutcome,
   type AuthScheme,
   type IncomingRequest,
@@ -357,6 +358,28 @@ export function parseAuthHeader(request: IncomingRequest): ParseAuthHeaderResult
   }
   if (Array.isArray(apiKeyQuery) && apiKeyQuery.some((v) => v.length > 0)) {
     return { kind: "credential", scheme: "api_key_query", token: "" };
+  }
+  // `hmac_signature` sits **last among the message positions** — after every existing recognition
+  // and before the residual — and the placement is chosen so that **no request that resolves today
+  // resolves differently**. Its header is new, so it has no behaviour to preserve of its own, while
+  // every position above it does: putting it first would change which credential a request carrying
+  // both an api key and a signature authenticates as, for the benefit of nobody who has written a
+  // client yet. First match wins here, as it already did for `Authorization` + `x-api-key`.
+  //
+  // It therefore sits after `api_key_query`'s *refusal* too, which is right rather than incidental:
+  // that refusal is about a credential having been copied into access logs and a Referer, and that
+  // exposure happened regardless of what else the request presented — so a signed request that also
+  // puts a key in the URL is still refused for the key in the URL.
+  //
+  // The **value is carried** where `api_key_query`'s is deliberately not, and the asymmetry is the
+  // scheme's whole point: this is not a bearer secret but a MAC over this one request, so the stage
+  // must re-read it to verify, and a log line holding it discloses no key. The parse is left to the
+  // stage rather than done here, because the result type carries one opaque `token` and a signature
+  // is three fields — splitting it here would mean either a second shape on this union or a parse
+  // whose failure this function has no way to report.
+  const signature = request.headers[REQUEST_SIGNATURE_HEADER_LOWER];
+  if (signature !== undefined && signature.trim().length > 0) {
+    return { kind: "credential", scheme: "hmac_signature", token: signature.trim() };
   }
   // The residual comes **before** `mtls`, and that ordering is the whole of what "the message named
   // nothing" means. `x-api-key` was already ahead of it before this change — a request with an

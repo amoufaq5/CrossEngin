@@ -72,6 +72,31 @@ export interface AuthSchemeSupport {
 export const API_KEY_HEADER = "x-api-key";
 
 /**
+ * The header `hmac_signature` is presented in.
+ *
+ * Here and **not** in `@crossengin/crypto` beside the signer, and the split is the one this file
+ * already draws for `API_KEY_HEADER`: crypto owns the *value* — the canonical message, the grammar,
+ * the sign and the verify — and this package owns which position on the wire carries it. That is
+ * also the only split the dependency graph permits in one spelling: `@crossengin/api-gateway` has
+ * **no workspace dependencies at all** (measured: `zod` alone), so a constant declared in crypto
+ * could only reach the support map and the security doc as a second copy, and the security doc's
+ * `name` is a machine value a client generator emits code from.
+ *
+ * Deliberately **not** `CrossEngin-Signature`, which is the published *payload*-authenticity format
+ * (`t=<unix>,v1=<hex>` over `"<unix>." || body`). A verifier holding a header value could not
+ * otherwise tell which canonical message applies — the payload one covers two facts and this one
+ * covers nine — and a payload signature names no principal, having no key-id field, which is
+ * exactly why `AUTH_SCHEME_SUPPORT` was right that *that* format authenticates a payload rather
+ * than a principal. The fix is a different format, not a second reading of that one.
+ *
+ * No `X-` prefix, following `SIGNATURE_HEADER_NAME` and RFC 6648, which deprecates it.
+ */
+export const REQUEST_SIGNATURE_HEADER = "CrossEngin-Request-Signature";
+
+/** Lower-cased, because `IncomingRequest.headers` is normalised that way by the adapter. */
+export const REQUEST_SIGNATURE_HEADER_LOWER = REQUEST_SIGNATURE_HEADER.toLowerCase();
+
+/**
  * How this gateway treats each of the eight `AUTH_SCHEMES`, as **one total map**.
  *
  * It is the map because the three things that used to be maintained separately are all derived from
@@ -124,10 +149,10 @@ export const AUTH_SCHEME_SUPPORT: Readonly<Record<AuthScheme, AuthSchemeSupport>
       "not implemented: the deployment's password hashes back the login route (ADR-0358), which mints a session token, so a password-on-every-request scheme would be a second credential path over the same hashes and would have to re-implement that route's lockout to avoid being the way around it",
   },
   hmac_signature: {
-    treatment: "indistinguishable",
-    recognisedFrom: null,
+    treatment: "served",
+    recognisedFrom: `a ${REQUEST_SIGNATURE_HEADER} header`,
     reason:
-      "no Authorization auth-scheme token for HMAC request signing has been chosen here, and the repo's one HMAC wire format (CrossEngin-Signature, t=<unix>,v1=<hex>) authenticates a payload rather than a principal — which is why the pipeline reserves validate_request_signature as its own stage; reading that header as a principal credential would conflate the two. It is also the dearest of the unimplemented schemes: it needs a key-id-to-secret store, which does not exist, since meta.crypto_keys has no private-material column",
+      `verified here at authenticate: the key id names the signing key, the timestamp is checked against a symmetric tolerance, and the HMAC-SHA256 is compared in constant time against a canonical message covering the method, path, sorted query, body digest, host and scheme. Reserving its own header rather than an Authorization auth-scheme token is why it did not need one chosen: ${REQUEST_SIGNATURE_HEADER} is distinct from CrossEngin-Signature, the payload-authenticity format, so no verifier has to guess which canonical message a value is over`,
   },
   api_key_query: {
     treatment: "refused",
@@ -208,9 +233,28 @@ export const AUTH_SCHEME_SECURITY_DOC: Readonly<Record<AuthScheme, SecuritySchem
       name: API_KEY_HEADER,
       description: "A deployment-issued opaque key. Resolved against the deployment's own lookup.",
     },
+    hmac_signature: {
+      key: "requestSignatureAuth",
+      type: "apiKey",
+      in: "header",
+      name: REQUEST_SIGNATURE_HEADER,
+      // `type: apiKey` and not `http`, because OpenAPI 3.1's `http` type takes a registered
+      // auth-scheme token and this credential deliberately reserves its own header rather than one
+      // — which is the whole reason it needed no namespace commitment. `apiKey` is the honest shape
+      // for "a credential in a named header", and the grammar a client must produce goes in the
+      // description, where `api_key_header` puts its own prose. A generator emits a header
+      // parameter either way; what it cannot do is compute the signature, which is why the
+      // description names the canonical message rather than implying the value is a static key.
+      description:
+        "An HMAC-SHA256 request signature, as `k=<keyId>,t=<unixSeconds>,v1=<hex64>`. The signature " +
+        "covers a canonical JSON array of [domain, keyId, timestamp, method, path, sorted query, " +
+        "body sha256 or null, host, scheme], so it is bound to one request rather than reusable: a " +
+        "captured value replays only within the deployment's clock tolerance and only against the " +
+        "identical request. Unlike a static key this cannot be sent as a literal — the client " +
+        "computes it per request from its own copy of the signing key.",
+    },
     anonymous: null,
     basic: null,
-    hmac_signature: null,
     api_key_query: null,
     mtls: null,
     bearer_opaque: null,
@@ -371,6 +415,21 @@ export const ParsedAuthCredentialSchema = z
     basicPasswordSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
     clientCertSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
     hmacKeyId: z.string().max(120).nullable(),
+    /**
+     * `sha256` of the **lower-case hex signature as the header carries it**, which is a digest of a
+     * signature and not the signature.
+     *
+     * Ambiguous by construction until the wire format existed: the regex admits 64 hex characters
+     * and a raw HMAC-SHA256 *is* 64 hex characters, so the field's value and its digest are
+     * indistinguishable by shape, and only the name and this schema's doc said which was meant. The
+     * live format is `k=…,t=…,v1=<hex64>` and the `v1` field is the raw MAC, so populating this
+     * field from it directly would put a replayable value — within the clock tolerance, against the
+     * identical request — into something the doc above says is safe to persist and to log.
+     *
+     * The digest is over the **hex text** rather than the decoded 32 bytes, because the hex is what
+     * the header carries and what a log line would otherwise hold, so the two cannot be confused
+     * when a reader checks one against a captured header.
+     */
     hmacSignatureSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
     hmacSignedAt: z.string().datetime({ offset: true }).nullable(),
     jwtIssuer: z.string().max(500).nullable(),
@@ -467,9 +526,19 @@ export interface AuthResolutionResult {
  * `api-gateway-runtime`: the TLS floor by `stageValidateTls` (and again by
  * `IncomingRequestSchema.superRefine`, which refuses `tls_1_0`/`tls_1_1` at parse), the anonymous
  * arm by the authenticate stage's no-credential path, and the JWT `exp`/`nbf`/`iss`/`aud` quartet by
- * `verifyBearerJwt`. Two are unique to it — the scheme allow-list, which the runtime's stage now
- * reads from `AUTH_SCHEME_SUPPORT` instead, and the HMAC freshness window, which no runtime path has
- * because `hmac_signature` is refused.
+ * `verifyBearerJwt`. One is unique to it — the scheme allow-list, which the runtime's stage now
+ * reads from `AUTH_SCHEME_SUPPORT` instead.
+ *
+ * The HMAC freshness window **used to be the second**, on the stated ground that no runtime path had
+ * one because `hmac_signature` was refused. It is served now, so there is a live window, and the two
+ * disagree in shape rather than in intent: this one is **asymmetric over two parameters**
+ * (`hmacSignatureMaxAgeSeconds` for the past, `clockSkewSeconds` for the future) and compares
+ * milliseconds parsed out of an ISO `hmacSignedAt`, while the wire format carries integer unix
+ * seconds and `verifyRequestSignature` takes **one symmetric tolerance**, which is
+ * `verifyWebhookSignature`'s shape. The live one is the one the wire can express; this one is kept
+ * with the rest of the specification rather than reshaped to match, because its input
+ * (`ParsedAuthCredential`) cannot carry a signature in the first place and so could never be the
+ * authenticator — see the next paragraph.
  *
  * **Wiring it as the authenticator would be worse than leaving it unwired**, and that was true
  * before `signatureVerified` existed: the only signature material on its input is

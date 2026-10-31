@@ -1,6 +1,7 @@
 import {
   AUTH_SCHEME_SUPPORT,
   DEFAULT_SECURITY_HEADERS,
+  REQUEST_SIGNATURE_HEADER,
   type AuthOutcome,
   type IdempotencyOutcome,
   type IdempotencyRecord,
@@ -11,7 +12,12 @@ import {
   computeRequestHashInputs,
   evaluateIdempotency,
 } from "@crossengin/api-gateway";
-import { sha256 } from "@crossengin/crypto";
+import {
+  DEFAULT_REQUEST_SIGNATURE_TOLERANCE_SECONDS,
+  parseRequestSignatureHeader,
+  sha256,
+  verifyRequestSignature,
+} from "@crossengin/crypto";
 
 import { type OutgoingResponse, outgoingResponseFromJson } from "./adapters.js";
 import {
@@ -68,6 +74,45 @@ export interface OpaqueTokenLookup {
   lookup(request: IncomingRequest, token: string): Promise<OpaqueTokenLookupResult | null>;
 }
 
+/**
+ * What a signing key id resolves to: the bytes to verify with, and the principal it names.
+ *
+ * The **bytes** and not a verifier, which is the one shape decision here. A `verify(keyId, header,
+ * facts)` seam would let a deployment answer "valid" without the gateway ever holding a key, which
+ * reads as the safer split and is not: `resolveAuth` is callerless precisely because its input
+ * carries digests rather than a signature, so it could reach `authenticated` with nothing having
+ * verified anything (ADR-0384), and a seam that *returns a verdict* reproduces that one layer out.
+ * Returning bytes keeps the comparison in `verifyRequestSignature`, where the constant-time compare,
+ * the hex guard and the canonical message are one definition — so a deployment chooses which key,
+ * and this gateway decides whether the signature is good.
+ *
+ * `scopes` and `tenantId` match `OpaqueTokenLookupResult` field for field, because what an hmac
+ * credential owes the pipeline is a **role list and a tenant**, not an identity:
+ * `Principal.kind` reaches no authorization decision — measured, `rbacCheck` with
+ * `kind: "BOGUS_KIND"` answers `allowed: true` — and `resolve_principal` is scheme-agnostic, taking
+ * `{tenantId, principalRef, scopes, authScheme}` and stamping the scheme itself. The two results are
+ * deliberately *not* one type: they are reached by different lookups and a future field on one (a
+ * key's own tolerance, say) has no meaning on the other.
+ */
+export interface HmacKeyLookupResult {
+  readonly keyBytes: Uint8Array;
+  readonly principalRef: string;
+  readonly scopes: readonly string[];
+  readonly tenantId: string | null;
+}
+
+export interface HmacKeyLookup {
+  /**
+   * Resolves a key id, or `null` when this deployment has no such key.
+   *
+   * The **request is passed** so a deployment can scope a key per host or per path prefix without a
+   * second seam, matching `OpaqueTokenLookup.lookup`. It must not be used to decide the *signature*:
+   * the facts the signature covers are read from the request by the stage, so a lookup that read the
+   * header itself would be a second reading of the credential.
+   */
+  lookup(request: IncomingRequest, keyId: string): Promise<HmacKeyLookupResult | null>;
+}
+
 export interface GatewayRuntimeOptions {
   readonly routes: RouteRegistry;
   readonly handlers: HandlerRegistry;
@@ -88,6 +133,17 @@ export interface GatewayRuntimeOptions {
   readonly requiredJwtClaims?: ReadonlySet<RequiredJwtClaim>;
   readonly clockSkewSeconds?: number;
   readonly opaqueTokenLookup?: OpaqueTokenLookup;
+  readonly hmacKeyLookup?: HmacKeyLookup;
+  /**
+   * The symmetric window, in seconds, a request signature's timestamp may sit either side of now.
+   *
+   * Defaults to `DEFAULT_REQUEST_SIGNATURE_TOLERANCE_SECONDS`. **Symmetric over one parameter**,
+   * which is `verifyWebhookSignature`'s shape and deliberately not `resolveAuth`'s asymmetric pair:
+   * the wire format carries integer unix seconds, and a past-versus-future split would need two
+   * numbers for one question that the header cannot distinguish anyway — a client whose clock is
+   * ahead and one replaying an old capture present the same bytes.
+   */
+  readonly requestSignatureToleranceSeconds?: number;
   readonly clock?: { now(): Date };
   readonly defaultApiVersion?: string;
   readonly idempotencyTtlSeconds?: number;
@@ -135,6 +191,8 @@ export class GatewayRuntime {
   private readonly requiredJwtClaims: ReadonlySet<RequiredJwtClaim>;
   private readonly clockSkewSeconds: number;
   private readonly opaqueTokenLookup: OpaqueTokenLookup | null;
+  private readonly hmacKeyLookup: HmacKeyLookup | null;
+  private readonly requestSignatureToleranceSeconds: number;
   private readonly clock: { now(): Date };
   private readonly defaultApiVersion: string;
   private readonly idempotencyTtlSeconds: number;
@@ -152,6 +210,9 @@ export class GatewayRuntime {
     this.requiredJwtClaims = opts.requiredJwtClaims ?? new Set(REQUIRED_JWT_CLAIMS);
     this.clockSkewSeconds = opts.clockSkewSeconds ?? 30;
     this.opaqueTokenLookup = opts.opaqueTokenLookup ?? null;
+    this.hmacKeyLookup = opts.hmacKeyLookup ?? null;
+    this.requestSignatureToleranceSeconds =
+      opts.requestSignatureToleranceSeconds ?? DEFAULT_REQUEST_SIGNATURE_TOLERANCE_SECONDS;
     this.clock = opts.clock ?? { now: () => new Date() };
     this.defaultApiVersion = opts.defaultApiVersion ?? "v1";
     this.idempotencyTtlSeconds = opts.idempotencyTtlSeconds ?? 86_400;
@@ -350,8 +411,8 @@ export class GatewayRuntime {
   }
 
   /**
-   * Which of the two served schemes this *deployment* can actually authenticate, read off the
-   * runtime's own fields rather than re-derived.
+   * Which of the served schemes this *deployment* can actually authenticate, read off the runtime's
+   * own fields rather than re-derived.
    *
    * It is a getter on the instance so a boot survey and the request path cannot disagree: the
    * alternative — a caller passing the same two booleans it passed to the options — is two
@@ -362,6 +423,7 @@ export class GatewayRuntime {
     return {
       jwtVerifierConfigured: this.jwksProvider !== null,
       opaqueLookupConfigured: this.opaqueTokenLookup !== null,
+      hmacKeyLookupConfigured: this.hmacKeyLookup !== null,
     };
   }
 
@@ -585,7 +647,147 @@ export class GatewayRuntime {
       });
       return null;
     }
-    // Unreachable while `SERVED_AUTH_SCHEMES` is exactly the two schemes with an arm above, which is
+    if (parsed.scheme === "hmac_signature") {
+      if (this.hmacKeyLookup === null) {
+        // `scheme_not_supported` rather than `credential_not_found`, which is the JWKS arm's own
+        // correction two schemes over: nothing looked the key up, so "not found" is a claim about a
+        // lookup that never happened, failing in the direction that blames the caller.
+        ctx.authOutcome = "scheme_not_supported";
+        const env = authenticationRequired({
+          reason: `auth scheme hmac_signature is not accepted here: no signing-key lookup is configured, so no signature can be verified; this deployment serves ${this.servedSchemeList()}`,
+          wwwAuthenticate: this.authChallenge(),
+          correlationId: ctx.request.correlationId ?? undefined,
+        });
+        rec.record({
+          stage: "authenticate",
+          outcome: "deny",
+          startedAt,
+          completedAt: this.now(),
+          reason: "no_hmac_key_lookup",
+          problemTypeUri: env.body.type,
+          responseStatus: env.body.status,
+        });
+        return env;
+      }
+      // Parsed before the key is resolved, because the **key id is what names the key**: a verifier
+      // cannot be handed a key, it has to be told which one. A malformed header is therefore refused
+      // without a lookup, which is also the cheaper order — `credential_malformed` is a statement
+      // about the header's shape and needs no deployment state to make.
+      //
+      // The credential comes from `parsed.token` and **not** from a second read of the header, which
+      // is how this arm was first written and was a defect of exactly the kind this increment is
+      // about. `parseAuthHeader` recognises on the trimmed value and carries it, so re-reading
+      // `ctx.request.headers[...]` discarded that normalisation and left the two halves disagreeing
+      // about what the credential is: a padded-but-well-formed header was *recognised* as a
+      // credential and then refused `credential_malformed`, and `parsed.token` was dead on the only
+      // served arm that did not use it. Latent rather than live — RFC 9112 §5 has the recipient strip
+      // the surrounding whitespace and both node's parser and `Headers.get()` do — and reachable
+      // from a direct `handleRequest` caller, which the public API permits.
+      const presented = parseRequestSignatureHeader(parsed.token);
+      if (presented === null) {
+        ctx.authOutcome = "credential_malformed";
+        const env = authenticationRequired({
+          reason: `the ${REQUEST_SIGNATURE_HEADER} header is not in the form k=<keyId>,t=<unixSeconds>,v1=<hex64>`,
+          wwwAuthenticate: this.authChallenge(),
+          correlationId: ctx.request.correlationId ?? undefined,
+        });
+        rec.record({
+          stage: "authenticate",
+          outcome: "deny",
+          startedAt,
+          completedAt: this.now(),
+          reason: "request_signature_malformed",
+          problemTypeUri: env.body.type,
+          responseStatus: env.body.status,
+        });
+        return env;
+      }
+      const key = await this.hmacKeyLookup.lookup(ctx.request, presented.keyId);
+      if (key === null) {
+        ctx.authOutcome = "credential_not_found";
+        // One body for an unknown key and for a bad signature, and that is the decision rather than
+        // laziness: telling a caller *which* half failed turns the header into a key-id oracle, so
+        // an attacker learns which ids exist without ever producing a valid signature. The recorded
+        // reasons differ, which is the bounce webhook's model (one opaque answer, a distinct reason
+        // logged) — the one of this repo's two live HMAC paths that gets disclosure right, where
+        // `verifyStripeWebhook` hands its cause to the caller and logs nothing.
+        const env = authenticationRequired({
+          reason: "request signature not accepted",
+          wwwAuthenticate: this.authChallenge(),
+          correlationId: ctx.request.correlationId ?? undefined,
+        });
+        rec.record({
+          stage: "authenticate",
+          outcome: "deny",
+          startedAt,
+          completedAt: this.now(),
+          // The **key id** is on the record and never in the response: it is not a secret (it
+          // travels in the clear in the header, so it may be logged and may be a principal
+          // reference), and it is the half an operator needs to tell a retired key from a typo.
+          reason: `request_signature_key_not_found_${presented.keyId}`,
+          problemTypeUri: env.body.type,
+          responseStatus: env.body.status,
+        });
+        return env;
+      }
+      const verdict = verifyRequestSignature(
+        key.keyBytes,
+        parsed.token,
+        {
+          method: ctx.request.method,
+          path: ctx.request.path,
+          query: ctx.request.query,
+          // The **digest** the request already carries, not the bytes: `bodySha256` is on the typed
+          // `IncomingRequest` where `rawBody` is not, so this arm needs no cast — and it is computed
+          // once per request by the adapter, so covering it is free. `IncomingRequestSchema` refuses
+          // a non-empty body with no digest, so `null` here means an empty body and nothing else.
+          bodySha256: ctx.request.bodySha256,
+          host: ctx.request.host,
+          scheme: ctx.request.scheme,
+        },
+        {
+          toleranceSeconds: this.requestSignatureToleranceSeconds,
+          nowSeconds: Math.floor(this.now().getTime() / 1000),
+        },
+      );
+      if (!verdict.ok) {
+        // Mapped per refusal, because the three send *different parties* to different remedies and
+        // the outcome column is what an operator filters on: a stale timestamp is either side's
+        // clock and is the one of the three that a well-behaved client hits, so collapsing it into
+        // `invalid_signature` would hide a clock-drift incident inside a forgery count.
+        ctx.authOutcome =
+          verdict.reason === "timestamp_outside_tolerance" ? "expired_token" : "invalid_signature";
+        const env = authenticationRequired({
+          reason: "request signature not accepted",
+          wwwAuthenticate: this.authChallenge(),
+          correlationId: ctx.request.correlationId ?? undefined,
+        });
+        rec.record({
+          stage: "authenticate",
+          outcome: "deny",
+          startedAt,
+          completedAt: this.now(),
+          reason: `request_signature_${verdict.reason}`,
+          problemTypeUri: env.body.type,
+          responseStatus: env.body.status,
+        });
+        return env;
+      }
+      ctx.authOutcome = "authenticated";
+      ctx.authScheme = "hmac_signature";
+      ctx.authPrincipalRef = key.principalRef;
+      ctx.authScopes = key.scopes;
+      ctx.tenantId = key.tenantId;
+      rec.record({
+        stage: "authenticate",
+        outcome: "pass",
+        startedAt,
+        completedAt: this.now(),
+        reason: "request_signature_verified",
+      });
+      return null;
+    }
+    // Unreachable while `SERVED_AUTH_SCHEMES` is exactly the three schemes with an arm above, which is
     // what `runtime-auth-schemes.test.ts`'s "the stage and the support map agree" asserts in both
     // directions — the fence the type system cannot give, because `support.treatment === "served"`
     // does not narrow `parsed.scheme`. A third served scheme declared in `AUTH_SCHEME_SUPPORT` and

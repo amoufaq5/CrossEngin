@@ -46,7 +46,7 @@ import {
 import { CREDENTIAL_PEPPER_VAR, TOKEN_SIGNING_KEY_VAR } from "./credential-auth-env.js";
 import type { SetCredentialOptions } from "./set-credential.js";
 import { NEW_PASSWORD_VAR } from "./set-credential.js";
-import { parseJwksKeySpec } from "./principals.js";
+import { parseHmacKeySpec, parseJwksKeySpec } from "./principals.js";
 import { BUILTIN_PACK_NAMES } from "./manifest-source.js";
 import { DEFAULT_ADMIN_ROLES } from "./recipient-resolver.js";
 import { MIN_FAX_SUPPRESSION_THRESHOLD } from "@crossengin/notification-providers";
@@ -133,6 +133,16 @@ export interface ServeOptions {
   readonly columnKeyTtlMs: number | null;
   readonly schema: string | null;
   readonly apiKeys: readonly string[];
+  /**
+   * `--hmac-key keyId:role:tenant[:principalId]`, repeatable.
+   *
+   * On argv and **not** behind an environment variable, which is the one place in this file that
+   * departs from ADR-0301 deliberately rather than by omission: the first field is a key *id*, not
+   * a credential — it travels in the clear in every signed request's header — so publishing it via
+   * `ps` discloses nothing. The secret it derives from is `REQUEST_SIGNING_SECRET`, read from the
+   * environment by `request-signing.ts` and reachable through no flag at all.
+   */
+  readonly hmacKeys: readonly string[];
   readonly jwksKeys: readonly string[];
   readonly jwksFile: string | null;
   readonly jwksUrl: string | null;
@@ -602,6 +612,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let schema: string | null = null;
   let defaultScheme: "http" | "https" = "http";
   const apiKeys: string[] = [];
+  const hmacKeys: string[] = [];
   const jwksKeys: string[] = [];
   let jwksFile: string | null = null;
   let jwksUrl: string | null = null;
@@ -771,6 +782,20 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       i += consumed();
     } else if (arg === "--api-key" || arg.startsWith("--api-key=")) {
       apiKeys.push(takeValue(arg, next, "--api-key"));
+      i += consumed();
+    } else if (arg === "--hmac-key" || arg.startsWith("--hmac-key=")) {
+      {
+        // Validated here as well as at boot, for `--jwks-key`'s stated reason: the parser can answer
+        // with a usage error and the help text (exit 2) where `resolveRequestSigning` can only
+        // report an absence, and `parseHmacKeySpec` is pure so there is nothing to defer.
+        const spec = takeValue(arg, next, "--hmac-key");
+        try {
+          parseHmacKeySpec(spec);
+        } catch (err) {
+          throw new CliUsageError(err instanceof Error ? err.message : String(err));
+        }
+        hmacKeys.push(spec);
+      }
       i += consumed();
     } else if (arg === "--jwks-key" || arg.startsWith("--jwks-key=")) {
       {
@@ -2056,6 +2081,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     store,
     schema,
     apiKeys,
+    hmacKeys,
     jwksKeys,
     jwksFile,
     jwksUrl,
@@ -2498,6 +2524,14 @@ Options:
   --api-key <spec>     API key binding key:role:tenant[:principalId] (repeatable;
                        the token IS a credential and argv is readable via ps, so
                        prefer OPERATE_API_KEY_SPECS — newline/comma-separated)
+  --hmac-key <spec>    HMAC request-signing key keyId:role:tenant:principalId
+                       (repeatable; all four fields required). The key id is NOT
+                       a credential — it travels in the clear in every signed
+                       request — so argv is fine; the secret is
+                       REQUEST_SIGNING_SECRET in the environment. Declaring a
+                       key with no secret set refuses the boot. principalId must
+                       be a provisioned meta.users UUID: unlike --api-key there
+                       is no bare form and no shared placeholder principal.
   --jwks-key <spec>    JWKS public key kid:base64-ed25519-pubkey (repeatable)
   --jwks-file <file>   JSON [{kid, publicKeyBase64}, ...] of the IdP's keys
   --jwks-url <url>     Remote JWKS endpoint (cached, refetched on kid rotation)

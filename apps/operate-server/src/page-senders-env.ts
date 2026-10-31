@@ -187,18 +187,29 @@ export function buildPageSendersFromEnv(env: NodeJS.ProcessEnv = process.env): B
     }
   }
 
+  // The webhook transport is left unwired rather than wired unsigned: a receiver that expects a
+  // signature would reject every page anyway, and silently dropping to unsigned is a downgrade
+  // nobody asked for.
+  //
+  // That rule used to hold for a secret too *short* to sign with and not for an **absent** one,
+  // which is the case every deployment is in — `PAGE_WEBHOOK_SECRET` occurs zero times in all three
+  // compose files. `webhookSecret === null` passed `{}`, `signingSecret` is optional on the sender,
+  // and the transport registered and sent with no signature header while `skipped` reported nothing:
+  // the comment above claimed a protection the code did not provide, which is the direction that
+  // reads as working (ADR-0337). So the absent case is a skip like every sibling in this function —
+  // slack on its token, sms on its vars, email on its credential pair — and `pagerduty` stays
+  // unconditional for the opposite reason, that it needs no credential at all.
   const webhookSecret = value(env, PAGE_WEBHOOK_SECRET_VAR);
-  try {
-    senders["webhook"] = new WebhookPageSender(
-      webhookSecret === null ? {} : { signingSecret: webhookSecret },
-    );
-  } catch (err) {
-    // A secret too short to sign with. The webhook transport is left unwired rather than wired
-    // unsigned: a receiver that expects a signature would reject every page anyway, and silently
-    // dropping to unsigned is a downgrade nobody asked for.
-    skipped.push(
-      `webhook (${PAGE_WEBHOOK_SECRET_VAR}: ${err instanceof Error ? err.message : String(err)})`,
-    );
+  if (webhookSecret === null) {
+    skipped.push(`webhook (${PAGE_WEBHOOK_SECRET_VAR} is not set, so a page could only be sent unsigned)`);
+  } else {
+    try {
+      senders["webhook"] = new WebhookPageSender({ signingSecret: webhookSecret });
+    } catch (err) {
+      skipped.push(
+        `webhook (${PAGE_WEBHOOK_SECRET_VAR}: ${err instanceof Error ? err.message : String(err)})`,
+      );
+    }
   }
 
   return { senders, report: { kinds: Object.keys(senders).sort(), skipped } };

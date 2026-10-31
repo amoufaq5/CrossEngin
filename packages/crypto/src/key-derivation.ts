@@ -46,6 +46,29 @@ export const CURSOR_KEY_DERIVATION_INFO = "crossengin.list-cursor.v1";
 export const KEK_KEY_DERIVATION_INFO = "crossengin.key-encryption.v1";
 
 /**
+ * The info string for a request-signing key, salted by **key id** rather than by tenant.
+ *
+ * A fourth label and not a reuse of any of the three, per the module header — but it differs from
+ * them on an axis none of those three has, and the difference is the whole of why this one is
+ * derived rather than stored. The column, cursor and key-encryption keys are **never disclosed**:
+ * they exist only inside this process. A request-signing key is the opposite — it is handed to a
+ * client, which is the only way a symmetric signature can work — so its secrecy rests on the key id
+ * being the unit of issuance and revocation, not on the key never leaving.
+ *
+ * Deriving it therefore buys exactly what it buys for the bounce webhook (ADR-0302's
+ * `HMAC-SHA256(platform_secret, "bounce-webhook:" || tenantId)`): one deployment secret instead of
+ * N stored ones, and no column anywhere holding material a reader could sign with. It does **not**
+ * buy per-key rotation — a key id's secret is a pure function of the deployment secret and the id,
+ * so rotating one client means issuing a new key id, which is the honest unit anyway and is what
+ * `meta.crypto_keys.key_version` and `rotated_from_key_id` already model for a stored key.
+ *
+ * Salted by key id because the key id is what the wire carries and what the verifier is told: a
+ * tenant-salted key would make every key id in a tenant interchangeable, which is precisely the
+ * collision `principals.ts` records as unfixable for an api-key spec.
+ */
+export const REQUEST_SIGNING_KEY_DERIVATION_INFO = "crossengin.request-signing.v1";
+
+/**
  * The human names the refusals use. A deployment reading `column encryption secret
  * refused` while it was configuring the cursor secret would be sent to the wrong
  * variable, which is the whole reason the label is a parameter.
@@ -58,6 +81,7 @@ export const KEK_KEY_DERIVATION_INFO = "crossengin.key-encryption.v1";
 const COLUMN_SECRET_LABEL = "column encryption secret";
 const CURSOR_SECRET_LABEL = "list-cursor encryption secret";
 const CREDENTIAL_PEPPER_LABEL = "credential pepper";
+const REQUEST_SIGNING_SECRET_LABEL = "request-signing secret";
 // Names the variable as well as the role, unlike its two siblings, and the asymmetry is the point:
 // those two each have an environment variable of their own, so naming the role points at it. The KEK
 // has none — it reads `COLUMN_ENCRYPTION_SECRET`, which is what makes the envelope a mode switch
@@ -411,4 +435,54 @@ export function columnKeyFingerprint(derivedKey: string): string {
     throw new Error("columnKeyFingerprint requires a non-empty derived key");
   }
   return sha256(derivedKey).slice(0, 16);
+}
+
+/**
+ * The same validation for the request-signing deployment secret, differing only in the variable
+ * the refusal names. A fourth parser for `parseCredentialPepper`'s stated reason: a secret good
+ * enough for a PHI column is good enough here, and only the name an operator is told to fix
+ * differs.
+ *
+ * @throws ColumnSecretRefused `unreplaced_placeholder`, `too_short` or `too_uniform`.
+ */
+export function parseRequestSigningSecret(raw: string): Uint8Array {
+  const bytes = new TextEncoder().encode(raw);
+  refuseWeakSecret(bytes, REQUEST_SIGNING_SECRET_LABEL);
+  return bytes;
+}
+
+/**
+ * HKDF-SHA256(ikm = secret, salt = keyId utf8, info = `REQUEST_SIGNING_KEY_DERIVATION_INFO`,
+ * `AEAD_KEY_BYTES`) — the shared secret a client signs a request with.
+ *
+ * **No generation parameter**, which is the one place this departs from its three siblings and is
+ * a decision rather than an omission. A generation is a *context for one key* there, so that a
+ * tenant's ciphertext can be re-encrypted from generation N to N+1 while the tenant stays the
+ * same. Here the key is held by a client: there is nothing to re-encrypt, and a second generation
+ * for one key id would mean two secrets simultaneously valid for one credential — a window in
+ * which a revoked key still works, which is the opposite of what issuing a new key id buys. So
+ * **the key id is the generation**, and `deriveRequestSigningKey(s, "k1")` is total.
+ *
+ * Bytes and not base64, for `deriveTenantCursorKey`'s reason: the consumer is `hmacSha256Hex` in
+ * this process and takes bytes. `AEAD_KEY_BYTES` is 32, comfortably above `hmacSha256Hex`'s
+ * 16-byte floor, so a derived key can never be refused by the primitive it is derived for.
+ *
+ * The key id is refused empty rather than salted with nothing — an empty salt is legal HKDF, so
+ * without the check every unnamed key would share one secret, which is the collision this
+ * derivation is salted by key id to prevent.
+ */
+export function deriveRequestSigningKey(secret: Uint8Array, keyId: string): Uint8Array {
+  refuseWeakSecret(secret, REQUEST_SIGNING_SECRET_LABEL);
+  if (keyId.length === 0) {
+    throw new Error("keyId must be non-empty: an empty salt would give every key one secret");
+  }
+  return new Uint8Array(
+    hkdfSync(
+      "sha256",
+      secret,
+      new TextEncoder().encode(keyId),
+      new TextEncoder().encode(REQUEST_SIGNING_KEY_DERIVATION_INFO),
+      AEAD_KEY_BYTES,
+    ),
+  );
 }

@@ -43,26 +43,109 @@ export interface ApiKeySpec {
 const DEFAULT_PRINCIPAL_ID = "00000000-0000-4000-8000-0000000000aa";
 
 /**
+ * The four fields of a `<first>:role:tenant[:principalId]` credential spec, and nothing about what
+ * they mean.
+ *
+ * Shared by `--api-key` and `--hmac-key`, which have the identical *grammar* and a different
+ * *defaulting rule* — so the shape, the arity refusal and the empty-field refusal are one
+ * definition while each caller decides what an omitted principal means. That split is the whole of
+ * why they are not one function: an api key's first field **is** the credential, so a bare spec
+ * cannot name a distinct principal and falls back to one shared placeholder; an hmac key id is
+ * **not** a credential, so it can be the principal reference itself. Collapsing them would make one
+ * of those two defaults wrong, and collapsing only the grammar costs nothing.
+ *
+ * `flag` is the flag the caller is parsing for, so each error names the one an operator typed. A
+ * shared message naming the wrong flag is ADR-0334's remedy-that-cannot-work in a parse error.
+ */
+interface CredentialSpecFields {
+  readonly first: string;
+  readonly role: string;
+  readonly tenantId: string;
+  /** `null` when the spec named none, as opposed to naming an empty one. */
+  readonly principalId: string | null;
+}
+
+function parseCredentialSpecFields(raw: string, flag: string, firstName: string): CredentialSpecFields {
+  const parts = raw.split(":");
+  if (parts.length < 3 || parts.length > 4) {
+    throw new Error(
+      `invalid ${flag} (expected ${firstName}:role:tenant[:principalId]): ${JSON.stringify(raw)}`,
+    );
+  }
+  const [first, role, tenantId, principalId] = parts;
+  if (!first || !role || !tenantId) {
+    throw new Error(`invalid ${flag} (empty field): ${JSON.stringify(raw)}`);
+  }
+  return {
+    first,
+    role,
+    tenantId,
+    principalId: principalId !== undefined && principalId.length > 0 ? principalId : null,
+  };
+}
+
+/**
  * Parses a `key:role:tenant[:principalId]` spec. The principalId defaults to a
  * fixed placeholder UUID so the common `key:role:tenant` form just works.
  */
 export function parseApiKeySpec(raw: string): ApiKeySpec {
-  const parts = raw.split(":");
-  if (parts.length < 3 || parts.length > 4) {
-    throw new Error(`invalid --api-key (expected key:role:tenant[:principalId]): ${JSON.stringify(raw)}`);
-  }
-  const [key, role, tenantId, principalId] = parts;
-  if (!key || !role || !tenantId) {
-    throw new Error(`invalid --api-key (empty field): ${JSON.stringify(raw)}`);
-  }
-  const named = principalId !== undefined && principalId.length > 0;
+  const f = parseCredentialSpecFields(raw, "--api-key", "key");
   return {
-    key,
-    role,
-    tenantId,
-    principalId: named ? principalId : DEFAULT_PRINCIPAL_ID,
-    namesPrincipal: named,
+    key: f.first,
+    role: f.role,
+    tenantId: f.tenantId,
+    principalId: f.principalId ?? DEFAULT_PRINCIPAL_ID,
+    namesPrincipal: f.principalId !== null,
   };
+}
+
+/** One HMAC signing key id → (role, tenant, principal) binding the server verifies against. */
+export interface HmacKeySpec {
+  readonly keyId: string;
+  readonly role: string;
+  readonly tenantId: string;
+  /** Always named by the spec — see `parseHmacKeySpec`. */
+  readonly principalId: string;
+}
+
+/**
+ * Parses a `keyId:role:tenant:principalId` spec, with **all four fields required**.
+ *
+ * The principal is required here where `--api-key` defaults it, and the reason is a correction to
+ * this increment's own first design, found by a live run rather than by reading. That draft used the
+ * key id as the principal reference, on the argument that an api key cannot do so — its only
+ * distinguishing field is the credential, and `DEFAULT_PRINCIPAL_ID`'s doc says hashing a credential
+ * into an id "turns an audit reader into an offline attacker" — while a key id is public in every
+ * signed request's header and so discloses nothing. **That argument is sound and the conclusion was
+ * wrong twice.**
+ *
+ * First, `ResolvedPrincipalSchema.principalId` is `z.string().uuid()`, so a key id is not a legal
+ * value at all: live, a correctly signed request answered **500** with
+ * `{"validation":"uuid","path":["principalId"]}` from the resolver's parse — the stage had verified
+ * the signature and the request failed one stage later on a contract this draft had not measured.
+ *
+ * Second, the obvious repair — derive a UUID from the key id — is **worse than the placeholder it
+ * was trying to beat**. ADR-0331 and ADR-0335 found that a principal id naming no `meta.users` row
+ * breaks every per-person surface through a foreign key, reported as a 503 for something permanent,
+ * and `surveyEnvelopeTenantReadiness`' sibling survey exists for exactly that class. One shared
+ * placeholder can be provisioned once; N derived ids would need N rows nobody knows to create, so
+ * deriving would have multiplied the defect rather than closing it.
+ *
+ * So the advantage this scheme really has over an api key is not that it can *default* an identity
+ * but that it can **demand** one: an api-key spec must keep its three-field form working for every
+ * existing deployment, while `--hmac-key` is new, so requiring the principal costs no deployment
+ * anything and a signing key always names a principal an operator provisioned. `principalKind` is
+ * `user`, because the spec names a UUID a person holds — the api-key path's `service_account`
+ * fallback exists only for the bare form this grammar does not have.
+ */
+export function parseHmacKeySpec(raw: string): HmacKeySpec {
+  const f = parseCredentialSpecFields(raw, "--hmac-key", "keyId");
+  if (f.principalId === null) {
+    throw new Error(
+      `invalid --hmac-key (principalId is required and must be a provisioned meta.users UUID; a signing key may not share a placeholder principal): ${JSON.stringify(raw)}`,
+    );
+  }
+  return { keyId: f.first, role: f.role, tenantId: f.tenantId, principalId: f.principalId };
 }
 
 export interface PrincipalWiring {
@@ -212,11 +295,47 @@ export function principalFromJwtClaims(input: PrincipalResolverInput, now: () =>
  */
 export function buildPrincipalWiring(
   specs: readonly ApiKeySpec[],
-  opts: { readonly now?: () => Date } = {},
+  opts: {
+    readonly now?: () => Date;
+    /**
+     * HMAC signing-key specs, whose principals are registered in the same resolver.
+     *
+     * **Required for the scheme to work at all, and that was found live rather than reasoned**: the
+     * gateway's stage verifies a signature and sets `authPrincipalRef` from the key lookup, and
+     * `resolve_principal` then runs for every scheme — so with the signature verifying and nothing
+     * registered under that reference, a correctly signed request answered **401
+     * `principal_not_found`**. The stage had done its job and the request was refused one stage
+     * later, which from a client's position is indistinguishable from a bad signature.
+     *
+     * An **optional second field** rather than a second positional parameter, because
+     * `buildPrincipalWiring(apiKeys)` is called at eight further sites in `node.ts` purely for
+     * `principalRoles`, which depends on no registration — so a required parameter would have made
+     * eight call sites state something they do not care about.
+     */
+    readonly hmacKeys?: readonly HmacKeySpec[];
+  } = {},
 ): PrincipalWiring {
   const now = opts.now ?? (() => new Date());
   const apiKeyResolver = new InMemoryPrincipalResolver();
   const byKey = new Map<string, ApiKeySpec>();
+  for (const spec of opts.hmacKeys ?? []) {
+    // Registered under the **principal reference** and not the key id, which are the same string
+    // for a bare spec and differ the moment one names a principal — `request-signing.ts`'s lookup
+    // answers `principalRef: spec.principalId`, so this is the key that must match it.
+    apiKeyResolver.register(spec.principalId, {
+      principalId: spec.principalId,
+      tenantId: spec.tenantId,
+      // `user` unconditionally, which is the one place this differs from the api-key loop below and
+      // is earned by the grammar: `parseHmacKeySpec` requires the principal, so there is no bare
+      // form and no shared placeholder — every signing key names a UUID an operator provisioned.
+      // The api-key path's `service_account` arm exists precisely for the form that does not.
+      principalKind: "user",
+      authScheme: "hmac_signature",
+      grantedScopes: [spec.role],
+      mfaProofAgeSeconds: null,
+      resolvedAt: now().toISOString(),
+    });
+  }
   for (const spec of specs) {
     byKey.set(spec.key, spec);
     apiKeyResolver.register(spec.key, {

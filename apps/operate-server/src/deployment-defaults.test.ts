@@ -417,6 +417,36 @@ describe("what the command must not carry", () => {
   });
 });
 
+describe("the absence request signatures are withheld on", () => {
+  const args = apiCommandArgs();
+
+  it("passes no --hmac-key, because the flag cannot be a shipped default at all", () => {
+    // Not a default decision of the usual kind and not blocked on a surface either (ADR-0376's two
+    // shapes): `--hmac-key keyId:role:tenant:principalId` requires a **provisioned `meta.users`
+    // UUID**, and that id is minted by the server during the documented bootstrap — the same reason
+    // `OPERATE_ADMIN_API_KEY`'s placeholder tenant can never name a real tenant. So a key written
+    // into `docker-compose.yml` would name a principal that does not exist until an operator has
+    // run four HTTP calls, and ADR-0331's finding is that such an id breaks every per-person
+    // surface through a foreign key. There is nothing a shipped compose could put here.
+    //
+    // The secret is the other half and is withheld with it: `REQUEST_SIGNING_SECRET` with no key is
+    // the `no_keys` absence, which boots and reports, so shipping the variable alone would be a
+    // secret in `.env.example` for a capability nothing uses.
+    expect(args.join(" ")).not.toContain("--hmac-key");
+    expect(readFileSync(COMPOSE, "utf8")).not.toContain("REQUEST_SIGNING_SECRET");
+  });
+
+  it("is reported at boot either way, so the absence is not silent", () => {
+    // The thing that makes withholding it honest rather than quiet: `formatRequestSigningSurvey`
+    // runs on every boot and says which it is, so an operator reading the log learns that signatures
+    // are not verified and why — ADR-0376's rule, where what wants confirming is that a signed
+    // request would be *accepted*, which is harder to confirm by trying than a refusal is.
+    const node = readFileSync(resolve(here, "./node.ts"), "utf8");
+    expect(node).toContain("formatRequestSigningSurvey");
+    expect(node).toContain("REQUEST_SIGNING_ABSENCE_REFUSES_BOOT");
+  });
+});
+
 describe("the documented bootstrap", () => {
   it("creates the tenant before it grants a membership in one", () => {
     // Every version of `.env.example`'s walkthrough omitted this, so the membership call answered

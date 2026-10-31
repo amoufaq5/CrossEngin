@@ -2,7 +2,11 @@ import type { ForwardedProto, HttpMethod, PipelineExecution } from "@crossengin/
 import type { AbacBatchEvaluator, AbacEvaluator, SensitiveFieldPolicy } from "@crossengin/auth";
 import type { CursorSealer, OpenApiCoverageGap } from "@crossengin/operate-runtime";
 import type { CursorSealingMode } from "./cursor-encryption.js";
-import type { IdempotencyStore, RateLimitChecker } from "@crossengin/api-gateway-runtime";
+import type {
+  HmacKeyLookup,
+  IdempotencyStore,
+  RateLimitChecker,
+} from "@crossengin/api-gateway-runtime";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import type { Region } from "@crossengin/residency";
 import { decideRegionRouting, type TenantResidencyDirectory } from "@crossengin/residency-runtime";
@@ -21,7 +25,12 @@ import {
 } from "@crossengin/operate-runtime";
 
 import { parseMethod, rawToIncoming, splitTarget, type RawHttpRequest, type RawHttpResponse } from "./http.js";
-import { buildPrincipalWiring, type ApiKeySpec, type JwtVerifyConfig } from "./principals.js";
+import {
+  buildPrincipalWiring,
+  type ApiKeySpec,
+  type HmacKeySpec,
+  type JwtVerifyConfig,
+} from "./principals.js";
 import { applyTenantStatusGate, type TenantStatusGateOptions } from "./tenant-status-gate.js";
 import { AbacObligationsUnevaluable, checkAbacObligations } from "./abac-obligations.js";
 import {
@@ -336,6 +345,29 @@ export interface BuildOperateHttpServerOptions {
     readonly directory: AbacAttributeDirectory;
     readonly onRefused?: (tenantId: string, userId: string) => void;
   };
+  /**
+   * The HMAC signing-key lookup, present exactly when this deployment declared `--hmac-key` and
+   * holds a usable `REQUEST_SIGNING_SECRET`.
+   *
+   * Grouped with its tolerance rather than offered as two sibling options, which is ADR-0342's
+   * rule: a tolerance with no lookup is a policy over a scheme this deployment does not serve, and
+   * the pair is formed from one resolution so it cannot be stated half way. `toleranceSeconds` is
+   * optional *within* the group because its absence has a correct answer
+   * (`DEFAULT_REQUEST_SIGNATURE_TOLERANCE_SECONDS`) where the lookup's does not.
+   */
+  readonly requestSigning?: {
+    readonly lookup: HmacKeyLookup;
+    /**
+     * The specs behind that lookup, so the principal resolver can register who each key is.
+     *
+     * Both halves in one group rather than two options, because a lookup without the specs is the
+     * defect a live run found: the signature verifies, `authPrincipalRef` is set, and
+     * `resolve_principal` answers nothing — a 401 one stage after the credential was accepted.
+     * Grouped, that state does not typecheck.
+     */
+    readonly keys: readonly HmacKeySpec[];
+    readonly toleranceSeconds?: number;
+  };
 }
 
 export interface BuiltOperateHttpServer {
@@ -365,7 +397,15 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
   });
   if (obligations.refusal !== null) throw new AbacObligationsUnevaluable(obligations);
 
-  const wiring = buildPrincipalWiring(options.apiKeys, options.now !== undefined ? { now: options.now } : {});
+  // The hmac specs reach the wiring as well as the lookup, and the two halves are separate for a
+  // stated reason: `requestSigning.lookup` answers *which key verifies this signature* and lives in
+  // `request-signing.ts` beside the derivation, while the resolver answers *who that key is* and
+  // belongs with every other principal. Passing only the first is the state a live run found —
+  // signature verified, then 401 `principal_not_found` one stage later.
+  const wiring = buildPrincipalWiring(options.apiKeys, {
+    ...(options.now !== undefined ? { now: options.now } : {}),
+    ...(options.requestSigning !== undefined ? { hmacKeys: options.requestSigning.keys } : {}),
+  });
   // Decorated here rather than inside `buildPrincipalWiring`: the directory needs a connection and
   // this is the seam that already takes deployment-supplied collaborators, so the api-key and JWT
   // paths both get attributes from one wrap instead of two.
@@ -396,6 +436,14 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     principalRoles: wiring.principalRoles,
     principalResolver,
     opaqueTokenLookup: wiring.opaqueTokenLookup,
+    ...(options.requestSigning !== undefined
+      ? {
+          hmacKeyLookup: options.requestSigning.lookup,
+          ...(options.requestSigning.toleranceSeconds !== undefined
+            ? { requestSignatureToleranceSeconds: options.requestSigning.toleranceSeconds }
+            : {}),
+        }
+      : {}),
     ...(options.jwt !== undefined
       ? {
           jwksProvider: options.jwt.jwksProvider,

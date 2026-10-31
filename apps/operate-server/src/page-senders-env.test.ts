@@ -20,11 +20,22 @@ describe("buildPageSendersFromEnv", () => {
     // configuration most likely to be right when it matters needs nothing.
     expect(built.report.kinds).toContain("pagerduty_phone");
     expect(built.report.kinds).toContain("pagerduty_business_hours");
-    expect(built.report.skipped).toEqual([]);
+    // Narrowed to this channel: with no environment at all every *other* transport is correctly
+    // skipped for want of a credential, so a claim about the whole list would be a claim about them.
+    expect(built.report.skipped.filter((s) => s.startsWith("pagerduty"))).toEqual([]);
   });
 
-  it("wires the webhook unsigned by default and signed when a secret is given", () => {
-    expect(buildPageSendersFromEnv({}).report.kinds).toContain("webhook");
+  it("leaves the webhook unwired when no secret is set, rather than wiring it unsigned", () => {
+    // This test used to be titled "wires the webhook unsigned by default" and asserted exactly
+    // that, which is the live state of every shipped deployment — `PAGE_WEBHOOK_SECRET` occurs zero
+    // times in all three compose files — while the wiring's own comment claimed the transport "is
+    // left unwired rather than wired unsigned". The comment was true of a *short* secret and false
+    // of an absent one, and the test pinned the false half as the intended behaviour (ADR-0372).
+    const absent = buildPageSendersFromEnv({});
+    expect(absent.report.kinds).not.toContain("webhook");
+    expect(absent.report.skipped.filter((s) => s.startsWith("webhook"))).toHaveLength(1);
+    expect(absent.report.skipped[0]).toContain(PAGE_WEBHOOK_SECRET_VAR);
+
     const signed = buildPageSendersFromEnv({ [PAGE_WEBHOOK_SECRET_VAR]: "y".repeat(32) });
     expect(signed.report.kinds).toContain("webhook");
     expect(signed.report.skipped).toEqual([]);
@@ -122,7 +133,7 @@ describe("email paging credentials", () => {
   it("wires a complete set, closing the one channel kind that had no transport", () => {
     const built = buildPageSendersFromEnv(FULL);
     expect(built.report.kinds).toContain("email_digest");
-    expect(built.report.skipped).toEqual([]);
+    expect(built.report.skipped.filter((s) => s.startsWith("email_digest"))).toEqual([]);
   });
 
   it("borrows the AWS access key, because that is an account credential and not an identity", () => {
@@ -136,7 +147,7 @@ describe("email paging credentials", () => {
       AWS_SECRET_ACCESS_KEY: SECRET,
     });
     expect(built.report.kinds).toContain("email_digest");
-    expect(built.report.skipped).toEqual([]);
+    expect(built.report.skipped.filter((s) => s.startsWith("email_digest"))).toEqual([]);
   });
 
   it("reports a half-configured set rather than guessing or silently skipping", () => {
@@ -170,7 +181,11 @@ describe("email paging credentials", () => {
     expect(buildPageSendersFromEnv({ PAGE_EMAIL_REGION: "   " }).report.kinds).not.toContain(
       "email_digest",
     );
-    expect(buildPageSendersFromEnv({ PAGE_EMAIL_REGION: "   " }).report.skipped).toEqual([]);
+    expect(
+      buildPageSendersFromEnv({ PAGE_EMAIL_REGION: "   " }).report.skipped.filter((s) =>
+        s.startsWith("email_digest"),
+      ),
+    ).toEqual([]);
   });
 
   it("accepts an endpoint override, for a VPC endpoint or a staging stand-in", () => {
@@ -205,7 +220,7 @@ describe("SMS paging credentials", () => {
   it("wires a complete set", () => {
     const built = buildPageSendersFromEnv(FULL);
     expect(built.report.kinds).toContain("sms");
-    expect(built.report.skipped).toEqual([]);
+    expect(built.report.skipped.filter((s) => s.startsWith("sms"))).toEqual([]);
   });
 
   it("reports a half-configured set rather than guessing or silently skipping", () => {

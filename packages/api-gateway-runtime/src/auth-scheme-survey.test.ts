@@ -13,22 +13,36 @@ import {
   type AuthSchemeServingInput,
 } from "./auth-scheme-survey.js";
 
-const BOTH: AuthSchemeServingInput = {
+// `ALL` rather than `ALL`: the input is three facts since `hmac_signature` became served, and
+// the rename is deliberate so a fourth gate cannot land under a name that claims a count.
+const ALL: AuthSchemeServingInput = {
   jwtVerifierConfigured: true,
   opaqueLookupConfigured: true,
+  hmacKeyLookupConfigured: true,
 };
 const NEITHER: AuthSchemeServingInput = {
   jwtVerifierConfigured: false,
   opaqueLookupConfigured: false,
+  hmacKeyLookupConfigured: false,
 };
 const API_KEY_ONLY: AuthSchemeServingInput = {
   jwtVerifierConfigured: false,
   opaqueLookupConfigured: true,
+  hmacKeyLookupConfigured: false,
+};
+const SIGNATURE_ONLY: AuthSchemeServingInput = {
+  jwtVerifierConfigured: false,
+  opaqueLookupConfigured: false,
+  hmacKeyLookupConfigured: true,
 };
 
 describe("servedAuthSchemesFor", () => {
-  it("both configured serves both", () => {
-    expect(servedAuthSchemesFor(BOTH)).toEqual(["bearer_jwt", "api_key_header"]);
+  it("all configured serves all three", () => {
+    expect(servedAuthSchemesFor(ALL)).toEqual([
+      "bearer_jwt",
+      "api_key_header",
+      "hmac_signature",
+    ]);
   });
 
   it("neither configured serves nothing", () => {
@@ -41,12 +55,23 @@ describe("servedAuthSchemesFor", () => {
 
   it("a jwt-only deployment serves bearer_jwt alone", () => {
     expect(
-      servedAuthSchemesFor({ jwtVerifierConfigured: true, opaqueLookupConfigured: false }),
+      servedAuthSchemesFor({
+        jwtVerifierConfigured: true,
+        opaqueLookupConfigured: false,
+        hmacKeyLookupConfigured: false,
+      }),
     ).toEqual(["bearer_jwt"]);
   });
 
+  it("a signature-only deployment serves hmac_signature alone", () => {
+    // The gate is per scheme, so a deployment issuing signing keys and no api keys is expressible —
+    // which is the state an unattended integration wants, and the state that would have read as
+    // "served" whatever the configuration said had the gate map not gained a third entry.
+    expect(servedAuthSchemesFor(SIGNATURE_ONLY)).toEqual(["hmac_signature"]);
+  });
+
   it("never reports a scheme the binary does not serve, whatever the configuration", () => {
-    for (const input of [BOTH, NEITHER, API_KEY_ONLY]) {
+    for (const input of [ALL, NEITHER, API_KEY_ONLY, SIGNATURE_ONLY]) {
       for (const scheme of servedAuthSchemesFor(input)) {
         expect(AUTH_SCHEME_SUPPORT[scheme].treatment).toBe("served");
       }
@@ -69,7 +94,7 @@ describe("servedAuthSchemesFor", () => {
   });
 
   it("the answer is a subset of SERVED_AUTH_SCHEMES in every configuration", () => {
-    for (const input of [BOTH, NEITHER, API_KEY_ONLY]) {
+    for (const input of [ALL, NEITHER, API_KEY_ONLY, SIGNATURE_ONLY]) {
       for (const scheme of servedAuthSchemesFor(input)) {
         expect(SERVED_AUTH_SCHEMES).toContain(scheme);
       }
@@ -97,15 +122,20 @@ describe("authSchemesByTreatment", () => {
 });
 
 describe("formatAuthSchemeSurvey", () => {
-  it("names the served schemes, the refusals and the indistinguishable pair", () => {
-    const line = formatAuthSchemeSurvey(BOTH);
-    expect(line).toContain("serving bearer_jwt and api_key_header");
+  it("names the served schemes, the refusals and the indistinguishable one", () => {
+    const line = formatAuthSchemeSurvey(ALL);
+    expect(line).toContain("serving bearer_jwt, api_key_header and hmac_signature");
     expect(line).toContain("refusing");
     for (const scheme of authSchemesByTreatment("refused")) {
       expect(line).toContain(scheme);
     }
     expect(line).toContain("bearer_opaque");
-    expect(line).toContain("hmac_signature");
+    // `hmac_signature` is in the *served* clause now, not the indistinguishable one, so asserting
+    // its mere presence anywhere in the line would pass whichever clause held it. The served clause
+    // above names it positionally, and this is the complement: it must not be described as naming no
+    // position on the wire, which is the sentence it carried before it had a header.
+    expect(line).not.toContain("hmac_signature name");
+    expect(line).not.toContain("and hmac_signature names no");
   });
 
   /**
@@ -139,7 +169,7 @@ describe("formatAuthSchemeSurvey", () => {
   });
 
   it("omits the unconfigured clause when both verifiers are present", () => {
-    expect(formatAuthSchemeSurvey(BOTH)).not.toContain("is served by this binary and has");
+    expect(formatAuthSchemeSurvey(ALL)).not.toContain("is served by this binary and has");
   });
 
   it("says 'none' rather than an empty gap when nothing is served", () => {
@@ -149,7 +179,7 @@ describe("formatAuthSchemeSurvey", () => {
   // Said either way, including when there is nothing to warn about — ADR-0376's rule, which is why
   // the affirmative case is asserted rather than only the finding.
   it("is a non-empty sentence in every configuration", () => {
-    for (const input of [BOTH, NEITHER, API_KEY_ONLY]) {
+    for (const input of [ALL, NEITHER, API_KEY_ONLY, SIGNATURE_ONLY]) {
       const line = formatAuthSchemeSurvey(input);
       expect(line.length).toBeGreaterThan(60);
       expect(line.startsWith("auth schemes:")).toBe(true);
@@ -157,7 +187,7 @@ describe("formatAuthSchemeSurvey", () => {
   });
 
   it("never renders a scheme name twice in one clause", () => {
-    const line = formatAuthSchemeSurvey(BOTH);
+    const line = formatAuthSchemeSurvey(ALL);
     const occurrences = (line.match(/api_key_header/g) ?? []).length;
     expect(occurrences).toBe(1);
   });
@@ -165,7 +195,7 @@ describe("formatAuthSchemeSurvey", () => {
   // A credential must not reach a log line, and the survey is the one place in this increment that
   // renders prose at boot: it reads the map and the two booleans and never a request.
   it("renders only declared names, never a token or a header value", () => {
-    const line = formatAuthSchemeSurvey(BOTH);
+    const line = formatAuthSchemeSurvey(ALL);
     for (const word of line.split(/[\s,;]+/)) {
       const bare = word.replace(/[^\w-]/g, "");
       if (bare.length === 0) continue;
@@ -177,7 +207,19 @@ describe("formatAuthSchemeSurvey", () => {
   // alphabetically or by treatment, which is what the order-preservation assertion above pins; this
   // one pins the conjunction, so a list rendered as `a, b, c` is a visible change.
   it("uses 'and' for two and a comma list for three", () => {
-    expect(formatAuthSchemeSurvey(BOTH)).toContain("bearer_jwt and api_key_header");
-    expect(formatAuthSchemeSurvey(BOTH)).toContain("api_key_query, basic and mtls");
+    // Both arms of `joinNames` exercised on one line: three served and three refused read as comma
+    // lists, and the two-member form is asserted on a deployment that configures exactly two.
+    expect(formatAuthSchemeSurvey(ALL)).toContain("bearer_jwt, api_key_header and hmac_signature");
+    expect(formatAuthSchemeSurvey(ALL)).toContain("api_key_query, basic and mtls");
+    expect(
+      formatAuthSchemeSurvey({
+        jwtVerifierConfigured: true,
+        opaqueLookupConfigured: true,
+        hmacKeyLookupConfigured: false,
+      }),
+    ).toContain("serving bearer_jwt and api_key_header");
+    // And the one-member form, which the indistinguishable clause is now the only user of.
+    expect(formatAuthSchemeSurvey(ALL)).toContain("bearer_opaque names no position on the wire");
+    expect(formatAuthSchemeSurvey(ALL)).toContain("a request in it is refused");
   });
 });

@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 20,912 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 21,036 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -2993,6 +2993,59 @@ report; `apps/operate-web` has none).
   the shipped packs. Thirteen mutations, thirteen caught; byte figures re-derived per pack (core
   **948.4 KiB / 338 routes**, grocery 1033.4 / 365 the widest).
 
+  ADR-0393 is the seventh user-directed increment and the class is **a credential the wire could not
+  name**. `hmac_signature` has been in `AUTH_SCHEMES` since Phase 1, in `STRONG_AUTH_SCHEMES` and in
+  `SCHEMES_REQUIRING_HTTPS` — *the repo called it strong and could not receive it* — while
+  `AUTH_SCHEME_SUPPORT` declared it `indistinguishable` because no wire position had been chosen.
+  Eight measurements taken before designing **refuted six of ADR-0384's own statements about it**,
+  and two of the refutations decided the design. **All six `AuthOutcome` members this scheme needs
+  already exist** with `AUTH_OUTCOME_SUCCEEDS` answering `false`, so there is no new outcome and **no
+  catalog migration** — which was named as stage 12's deciding advantage, and is the refutation that
+  settled the stage question. And *"the repo's ONE HMAC wire format"* is **wrong-when-written**:
+  three header spellings over **two incompatible canonical messages**, with the third already in the
+  tree when that reason was authored. The stated ground for reserving stage 12 — *that format
+  authenticates a payload rather than a principal* — is **right about the existing format and wrong
+  as a general claim**: `t=,v1=` carries no key id, while `ParsedAuthCredentialSchema.hmacKeyId`
+  proves the repo already knew a *credential* form needs one. An HMAC request signature is **one
+  fact with two consequences** (possession proves the principal; coverage binds the payload), which
+  is what SigV4 is.
+  **Stage 5, measured rather than preferred**: a forgery at stage 12 costs 4 store round trips, a
+  persisted decision row and **the claimed principal's rate-limit budget** — reproduced as a 429 for
+  the *legitimate* key-holder after five forgeries at limit 3 — against stage 5's 3.42 µs to 13.95 ms
+  of unauthenticated HMAC, bounded by `--max-request-body-route`. A **dedicated header** rather than
+  an `Authorization` token, on `api_key_header`'s precedent that a *served* credential need not live
+  there: it commits to no shared namespace, keeps the 11 negative `CE-HMAC-SHA256` fixtures valid,
+  and avoids `type: http`'s registered-token question. The message is **canonical JSON of an array**
+  (ADR-0346's rule) covering nine facts including the sorted query, because omitting it would let a
+  capture be replayed against a different `?filter=` — ADR-0359's class. The key is **derived and
+  stored nowhere**, because `KeyStore` is sign-only, `meta.crypto_keys` has no private-material
+  column and `meta.api_keys` is storeless; the stated cost is **no revocation without a restart**.
+  Three of the increment's own defects are the instructive part and two were found only by running
+  it. **The wire version had two spellings** and flipping the constant to `v2` made the signer and
+  its *own* parser disagree with no compile error — ADR-0288's list, in the module whose doc
+  anticipates that change — and fixing it exposed that the version is **not in the canonical
+  message**, so a `v2` header carried a byte-identical signature and a relabelled v1 capture would
+  verify; the version is derived from the domain tag now. **A valid signature answered 401 then
+  500**, because `resolve_principal` had nothing registered and `ResolvedPrincipalSchema.principalId`
+  is a **uuid** — so the first design's *"the key id is the principal reference"* is not a legal
+  value, and the obvious repair is **worse than the placeholder it was beating**, since ADR-0331's
+  and ADR-0335's finding is that a principal id naming no `meta.users` row breaks every per-person
+  surface and N derived ids need N rows nobody knows to create. `--hmac-key` **requires** the
+  principal, and the surviving argument is that this scheme can **demand** an identity where an
+  api-key spec must keep its three-field form working. A fourth, found by review: the stage
+  **re-read the raw header** instead of using `parsed.token`, so a padded well-formed header was
+  recognised and then refused `credential_malformed` — and the fix made the import unused, so
+  **`tsc` is what proves the second read is gone**. Verified live in eleven arms, including each of
+  method, path, query, host, scheme and body digest bound independently, and the three refusal causes
+  producing a **byte-identical body** under three different recorded reasons — because telling a
+  caller which half failed would make the header a **key-id oracle**.
+  Found in passing and live in another subsystem: **pages were sent unsigned**.
+  `buildPageSendersFromEnv` registered the webhook transport unconditionally and with
+  `PAGE_WEBHOOK_SECRET` absent — zero occurrences in all three compose files — sent with no signature
+  and reported nothing in `skipped`, while its own comment said the transport *"is left unwired
+  rather than wired unsigned"*. True of a **short** secret and false of an **absent** one, with
+  `page-dispatch.test.ts` pinning the unsigned behaviour as intended (ADR-0372's class).
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -3938,7 +3991,30 @@ packages exist at only one layer, noted below where that is true.
   Each carries its reason rather than an arm that cannot fire (ADR-0334).
   `RECOGNISABLE_AUTH_SCHEMES` and
   `SERVED_AUTH_SCHEMES` are **derived** from the map and never restated, which is what makes the
-  literal pin on the second one a fence rather than a second spelling. `resolveAuth` and
+  literal pin on the second one a fence rather than a second spelling.
+  **`hmac_signature` is `served` since ADR-0393, which leaves `indistinguishable` with one member**
+  — and the scheme left that treatment by *satisfying its argument* rather than by the argument being
+  withdrawn: the stated ground was that no wire position had been **chosen**, and choosing a
+  dedicated header is a position that commits to no shared namespace. `bearer_opaque` cannot follow,
+  because the position it would need is `Authorization: Bearer`, which `bearer_jwt` holds.
+  `REQUEST_SIGNATURE_HEADER` (`CrossEngin-Request-Signature`) lives here beside `API_KEY_HEADER` and
+  **not** beside the signer in `@crossengin/crypto`, on the split this file already draws for the
+  api-key header: crypto owns the *value* — the canonical message, the grammar, the sign and the
+  verify — and this package owns which position on the wire carries it. It is also the only split
+  that keeps one spelling, because `@crossengin/api-gateway` has **no workspace dependencies at all**
+  (measured: `zod` alone), so a constant declared in crypto could only reach the support map and the
+  security doc as a copy — and the doc's `name` is a machine value a client generator emits code
+  from. Deliberately distinct from `CrossEngin-Signature`, the published *payload*-authenticity
+  format: a verifier holding a value could not otherwise tell which canonical message applies, and a
+  payload signature names no principal, which is exactly why the old reason was right that *that*
+  format authenticates a payload rather than a principal.
+  **`hmacSignatureSha256`'s ambiguity is resolved in prose** rather than in the type, because the
+  type cannot carry it: the regex admits 64 hex characters and a raw HMAC-SHA256 *is* 64 hex
+  characters, so the field's value and its digest are indistinguishable by shape. With a live wire
+  format the distinction became consequential — `v1=<hex64>` is the **raw** MAC, so populating this
+  field from it directly would put a replayable value into something the schema's own doc says is
+  safe to persist and to log — and the digest is declared to be over the **hex text**, which is what
+  a log line would otherwise hold. `resolveAuth` and
   `ParsedAuthCredentialSchema` are **kept and callerless on purpose**: ADR-0337's test for a deletion
   is *a second spelling of live code* and this is the opposite — four of nine clauses are duplicated
   by the runtime, two are unique (the scheme allow-list, now superseded by the map, and an HMAC
@@ -3992,6 +4068,34 @@ packages exist at only one layer, noted below where that is true.
   because a token missing a claim cannot be compared. `REQUIRED_JWT_CLAIM_COSTS` carries each
   absence's cost so the boot line reads one back, and `nbf` is deliberately unrequirable because its
   absence means *valid from issuance*.
+  **`hmac_signature` is verified at `authenticate`, stage 5** (ADR-0393), and the position is
+  measured rather than preferred: a forgery at stage 12 — the stage the pipeline reserves for a
+  signature — costs 4 store round trips, a persisted decision row and **the claimed principal's
+  rate-limit budget**, reproduced as a 429 for the *legitimate* key-holder after five forgeries at
+  limit 3, against stage 5's 3.42 µs–13.95 ms of unauthenticated HMAC bounded by an instrument that
+  already exists. `HmacKeyLookup` answers **key bytes** and not a verdict, which is the one shape
+  decision: a `verify(keyId, header, facts)` seam would let a deployment answer "valid" with nothing
+  having verified anything, which is ADR-0384's own reason `resolveAuth` is callerless reproduced one
+  layer out — so a deployment chooses *which key* and this gateway decides *whether the signature is
+  good*. The facts come off the **typed** `IncomingRequest`, including `bodySha256`, so the arm needs
+  no cast and covers a digest the adapter already computed. The credential comes from `parsed.token`
+  and **not** from a second read of the header, which is how the arm was first written: `parseAuthHeader`
+  recognises on the trimmed value and carries it, so re-reading discarded that normalisation and a
+  padded well-formed header was *recognised* as a credential and then refused `credential_malformed`
+  — and the fix made `REQUEST_SIGNATURE_HEADER_LOWER` an unused import, so **`tsc` is what proves the
+  second read is gone**. One body for an unknown key, a stale clock and a bad signature, with three
+  different recorded reasons: telling a caller which half failed would turn the header into a
+  **key-id oracle**, and the split is the bounce webhook's model (one opaque answer, a distinct
+  reason logged) rather than `verifyStripeWebhook`'s. `timestamp_outside_tolerance` maps to
+  `expired_token` and the other two to `invalid_signature`, because a stale clock is the one of the
+  three a well-behaved client hits, so collapsing it would hide a clock-drift incident inside a
+  forgery count. `parseAuthHeader` recognises the header **last among the message positions and
+  before the residual**, chosen so **no request that resolves today resolves differently**: the
+  header is new and has no behaviour to preserve, while every position above it does.
+  `AuthSchemeServingInput` gained a **third required** fact for it — required rather than
+  optional-with-a-default, which is ADR-0386's finding applied before it could happen again, since an
+  optional field defaulting to the *safe* value makes its own omission unobservable.
+
   **A credential this build does not serve is recognised and refused, where it used to be
   unrecognised and served** (ADR-0384). `authenticate` had no arm for an unserved scheme, so
   `bearer_opaque` with no matcher, `basic`, `mtls` and `hmac_signature` reached the **no-credential
@@ -4597,6 +4701,45 @@ packages exist at only one layer, noted below where that is true.
   calling `setAAD`, so requiring it buys nothing from GCM and everything from the signature — an
   unbound seal still encrypts and still authenticates, so nothing looks wrong while it is valid in
   every context instead of the one it was issued for.
+  **`request-signature.ts` is the HMAC request-signature credential** (ADR-0393), and the three pins
+  stay for `aead.ts`' reason: a MAC over a *derived* key registers nothing, so `hmac-sha256` is
+  already a `KeyAlgorithm` and nothing here becomes a registerable cipher. The module owns the
+  **value** and deliberately declares **no header name** — which position carries it is the gateway's
+  contract (`REQUEST_SIGNATURE_HEADER` in `@crossengin/api-gateway`, beside `API_KEY_HEADER`), and
+  that is the only split keeping one spelling, since that package has no workspace dependencies.
+  `canonicalRequestSignatureMessage` is **canonical JSON of an array** opening with a domain tag, on
+  `cursorSealAad`'s and `dataKeyWrapAad`'s stated rule: a joined form would rest on an assumption
+  about which characters a path, a query key or a key id cannot contain, and this repo has a measured
+  instance of that assumption being wrong — `computeRequestHashInputs` joins on `|` and both
+  `IncomingRequest.path` and a spec-supplied `principalId` admit one, so the nearest precedent for
+  *identifying a request* is the one construction this must not copy. `null` for an empty body is
+  unambiguous inside an array, which is why no `"no-body"` sentinel is needed. The query is covered
+  and **sorted**, because omitting it would let a capture be replayed against a different `?filter=`
+  (ADR-0359's class), with each multi-value's own order preserved since `?sort=a&sort=b` and
+  `?sort=b&sort=a` are different requests. `operationId` is **absent** and said so at the
+  definition: the verifier runs at stage 5 and `match_route` is stage 7.
+  **`REQUEST_SIGNATURE_WIRE_VERSION` is derived from the domain tag**, and the reason is a mutation
+  this increment ran on itself: the version is *not* inside the canonical message, so with the two
+  declared independently a `v2` header carried a **byte-identical** signature to the v1 one — a
+  captured v1 header relabelled `v2=` would verify, and the version field would name a message format
+  the signature is not over. `HEADER_RE` is built from that constant and from the key-id and hex
+  patterns rather than spelling any of them twice, which closed the live half of the same class:
+  flipping the version made `signRequest` emit `v2=` while its **own** parser answered `null`, with
+  no compile error, in the module whose doc anticipates exactly that change.
+  Three refusals (`malformed_header`, `timestamp_outside_tolerance`, `signature_mismatch`) and not
+  `CURSOR_REFUSALS`' single reason, because the difference is which primitive decides: GCM fails
+  identically for a tampered ciphertext, a wrong tenant and a rotated key, while these are three
+  separate comparisons each of which can be reported honestly — and the **timestamp is checked
+  before the signature**, so each reason is the first true thing about the request. What a *caller*
+  is told is a separate decision made at the gateway. `DEFAULT_REQUEST_SIGNATURE_TOLERANCE_SECONDS`
+  is here beside the primitive it bounds and is deliberately **not** shared with the repo's other
+  300s, which bound different questions (how long a *payload* stays acceptable, how far a *clock* may
+  drift): the same threat shape is a reason to pick the same number, not to share the constant.
+  `deriveRequestSigningKey` is the **fourth** info tag in `key-derivation.ts`, with the axis none of
+  the three siblings has — the column, cursor and KEK keys are never disclosed, while a
+  request-signing key is handed to a client, so its secrecy rests on the key id being the unit of
+  issuance — and it takes **no generation**, because a second generation for one key id would mean
+  two secrets simultaneously valid for one credential: **the key id is the generation**.
   `deriveTenantCursorKey` is the second derivation, returning **raw bytes** where the column key
   returns base64 (`aeadSeal` takes bytes, `pgp_sym_encrypt` takes text), and the two are separated
   **only by their info strings** — which is what keeps one compromise from being two, so a leaked
@@ -6692,6 +6835,43 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   rather than casting, since `CredentialRecord.status` is a bare `string` constrained only by the
   column's CHECK, so a row from a later binary takes the fail-closed arm instead of indexing the map
   with a key it does not have.
+  **`--hmac-key keyId:role:tenant:principalId` declares a signing key, and only the secret comes
+  from the environment** (ADR-0393, `request-signing.ts`). This is the first credential flag here
+  that puts **nothing** secret on argv, and the split is not a concession to ADR-0301 but an exact
+  reading of it: the first field is a key **id**, which travels in the clear in every signed
+  request's header, so publishing it via `ps` discloses nothing — while `REQUEST_SIGNING_SECRET` has
+  no flag at all. So `api-key-source.ts`' whole apparatus (an environment route beside the flag, a
+  four-value source verdict, an argv-exposure map) is **not reproduced**, because the thing it exists
+  to move is not on the flag. Per-key secrets are `HKDF-SHA256(secret, salt = keyId)` and **stored
+  nowhere**, because `KeyStore` is sign-only (`getPublicMaterial` throws for a MAC key and
+  `KeyRecord` has no secret field, so a *verifier* cannot get bytes out of it), `meta.crypto_keys`
+  has no private-material column and `meta.api_keys` is declared storeless — four derivation
+  precedents exist and no storage route does. The stated cost is that **a key cannot be revoked
+  without a restart**, since the key set is the flag set.
+  **All four fields are required**, which is where this differs from `--api-key` and is a correction
+  to the increment's own first design found by a live run: that draft used the key id as the
+  principal reference, on the sound argument that an api key cannot (its only distinguishing field
+  is the credential, and `DEFAULT_PRINCIPAL_ID`'s doc says hashing one into an id turns an audit
+  reader into an offline attacker). The conclusion was wrong twice.
+  `ResolvedPrincipalSchema.principalId` is `z.string().uuid()`, so a key id is **not a legal value** —
+  live, a correctly signed request answered **500** with `{"validation":"uuid","path":["principalId"]}`
+  from the resolver's parse, one stage after the signature verified. And deriving a UUID instead is
+  **worse than the placeholder it was beating**: ADR-0331 and ADR-0335 found that a principal id
+  naming no `meta.users` row breaks every per-person surface through a foreign key, and one shared
+  placeholder can be provisioned once where N derived ids would need N rows nobody knows to create.
+  So the advantage this scheme really has is not that it can *default* an identity but that it can
+  **demand** one: an api-key spec must keep its three-field form working for every existing
+  deployment, while this flag is new. `parseCredentialSpecFields` shares the **grammar** with
+  `--api-key` and not the meaning — one arity rule, one empty-field rule, each error naming the flag
+  an operator typed. `buildPrincipalWiring` takes the specs as an optional second field so the eight
+  `node.ts` call sites that want only `principalRoles` are unaffected, and registering them is
+  load-bearing rather than tidy: without it the stage verified a signature, set `authPrincipalRef`,
+  and `resolve_principal` answered **401 `principal_not_found`** — indistinguishable to a client from
+  a bad signature. `REQUEST_SIGNING_ABSENCE_REFUSES_BOOT` splits on *did the operator ask for this*:
+  `no_keys` is reported (a deployment that declared none has not asked, so refusing would refuse one
+  that works) while `secret_absent` and `secret_refused` refuse, because a deployment that declared
+  keys and cannot verify a single signature would otherwise find out as a 401 per request.
+
   **A session carries every role its membership grants** (ADR-0369), over three functions that are
   one round trip: `roleFor` returns the row's `SessionRoles {primaryRole, secondaryRoles}`,
   `sessionScope` composes the `scope` claim (primary first, de-duplicated, secondary order
@@ -11420,8 +11600,24 @@ three make the rest honest, cheap or verifiable.
 10. **No outbound webhook delivery**, so a tenant cannot subscribe to any platform event — and with
     the signal bridge unregistered the platform has neither event ingress nor egress. Cheapest item
     in the tier: the HMAC primitive exists and the drain loop is the mechanism.
-11. ~~**Five of eight declared auth schemes are denied at runtime.**~~ — **the refusal half is
-    closed by ADR-0384, and this entry was wrong about four of its five schemes.** *"The refusal is
+11. ~~**Five of eight declared auth schemes are denied at runtime.**~~ — **the refusal half closed
+    by ADR-0384; `hmac_signature` is now SERVED (ADR-0393), which left `bearer_opaque` as the one
+    `indistinguishable` member.** That increment refuted **six** further statements of ADR-0384's,
+    two of them decisive: all six `AuthOutcome` members the scheme needs already exist, so the
+    catalog migration named as stage 12's deciding advantage does not exist either; and *"the repo's
+    ONE HMAC wire format"* is wrong-when-written (three header spellings over two incompatible
+    canonical messages). This entry's *"`hmac_signature` is cheap"* was **refuted and inverted** by
+    the pre-design measurement and then **re-inverted by building it**: the dear part was taken to
+    be a key-id→secret store, and deriving (`KeyStore` is sign-only, `meta.crypto_keys` has no
+    private-material column) made that free — while the genuinely dear parts turned out to be the
+    two the measurement had not reached, a **principal id that must be a provisioned uuid** and a
+    canonical message that cannot be a delimiter join. What remains of this item is `basic`,
+    `api_key_query` and `mtls` — each **refused by name**, which is the honest state — plus
+    `bearer_opaque`, whose position `bearer_jwt` holds. Implementing any of the three is a
+    scheme-by-scheme product decision and `mtls` is dearest in *deployment* terms (no edge in this
+    workspace forwards a client certificate).
+
+    The original entry, kept because its measurements are what the fix rests on: *"The refusal is
     honest and named"* was true of **`basic` alone** — the only unserved scheme the parser could
     even produce — and it was honest in neither half: `scheme_unsupported_basic` was the recorded
     stage **reason**, never an `AuthOutcome` (there was no such member), and the `authOutcome` it
@@ -12097,7 +12293,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 387 records; 308 Accepted, 79 Proposed (the
+title or status change cannot drift. 388 records; 309 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

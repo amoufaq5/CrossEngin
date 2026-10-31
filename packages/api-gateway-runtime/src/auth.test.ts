@@ -517,6 +517,9 @@ describe("parseAuthHeader", () => {
       fixtureRequest({ headers: { "x-api-key": "k" } }),
       fixtureRequest({ query: { [API_KEY_QUERY_PARAM]: "k" } }),
       fixtureRequest({ clientCertSha256: "c".repeat(64) }),
+      fixtureRequest({
+        headers: { "crossengin-request-signature": `k=k1,t=1700000000,v1=${"a".repeat(64)}` },
+      }),
     ];
     for (const request of samples) {
       const parsed = parseAuthHeader(request);

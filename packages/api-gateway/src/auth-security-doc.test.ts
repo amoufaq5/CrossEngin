@@ -10,6 +10,7 @@ import {
   AUTH_SCHEMES,
   AUTH_SCHEME_SECURITY_DOC,
   AUTH_SCHEME_SUPPORT,
+  REQUEST_SIGNATURE_HEADER,
   SERVED_AUTH_SCHEMES,
   securityDocMatchesTreatment,
   type AuthScheme,
@@ -215,7 +216,7 @@ describe("securityDocMatchesTreatment", () => {
     const unserved = AUTH_SCHEMES.filter((s) => AUTH_SCHEME_SECURITY_DOC[s] === null);
     const treatments = new Set(unserved.map((s) => AUTH_SCHEME_SUPPORT[s].treatment));
     expect(treatments).toEqual(new Set(["refused", "indistinguishable", "not_a_credential"]));
-    expect(unserved.length).toBe(6);
+    expect(unserved.length).toBe(AUTH_SCHEMES.length - SERVED_AUTH_SCHEMES.length);
     for (const scheme of unserved) {
       const variant = {
         ...AUTH_SCHEME_SECURITY_DOC,
@@ -259,7 +260,7 @@ describe("AUTH_SCHEME_SECURITY_DOC is a valid OpenAPI Security Scheme Object", (
   it("every non-null doc has no defects", () => {
     const docs = nonNullDocs();
     // Floor: a pass over zero docs would be the vacuity this whole block is about.
-    expect(docs.length).toBe(2);
+    expect(docs.length).toBe(SERVED_AUTH_SCHEMES.length);
     for (const [scheme, doc] of docs) {
       expect(securitySchemeObjectDefects(doc), `${scheme}: ${doc.key}`).toEqual([]);
     }
@@ -276,14 +277,28 @@ describe("AUTH_SCHEME_SECURITY_DOC is a valid OpenAPI Security Scheme Object", (
   });
 
   it("an apiKey doc carries `in` and `name` and no `scheme` or `bearerFormat`", () => {
+    // Each doc's `name` is asserted against the header *its own scheme* is recognised from, not
+    // against one constant: this used to read `toBe(API_KEY_HEADER)` for every apiKey doc, which
+    // was true while there was one and would have silently required a second served scheme to
+    // claim the api-key header. The header constants are the subject here, so they are named
+    // rather than re-derived from `recognisedFrom`, which is prose.
+    const EXPECTED_HEADER: Partial<Record<AuthScheme, string>> = {
+      api_key_header: API_KEY_HEADER,
+      hmac_signature: REQUEST_SIGNATURE_HEADER,
+    };
     const apiKeys = nonNullDocs().filter(([, d]) => d.type === "apiKey");
-    expect(apiKeys.length).toBe(1);
-    for (const [, doc] of apiKeys) {
+    expect(apiKeys.length).toBeGreaterThanOrEqual(1);
+    for (const [scheme, doc] of apiKeys) {
       expect(doc.in).toBe("header");
-      expect(doc.name).toBe(API_KEY_HEADER);
+      // Every apiKey scheme must be in the table, so a third one cannot pass by being unlisted.
+      expect(Object.keys(EXPECTED_HEADER)).toContain(scheme);
+      expect(doc.name).toBe(EXPECTED_HEADER[scheme]);
       expect(doc.scheme).toBeUndefined();
       expect(doc.bearerFormat).toBeUndefined();
     }
+    // Non-vacuity: both of today's apiKey schemes were visited, and their headers differ.
+    expect(apiKeys.map(([k]) => k).sort()).toEqual(["api_key_header", "hmac_signature"]);
+    expect(API_KEY_HEADER).not.toBe(REQUEST_SIGNATURE_HEADER);
   });
 
   it("an http doc carries `scheme` and no `in` or `name`", () => {
@@ -379,9 +394,9 @@ describe("securitySchemeObjectDefects fires", () => {
 describe("the `key` field", () => {
   it("is unique across the map", () => {
     const keys = nonNullDocs().map(([, d]) => d.key);
-    expect(keys.length).toBe(2);
+    expect(keys.length).toBe(SERVED_AUTH_SCHEMES.length);
     expect(new Set(keys).size).toBe(keys.length);
-    expect([...keys].sort()).toEqual(["apiKeyAuth", "bearerAuth"]);
+    expect([...keys].sort()).toEqual(["apiKeyAuth", "bearerAuth", "requestSignatureAuth"]);
   });
 
   it("is a legal components.securitySchemes key", () => {
@@ -441,8 +456,15 @@ describe("API_KEY_HEADER has one spelling", () => {
     expect(code).toContain("export function parseAuthHeader");
     expect(code).toContain("request.headers[API_KEY_HEADER]");
     // ...and it is doing real work rather than the file simply never mentioning the header: the raw
-    // source carries it three times, all in comments, which is why this test strips.
-    expect(countOccurrences(raw, LITERAL)).toBe(3);
+    // source carries it in comments, which is why this test strips.
+    //
+    // A **floor and not an exact count**, which this increment changed after the exact one failed on
+    // a comment: it was `toBe(3)` and ADR-0393 added a fourth mention in prose explaining why the
+    // signature header sits after `x-api-key` in `parseAuthHeader`. The property is *the raw source
+    // mentions it and the stripped source does not* — the number is incidental, and pinning it made
+    // every comment that names the header a test edit, which is ADR-0288's maintained list inside a
+    // fence. The assertion that carries the weight is the `code` one above and below.
+    expect(countOccurrences(raw, LITERAL)).toBeGreaterThanOrEqual(1);
     expect(countOccurrences(code, LITERAL)).toBe(0);
   });
 
@@ -527,7 +549,11 @@ describe("the served set and the doc set agree", () => {
     expect([...SERVED_AUTH_SCHEMES].sort()).toEqual([...documented].sort());
     // Literal pin, the idiom `auth-resolution.test.ts` uses for `AUTH_OUTCOMES`' length: widening
     // what this binary serves is then a visible change here, beside the doc it owes.
-    expect([...SERVED_AUTH_SCHEMES].sort()).toEqual(["api_key_header", "bearer_jwt"]);
+    expect([...SERVED_AUTH_SCHEMES].sort()).toEqual([
+      "api_key_header",
+      "bearer_jwt",
+      "hmac_signature",
+    ]);
   });
 
   it("and every served scheme's doc names a recognising position", () => {

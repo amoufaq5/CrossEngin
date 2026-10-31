@@ -6,8 +6,8 @@ import {
 } from "@crossengin/api-gateway";
 
 /**
- * The two configuration facts that narrow `SERVED_AUTH_SCHEMES` to what a *deployment* can actually
- * authenticate.
+ * The three configuration facts that narrow `SERVED_AUTH_SCHEMES` to what a *deployment* can
+ * actually authenticate.
  *
  * Both are read off a live `GatewayRuntime` through its `authSchemeServing` getter rather than
  * re-derived by the caller, which is the whole reason the getter exists: a boot line computed from
@@ -20,6 +20,17 @@ export interface AuthSchemeServingInput {
   readonly jwtVerifierConfigured: boolean;
   /** An opaque-token lookup reaches the runtime, so `api_key_header` can be resolved. */
   readonly opaqueLookupConfigured: boolean;
+  /**
+   * An HMAC key lookup reaches the runtime, so `hmac_signature` can be verified.
+   *
+   * **Required rather than optional-with-a-default**, which is the one shape decision here and is
+   * ADR-0386's finding applied before it could happen again: an optional field whose default is the
+   * *safe* value makes its own omission unobservable, so a caller that forgot it would report the
+   * scheme unconfigured and refuse every signed request while the boot line agreed with the
+   * refusal — a wrong answer nothing contradicts. Required, a caller that forgets it does not
+   * compile.
+   */
+  readonly hmacKeyLookupConfigured: boolean;
 }
 
 /**
@@ -31,10 +42,11 @@ export interface AuthSchemeServingInput {
  * configuration says, which is the shape of defect this increment is about.
  */
 const SERVED_SCHEME_GATE: Readonly<
-  Record<"bearer_jwt" | "api_key_header", keyof AuthSchemeServingInput>
+  Record<"bearer_jwt" | "api_key_header" | "hmac_signature", keyof AuthSchemeServingInput>
 > = Object.freeze({
   bearer_jwt: "jwtVerifierConfigured",
   api_key_header: "opaqueLookupConfigured",
+  hmac_signature: "hmacKeyLookupConfigured",
 });
 
 const isGatedScheme = (scheme: AuthScheme): scheme is keyof typeof SERVED_SCHEME_GATE =>
@@ -61,6 +73,7 @@ const isGatedScheme = (scheme: AuthScheme): scheme is keyof typeof SERVED_SCHEME
 const GATE_SUBJECT: Readonly<Record<keyof AuthSchemeServingInput, string>> = Object.freeze({
   jwtVerifierConfigured: "no JWKS verifier configured",
   opaqueLookupConfigured: "no opaque-token lookup configured",
+  hmacKeyLookupConfigured: "no HMAC signing-key lookup configured",
 });
 
 /** The schemes this deployment can authenticate: served by the binary **and** configured here. */
@@ -128,8 +141,13 @@ export function formatAuthSchemeSurvey(input: AuthSchemeServingInput): string {
     `auth schemes: serving ${joinNames([...served])}`,
     ...unconfigured,
     `refusing ${joinNames([...refused])} by name`,
-    `${joinNames([...indistinguishable])} name no position on the wire, so a request in either is` +
-      ` refused as an unrecognized credential rather than by scheme`,
+    // Phrased for however many members there are rather than for two: this clause read "a request
+    // in **either**" while `indistinguishable` was `bearer_opaque` and `hmac_signature`, and
+    // serving the second left a boot line offering a choice of one. The count is a property of the
+    // map, so the sentence is derived from it.
+    `${joinNames([...indistinguishable])} ${indistinguishable.length === 1 ? "names" : "name"} no` +
+      ` position on the wire, so a request in ${indistinguishable.length === 1 ? "it" : "any of them"}` +
+      ` is refused as an unrecognized credential rather than by scheme`,
   ];
   return sentences.join("; ");
 }

@@ -429,33 +429,46 @@ describe("AUTH_SCHEME_SUPPORT", () => {
     }
   });
 
-  it("the two served schemes are the two the runtime authenticates", () => {
-    expect(SERVED_AUTH_SCHEMES).toEqual(["bearer_jwt", "api_key_header"]);
+  it("the three served schemes are the three the runtime authenticates", () => {
+    expect(SERVED_AUTH_SCHEMES).toEqual(["bearer_jwt", "api_key_header", "hmac_signature"]);
   });
 
   /**
-   * Two, and both for the same stated reason: no wire position has been *chosen* for them here, so
-   * reserving one in order to refuse it would be a partial commitment, and a client using the
-   * spelling we did not reserve is served anonymously — the defect restated one spelling over.
+   * One, and the reason it is one rather than two is the whole of what `hmac_signature` needed: the
+   * member's stated ground was that no wire position had been *chosen*, so reserving one in order to
+   * refuse it would be a partial commitment. Choosing a **dedicated header** is a position that
+   * commits to no shared namespace, so the scheme left this treatment by being served rather than by
+   * the argument being withdrawn — `bearer_opaque` cannot follow it, because the position it would
+   * need is `Authorization: Bearer`, which `bearer_jwt` already holds.
    */
-  it("bearer_opaque and hmac_signature are the indistinguishable schemes", () => {
+  it("bearer_opaque is the one indistinguishable scheme", () => {
     const indistinguishable = AUTH_SCHEMES.filter(
       (s) => AUTH_SCHEME_SUPPORT[s].treatment === "indistinguishable",
     );
-    expect([...indistinguishable].sort()).toEqual(["bearer_opaque", "hmac_signature"]);
+    expect([...indistinguishable].sort()).toEqual(["bearer_opaque"]);
   });
 
   /**
-   * The finding that moved `hmac_signature` off `refused`: the repo's one HMAC wire format is
-   * `SIGNATURE_HEADER_NAME` (`packages/sdk/src/webhooks.ts:251`) over `crypto/hmac.ts`'s
-   * `t=<unix>,v1=<hex>`, and it authenticates a *payload*. `PIPELINE_STAGES` reserves
-   * `validate_request_signature` for exactly that, so reading it as a principal credential would
-   * conflate request authentication with message authenticity.
+   * The payload-versus-principal distinction that kept `hmac_signature` unserved is **kept and
+   * answered** rather than dropped: the reason still names it, because the resolution is that the
+   * two formats are separate headers, not that the distinction was imaginary. `CrossEngin-Signature`
+   * remains the payload-authenticity format and `REQUEST_SIGNATURE_HEADER` is the credential, so no
+   * verifier has to guess which canonical message a value is over — which is exactly the conflation
+   * the old reason refused.
+   *
+   * `validate_request_signature` is deliberately **no longer named here**: that stage stays a stub,
+   * and claiming it as this scheme's site would be false. Nothing can declare that a route requires
+   * a signature — `RouteDefinition` has 14 fields and 0 signature-related, and `meta.gateway_routes`
+   * 17 columns and 0 — so that stage is where a *per-route* policy would go once something can
+   * declare one, and the measurement is in ADR-0393.
    */
-  it("hmac_signature's reason names the payload-versus-principal conflation", () => {
+  it("hmac_signature's reason keeps the payload-versus-principal distinction and answers it", () => {
     const reason = AUTH_SCHEME_SUPPORT.hmac_signature.reason;
-    expect(reason).toContain("validate_request_signature");
+    expect(reason).toContain("CrossEngin-Signature");
     expect(reason).toContain("payload");
+    expect(reason).toContain("canonical message");
+    // It must not claim the reserved stage, which is still a stub.
+    expect(reason).not.toContain("validate_request_signature");
   });
 
   it("anonymous is the only scheme that is not a credential", () => {
@@ -486,35 +499,42 @@ describe("AUTH_SCHEME_SUPPORT", () => {
     expect(AUTH_SCHEME_SUPPORT.bearer_opaque.reason).toContain("grant");
   });
 
-  it("RECOGNISABLE_AUTH_SCHEMES is served plus refused and excludes the other three", () => {
+  it("RECOGNISABLE_AUTH_SCHEMES is served plus refused and excludes the other two", () => {
     expect([...RECOGNISABLE_AUTH_SCHEMES].sort()).toEqual(
-      ["api_key_header", "api_key_query", "basic", "bearer_jwt", "mtls"].sort(),
+      ["api_key_header", "api_key_query", "basic", "bearer_jwt", "hmac_signature", "mtls"].sort(),
     );
     expect(RECOGNISABLE_AUTH_SCHEMES).not.toContain("anonymous");
     expect(RECOGNISABLE_AUTH_SCHEMES).not.toContain("bearer_opaque");
-    expect(RECOGNISABLE_AUTH_SCHEMES).not.toContain("hmac_signature");
   });
 
   it("authSchemeTreatment answers the map", () => {
     expect(authSchemeTreatment("bearer_jwt")).toBe("served");
     expect(authSchemeTreatment("basic")).toBe("refused");
-    expect(authSchemeTreatment("hmac_signature")).toBe("indistinguishable");
+    expect(authSchemeTreatment("hmac_signature")).toBe("served");
     expect(authSchemeTreatment("bearer_opaque")).toBe("indistinguishable");
     expect(authSchemeTreatment("anonymous")).toBe("not_a_credential");
   });
 
   /**
-   * Both of this repo's existing scheme sets are asserted against the new map rather than beside
-   * it: `STRONG_AUTH_SCHEMES` names two schemes this gateway refuses (`mtls`, `hmac_signature`),
-   * which is coherent — strength is a property of the scheme and serving is a property of this
-   * deployment — and the assertion pins that they are *allowed* to disagree, so a later reader does
-   * not "fix" one against the other.
+   * `STRONG_AUTH_SCHEMES` is asserted against the map rather than beside it, and the property is
+   * that the two are *allowed* to disagree: strength is a property of the scheme and serving is a
+   * property of this deployment, so a later reader must not "fix" one against the other.
+   *
+   * It was two members and is now one. `hmac_signature` left by being **served**, which confirms
+   * the property rather than weakening it — the set did not change, the treatment did — and `mtls`
+   * remains, strong and unserved, because no edge in this workspace forwards a client certificate.
    */
-  it("STRONG_AUTH_SCHEMES deliberately includes schemes this gateway does not serve", () => {
+  it("STRONG_AUTH_SCHEMES deliberately includes a scheme this gateway does not serve", () => {
     const strongUnserved = [...STRONG_AUTH_SCHEMES].filter(
       (s) => AUTH_SCHEME_SUPPORT[s].treatment !== "served",
     );
-    expect([...strongUnserved].sort()).toEqual(["hmac_signature", "mtls"]);
+    expect([...strongUnserved].sort()).toEqual(["mtls"]);
+    // Non-vacuity on the other side: a strong scheme that *is* served is the case this set would be
+    // wrong to exclude, and there are now two of them.
+    const strongServed = [...STRONG_AUTH_SCHEMES].filter(
+      (s) => AUTH_SCHEME_SUPPORT[s].treatment === "served",
+    );
+    expect([...strongServed].sort()).toEqual(["bearer_jwt", "hmac_signature"]);
   });
 });
 

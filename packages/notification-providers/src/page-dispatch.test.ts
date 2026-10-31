@@ -427,7 +427,13 @@ describe("the signed webhook", () => {
     expect(f.calls[0]?.headers[PAGE_SIGNATURE_HEADER]).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it("sends unsigned when no secret is configured", async () => {
+  // `signingSecret` is optional by design, so this is a live branch of the sender rather than a
+  // deployment state: whether anything reaches it is the boot wiring's decision, not this file's.
+  // Today that wiring does reach it — `buildPageSendersFromEnv`'s absent-secret arm registers the
+  // webhook transport unsigned and reports nothing in `skipped`, so every shipped deployment pages
+  // unsigned (apps/operate-server/src/page-senders-env.ts). Unfixed as of this comment; the title
+  // says "constructed with" so the test cannot be read as what a deployment does.
+  it("sends unsigned when constructed with no signing secret", async () => {
     const f = fakeFetch([{ ok: true, status: 200, text: "ok" }]);
     await new WebhookPageSender({ fetch: f.fetch }).send(CONTENT, "https://ops.test/page");
     expect(f.calls[0]?.headers[PAGE_SIGNATURE_HEADER]).toBeUndefined();

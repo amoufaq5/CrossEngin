@@ -20,7 +20,11 @@ import { describe, expect, it } from "vitest";
 import { API_KEY_QUERY_PARAM } from "./auth.js";
 import { InMemoryJwksProvider } from "./auth.js";
 import { HandlerRegistry } from "./dispatcher.js";
-import { GatewayRuntime, type OpaqueTokenLookup } from "./runtime.js";
+import {
+  GatewayRuntime,
+  type HmacKeyLookup,
+  type OpaqueTokenLookup,
+} from "./runtime.js";
 import {
   InMemoryIdempotencyStore,
   InMemoryPrincipalResolver,
@@ -91,11 +95,18 @@ function request(overrides: Partial<IncomingRequest> = {}): IncomingRequest {
 }
 
 const ALWAYS_UNKNOWN: OpaqueTokenLookup = { async lookup() { return null; } };
+/**
+ * Configured and resolving nothing — the hmac counterpart of the empty JWKS key set, and for the
+ * same reason: it makes the lookup *configured* without making any key id resolve, so a refusal
+ * still comes from the credential rather than from the scheme.
+ */
+const HMAC_NO_SUCH_KEY: HmacKeyLookup = { async lookup() { return null; } };
 
 function buildRuntime(
   opts: {
     readonly jwks?: InMemoryJwksProvider;
     readonly opaque?: OpaqueTokenLookup;
+    readonly hmac?: HmacKeyLookup;
   } = {},
 ): GatewayRuntime {
   return new GatewayRuntime({
@@ -121,6 +132,7 @@ function buildRuntime(
     clock: { now: () => new Date(NOW) },
     ...(opts.jwks !== undefined ? { jwksProvider: opts.jwks } : {}),
     ...(opts.opaque !== undefined ? { opaqueTokenLookup: opts.opaque } : {}),
+    ...(opts.hmac !== undefined ? { hmacKeyLookup: opts.hmac } : {}),
   });
 }
 
@@ -443,7 +455,11 @@ describe("the stage and the support map agree", () => {
    * drives every recognisable scheme through the real 17 stages.
    */
   it("pins SERVED_AUTH_SCHEMES by literal, so the set cannot change unnoticed", () => {
-    expect([...SERVED_AUTH_SCHEMES].sort()).toEqual(["api_key_header", "bearer_jwt"]);
+    expect([...SERVED_AUTH_SCHEMES].sort()).toEqual([
+      "api_key_header",
+      "bearer_jwt",
+      "hmac_signature",
+    ]);
   });
 
   it("every recognisable scheme either authenticates or is refused by the stage", async () => {
@@ -453,9 +469,21 @@ describe("the stage and the support map agree", () => {
       ["api_key_header", request({ headers: { "x-api-key": "k" } })],
       ["api_key_query", request({ query: { [API_KEY_QUERY_PARAM]: "k" } })],
       ["mtls", request({ clientCertSha256: "a".repeat(64) })],
+      [
+        "hmac_signature",
+        request({
+          headers: {
+            // Well-formed, and resolving no key: a malformed header would be refused
+            // `credential_malformed` before any lookup, which passes this fence for the wrong
+            // reason — the refusal would come from the header's shape rather than from the
+            // credential being unknown, so the lookup arm would go unexercised.
+            "crossengin-request-signature": `k=k1,t=1700000000,v1=${"a".repeat(64)}`,
+          },
+        }),
+      ],
     ];
     expect(samples.map(([s]) => s).sort()).toEqual([...RECOGNISABLE_AUTH_SCHEMES].sort());
-    // Both served schemes must be **configured** here, or the fence below is unsound in the
+    // Every served scheme must be **configured** here, or the fence below is unsound in the
     // direction that hides the thing it checks. An unconfigured verifier deliberately folds into
     // `scheme_not_supported` (ADR-0384's third-candidate decision: `credential_not_found` would be
     // a claim about a lookup that never happened — ADR-0331), so with no JWKS a served `bearer_jwt`
@@ -468,6 +496,7 @@ describe("the stage and the support map agree", () => {
     const runtime = buildRuntime({
       opaque: ALWAYS_UNKNOWN,
       jwks: new InMemoryJwksProvider({ keys: [] }),
+      hmac: HMAC_NO_SUCH_KEY,
     });
     for (const [scheme, req] of samples) {
       const { response, execution } = await runtime.handleRequest(req);
@@ -494,6 +523,7 @@ describe("the stage and the support map agree", () => {
     expect(buildRuntime().authSchemeServing).toEqual({
       jwtVerifierConfigured: false,
       opaqueLookupConfigured: false,
+      hmacKeyLookupConfigured: false,
     });
     expect(
       buildRuntime({
@@ -501,8 +531,13 @@ describe("the stage and the support map agree", () => {
           keys: [{ kid: "k", publicKeyBase64: kp.publicKeyBase64 }],
         }),
         opaque: ALWAYS_UNKNOWN,
+        hmac: HMAC_NO_SUCH_KEY,
       }).authSchemeServing,
-    ).toEqual({ jwtVerifierConfigured: true, opaqueLookupConfigured: true });
+    ).toEqual({
+      jwtVerifierConfigured: true,
+      opaqueLookupConfigured: true,
+      hmacKeyLookupConfigured: true,
+    });
   });
 
   /**

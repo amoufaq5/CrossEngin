@@ -239,10 +239,16 @@ import {
   buildPrincipalWiring,
   formatScopeRoleReading,
   parseApiKeySpec,
+  parseHmacKeySpec,
   parseJwksKeySpec,
   type JwksKeySpec,
   type JwtVerifyConfig,
 } from "./principals.js";
+import {
+  REQUEST_SIGNING_ABSENCE_REFUSES_BOOT,
+  formatRequestSigningSurvey,
+  resolveRequestSigning,
+} from "./request-signing.js";
 import {
   formatApiKeySpecSource,
   resolveApiKeySpecs,
@@ -976,6 +982,31 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     console.warn(`[auth] ${formatApiKeySpecSource(apiKeySource)}`);
   } else {
     console.info(`[auth] ${formatApiKeySpecSource(apiKeySource)}`);
+  }
+  /*
+   * HMAC request signatures. Resolved here, before the store, because the two refusing absences are
+   * properties of the flags and the environment alone — nothing is read and no connection is needed
+   * — so an operator who declared keys and set no secret meets that at the top of the log rather
+   * than after a database wait.
+   *
+   * The key *ids* come from argv and the secret only from the environment, which is the one place
+   * this binary departs from needing an `api-key-source.ts`-shaped merge: a key id is not a
+   * credential, so there is nothing on the command line to move.
+   */
+  const hmacKeySpecs = options.hmacKeys.map(parseHmacKeySpec);
+  const requestSigning = resolveRequestSigning(hmacKeySpecs, process.env);
+  if (requestSigning.kind === "absent") {
+    // The level is read off the total map, not compared against an absence name, so a fourth
+    // absence has to declare which side of the boot it falls on before it can pick a level.
+    if (REQUEST_SIGNING_ABSENCE_REFUSES_BOOT[requestSigning.absence]) {
+      console.error(`[auth] ${formatRequestSigningSurvey(requestSigning)}`);
+      throw new Error(
+        `--hmac-key was declared and request signatures cannot be verified: ${requestSigning.detail}`,
+      );
+    }
+    console.info(`[auth] ${formatRequestSigningSurvey(requestSigning)}`);
+  } else {
+    console.info(`[auth] ${formatRequestSigningSurvey(requestSigning)}`);
   }
   const { store, allocator, settingsStore, conn, columnKey } = await resolveStore(
     options,
@@ -3893,6 +3924,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     allowUncoveredSettlement: options.allowUncoveredSettlement,
     ...(abac !== undefined ? { abac } : {}),
     ...(sessionRevocation !== undefined ? { sessionRevocation } : {}),
+    ...(requestSigning.kind === "configured"
+      ? { requestSigning: { lookup: requestSigning.lookup, keys: hmacKeySpecs } }
+      : {}),
     ...(regionGuard !== undefined ? { regionGuard } : {}),
     ...(extraRoutes !== undefined ? { extraRoutes } : {}),
     ...(entitlementResolver !== undefined ? { entitlementResolver } : {}),
@@ -4727,6 +4761,14 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           // `buildOperateHttpServer`: a tenant serving its own activated manifest serves the same
           // tenant's users, so a revoked membership must stop working there as well.
           ...(sessionRevocation !== undefined ? { sessionRevocation } : {}),
+          // And the signing keys, for the same reason one notch stronger: a key id *names its
+          // tenant*, so the lookup resolves `ctx.tenantId` from the credential exactly as an api key
+          // does — which means a signed request is routed to a tenant's own gateway and would then
+          // find no scheme to authenticate it. Dropping it here is the shape ADR-0392's addendum
+          // found live at this very call site with `openApiCoverage`, so the two travel together.
+          ...(requestSigning.kind === "configured"
+            ? { requestSigning: { lookup: requestSigning.lookup, keys: hmacKeySpecs } }
+            : {}),
           // Dropped here until review found it, and the drop was the exact shape the field was
           // designed against: `compileOperateServer` registers `/v1/meta/openapi` unconditionally,
           // so a tenant **does** get the route, and without this the document it serves declared
