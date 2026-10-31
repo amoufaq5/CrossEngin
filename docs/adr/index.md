@@ -1,10 +1,10 @@
 # ADR index
 
-389 records. Generated from the ADR files themselves — regenerate rather than
+390 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 310  **Proposed:** 79
+- **Accepted:** 311  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -401,3 +401,4 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0392](0392-the-contract-nobody-could-read.md) | The contract nobody could read | — | Accepted | 2026-10-30 |
 | [0393](0393-the-credential-the-wire-could-not-name.md) | The credential the wire could not name | — | Accepted | 2026-10-31 |
 | [0394](0394-the-fact-the-gateway-could-not-establish.md) | The fact the gateway could not establish | — | Accepted | 2026-10-31 |
+| [0395](0395-a-refusal-that-was-not-true.md) | A refusal that was not true | — | Accepted | 2026-10-31 |

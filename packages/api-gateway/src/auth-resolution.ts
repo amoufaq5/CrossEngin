@@ -162,7 +162,7 @@ export const EMPTY_CERTIFICATE_FINGERPRINT =
  *
  * Validated **here and not only in the schema**, because `IncomingRequestSchema` is never parsed on
  * the request path — see the note on its `superRefine` — so this is the only thing between a trusted
- * edge forwarding a malformed value and `recogniseCredential` handing it to the `mtls` arm as a
+ * edge forwarding a malformed value and `parseAuthHeader` handing it to the `mtls` arm as a
  * credential. A trusted edge is trusted to be honest, not to be correctly configured.
  *
  * Case-folded first: Caddy's `{http.request.tls.client.fingerprint}` is lowercase hex, and an edge
@@ -199,14 +199,22 @@ export function parseForwardedClientCertFingerprint(value: string | null): strin
  * this gateway treats it but **who establishes the fact** — see its own entry — and that belongs in a
  * reason, which is where it is.
  *
- * The two `indistinguishable` members are deliberately not given a wire position in order to be
- * refused. A refusal arm is a wire commitment too, and a *partial* one is the defect restated: a
- * client using the spelling we did not reserve is served anonymously again, which is what this
- * increment exists to end. So each says in its own `reason` what would have to be decided first,
- * and the **residual** verdict — an `Authorization` header in any scheme this gateway does not
- * serve — is what covers an attempt in either of them. `api_key_query` is the opposite case and is
- * refused: reserving `?api_key=` commits only to never *accepting* it, which is already the
- * decision, so a client using another spelling is no worse off than before.
+ * An `indistinguishable` member is deliberately not given a wire position in order to be refused. A
+ * refusal arm is a wire commitment too, and a *partial* one is the defect restated: a client using
+ * the spelling we did not reserve is served anonymously again, which is what ADR-0384 exists to end.
+ * So it says in its own `reason` what would have to be decided first, and the **residual** verdict —
+ * an `Authorization` header in any scheme this gateway does not serve — is what covers an attempt in
+ * it. `api_key_query` is the opposite case and is refused: reserving `?api_key=` commits only to
+ * never *accepting* it, which is already the decision, so a client using another spelling is no
+ * worse off than before.
+ *
+ * **Phrased for however many members the treatment has, rather than for a count**, because the count
+ * has moved twice and the prose did not: this paragraph read "the two `indistinguishable` members"
+ * from ADR-0384, when there genuinely were two, through ADR-0393 serving `hmac_signature` and
+ * ADR-0394 serving `mtls` — so it asserted two where the live map has one, in the present tense,
+ * two lines above an entry that contradicted it. `auth-scheme-survey.ts` already took this lesson
+ * for the boot line it renders; this is the same correction on the declaration itself. The member
+ * count is derivable from the map and is asserted in the tests; do not restate it here.
  */
 export const AUTH_SCHEME_SUPPORT: Readonly<Record<AuthScheme, AuthSchemeSupport>> = Object.freeze({
   bearer_jwt: {
@@ -227,11 +235,68 @@ export const AUTH_SCHEME_SUPPORT: Readonly<Record<AuthScheme, AuthSchemeSupport>
     reason:
       "the absence of a credential, not one of its kinds — the value a principal and a pipeline row carry when nothing was presented",
   },
+  /**
+   * Refused on two measured grounds, and the reason is written for the audience that reads it:
+   * **this string is interpolated verbatim into the 401 body** (`runtime.ts`'s scheme refusal →
+   * `problems.ts`' `detail`), which `runtime-auth-schemes.test.ts` pins as a design property — "so
+   * the body says why". A refusal reason here is therefore a client-facing security statement, not
+   * a comment, and the previous one was **false**.
+   *
+   * What it said: that a Basic arm "would have to re-implement that route's lockout to avoid being
+   * the way around it". That was wrong **when it was written**, not stale — `credentialIsLocked` was
+   * exported from the login and already imported by a second credential surface 13 days and 49
+   * commits earlier, so a Basic arm would have *reused* the lockout exactly as the password-change
+   * route does. Measured, and it survived two increments that edited this very map because `basic`
+   * was the only refused scheme whose reason **content** no test read (`api_key_query` has three
+   * assertions on its own). The fence is now in `auth-resolution.test.ts`.
+   *
+   * What is true, and why neither clause is about implementation effort:
+   *
+   * 1. **Basic cannot name a tenant, and that is structural rather than unbuilt.** RFC 7617 carries
+   *    a userid and a password and nothing else, while an authorization answer here is a function of
+   *    (user, tenant): `meta.users` has no tenant column, one person legitimately holds different
+   *    roles in different tenants, `membershipFor` needs the tenant for both its scope filter and
+   *    its transaction context, and there is no by-user membership read and no default-tenant
+   *    concept anywhere. A sub-grammar inside the userid is not available either, because the
+   *    **first colon is RFC 7617's own delimiter** — so `tenant:user:password` is not
+   *    representable. The login route takes the tenant as a third field for exactly this reason.
+   * 2. **The cost is a property of the credential, not of this implementation.** A password
+   *    verification is a deliberate scrypt derivation — measured here at a 105 ms median with a
+   *    throughput ceiling of ~35/second on four cores, flat from 8 concurrent upward because the
+   *    libuv pool is 4 wide and shared with fs and dns — and a scheme that re-presents the password
+   *    on every request pays it on every request. Caching the decision is refused separately: the
+   *    repo has four cached directories and all four cache a fact about a row keyed by something the
+   *    caller *names*, with no precedent for caching a verdict derived from a secret the caller
+   *    *sends*, and a positive cache is unsafe rather than merely unhelpful — a hit short-circuits
+   *    `verifyLogin`, which is where `credentialIsLocked` is read and `recordSuccess` clears the
+   *    counter, so a rotated password and a locked account would both keep being served for the TTL.
+   *
+   * Only **(1)** is published. The cost is a true ground for the decision and is deliberately not in
+   * the body: a latency figure is an operational fact about this deployment that an anonymous caller
+   * has no business being handed, and it is not a durable form of the measurement either — the three
+   * Ed25519 numbers this repo holds span an order of magnitude (0.012 ms bare verify, 0.133 ms sign
+   * with key construction, 0.152 ms per chain entry with canonicalisation), so "N times dearer"
+   * reads as 693x, 793x or 8,770x on one true cost depending only on which is picked, and a draft of
+   * this reason published the middle one as "about a thousand times" (ADR-0378's rule: record the
+   * mechanism, not the figure). A third true fact — that nothing in the repo or its documentation
+   * asks for this scheme — is withheld for a different reason: it argues against *building* it and
+   * is no answer to the caller in front of you.
+   *
+   * What the reason does carry is what to send instead, which is the half a 401 exists to provide
+   * (ADR-0334: a remedy that cannot work is worse than none, and no remedy at all is worse still).
+   * It carries no ADR reference, unlike the string it replaces: an internal document number is
+   * unactionable to an anonymous caller and is the one part of the old reason that could not have
+   * been useful even had the rest been true.
+   */
   basic: {
     treatment: "refused",
     recognisedFrom: "an Authorization header with the Basic auth-scheme",
     reason:
-      "not implemented: the deployment's password hashes back the login route (ADR-0358), which mints a session token, so a password-on-every-request scheme would be a second credential path over the same hashes and would have to re-implement that route's lockout to avoid being the way around it",
+      "not served: Basic carries a userid and a password and nothing else, while an authorization " +
+      "answer here needs a tenant as well — one person holds different roles in different tenants " +
+      "and the userid cannot name which, because the first colon is this scheme's own delimiter. " +
+      `Send a machine credential in ${API_KEY_HEADER}, or exchange a password for a session token ` +
+      "at the login route and send that",
   },
   hmac_signature: {
     treatment: "served",
@@ -242,8 +307,13 @@ export const AUTH_SCHEME_SUPPORT: Readonly<Record<AuthScheme, AuthSchemeSupport>
   api_key_query: {
     treatment: "refused",
     recognisedFrom: "an api_key query parameter",
+    // The ADR citation this used to carry is gone for the reason given on `basic`: the string is
+    // interpolated into the 401 body, and an internal document number is unactionable to the caller
+    // reading it. The *rule* it referenced is restated in one clause instead, which is the half that
+    // travels — a credential must not go where it will be copied — and the comparison to the argv
+    // rule belongs here in the source rather than in the response.
     reason:
-      `refused deliberately and not merely unbuilt: a credential in a URL is copied into access logs, proxy logs and Referer, which is ADR-0301's argv rule one transport over — present the key in ${API_KEY_HEADER} instead`,
+      `refused deliberately and not merely unbuilt: a credential in a URL is copied into access logs, proxy logs and Referer, and a credential must not travel where it will be copied — present the key in ${API_KEY_HEADER} instead`,
   },
   mtls: {
     treatment: "served",

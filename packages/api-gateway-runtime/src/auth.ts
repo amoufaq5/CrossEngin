@@ -392,7 +392,49 @@ export function parseAuthHeader(request: IncomingRequest): ParseAuthHeaderResult
   // authenticated another, silently — which is the shape this whole increment exists to refuse, and
   // which the comment below used to claim could not happen while the code above it did it.
   if (header !== undefined) {
-    return { kind: "unrecognized", schemeToken: authSchemeToken(header.trim()) };
+    // `trimStart` and **not** `trim`, because `authSchemeToken`'s own rule is *no space means no
+    // auth-scheme, so the value is potentially a bare token and nothing is reported* — and trimming
+    // the **end** destroys the very space that rule reads. `Authorization: Basic ` and
+    // `Authorization: Bearer ` reported `schemeToken: null` under `trim`, i.e. the record claimed
+    // **no scheme was named at all** for a value that plainly named one, while `Negotiate x` and
+    // `Digest x` reported theirs correctly. So the arm already had the capability and a trailing
+    // space was what hid it.
+    //
+    // **This is latent, and the first draft of this comment claimed it was live.** Measured at the
+    // right layer afterwards: a trailing space in a header value **cannot arrive over either
+    // transport**. Written to a raw socket, bypassing any client's normalisation, Node's HTTP parser
+    // hands up `"Basic"` for `Authorization: Basic ` (RFC 9110 §5.5 — a field value excludes leading
+    // and trailing whitespace, and llhttp implements it), and `new Headers({authorization: "Basic "})
+    // .get("authorization")` is `"Basic"` on the Fetch path for the same reason. What *does* keep it
+    // is a direct `buildIncomingRequest` caller, whose `headers` is a plain record — the same seam
+    // ADR-0394 made `EdgeTrust` required at, and which has one non-test caller today. So this is a
+    // fail-closed correctness fix at a seam no client reaches and an embedder does, not the alarm
+    // gap the draft described. That gap is **real and belongs to a different change**: an alarm
+    // keyed on `scheme_unsupported_basic` does miss `Authorization: Basic` with no credential,
+    // which records `credential_in_unrecognized_scheme` — and this change moves it in **neither**
+    // direction, because that reason comes from the `basic` recognition arm two screens up,
+    // `"Basic"` does not start with `"basic "`, and the value reaches this arm identically before
+    // and after. Closing it means recognising a credential-less `Basic` as the scheme it names,
+    // which is the paragraph below.
+    //
+    // `trimStart` is correct where both alternatives are not: `trim` loses `"Basic "` and
+    // `"Bearer "`, and leaving the value untrimmed loses `"  Negotiate x"` and `"\tNegotiate YIIZ"`,
+    // because a leading space puts the first space at index 0 and `authSchemeToken` refuses that.
+    // The bare-token protection the rule exists for is untouched — `"ce_live_abc"` and
+    // `" ce_live_abc"` report `null` under all three.
+    //
+    // The leading-space pair is deliberately **not** `"  Basic x"`, which an earlier draft of this
+    // comment named: that shape answers `"Basic"` under the transform and **cannot reach this arm
+    // at all**, because `trim()` on it starts with `"basic "` and the recognition above claims it
+    // as a basic credential. So a shape table measured against `authSchemeToken` in isolation is
+    // not a table about this call site, and the two differ exactly where a leading space meets a
+    // scheme this gateway *does* recognise. The reachable table is in `auth.test.ts`.
+    //
+    // Deliberately **not** extended to recognising `Authorization: Basic ` as a *basic credential*
+    // with an empty token, which would make the outcome `scheme_not_supported` and is arguably more
+    // honest still: that changes the answer for the served `Bearer ` spelling in the same stroke,
+    // and a served scheme's outcome is not this change's subject.
+    return { kind: "unrecognized", schemeToken: authSchemeToken(header.trimStart()) };
   }
   // `mtls` is **last**, and the order is load-bearing rather than arbitrary: an edge performing
   // mutual TLS sets `clientCertSha256` on *every* request it forwards, so checking it first would

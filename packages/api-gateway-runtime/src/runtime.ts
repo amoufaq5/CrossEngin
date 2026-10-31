@@ -852,7 +852,7 @@ export class GatewayRuntime {
       // There is deliberately **no malformed arm** here, where the other three served schemes each
       // have one, and the absence is structural rather than an omission: a fingerprint reaches this
       // stage only through `buildIncomingRequest`, which drops it unless the edge is trusted and then
-      // puts it through `parseForwardedClientCertFingerprint`. So by the time `recogniseCredential`
+      // puts it through `parseForwardedClientCertFingerprint`. So by the time `parseAuthHeader`
       // can answer `mtls` at all, the token is 64 lowercase hex characters — there is no shape left
       // to refuse. `credential_malformed` would also be the wrong *subject*: it is a claim about what
       // a caller sent, and on this path the caller sent no credential at all. The edge did.

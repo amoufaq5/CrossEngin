@@ -460,6 +460,72 @@ describe("parseAuthHeader", () => {
   });
 
   /**
+   * The **argument** passed to `authSchemeToken`, which nothing checked. That function is
+   * thoroughly tested as a pure transform — including `" Bearer abc"` → `null` — and its call site
+   * here was `header.trim()`, which destroys the one character the transform reads: *no space means
+   * no auth-scheme*. So `Authorization: Basic ` reported `schemeToken: null`, a record claiming no
+   * scheme was named at all for a value that plainly named one.
+   *
+   * The caller these shapes come from is a **direct `buildIncomingRequest` caller**, not an HTTP
+   * client: measured on a raw socket, Node's parser strips trailing OWS per RFC 9110 §5.5, and
+   * `Headers` does the same on the Fetch path, so neither transport can carry one. `headers` on
+   * that builder is a plain record and keeps it. That makes this fail-closed hardening at an
+   * embedding seam rather than a live request-path fix, and the distinction is in the subject's own
+   * comment because a first draft of it asserted the latter from a measurement of the former.
+   *
+   * The table is the comment's own claim made checkable: **`trimStart` is the only one of the three
+   * that answers every shape**, and the two groups below are what refute the alternatives. `trim`
+   * loses the trailing-space pair; leaving the value untrimmed loses the leading-space pair,
+   * because a leading space puts the first space at index 0 and `authSchemeToken` refuses that. The
+   * last group is the protection the rule exists for and is untouched by all three — a bare token
+   * reports nothing, with or without surrounding space, because a truncated prefix of a secret is
+   * still a prefix of a secret.
+   */
+  describe("the residual arm reads the scheme off a trimStart'd value", () => {
+    const tokenFor = (authorization: string): string | null => {
+      const result = parseAuthHeader(fixtureRequest({ headers: { authorization } }));
+      expect(result.kind, `${JSON.stringify(authorization)} should reach the residual`).toBe(
+        "unrecognized",
+      );
+      return result.kind === "unrecognized" ? result.schemeToken : null;
+    };
+
+    // Refutes `trim`: the caller's own trailing space is what used to hide the scheme.
+    it.each([
+      ["Basic ", "Basic"],
+      ["Bearer ", "Bearer"],
+    ])("reports the scheme for %j, which trim() loses", (header, expected) => {
+      expect(tokenFor(header)).toBe(expected);
+    });
+
+    // Refutes leaving it untrimmed: `indexOf(" ")` would answer 0 and the transform refuses that.
+    // Deliberately not `"  Basic x"`, which the transform answers `"Basic"` for and which **never
+    // reaches this arm** — `trim()` on it starts with `"basic "`, so it is recognised as a basic
+    // credential two screens above. A leading-space shape only reaches the residual when its scheme
+    // is one this gateway does not recognise, which is what these two are.
+    it.each([
+      ["  Negotiate x", "Negotiate"],
+      ["\tNegotiate YIIZ", "Negotiate"],
+    ])("reports the scheme for %j, which an untrimmed value loses", (header, expected) => {
+      expect(tokenFor(header)).toBe(expected);
+    });
+
+    it.each([
+      ["Negotiate YIIZ", "Negotiate"],
+      ["Digest realm=x", "Digest"],
+    ])("reports the scheme for %j, which every spelling gets", (header, expected) => {
+      expect(tokenFor(header)).toBe(expected);
+    });
+
+    it.each([["ce_live_abc"], [" ce_live_abc"]])(
+      "still reports nothing for the bare token %j",
+      (header) => {
+        expect(tokenFor(header)).toBeNull();
+      },
+    );
+  });
+
+  /**
    * The residual is last, which this pins: the pre-ADR-0384 parser already placed `x-api-key` ahead
    * of it, and the generalisation is that a verdict meaning *nothing recognised this* must not
    * outrank something that did.

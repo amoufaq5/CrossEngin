@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  API_KEY_HEADER,
   AUTH_OUTCOMES,
   AUTH_OUTCOME_SUCCEEDS,
   AUTH_SCHEMES,
@@ -513,9 +514,114 @@ describe("AUTH_SCHEME_SUPPORT", () => {
     expect(createHash("sha256").update("").digest("hex")).toBe(EMPTY_CERTIFICATE_FINGERPRINT);
   });
 
-  it("the refused schemes are named, and a caller can provoke each", () => {
+  /**
+   * **Retitled**, because the old title — "the refused schemes are named, and a caller can provoke
+   * each" — claimed a behavioural property this body never checked and this *package* cannot: the
+   * provocation needs `parseAuthHeader`, which lives in `@crossengin/api-gateway-runtime`, and
+   * `@crossengin/api-gateway` has no workspace dependencies at all (zod only). A grep of the old
+   * two-line body for `parseAuthHeader|request|handleRequest|authorization` returned zero hits.
+   *
+   * That is this repo's documented "documented the hazard and checked nothing" shape for the fourth
+   * time (ADR-0351, ADR-0362, ADR-0372), and the dangerous part is that the claim was *true* — the
+   * behavioural fence does exist, one package over, as `runtime-auth-schemes.test.ts`'s "every
+   * recognisable scheme either authenticates or is refused by the stage", which drives each one
+   * through the real 17 stages. So nothing was unchecked; a correct fact was attributed to a test
+   * that did not establish it, which is worse than an absent fence because it reads as covered.
+   */
+  it("the refused set is exactly these two (provocation is fenced in the runtime package)", () => {
     const refused = AUTH_SCHEMES.filter((s) => AUTH_SCHEME_SUPPORT[s].treatment === "refused");
     expect([...refused].sort()).toEqual(["api_key_query", "basic"]);
+  });
+
+  /**
+   * The fence whose absence let a **false** refusal reason survive two increments that edited this
+   * very map.
+   *
+   * `AUTH_SCHEME_SUPPORT.basic.reason` asserted that a Basic arm "would have to re-implement that
+   * route's lockout" — wrong when it was written, because `credentialIsLocked` was exported and
+   * already reused by a second credential surface 13 days earlier. Measured, 4 of the 8 schemes'
+   * reasons were read by no test at all, and `basic` was the only **refused** one among them while
+   * `api_key_query` carried three assertions. The one false reason was the one with no fence.
+   *
+   * A machine cannot check whether a reason is *true* — ADR-0384 says so in its own open questions,
+   * and that remains the case. What it can check are the properties that make a reason *checkable
+   * by a reader*, and the one that matters most is self-containment: these strings are interpolated
+   * verbatim into the 401 body, so a reason that defers to an internal document number is
+   * unactionable to the anonymous caller reading it and cannot be verified by anyone who does not
+   * have the repository. Both halves of the old `basic` reason failed that — it cited ADR-0358 *and*
+   * was false about what the citation would have shown.
+   */
+  it("every scheme's reason is substantive, and a refused one says what to send instead", () => {
+    for (const scheme of AUTH_SCHEMES) {
+      const { treatment, reason, recognisedFrom } = AUTH_SCHEME_SUPPORT[scheme];
+      expect(reason.length, `${scheme}: reason is a placeholder`).toBeGreaterThan(40);
+      expect(reason.trim(), `${scheme}: reason is padded`).toBe(reason);
+      // `recognisedFrom` is nullable and the null is **load-bearing**: measured, it is null for
+      // exactly one scheme, `bearer_opaque`, which is exactly the one `indistinguishable` member —
+      // because having no wire position to be recognised from is what that treatment *means*. So
+      // the invariant is the biconditional and not a non-empty check, which is what the first draft
+      // of this fence asserted and what the suite refused with a TypeError on `null.length`. Note
+      // `anonymous` is non-null and not recognisable, which is also right: its string describes the
+      // *absence* of a credential rather than a position, so nullability tracks the treatment and
+      // not recognisability.
+      expect(
+        recognisedFrom === null,
+        `${scheme}: recognisedFrom null-ness must track the indistinguishable treatment`,
+      ).toBe(treatment === "indistinguishable");
+      if (recognisedFrom !== null) {
+        expect(recognisedFrom.length, `${scheme}: recognisedFrom is a placeholder`).toBeGreaterThan(
+          10,
+        );
+      }
+      // No internal document reference in a string that reaches an unauthenticated caller. Checked
+      // for every scheme and not only the refused ones, because the served reasons are published in
+      // the OpenAPI document's security-scheme descriptions as well.
+      expect(reason, `${scheme}: reason cites an ADR to an anonymous caller`).not.toMatch(
+        /ADR-\d{4}/,
+      );
+      if (treatment === "refused") {
+        // A refusal that names no alternative is ADR-0334's remedy-that-cannot-work with the remedy
+        // left out entirely. Both refused schemes have a served sibling to point at, so this costs
+        // nothing today and is the assertion that makes a third refusal state one.
+        expect(
+          reason.includes(API_KEY_HEADER) || /login route|session token/.test(reason),
+          `${scheme}: refusal names no alternative credential`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  /**
+   * `basic`'s reason, specifically — joining the set that has one, and asserting the two clauses
+   * that are **measured** rather than the prose around them.
+   *
+   * The tenant clause is the structural half: RFC 7617 carries two fields, an authorization answer
+   * here is a function of (user, tenant), and the first colon is the scheme's own delimiter so a
+   * sub-grammar in the userid is unavailable. The cost clause is the measured half. Neither is a
+   * statement about implementation effort, which is what the string this replaced was.
+   */
+  it("basic's refusal records the tenant, and neither the lockout nor a latency figure", () => {
+    const reason = AUTH_SCHEME_SUPPORT.basic.reason;
+    // The structural ground, which is the one of the two that is published: a Basic credential
+    // cannot name a tenant, and the first colon is RFC 7617's own delimiter so a sub-grammar in the
+    // userid is unavailable.
+    expect(reason).toContain("tenant");
+    expect(reason).toContain("colon");
+    expect(reason).toContain(API_KEY_HEADER);
+    // The false clause, by name. `lockout` must not come back: a Basic arm would reuse
+    // `credentialIsLocked`, which is exported for exactly that, as the password-change route does.
+    expect(reason).not.toMatch(/lockout|re-implement/);
+    // And it must not claim the scheme is merely unbuilt, which is what "not implemented" said and
+    // is the reading both measured grounds refute.
+    expect(reason).not.toContain("not implemented");
+    // The cost is a true ground and is deliberately **absent** from the body, so this is a fence
+    // rather than an omission: `runtime.ts` interpolates the reason verbatim into the 401, and a
+    // latency figure is an operational fact about this deployment that an anonymous caller has no
+    // business being handed — and it is not durable either, since "N times dearer" reads as 693x,
+    // 793x or 8,770x on one true cost depending on which Ed25519 figure is picked. A draft
+    // published the middle one.
+    expect(reason).not.toMatch(/\bms\b|millisecond|scrypt|per second|\/sec|times a signature/);
+    expect(reason).not.toMatch(/\b\d{2,}x\b|thousand times|orders of magnitude/);
   });
 
   /**

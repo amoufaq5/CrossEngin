@@ -117,7 +117,7 @@ describe("buildIncomingRequest", () => {
    * A trusted edge is trusted to be **honest, not correctly configured**, so a malformed forwarded
    * fingerprint is dropped rather than passed on as a credential. Nothing downstream would catch it:
    * `IncomingRequestSchema` is never parsed on the request path, so this is the only check between
-   * a misconfigured edge and `recogniseCredential` answering `mtls` for a value no registry can
+   * a misconfigured edge and `parseAuthHeader` answering `mtls` for a value no registry can
    * match. An unrecognised TLS version is dropped for the opposite reason — reading it as weak would
    * deny every request on an edge whose spelling the map does not know.
    */

@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 21,069 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 21,079 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -2147,11 +2147,16 @@ report; `apps/operate-web` has none).
 
   ADR-0384 is the first increment of the register's **P1** tier, and the class is **a credential
   presented and recorded as absent**. `AUTH_SCHEMES` declares eight schemes and the request path
-  served **five** of them anonymously: `bearer_opaque` with no matcher, `basic`, `mtls` and
+  served **four** of them anonymously: `bearer_opaque` with no matcher, `api_key_query`, `mtls` and
   `hmac_signature` all fell through `authenticate` to the **no-credential arm**, so a request that
   presented a credential was stamped `authOutcome: "anonymous"` — byte-identical to one that
   presented nothing — and then served. Measured before designing, which is what refuted the
   register: `?api_key=ce_live_…` answered **201** against a route requiring a principal.
+  (The figure is **four** and this file said five with a list naming `basic` and omitting
+  `api_key_query` — two errors in one list, the second being the paragraph's own headline
+  measurement, and the first contradicted six lines down. ADR-0384's table is authoritative: of the
+  five unserved schemes `basic` **alone** reached the fallthrough, and the other four resolved
+  `scheme: null`. Register P3.1.)
   **`basic` is the exception that makes the shape legible**: it was the one unserved scheme the
   parser could produce, it *did* reach a refusal arm, and that arm stored
   `authOutcome: "credential_malformed"` — a claim about the *caller's* credential, false of a
@@ -4046,15 +4051,20 @@ packages exist at only one layer, noted below where that is true.
   (2: `basic`, `api_key_query` — recognised on the wire and denied by name),
   `indistinguishable` (1) and `not_a_credential` (1,
   `anonymous`, which is the value recorded when nothing was presented and so is not a credential to
-  serve or refuse). **`indistinguishable` is the member that earns its place**, and its two members
-  are the ones nothing on the wire can separate — not the ones that are merely unimplemented, which
-  is the distinction to keep: `hmac_signature` has no `Authorization` auth-scheme token chosen for
-  it, so giving it a refusal arm would reserve half a surface and leave the unreserved half served
-  anonymously *and* would conflate a payload signature with a principal credential (the repo's one
-  HMAC wire format authenticates a payload, which is why stage 12 `validate_request_signature`
-  exists); and `bearer_opaque` is claimed by `bearer_jwt`'s own `Bearer ` prefix, where a
-  token-shape test would **grant** rather than refuse, because the only opaque lookup available
-  matches whole api-key strings — a capability decision, not a parser one. `mtls` was **refused**
+  serve or refuse). **`indistinguishable` is the treatment that earns its place**, and its members
+  are the schemes nothing on the wire can separate — not the ones that are merely unimplemented,
+  which is the distinction to keep. Its live member is `bearer_opaque`, claimed by `bearer_jwt`'s
+  own `Bearer ` prefix, where a token-shape test would **grant** rather than refuse, because the
+  only opaque lookup available matches whole api-key strings — a capability decision, not a parser
+  one. **Do not restate the count here**: it has moved twice (ADR-0393 served `hmac_signature`,
+  ADR-0394 served `mtls`) while this paragraph said "its two members" directly beneath a `(1)` on
+  the line above, so the one sentence contradicted the census it was describing. Read
+  `AUTH_SCHEME_SUPPORT`. `hmac_signature`'s former entry here is the argument's clearest instance
+  and is worth keeping as history: it had no `Authorization` auth-scheme token chosen for it, so a
+  refusal arm would have reserved half a surface and left the unreserved half served anonymously,
+  *and* would have conflated a payload signature with a principal credential — which is why
+  choosing a **dedicated** header satisfied the argument rather than overriding it. `mtls` was
+  **refused**
   rather than indistinguishable, because its recognising field existed (`clientCertSha256`) and only
   its *producer* was missing — and that reason **expired by being acted on** rather than being
   withdrawn (ADR-0394): the producer exists now, so the scheme is `served`. What survives from the
@@ -11749,6 +11759,98 @@ three make the rest honest, cheap or verifiable.
     since Phase 1. What is left of P1.11 is `basic` and `api_key_query`, refused by name with their
     reasons, and `bearer_opaque`, which can have no wire position while `bearer_jwt` holds
     `Authorization: Bearer`.
+    **`basic` is the fourth to close, by ADR-0395, and it closes as a refusal rather than as a
+    capability** — which is the one disposition this register had not considered, having read the
+    item throughout as a capability gap. Eight measured dimensions all answer *do not serve it*, and
+    four are independently sufficient: **no consumer in any direction** (zero callers present Basic
+    to this API, zero documents promise it, zero ADRs ask for it, and the only three non-test Basic
+    senders in the repo point **outbound** at Twilio); the **tenant is structurally
+    unrepresentable**, because an authorization answer here is a function of (user, tenant), one
+    person legitimately holds different roles in different tenants, `meta.users` has no tenant
+    column and no default-tenant concept exists — and a colon-qualified username cannot supply it,
+    since RFC 7617's `user-pass = userid ":" password` makes the **first colon the grammar's own
+    delimiter**; the **cost forbids it as a request-path scheme**, measured on 4 cores at a
+    **105 ms median** verification and a throughput ceiling of **~35/second**, flat from 8
+    concurrent upward (31.5 / 35.5 / 33.8 per second at 4 / 8 / 16), because the libuv pool is 4
+    wide and shared with fs and dns; and the api-key form is unavailable in the Stripe shape, an
+    argv spec being one opaque field with no (id, secret) pair.
+    **A ratio against `bearer_jwt` is deliberately not the form of that measurement**, which is
+    ADR-0378's rule applied before repeating a figure: the three Ed25519 numbers this repo holds
+    span an order of magnitude — a bare verify at **0.012 ms**, ADR-0358's 0.133 ms sign *including*
+    key construction from the seed, and ADR-0371's 0.152 ms per chain entry *including*
+    canonicalisation — so the same true cost reads as 693×, 793× or **8,770×** depending only on
+    which one is picked, and a first draft of this entry carried the middle one as though it were
+    the comparison. The durable facts are the median and the ceiling. One figure **was** refuted
+    rather than merely re-scoped: `password.ts`'s own comment asserts **415 ms** for 8 concurrent
+    derivations and the measured figure here is **225 ms**, which is what a 4-wide pool predicts
+    (two waves) where 415 implies an effective width of 2 — box-specific, so the comment's
+    *conclusion* (the async form leaves the loop live) stands and only its wall clock does not.
+    Re-measuring it also found the trap for anyone who tries: `verifyPassword(password, hash,
+    pepper)` with the first two swapped returns `unreadable_hash` in **0 ms** rather than throwing,
+    so a mis-ordered probe reports a free verification.
+    **So the defect is the refusal, not the absence, and it was live on every deployment**: the
+    reason string is interpolated **verbatim into the 401 problem body**, so every deployment has
+    been publishing a false security claim to unauthenticated callers. Its second clause said a
+    Basic authenticator would be *"a second credential path over the same hashes"* and *"would have
+    to re-implement that route's lockout"* — and **exactly one of those two halves is false, which
+    is narrower than this entry first claimed and is the refuter's correction to it**. The
+    *"re-implement"* half is false and was **wrong when written**, not drifted: `credentialIsLocked`
+    had been exported and was already reused by a second credential surface **13 days and 49
+    commits** before ADR-0384 wrote it, so the lockout is reusable by import and the clause names a
+    cost that does not exist. The *"second credential path"* half is **defensible** and the first
+    draft of this entry wrongly swept it in: `/v1/account/password` does verify a password against
+    the same column, but it refuses without an already-authenticated principal and cannot mint one,
+    so under the reading that a credential path *authenticates a principal from a password* the
+    login is the only one and `basic` would indeed be the second. Two readings, one false half; the
+    replacement reason avoids both by resting on grounds that need no count. It survived
+    because `basic` was the only one of the three unserved schemes whose reason *content* no test
+    read — measured on the pre-change tree, `api_key_query` carried **two** content assertions and
+    `bearer_opaque` **one**, where `basic` carried **zero**, so it was the only one that could hold
+    a false clause without a test noticing. (A draft said "three" of `api_key_query`; the figure is
+    two and the comparison is the useful form.) That is this file's **fourth** recorded instance of
+    *documented the hazard and checked nothing* (ADR-0351, ADR-0362, ADR-0372), and it is fenced now
+    by a general assertion over all eight schemes rather than by one about `basic`. The replacement reason publishes **the tenant ground alone**, names the
+    two credentials a caller should send instead, and deliberately withholds the other two true
+    grounds for two different reasons: a latency figure is an operational fact a refusal body has no
+    business handing an anonymous caller *and* is not a durable form of the measurement (above),
+    while the absence of an asker is a reason not to **build** rather than a reason a caller can act
+    on. The withholding is **fenced rather than merely done** — the test asserts the body matches no
+    `ms`/`scrypt`/`per second`/`Nx` shape — because a reason this file argues should carry one
+    ground is one a later increment will otherwise helpfully complete.
+    **A second defect was found in passing, it is not about `basic` at all, and it is latent where
+    the first draft of this entry called it live** — which is this increment's own class landing on
+    its own write-up, and the correction is worth more than the fix. The residual arm read its
+    auth-scheme token off `header.trim()`, and trimming the **end** destroys the one character
+    `authSchemeToken` reads (*no space means no auth-scheme*), so `Authorization: Basic ` and
+    `Authorization: Bearer ` reported `schemeToken: null` — a record claiming **no scheme was named
+    at all** for a value that plainly named one — while `Negotiate x` and `Digest x` reported theirs
+    correctly. **That was measured on the function and asserted of the request path.** Measured at
+    the right layer afterwards, a trailing space **cannot arrive over either transport**: written to
+    a raw socket, bypassing any client, Node's HTTP parser hands up `"Basic"` (RFC 9110 §5.5 — a
+    field value excludes surrounding whitespace), and `new Headers({authorization: "Basic "}).get()`
+    is `"Basic"` on the Fetch path for the same reason. What keeps it is a direct
+    `buildIncomingRequest` caller, whose `headers` is a plain record — **the seam ADR-0394 made
+    `EdgeTrust` required at**, with one non-test caller today. So it is a fail-closed fix at a seam
+    no client reaches and an embedder does, and the draft's sharpest clause is **misattributed**: an
+    alarm keyed on `scheme_unsupported_basic` really does miss the empty-credential spelling, which
+    records `credential_in_unrecognized_scheme` — and that gap is **unchanged by this fix in both
+    directions**, because the reason comes from the `basic` recognition arm, `"Basic"` does not
+    start with `"basic "`, and the value reaches the residual identically before and after. So a
+    true finding was offered as this change's justification and belongs to a different change (a
+    presence-recognition arm, ADR-0395's first open question). The lesson is the
+    one P3.1 keeps paying out, one layer down: **a defect measured on a function is a claim about
+    that function, and asserting it of the request path needs the transport measured too** — three
+    layers here (socket, `Headers`, the builder's record) and they do not agree.
+    `trimStart` is the only one of the three that answers every shape the builder can carry, and the
+    fence is a table in `auth.test.ts` because
+    **`authSchemeToken` was thoroughly tested as a pure transform and its *argument* was tested by
+    nothing** — mutation-checked both ways, `trim` failing exactly the trailing-space pair and the
+    untrimmed form exactly the leading-space pair. The shape table in that function's own comment
+    was also corrected while writing the fence: it named `"  Basic x"` as a leading-space member,
+    which is true of the transform and **unreachable through `parseAuthHeader`**, since `trim()` on
+    it starts with `"basic "` and the recognition above claims it as a basic credential — so a table
+    measured against a helper in isolation is not a table about its call site, and the two differ
+    exactly where a leading space meets a scheme this gateway *does* recognise.
 
     The original entry, kept because its measurements are what the fix rests on: *"The refusal is
     honest and named"* was true of **`basic` alone** — the only unserved scheme the parser could
@@ -12426,7 +12528,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 389 records; 310 Accepted, 79 Proposed (the
+title or status change cannot drift. 390 records; 311 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 
