@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
+import type { ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import { buildErpCorePack } from "@crossengin/pack-erp-core";
 
-import { buildUiSchema } from "./ui-schema.js";
+import { buildUiSchema, buildUiSchemaHandler } from "./ui-schema.js";
+import type { UiUserIdentity, UiViewer } from "./ui-schema.js";
 
 const schema = buildUiSchema(buildErpCorePack(), new Date("2026-06-20T00:00:00Z"));
 
@@ -183,5 +185,131 @@ describe("buildUiSchema — decimal declarations", () => {
     );
     expect([...advertised].sort()).toEqual([...declared].sort());
     expect(declared.length).toBeGreaterThan(0);
+  });
+});
+
+const PERSON_ID = "11111111-1111-4111-8111-111111111111";
+/** `apps/operate-server`'s shared placeholder for a bare `--api-key key:role:tenant`. */
+const PLACEHOLDER_ID = "00000000-0000-4000-8000-0000000000aa";
+
+function principalOf(over: Partial<ResolvedPrincipal>): ResolvedPrincipal {
+  return {
+    principalId: PERSON_ID,
+    tenantId: "22222222-2222-4222-8222-222222222222",
+    principalKind: "user",
+    authScheme: "bearer_jwt",
+    grantedScopes: [],
+    mfaProofAgeSeconds: null,
+    resolvedAt: "2026-06-20T00:00:00.000Z",
+    ...over,
+  };
+}
+
+async function viewerFor(
+  principal: ResolvedPrincipal | null,
+  userIdentity?: (userId: string) => Promise<UiUserIdentity | null>,
+): Promise<{ status: number; viewer: UiViewer | undefined }> {
+  const handler = buildUiSchemaHandler({
+    schema,
+    principalRoles: () => ({ primaryRole: "erp_admin", secondaryRoles: ["hr_manager"] }),
+    ...(userIdentity !== undefined ? { userIdentity } : {}),
+  });
+  const out = await handler({
+    request: {} as never,
+    route: {} as never,
+    principal,
+    params: {},
+    parsedBody: null,
+  });
+  if (out.kind !== "json") throw new Error(`expected json, got ${out.kind}`);
+  const body = out.body as { viewer?: UiViewer };
+  return { status: out.status, viewer: body.viewer };
+}
+
+describe("buildUiSchemaHandler — the viewer's identity", () => {
+  it("carries the signed-in person's id, which the handler held all along and discarded", async () => {
+    const { status, viewer } = await viewerFor(principalOf({}));
+    expect(status).toBe(200);
+    expect(viewer?.userId).toBe(PERSON_ID);
+    expect(viewer?.principalKind).toBe("user");
+  });
+
+  it("withholds the id from a service account, so a bare api-key's shared placeholder is not a person", async () => {
+    // Every bare `--api-key key:role:tenant` resolves to one `DEFAULT_PRINCIPAL_ID`, so an
+    // unconditional `principalId` would hand every service credential in the deployment the same
+    // "identity" — and a console would offer to open its record (ADR-0331's class, in a label).
+    const { viewer } = await viewerFor(
+      principalOf({ principalId: PLACEHOLDER_ID, principalKind: "service_account" }),
+    );
+    expect(viewer?.userId).toBeNull();
+    expect(viewer?.principalKind).toBe("service_account");
+  });
+
+  it("still names the role for a machine credential, which is what the console showed before", async () => {
+    const { viewer } = await viewerFor(principalOf({ principalKind: "system" }));
+    expect(viewer?.userId).toBeNull();
+    expect(viewer?.primaryRole).toBe("erp_admin");
+    expect(viewer?.roles).toEqual(["erp_admin", "hr_manager"]);
+  });
+
+  it("resolves the name and email when a directory is wired", async () => {
+    const seen: string[] = [];
+    const { viewer } = await viewerFor(principalOf({}), async (id) => {
+      seen.push(id);
+      return { displayName: "Ada Lovelace", email: "ada@example.test" };
+    });
+    expect(seen).toEqual([PERSON_ID]);
+    expect(viewer?.displayName).toBe("Ada Lovelace");
+    expect(viewer?.email).toBe("ada@example.test");
+  });
+
+  it("leaves both keys ABSENT with no directory, which is not the same fact as a row carrying no name", async () => {
+    const { viewer } = await viewerFor(principalOf({}));
+    // Absent, not null: `displayName: null` is the claim that the row has no name, and a consumer
+    // keying on `?? email` must be able to tell that from "nobody looked" (ADR-0331).
+    expect(viewer).not.toHaveProperty("displayName");
+    expect(viewer).not.toHaveProperty("email");
+  });
+
+  it("distinguishes a row with no display name from an unresolved one", async () => {
+    const { viewer } = await viewerFor(principalOf({}), async () => ({
+      displayName: null,
+      email: "noname@example.test",
+    }));
+    expect(viewer).toHaveProperty("displayName");
+    expect(viewer?.displayName).toBeNull();
+    expect(viewer?.email).toBe("noname@example.test");
+  });
+
+  it("never consults the directory for a credential that names no person", async () => {
+    let calls = 0;
+    const { viewer } = await viewerFor(
+      principalOf({ principalId: PLACEHOLDER_ID, principalKind: "service_account" }),
+      async () => {
+        calls += 1;
+        return { displayName: "should not be read", email: "x@example.test" };
+      },
+    );
+    expect(calls).toBe(0);
+    expect(viewer).not.toHaveProperty("displayName");
+  });
+
+  it("withholds the id when the principal's id is not uuid-shaped", async () => {
+    // `ResolvedPrincipalSchema` has no parse site anywhere in the workspace, so the uuid half of
+    // `principalUserId` is the only thing between a resolver that minted `key:hmac-1` and a client
+    // issuing `GET /v1/platform/users/key:hmac-1`.
+    const { viewer } = await viewerFor(principalOf({ principalId: "hmac-key-1" }));
+    expect(viewer?.userId).toBeNull();
+    expect(viewer?.principalKind).toBe("user");
+  });
+
+  it("answers 401 with no tenant, before any identity read", async () => {
+    let calls = 0;
+    const { status } = await viewerFor(principalOf({ tenantId: null }), async () => {
+      calls += 1;
+      return null;
+    });
+    expect(status).toBe(401);
+    expect(calls).toBe(0);
   });
 });

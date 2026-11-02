@@ -143,8 +143,15 @@ function fakeSource(byTenant: Record<string, Record<string, unknown> | null | Er
 function makeCache(
   source: TenantGatewayCacheOptions["source"],
   extra: Partial<TenantGatewayCacheOptions> = {},
-): { cache: TenantGatewayCache; builds: Manifest[] } {
+): {
+  cache: TenantGatewayCache;
+  builds: Manifest[];
+  refused: { tenantId: string; reason: string; detail: string }[];
+} {
   const builds: Manifest[] = [];
+  // Collected rather than ignored, because a refusal that reaches nobody is this repo's most-found
+  // shape and the source-throw arm reported nothing at all until it refused.
+  const refused: { tenantId: string; reason: string; detail: string }[] = [];
   const cache = new TenantGatewayCache({
     source,
     lineage: LINEAGE,
@@ -152,9 +159,12 @@ function makeCache(
       builds.push(manifest);
       return compile(manifest);
     },
+    onBuildRefused: (tenantId, reason, detail) => {
+      refused.push({ tenantId, reason, detail });
+    },
     ...extra,
   });
-  return { cache, builds };
+  return { cache, builds, refused };
 }
 
 describe("resolveRequestTenant", () => {
@@ -320,7 +330,17 @@ describe("TenantGatewayCache", () => {
     expect(reports[0]!.issues.join(" ")).toMatch(/duplicate/);
   });
 
-  it("treats a source throw as null for that call but does NOT cache it", async () => {
+  it("REFUSES a source throw rather than falling back, and does not cache the refusal", async () => {
+    // This test used to assert `{kind: "none"}` here, under the title "treats a source throw as
+    // null" — the defect written down as the specification (ADR-0372's class). `none` falls back
+    // to the DEPLOYMENT's gateway, and on `--store pg` that is the same store object, so the
+    // tenant was served their own rows under the boot manifest's rules with their field grants,
+    // classification and obligations absent. A read that did not happen is not evidence that this
+    // tenant has no manifest.
+    //
+    // It needs no fourth `GatewayResolution` arm, which is what the register prescribed:
+    // `unknown` is already `permanent: false`, so `remember` returns it unremembered and the next
+    // request re-asks the source — the property the old arm wanted and bought by falling back.
     let failing = true;
     const doc = tinyManifest("t-one", "Widget") as Record<string, unknown>;
     const source: TenantGatewayCacheOptions["source"] & { calls: number } = {
@@ -331,8 +351,18 @@ describe("TenantGatewayCache", () => {
         return doc;
       },
     };
-    const { cache, builds } = makeCache(source, { now: () => 0 });
-    expect(await cache.serverFor(TENANT_1)).toEqual({ kind: "none" });
+    const { cache, builds, refused } = makeCache(source, { now: () => 0 });
+    expect(await cache.serverFor(TENANT_1)).toEqual({
+      kind: "refused",
+      reason: "unknown",
+      retryAfterSeconds: expect.any(Number) as unknown as number,
+    });
+    // Reported, which it was not: a deployment whose manifest store was down logged nothing while
+    // serving every tenant the wrong manifest.
+    expect(refused).toHaveLength(1);
+    expect(refused[0]?.reason).toBe("unknown");
+    expect(refused[0]?.detail).toContain("store unavailable");
+    // And not cached: the next call re-asks, and once the source recovers the tenant is served.
     failing = false;
     expect(await serverOf(cache, TENANT_1)).not.toBeNull();
     expect(source.calls).toBe(2);
@@ -1175,8 +1205,19 @@ describe("buildPerTenantDispatch — a refused tenant gets 503 and never the def
     expect(defaultCalls).toBe(1);
   });
 
-  it("falls back rather than refusing when the manifest source itself throws", async () => {
+  it("REFUSES with 503 when the manifest source itself throws, and never reaches the default", async () => {
+    // The title used to be "falls back rather than refusing when the manifest source itself
+    // throws" — a defect named as a specification, and the second of two in this file (the other
+    // is the `serverFor` unit above). What it asserted was a **200 from the default gateway**, so
+    // on `--store pg`, where the fallback store is the same object, the tenant was served their
+    // own rows under the boot manifest's rules. The register's own words for that class:
+    // ADR-0314's "their data is in a different place than they think".
+    //
+    // 503 and not 200, uncached so the next request re-asks, and `retry-after` set — which the
+    // existing `unknown` refusal kind gives for free, so no fourth `GatewayResolution` arm was
+    // needed (the register prescribed one; it is refuted).
     let defaultCalls = 0;
+    const refusals: string[] = [];
     const defaultServer = compile(tinyManifest("default", "Fallback"));
     const cache = new TenantGatewayCache({
       lineage: LINEAGE,
@@ -1187,6 +1228,9 @@ describe("buildPerTenantDispatch — a refused tenant gets 503 and never the def
       },
       build: (): OperateHttpServer => {
         throw new Error("never reached");
+      },
+      onBuildRefused: (_tenantId, reason) => {
+        refusals.push(reason);
       },
       now: () => 0,
     });
@@ -1199,7 +1243,12 @@ describe("buildPerTenantDispatch — a refused tenant gets 503 and never the def
       apiKeys: API_KEYS,
     });
     const res = await dispatch(req("/v1/fallbacks", { "x-api-key": "key-a" }), null);
-    expect(res.status).toBe(200);
-    expect(defaultCalls).toBe(1);
+    expect(res.status).toBe(503);
+    expect(defaultCalls).toBe(0);
+    expect(refusals).toEqual(["unknown"]);
+    // A second request re-asks the source rather than inheriting a cached guess, because `unknown`
+    // is `permanent: false` — so a store that comes back up serves the tenant without a restart.
+    await dispatch(req("/v1/fallbacks", { "x-api-key": "key-a" }), null);
+    expect(refusals).toEqual(["unknown", "unknown"]);
   });
 });

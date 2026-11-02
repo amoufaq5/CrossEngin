@@ -305,7 +305,28 @@ function entityIsCreatable(
  */
 export function surveySensitiveFields(input: {
   readonly manifest: Manifest;
-  readonly declaration: SensitiveFieldDeclaration;
+  /**
+   * The **resolver**, not a resolved declaration — which is what lets this survey run anywhere
+   * `buildOperateHttpServer` runs, and so is what makes the per-tenant survey possible.
+   *
+   * It used to take a `SensitiveFieldDeclaration` and spend it on one line:
+   * `buildSensitiveFieldPolicy(declaration)("")`. That tied the survey to `serve()`, the only
+   * place a `SensitiveFieldDeclaration` exists — `buildOperateHttpServer` receives
+   * `policyForEntity` and never the declaration it was built from — so a tenant's own activated
+   * manifest, which is compiled inside `buildOperateHttpServer`, could not be surveyed at all.
+   *
+   * Taking the resolver is also strictly **more correct** than taking the declaration, which is
+   * why this is not merely a plumbing change. The old call asked the closure once with `""` and
+   * applied one answer to every entity; `buildSensitiveFieldPolicy` happens to ignore its entity
+   * argument today, so the two agree — but the seam's type permits per-entity variation, its own
+   * doc says a per-entity declaration is "expressible later without moving it", and a deployment
+   * may supply its own `policyForEntity`. Asked per entity, the survey is right for all three.
+   *
+   * `undefined` for an entity means *no policy of its own*, which falls to `{}` — the same empty
+   * policy the redaction registry uses, so an unpolicied entity is surveyed under the rule the
+   * request path applies to it rather than under another entity's.
+   */
+  readonly policyForEntity: (entity: string) => SensitiveFieldPolicy | undefined;
   /**
    * The roles the deployment can present. `node.ts` passes the **manifest's declared roles**
    * (`Object.keys(manifest.roles ?? {})`), which is the universe this question has to be asked
@@ -318,9 +339,8 @@ export function surveySensitiveFields(input: {
   readonly roles: readonly RoleName[];
   readonly classifiedWriteMask: boolean;
 }): SensitiveFieldSurvey {
-  const { manifest, declaration, classifiedWriteMask } = input;
+  const { manifest, classifiedWriteMask } = input;
   const roleDefs = new Map<RoleName, RoleDefinition>(Object.entries(manifest.roles ?? {}));
-  const policy = buildSensitiveFieldPolicy(declaration)("") ?? {};
   const traits = manifest.traits ?? [];
 
   // Deduped, input order preserved: the order a declaration was written in is the order an
@@ -346,6 +366,10 @@ export function surveySensitiveFields(input: {
       resolvedFields(entity, traits).map((f) => [f.name, f.required === true]),
     );
     const perms: EntityPermissions = manifest.permissions?.[entity.name] ?? {};
+    // Asked per entity, once, outside the field loop: the seam permits per-entity variation and
+    // the shipped resolver ignores its argument, so this is one call either way and is correct
+    // under both. `?? {}` is the same empty policy the redaction registry falls to.
+    const policy: SensitiveFieldPolicy = input.policyForEntity(entity.name) ?? {};
     let creatable: boolean | null = null;
 
     for (const { field, classification } of classified) {

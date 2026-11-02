@@ -390,6 +390,17 @@ export interface ServeOptions {
   readonly platformAdmin: boolean;
   /** Roles allowed to call the platform-admin routes (repeatable; default platform_admin). */
   readonly platformAdminRoles: readonly string[];
+  /**
+   * Roles allowed to read and write this tenant's own settings (`/v1/admin/settings`), which
+   * includes the document-numbering overrides and the formatting defaults the UI renders from.
+   *
+   * Deliberately NOT `platformAdminRoles`: that grant is cross-tenant and administers the tenant
+   * *registry*, while this one is a tenant administering its own row — so a deployment can grant
+   * one without the other, which is the split `--notification-admin-role` and
+   * `--credential-admin-role` already draw. Repeatable; defaults to `erp_admin`, which is what
+   * every deployment got when the role was hardcoded, so declaring nothing changes nothing.
+   */
+  readonly adminRoles: readonly string[];
   /** Expose the in-product AI Architect routes under /v1/ai — describe a business, get a validated manifest proposal, activate it (over meta.operate_tenant_manifests; needs --store pg|pg-columns; the designer needs ANTHROPIC_API_KEY or OPENAI_API_KEY [+ optional OPENAI_BASE_URL]). Implies per-tenant manifest serving. */
   readonly aiDesign: boolean;
   /** Roles allowed to call the AI-design routes (repeatable; default erp_admin + platform_admin). */
@@ -701,6 +712,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let auditSamplingRefreshMs: number | null = null;
   let platformAdmin = false;
   const platformAdminRoles: string[] = [];
+  const adminRoles: string[] = [];
   let aiDesign = false;
   const aiDesignRoles: string[] = [];
   let perTenantManifests = false;
@@ -1215,6 +1227,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       platformAdmin = true;
     } else if (arg === "--platform-admin-role" || arg.startsWith("--platform-admin-role=")) {
       platformAdminRoles.push(takeValue(arg, next, "--platform-admin-role"));
+      i += consumed();
+    } else if (arg === "--admin-role" || arg.startsWith("--admin-role=")) {
+      adminRoles.push(takeValue(arg, next, "--admin-role"));
       i += consumed();
     } else if (arg === "--ai-design") {
       aiDesign = true;
@@ -2216,6 +2231,11 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     auditSamplingRefreshMs,
     platformAdmin,
     platformAdminRoles: platformAdminRoles.length > 0 ? platformAdminRoles : ["platform_admin"],
+    // `erp_admin` is what `compileOperateServer`'s own default has always been, so a deployment
+    // declaring nothing keeps exactly the grant it had. Widening it here would silently hand
+    // `platform_admin` a tenant's settings on every deployment, which is a privilege decision
+    // rather than a default.
+    adminRoles: adminRoles.length > 0 ? adminRoles : ["erp_admin"],
     aiDesign,
     aiDesignRoles: aiDesignRoles.length > 0 ? aiDesignRoles : ["erp_admin", "platform_admin"],
     perTenantManifests: perTenantManifests || aiDesign,
@@ -2777,6 +2797,19 @@ Options:
                        archive/reactivate tenants + stats over meta.tenants (needs --store pg|pg-columns)
   --platform-admin-role <role>  Role allowed to call the /v1/platform routes (repeatable; default
                        platform_admin). Fail-closed: only these roles reach tenant management
+  --admin-role <role>  Role allowed to read and write THIS tenant's settings at
+                       GET/PUT /v1/admin/settings — the document-numbering overrides and the
+                       formatting defaults the UI renders from (repeatable; default erp_admin,
+                       which is the grant every deployment had when the role was hardcoded, so
+                       declaring nothing changes nothing). Separate from --platform-admin-role,
+                       which is cross-tenant and administers the tenant REGISTRY: a deployment can
+                       grant either without the other. Fail-closed — a caller holding none of
+                       these roles is 403 'admin role required' — and the settings routes are
+                       mounted on every deployment and deliberately outside the subscription gate,
+                       so a lapsed tenant can still open its billing screen. A declared role the
+                       served manifest does not define is WARNED about at boot and not refused:
+                       platform_admin is such a role on all seven packs and is a legitimate value
+                       here, so a refusal would refuse a correct deployment
   --ai-design          Expose the in-product AI Architect under /v1/ai — POST a business description,
                        get a validated manifest proposal, activate it as the tenant's live system
                        (needs --store pg|pg-columns + ANTHROPIC_API_KEY or OPENAI_API_KEY, optional

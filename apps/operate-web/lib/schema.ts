@@ -90,9 +90,39 @@ export interface UiRoleSchema {
   readonly description?: string;
 }
 
+/**
+ * Mirrors `UiViewer` in `@crossengin/operate-runtime`, and nothing compares the two.
+ *
+ * This app declares **no** `@crossengin/*` dependency — the only two files that mention one do so
+ * in a comment — so it cannot import the real interface and the mirror cannot be fenced by a type.
+ * Every field here is optional-or-nullable for that reason: a server a build behind simply sends
+ * fewer keys, and the fallbacks below are what this app rendered before they existed.
+ */
 export interface UiViewer {
   readonly primaryRole: string;
   readonly roles: readonly string[];
+  /** The signed-in person's user id, or `null` when the credential names no person (an api-key). */
+  readonly userId?: string | null;
+  readonly principalKind?: string | null;
+  /** Absent when nothing resolved an identity; `null` when the row carries no name. */
+  readonly displayName?: string | null;
+  readonly email?: string;
+}
+
+/** What to call the viewer: their name, else their email, else `null` — never a role. */
+export function viewerName(schema: UiSchema | null): string | null {
+  const v = schema?.viewer;
+  if (v === undefined) return null;
+  // The name may be absent (nothing resolved it) or null (the row has none); the email is present
+  // only when something resolved the row, and `meta.users.email` is NOT NULL, so it is the honest
+  // second choice. Falling back to the role is what this app used to do and is the thing being
+  // fixed — a role is not a person.
+  return v.displayName ?? v.email ?? null;
+}
+
+/** Whether a person is signed in, as opposed to a machine credential. */
+export function viewerIsPerson(schema: UiSchema | null): boolean {
+  return typeof schema?.viewer?.userId === "string";
 }
 
 export interface UiFormatting {

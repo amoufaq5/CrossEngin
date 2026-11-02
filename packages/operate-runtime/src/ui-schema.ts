@@ -1,4 +1,4 @@
-import type { ResolvedPrincipal } from "@crossengin/api-gateway";
+import { principalUserId, type ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import type { Entity, Field } from "@crossengin/types/meta-schema";
@@ -103,7 +103,51 @@ export interface UiRoleSchema {
 export interface UiViewer {
   readonly primaryRole: string;
   readonly roles: readonly string[];
+  /**
+   * The signed-in person's `meta.users` id, or `null` when this credential names no person.
+   *
+   * `null` is a **claim** and not an absence: it is always knowable from the principal alone, with
+   * no store read, so a client can rely on it. An api-key is a `service_account` sharing one
+   * placeholder principal id across the whole deployment, so emitting that id would hand every
+   * service credential the same "identity" — which is why this goes through `principalUserId`
+   * rather than reading `principalId` directly.
+   */
+  readonly userId: string | null;
+  /** Which kind of credential is being served, so a client can say *you are an api-key, not a person*. */
+  readonly principalKind: PrincipalKind | null;
+  /**
+   * The person's name and email, **absent** when nothing resolved them — either because the
+   * deployment wired no identity resolver (`--store memory` has no user store at all) or because
+   * no row answered for this id. Absent and `null` are kept apart deliberately: `displayName` is
+   * nullable in `meta.users`, so `null` means *the row carries no name*, while the key being
+   * missing means *nobody looked*. A client with neither falls back to the role, which is what it
+   * showed before these fields existed.
+   */
+  readonly displayName?: string | null;
+  readonly email?: string;
 }
+
+/** The principal kinds a viewer can be served for, as the gateway resolves them. */
+export type PrincipalKind = ResolvedPrincipal["principalKind"];
+
+/** A person's own identity, as a UI needs it. `email` is NOT NULL in `meta.users`; the name is not. */
+export interface UiUserIdentity {
+  readonly displayName: string | null;
+  readonly email: string;
+}
+
+/**
+ * Resolves the signed-in person's own name and email.
+ *
+ * A seam rather than a store call, for the reason `settingsStore` is one on the same interface:
+ * `@crossengin/operate-runtime` has **no** Postgres dependency, so the read is forced to live in
+ * the app. Optional on `UiSchemaContext` following that same precedent — ADR-0338's
+ * required-ness rule is for a default that *cannot be correct*, and here an absent resolver is a
+ * coherent deployment (no user store), with the only cost being a name the client cannot show.
+ *
+ * Called **only** for a non-null `UiViewer.userId`, so it is never asked about a placeholder.
+ */
+export type UiUserIdentityResolver = (userId: string) => Promise<UiUserIdentity | null>;
 
 /** Tenant display preferences safe to share with every authenticated caller. */
 export interface UiFormatting {
@@ -301,6 +345,8 @@ export interface UiSchemaContext {
   readonly principalRoles: (principal: ResolvedPrincipal | null) => PrincipalRoles;
   /** Optional: surfaces per-tenant formatting + feature flags so the UI can adapt. */
   readonly settingsStore?: SettingsStore;
+  /** Optional: surfaces the signed-in person's own name and email. See {@link UiUserIdentityResolver}. */
+  readonly userIdentity?: UiUserIdentityResolver;
 }
 
 function formattingFromSettings(settings: TenantSettings): UiFormatting {
@@ -323,7 +369,22 @@ export function buildUiSchemaHandler(ctx: UiSchemaContext): Handler {
     }
     const { primaryRole, secondaryRoles } = ctx.principalRoles(principal);
     const all = [primaryRole, ...(secondaryRoles ?? [])].map((r) => String(r)).filter((r) => r.length > 0);
-    const viewer: UiViewer = { primaryRole: String(primaryRole), roles: [...new Set(all)] };
+    // The id was in scope at this handler all along and discarded here, which is why a console
+    // could name the role you signed in with and not the person holding it — and why a person
+    // could not be shown their own record, the detail route being reached by an id the client
+    // never had. One property access, no store read.
+    const userId = principalUserId(principal);
+    const identity =
+      userId !== null && ctx.userIdentity !== undefined ? await ctx.userIdentity(userId) : null;
+    const viewer: UiViewer = {
+      primaryRole: String(primaryRole),
+      roles: [...new Set(all)],
+      userId,
+      principalKind: principal?.principalKind ?? null,
+      // Spread, so an unresolved identity leaves the keys **absent** rather than null — the
+      // distinction `UiViewer` draws between "the row carries no name" and "nobody looked".
+      ...(identity !== null ? { displayName: identity.displayName, email: identity.email } : {}),
+    };
     let extra: { formatting?: UiFormatting; features?: Readonly<Record<string, boolean>> } = {};
     if (ctx.settingsStore !== undefined) {
       const settings = await ctx.settingsStore.get(tenantId);

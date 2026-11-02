@@ -1,4 +1,4 @@
-import type { ResolvedPrincipal } from "@crossengin/api-gateway";
+import { principalNamesAPerson, type ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { PrincipalResolver, PrincipalResolverInput } from "@crossengin/api-gateway-runtime";
 import { DEFAULT_MAX_STALE_MS } from "./tenant-status-gate.js";
 
@@ -268,18 +268,14 @@ export type PrincipalWithAbacAttributes = ResolvedPrincipal & {
  * an operator means it as a service account — that is the operator's own declaration, and the id
  * they named is the one the membership is keyed on.
  */
-export const PRINCIPAL_KIND_NAMES_A_PERSON: Readonly<
-  Record<ResolvedPrincipal["principalKind"], boolean>
-> = Object.freeze({
-  user: true,
-  service_account: false,
-  ai_architect: false,
-  system: false,
-});
-
-export function principalNamesAPerson(principal: ResolvedPrincipal): boolean {
-  return PRINCIPAL_KIND_NAMES_A_PERSON[principal.principalKind];
-}
+// Re-exported rather than redeclared: the map moved to `@crossengin/api-gateway`, beside the
+// `ResolvedPrincipal` whose `principalKind` it is about, so that `packages/operate-runtime` could
+// read it too — which is what let the UI-schema handler stop discarding the principal id. The
+// re-export keeps this module's own importers unchanged and keeps the *local* rationale (the
+// `meta.user_tenant_membership` lookup this directory performs) where a reader of this package
+// looks, which is the convention `scopeFilter` and `feature-flags-pg` already follow.
+export { PRINCIPAL_KIND_NAMES_A_PERSON } from "@crossengin/api-gateway";
+export { principalNamesAPerson };
 
 /**
  * Decorates a resolver so a resolved principal carries its ABAC attributes.

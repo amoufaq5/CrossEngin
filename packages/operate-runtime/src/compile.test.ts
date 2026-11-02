@@ -635,17 +635,27 @@ describe("buildOperateGateway's option forwarding", () => {
     expect(ctor).toBeGreaterThan(-1);
     const literal = source.slice(ctor, source.indexOf("});", ctor));
 
-    // Options this function deliberately does not hand on, each with the reason it does not.
-    const notForwarded: Readonly<Record<string, string>> = Object.freeze({
-      // Consumed by the compile step itself rather than passed to the runtime.
-      store: "the compiler builds handlers over it; the runtime never sees a store",
-      allocator: "same: a handler dependency, not a runtime option",
-      settingsStore: "same",
-      operationsForEntity: "read by the redaction registry the compiler builds",
-      sensitiveFieldPolicy: "same",
-      abac: "same",
-      manifestRoleDirectory: "same",
-    });
+    /*
+     * Options this function deliberately does not hand on, each with the reason it does not.
+     *
+     * **Empty, and it was seven dead entries.** `OperateGatewayOptions extends
+     * OperateRuntimeOptions` and `interfaceFields` reads an interface's **own braces**, so the
+     * population here is the 12 fields this interface declares itself — and the seven entries that
+     * used to sit in this map (`store`, `allocator`, `settingsStore`, `operationsForEntity`,
+     * `sensitiveFieldPolicy`, `abac`, `manifestRoleDirectory`) are all **inherited**, so none of
+     * them was ever in `accepted` and none exempted anything. An exemption list that exempts
+     * nothing reads as coverage and provides none — ADR-0351's *documented the hazard and checked
+     * nothing*, in the fence's own data.
+     *
+     * The narrow aperture is kept rather than widened, and the alternative is refused on
+     * measurement: over the union of both interfaces, **19** fields never reach this literal
+     * because the compile step consumes them, so the union form needs 19 entries where
+     * `server.test.ts` refused 13 as ADR-0288's maintained list. All 12 own fields are also
+     * `GatewayRuntimeOptions` fields, so the intersection form is byte-identical to this one.
+     * The *inherited* fields are covered instead by the third check below, which asks whether
+     * every accepted option is read anywhere in `compile.ts` — a question that needs no list.
+     */
+    const notForwarded: Readonly<Record<string, string>> = Object.freeze({});
 
     const dropped = accepted.filter(
       (f) => !new RegExp(`\\b${f}\\b`).test(literal) && !(f in notForwarded),
@@ -655,6 +665,16 @@ describe("buildOperateGateway's option forwarding", () => {
       `these options reach buildOperateGateway and are not forwarded to GatewayRuntime; either ` +
         `forward them or declare why in notForwarded above`,
     ).toEqual([]);
+
+    // Both directions (`pg-record-retention.ts`'s rule), which is what was missing: an entry
+    // naming a field outside the population excuses nothing, and the seven that were here failed
+    // this the moment it was written.
+    for (const f of Object.keys(notForwarded)) {
+      expect(
+        accepted,
+        `notForwarded names ${f}, which is not in this fence's population — it exempts nothing`,
+      ).toContain(f);
+    }
   });
 
   /**
@@ -718,6 +738,60 @@ describe("buildOperateGateway's option forwarding", () => {
     expect(exposed.size).toBeGreaterThan(20);
     // And the field that occasioned this check is exposed, so the test would have failed before it.
     expect(exposed.has("mtlsClientLookup")).toBe(true);
+  });
+
+  /**
+   * The **third** hop, and the one neither check above reaches.
+   *
+   * `buildOperateGateway` hands `compileOperateServer(manifest, options)` the whole object, so no
+   * field can be dropped *there* — which is why the first check's narrow scope
+   * (`OperateGatewayOptions` alone) is correct rather than an oversight, and why widening it to the
+   * union would be checking a hop that has no drop-shaped hazard. What `OperateRuntimeOptions`'
+   * fields do cross is `compileOperateServer`'s **own** literals, and those are ADR-0386's triple
+   * again in two different spellings:
+   *
+   *   - a conditional spread into a handler context, which bypasses the excess-property check, so a
+   *     drop is syntactically identical to an absent field (`userIdentity`);
+   *   - a required read with a `??` default (`new Set(options.adminRoles ?? DEFAULT_ADMIN_ROLES)`),
+   *     where a drop is **worse than silent**: the default always wins, which for `adminRoles` is
+   *     exactly the hardcoded `["erp_admin"]` the flag exists to replace. No type and no boot line
+   *     can see it; the symptom is a 403 for the role an operator declared.
+   *
+   * So the unit here is neither a literal nor an interface pair but *this function's own source*:
+   * every option it accepts must be read somewhere in it. Weaker than naming the literal and
+   * stronger than both checks above in the one way that matters — it does not depend on which
+   * literal a field lands in, so it holds for a field added to a third one tomorrow.
+   *
+   * Measured before writing: **all 36** fields across the two interfaces are read, so the
+   * declaration below is empty rather than a list that grows faster than it is read.
+   */
+  it("reads every option it accepts, so a field cannot be accepted and discarded", () => {
+    const accepted = [
+      ...interfaceFields(source, "OperateGatewayOptions"),
+      ...interfaceFields(source, "OperateRuntimeOptions"),
+    ];
+
+    // Options this step accepts and deliberately never reads. Empty today, and an entry here is a
+    // claim a reader can check rather than a silence (ADR-0331).
+    const notRead: Readonly<Record<string, string>> = Object.freeze({});
+
+    const discarded = accepted.filter(
+      (f) => !new RegExp(`options\\.${f}\\b`).test(source) && !(f in notRead),
+    );
+    expect(
+      discarded,
+      `these options are accepted by buildOperateGateway/compileOperateServer and read nowhere in ` +
+        `compile.ts, so a deployment can set them and nothing happens`,
+    ).toEqual([]);
+
+    // Non-vacuity on both sides: a reader that stopped matching would report zero discarded fields.
+    expect(accepted.length, "the two option interfaces read as empty").toBeGreaterThan(30);
+    for (const f of Object.keys(notRead)) {
+      expect(accepted, `${f} is declared not-read and is not an accepted option`).toContain(f);
+    }
+    // And the two fields this check was written for are in the set it compares.
+    expect(accepted).toContain("adminRoles");
+    expect(accepted).toContain("userIdentity");
   });
 
   /**

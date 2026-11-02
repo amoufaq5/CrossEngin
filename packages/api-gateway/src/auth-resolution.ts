@@ -875,6 +875,61 @@ export function principalAbacAttributes(
   return principal?.abacAttributes ?? null;
 }
 
+/**
+ * Whether a principal kind names a **person** who could hold a `meta.users` row.
+ *
+ * A total map rather than a `!== "service_account"` comparison, so a fifth kind is a compile error
+ * instead of a kind inheriting whichever answer the comparison happened to give it.
+ * `service_account` is the load-bearing `false`: a bare `--api-key 'key:role:tenant'` names no
+ * person and **every** such key in a deployment shares one placeholder principal id, so treating
+ * that id as an identity would hand one placeholder's row to every service credential at once.
+ * `ai_architect` and `system` are `false` for the weaker reason that neither has a row to join, so
+ * a lookup could only ever resolve `null` at the cost of a query.
+ *
+ * A spec that *names* a principal resolves `principalKind: "user"` and is treated as a person even
+ * where an operator means it as a service account — that is the operator's own declaration.
+ *
+ * It lives here, beside `ResolvedPrincipalSchema`, because it is a fact about
+ * `ResolvedPrincipal["principalKind"]` and this package has no workspace dependencies — so every
+ * reader can import it. Before that it was spelled **three** ways: this map in
+ * `apps/operate-server`, an inline `principalKind !== "user"` in the read-state routes, and
+ * nothing at all in the UI-schema handler, which is how that handler came to discard the id.
+ */
+export const PRINCIPAL_KIND_NAMES_A_PERSON: Readonly<
+  Record<ResolvedPrincipal["principalKind"], boolean>
+> = Object.freeze({
+  user: true,
+  service_account: false,
+  ai_architect: false,
+  system: false,
+});
+
+export function principalNamesAPerson(principal: ResolvedPrincipal): boolean {
+  return PRINCIPAL_KIND_NAMES_A_PERSON[principal.principalKind];
+}
+
+const PRINCIPAL_UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+/**
+ * This principal's id **as a user id**, or `null` when it does not name one.
+ *
+ * Two conjuncts, and the second is not belt-and-braces. `ResolvedPrincipalSchema` constrains
+ * `principalId` to a uuid and has **no parse site anywhere in the workspace** — the resolvers
+ * return their stored object and `resolvePrincipalForCredential` spreads without parsing — so the
+ * shape is enforced incidentally and late, by `PipelineExecutionSchema` when the execution record
+ * is built at the *end* of the request. A reader that wants to use the value as a key to
+ * `meta.users` therefore has to check it, which is what `resolveViewer` already did inline and
+ * what this converges.
+ *
+ * `null` rather than a throw, because "this credential is not a person" is an ordinary and correct
+ * state for an api-key, not an error — and distinguishing it from a person's id is the whole point:
+ * a shared placeholder rendered as an identity is the defect this exists to prevent.
+ */
+export function principalUserId(principal: ResolvedPrincipal | null): string | null {
+  if (principal === null || !principalNamesAPerson(principal)) return null;
+  return PRINCIPAL_UUID_RE.test(principal.principalId) ? principal.principalId : null;
+}
+
 export const isStrongAuthScheme = (scheme: AuthScheme): boolean =>
   STRONG_AUTH_SCHEMES.has(scheme);
 

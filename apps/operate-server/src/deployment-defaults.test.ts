@@ -395,6 +395,54 @@ describe("the two defaults this increment measured", () => {
   });
 });
 
+describe("the tenant-settings grant", () => {
+  const args = apiCommandArgs();
+
+  it("names a grant at all, because the hardcoded default had no flag", () => {
+    // `GET`/`PUT /v1/admin/settings` were governed by `DEFAULT_ADMIN_ROLES = ["erp_admin"]` with no
+    // way to change it: `BuildOperateHttpServerOptions.adminRoles` existed, was forwarded into
+    // `compileOperateServer`, and `node.ts` never set it. A deployment whose administrator is named
+    // anything else simply could not reach its own tenant's settings.
+    expect(args).toContain("--admin-role");
+  });
+
+  it("keeps the binary's own default, so no tenant administrator is locked out by the flag", () => {
+    // `cli.ts` REPLACES the default rather than adding to it (`--ai-design-role`'s lesson), so
+    // naming only `platform_admin` here would have taken the page away from every `erp_admin`.
+    expect(valuesAfter(args, "--admin-role")).toContain("erp_admin");
+  });
+
+  it("grants the bootstrap operator, whose 403 on its own settings is the live defect", () => {
+    // The documented walkthrough grants `platform_admin` in the api-key spec AND in the membership,
+    // so before this flag the operator the stack ships reached a 403 on Settings and Billing while
+    // the sidebar linked to both unconditionally. Measured live.
+    expect(valuesAfter(args, "--admin-role")).toContain("platform_admin");
+  });
+
+  it("grants no role the command does not grant elsewhere, so the set is auditable", () => {
+    // Not an equality against a literal pair — that would have to be edited by anyone adding a
+    // third administrator — but a containment: every name here is one this command already hands
+    // out somewhere, so a typo'd role (which fails CLOSED, as a dead page) is caught here rather
+    // than by an operator finding Settings 403.
+    const elsewhere = new Set([
+      ...valuesAfter(args, "--platform-admin-role"),
+      ...valuesAfter(args, "--platform-user-role"),
+      ...valuesAfter(args, "--credential-admin-role"),
+      ...valuesAfter(args, "--read-state-role"),
+      ...valuesAfter(args, "--ai-design-role"),
+      ...valuesAfter(args, "--design-review-role"),
+      "erp_admin",
+    ]);
+    const unknown = valuesAfter(args, "--admin-role").filter((r) => !elsewhere.has(r));
+    expect(unknown, `these --admin-role values are granted nowhere else on this command`).toEqual(
+      [],
+    );
+    // Non-vacuity: the comparison set is real and the flag really is repeatable here.
+    expect(elsewhere.size).toBeGreaterThan(1);
+    expect(valuesAfter(args, "--admin-role").length).toBeGreaterThanOrEqual(2);
+  });
+});
+
 describe("what the command must not carry", () => {
   const args = apiCommandArgs();
 

@@ -98,7 +98,11 @@ import type { EntityStore } from "./store.js";
 import { temporalFieldIndexFromManifest, withDatetimeWireType } from "./datetime-store.js";
 import { decimalFieldIndexFromManifest, withDecimalWireType } from "./decimal-store.js";
 import { listValueTypesForManifest, withListValueTypes } from "./list-value-types.js";
-import { buildUiSchema, buildUiSchemaHandler } from "./ui-schema.js";
+import {
+  buildUiSchema,
+  buildUiSchemaHandler,
+  type UiUserIdentityResolver,
+} from "./ui-schema.js";
 import { buildClassifiedFieldIndex, type WriteMaskMode } from "./write-mask.js";
 
 export interface OperateRuntimeOptions {
@@ -190,6 +194,14 @@ export interface OperateRuntimeOptions {
   readonly openApiCoverage?: () => readonly OpenApiCoverageGap[];
   /** Backs the admin settings endpoints + runtime numbering overrides. */
   readonly settingsStore?: SettingsStore;
+  /**
+   * Resolves the signed-in person's own name and email for `GET /v1/meta/schema`'s viewer.
+   *
+   * Optional on `settingsStore`'s precedent and for its reason: this package has no Postgres
+   * dependency, so the read has to be supplied. Absent, the viewer still carries the person's
+   * `userId` — that comes from the principal and needs no store at all.
+   */
+  readonly userIdentity?: UiUserIdentityResolver;
   /** Roles permitted to read/write tenant settings. Defaults to {"erp_admin"}. */
   readonly adminRoles?: readonly RoleName[];
   /** Roles permitted to read finance reports (e.g. aging). Defaults to a finance-role set. */
@@ -891,6 +903,7 @@ export function compileOperateServer(
       schema: buildUiSchema(manifest),
       principalRoles: options.principalRoles,
       ...(options.settingsStore !== undefined ? { settingsStore: options.settingsStore } : {}),
+      ...(options.userIdentity !== undefined ? { userIdentity: options.userIdentity } : {}),
     }),
   );
 

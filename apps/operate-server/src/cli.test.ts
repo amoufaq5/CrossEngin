@@ -2223,27 +2223,31 @@ describe("--mtls-client and --trusted-edge-client-cert", () => {
    * following line indented past the description column, which is structural and does not rest on
    * the prose's wording.
    */
-  it("keeps each flag's continuation under its own flag", () => {
-    // A flag *definition* sits at exactly two spaces of indent and a continuation at the
-    // description column, so the block boundary is `/^ {2}--/` and **not** `/^\s*--/`. That
-    // distinction is load-bearing rather than pedantic: `--mtls-client`'s own continuation names
-    // `--trusted-edge-client-cert`, so the lax pattern cuts its block two lines early — a defect in
-    // the first draft of this helper, which would have reported the fixed text as still broken.
-    const FLAG_DEF = /^ {2}--/;
-    const blockFor = (flag: string): string => {
-      const lines = helpText.split("\n");
-      const start = lines.findIndex(
-        (l) => FLAG_DEF.test(l) && (l.trimStart().startsWith(`${flag} `) || l.trim() === flag),
-      );
-      expect(start, `${flag} is absent from --help`).toBeGreaterThanOrEqual(0);
-      const out = [lines[start] ?? ""];
-      for (const line of lines.slice(start + 1)) {
-        if (FLAG_DEF.test(line)) break;
-        out.push(line);
-      }
-      return out.join("\n");
-    };
+  // A flag *definition* sits at exactly two spaces of indent and a continuation at the description
+  // column, so the block boundary is `/^ {2}--/` and **not** `/^\s*--/`. That distinction is
+  // load-bearing rather than pedantic: `--mtls-client`'s own continuation names
+  // `--trusted-edge-client-cert`, so the lax pattern cuts its block two lines early — a defect in
+  // the first draft of this helper, which would have reported the fixed text as still broken.
+  //
+  // Hoisted out of the one `it` that first needed it, because a second insertion wanted the same
+  // rule and two copies of a boundary predicate is how the two come to disagree about where a
+  // block ends.
+  const FLAG_DEF = /^ {2}--/;
+  const blockFor = (flag: string): string => {
+    const lines = helpText.split("\n");
+    const start = lines.findIndex(
+      (l) => FLAG_DEF.test(l) && (l.trimStart().startsWith(`${flag} `) || l.trim() === flag),
+    );
+    expect(start, `${flag} is absent from --help`).toBeGreaterThanOrEqual(0);
+    const out = [lines[start] ?? ""];
+    for (const line of lines.slice(start + 1)) {
+      if (FLAG_DEF.test(line)) break;
+      out.push(line);
+    }
+    return out.join("\n");
+  };
 
+  it("keeps each flag's continuation under its own flag", () => {
     const hmac = blockFor("--hmac-key");
     const mtls = blockFor("--mtls-client");
     const trust = blockFor("--trusted-edge-client-cert");
@@ -2266,6 +2270,80 @@ describe("--mtls-client and --trusted-edge-client-cert", () => {
     ] as const) {
       expect(block.split("\n").length, `${name}'s help block is a single line`).toBeGreaterThan(2);
     }
+  });
+
+  it("keeps --admin-role's own block intact, and its neighbours' too", () => {
+    // Inserted between `--platform-admin-role` and `--ai-design`, which is exactly the position
+    // ADR-0394's addendum found a defect in: an inserted entry orphaned the *preceding* flag's
+    // continuation, so `--help` described a boolean as "repeatable; all four fields required".
+    // Measured here for all three, because the hazard is the neighbours and not the new entry.
+    const admin = blockFor("--admin-role");
+    const platform = blockFor("--platform-admin-role");
+    const ai = blockFor("--ai-design");
+
+    // Each block carries the fact only it is about.
+    expect(admin).toContain("/v1/admin/settings");
+    expect(admin).toContain("erp_admin");
+    expect(platform).toContain("/v1/platform");
+    expect(ai).toContain("AI Architect");
+
+    // And no block has absorbed a neighbour's subject.
+    expect(platform).not.toContain("/v1/admin/settings");
+    expect(ai).not.toContain("/v1/admin/settings");
+    expect(admin).not.toContain("AI Architect");
+
+    // The help entry has to carry the WARN-not-refuse decision, because that is the one thing an
+    // operator cannot infer: `platform_admin` is declared by none of the seven packs and is a
+    // correct value here, so an undeclared role is not a typo.
+    expect(admin).toMatch(/WARNED|warned/);
+    expect(admin).toContain("platform_admin");
+    // And the distinction from the flag beside it, which is the mistake the name invites.
+    expect(admin).toContain("--platform-admin-role");
+
+    for (const [name, block] of [
+      ["--admin-role", admin],
+      ["--platform-admin-role", platform],
+      ["--ai-design", ai],
+    ] as const) {
+      expect(block.split("\n").length, `${name}'s help block is a single line`).toBeGreaterThan(1);
+    }
+  });
+});
+
+describe("--admin-role", () => {
+  it("defaults to erp_admin, so declaring nothing changes nothing", () => {
+    // `compileOperateServer`'s own `?? DEFAULT_ADMIN_ROLES` has always been `["erp_admin"]`, and
+    // every one of the seven packs declares that role — so the default is what every deployment
+    // already had. Widening it to the three-member exported `DEFAULT_ADMIN_ROLES` would silently
+    // hand `platform_admin` a tenant's settings everywhere, which is a privilege decision.
+    expect(parseServeArgs(["--pack", "erp-core"]).adminRoles).toEqual(["erp_admin"]);
+  });
+
+  it("is repeatable and replaces the default rather than adding to it", () => {
+    const opts = parseServeArgs([
+      "--pack", "erp-core",
+      "--admin-role", "erp_admin",
+      "--admin-role", "platform_admin",
+    ]);
+    expect(opts.adminRoles).toEqual(["erp_admin", "platform_admin"]);
+  });
+
+  it("accepts the --flag=value form", () => {
+    expect(parseServeArgs(["--pack", "erp-core", "--admin-role=ops"]).adminRoles).toEqual(["ops"]);
+  });
+
+  it("refuses a missing value", () => {
+    expect(() => parseServeArgs(["--pack", "erp-core", "--admin-role"])).toThrow(CliUsageError);
+  });
+
+  it("needs no companion flag, because the routes it grants are always mounted", () => {
+    // Deliberately unlike `--credential-admin-role`, which is refused without `--credential-login`
+    // because its routes would not be mounted. `/v1/admin/settings` is registered whenever a
+    // settings store exists, and `ResolvedStores.settingsStore` is non-optional — so this grant is
+    // never inert and has nothing to be refused against.
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--admin-role", "whoever"]),
+    ).not.toThrow();
   });
 });
 

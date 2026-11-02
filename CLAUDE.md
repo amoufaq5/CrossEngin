@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 21,079 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 21,141 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -2342,9 +2342,33 @@ report; `apps/operate-web` has none).
   dropped option. ADR-0288's maintained list wrong for the **fourth** time, so the fence is over the
   list and not the field: `compile.test.ts` reads `compile.ts` **as text** and asserts that every
   option the function accepts and the runtime also accepts appears in the forwarding literal, with a
-  `notForwarded` map carrying a reason for each of the seven consumed by the compile step instead.
+  `notForwarded` map carrying a reason for each option consumed by the compile step instead.
+  (ADR-0386's own text says "each of the seven", and ADR-0396 measured that map **empty in
+  practice**: all seven entries name fields `CompileOperateServerOptions` *inherits* from
+  `OperateRuntimeOptions` rather than declaring in its own braces, so none was ever in the
+  population the fence compares and every one was a dead exemption — a `notForwarded` list that
+  excuses nothing reads as seven considered judgements. They are removed, with a both-directions
+  invariant asserting the map names only fields the population holds, and a third check asserting
+  the function *reads* every option it accepts.)
   As text because no type can ask it — a forwarded field and an absent one are identical to the type
   system.
+  **ADR-0396 generalised that fence one hop out, and the generalisation immediately found two live
+  drops this file had never recorded.** `serve()`'s two `buildOperateHttpServer` literals had been
+  fenced the way ADR-0386's and ADR-0391's open ends were closed — *by name, one field per
+  increment* — which is ADR-0288's maintained list rebuilt as a test rather than as a forwarding
+  literal: each fence pinned the field its own increment had dropped and said nothing about the next
+  one. `node.test.ts` now reads `node.ts` as text, brace-matches both literals' spans, and asserts
+  that **every** field `BuildOperateHttpServerOptions` declares is passed at **both** sites, with a
+  per-site `notPassed` map carrying a reason for each exception. It found `idempotencyStore` and
+  `rateLimitChecker` passed at the boot site and **not** at the per-tenant one — so a tenant serving
+  its own activated manifest got the in-memory replay guard and no rate-limit decision row, three
+  increments after ADR-0336 wired the durable store — plus a comment claiming two
+  deployment-singleton exceptions where there are four. Three mechanics are load-bearing: the span
+  is **brace-matched** rather than line-bounded (both literals are ~100 lines and nest objects and
+  arrow functions); the match is on a **word boundary** and not `field\s*[,:]`, because a shorthand
+  property in a conditional spread ends in `}`; and `stripComments` is applied first — not to
+  prevent a false *red* but a false **green**, since the raw per-tenant span is 9,628 characters
+  against 3,522 stripped and a field named only in prose would read as passed.
 
   ADR-0387 and ADR-0388 are the second P1 batch, run as parallel increments over disjoint files.
 
@@ -3856,6 +3880,23 @@ packages exist at only one layer, noted below where that is true.
   route's response and the handler imports the emitter, so the other direction is a module cycle over
   `const` bindings. (The path was briefly an array in `compile.ts` and a string in `node.ts`'s boot
   line, caught by a `TS2304` rather than by looking.)
+  **`UiViewer` names the person and not only the role they signed in with** (ADR-0396), over four
+  new fields: `userId` and `principalKind` (both **required**, both nullable) plus `displayName`
+  and `email`, which are **optional** — and the split is the whole of it. The id was already in
+  hand on every request (`principal.principalId`, read by three other surfaces) and the handler
+  simply never put it on the viewer, so the client could name the *role* and not the holder; the
+  consequence that bit is that **a person could not be shown their own record**, the detail page
+  being reached by an id the client did not have. `null` is *this credential names nobody* (a
+  `service_account`, measured as the shared `DEFAULT_PRINCIPAL_ID`) and an **absent** key is
+  *nobody was looked up*, which is ADR-0331's distinction made observable to a consumer keying on
+  `?? email`: Bob's row carries no name and answers `displayName: null`, while an api-key answers
+  neither key at all. The identity comes from an injected
+  `UiSchemaContext.userIdentity?: (userId) => Promise<UiUserIdentity | null>` — a seam and not a
+  store, because `operate-runtime` must not depend on a Postgres package, and **optional** because
+  a deployment with no identity source is a working deployment rather than a misconfiguration
+  (ADR-0338's rule read the other way). It is asked **once per request and only for a person**, so
+  a bare api-key costs no lookup (ADR-0341's producer rule, per request rather than per
+  deployment).
 - **`operate-runtime-pg`** — Postgres `EntityStore` implementations plus the serving-side
   stores.
   **`public.ce_unaccent(text)` is the one accent fold, named by the predicate and by the index**
@@ -3935,6 +3976,20 @@ packages exist at only one layer, noted below where that is true.
   the child's own entity answers 403 and an inherited one 200 on **one** gateway, and each of the
   three refusals is a 503 whose log reads *"extends unknown parent 'operate-erp/retail' — this
   deployment permits extending only 'operate-erp/core'"*.
+  **A throw from the manifest *source* is a refusal too since ADR-0397**, where it resolved
+  `{kind:"none"}` and fell back — which on `--store pg` is the same store object, so a read that
+  **did not happen** served the tenant their own rows under the boot manifest's rules, and it
+  logged nothing. It routes to the existing `unknown` kind, which is already `permanent: false`, so
+  it is **returned unremembered** and re-asked on the next request — no fourth `GatewayResolution`
+  arm and no new enum member, which refutes that open end's own prescribed "third disposition".
+  Measured live as a non-owner by revoking `SELECT` on `meta.operate_tenant_manifests`: **503**
+  with `retry-after: 60` on both of two requests (two log lines, so uncached), and restoring the
+  grant serves **200 on the very next request with no restart**. `onBuildRefused`'s sentence is
+  keyed on the kind, because the unconditional *"manifest is valid and its gateway could not be
+  built"* is **false** for a source throw — the manifest was never read — and contradicted its own
+  detail clause in one line; for the five kinds that parse the manifest first the clause is true and
+  load-bearing, since it is what tells an operator not to look there. Two existing tests had pinned
+  the fallback as the specification, one of them in its title (ADR-0372's class).
   **A tenant serving its own activated manifest gets its own Postgres schema** (ADR-0314), not a share of
   the boot tables — two tenants author independently, so A's `Invoice` and B's `Invoice` are different
   types with the same name, and `ADD COLUMN IF NOT EXISTS` matches on *name only*, so a shared table would
@@ -4155,6 +4210,20 @@ packages exist at only one layer, noted below where that is true.
   separates them by registration order — so a Paths Object would hold one and omit the other.
   `OPENAPI_PATH_ITEM_FIELD` is a total map over `HttpMethod` with `CONNECT → null`, the Path Item
   Object having no field for it.
+  **`principalUserId` is the one spelling of *this request is a person, and here is their id***
+  (ADR-0396), beside `PRINCIPAL_KIND_NAMES_A_PERSON` and `principalNamesAPerson` in
+  `auth-resolution.ts`. There were **three** spellings of the first half — ADR-0341's directory,
+  `read-state-routes.ts`' viewer resolution and `abac-attributes.ts`' lookup gate — each
+  re-deriving *does this credential name a person* from the same total map, and none of them
+  answering the second half, which is why `UiViewer` carried no id. The **uuid test is not
+  belt-and-braces**: `ResolvedPrincipalSchema` has **no parse site anywhere in the workspace**, so
+  the field's `z.string().uuid()` is a type annotation standing in for a check (ADR-0362) and
+  `principalId` is whatever a resolver put there — ADR-0331's shared `DEFAULT_PRINCIPAL_ID` being
+  the one value that is uuid-shaped *and* names nobody, which is what the `principalKind` half
+  excludes. Both halves are needed and neither is sufficient: without the kind test the shared
+  placeholder travels as a person's id, and without the uuid test a non-uuid `principalId` reaches
+  a `meta.users` lookup that answers `22P02`. It returns `string | null` and never throws, because
+  every caller's next act is a store read it must be able to decline.
 - **`api-gateway-runtime`** — that pipeline as real middleware. EdDSA JWT verification with
   iss/aud/exp/nbf and a JWT-vs-header tenant cross-check, opaque-token matching, body
   parsing, handler dispatch, handler 4xx/5xx → deny/error mapping, classification-driven
@@ -6490,6 +6559,16 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   would produce a false boot refusal — and measures `uncreatable` with the mask **on** whatever the
   flag says, because a refusal computed under the regime the operator is leaving could never gate
   the change.
+  **`surveySensitiveFields` takes the *resolver* and not a declaration since ADR-0397**, which is
+  what untied it from `serve()`: it used to accept a `SensitiveFieldDeclaration` and spend it on one
+  line (`buildSensitiveFieldPolicy(declaration)("")`), so the one place such a declaration exists
+  was the only place the survey could run — and that is why a tenant's own manifest was surveyed by
+  nothing. `policyForEntity: (entity: string) => SensitiveFieldPolicy | undefined` is the same seam
+  the redaction registry already takes, asked **per entity inside the loop**, which is strictly more
+  correct rather than mere plumbing: the type permits per-entity variation and a deployment may
+  supply its own resolver, where the old single `("")` call applied one answer to every entity.
+  Note the resolver has **two** consumers on the same server, so a test counting its invocations
+  must assert a *delta* rather than a total (the registry already calls it once per entity).
   **A manifest declaring an ABAC obligation this deployment cannot discharge is refused at boot**
   (ADR-0340, `abac-obligations.ts`), and there is deliberately **no flag past it**: ADR-0338 shipped
   `--allow-plaintext-phi` because plaintext PHI is a degraded-but-coherent state an operator may
@@ -6505,6 +6584,17 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `would_make_entity_uncreatable`, naming the classification declaration as the remedy for
   something no declaration can fix. First refusal wins, so it has to be the one whose remedy is
   true.
+  **Two *reports* sit beside that refusal since ADR-0397, under `onSurvey`** — the sensitive-field
+  survey and the cursor-disclosure decision, both of which `serve()` had always computed for the
+  boot pack and neither of which ran for an activated per-tenant manifest. This is the same
+  placement argument the paragraph above makes, and it reaches a second class of check: the
+  obligation check is here because it **throws**, which is how it reaches an operator at all, while
+  a finding that must not refuse had nowhere to go — so `onSurvey` is the increment, and it is what
+  made both halves one change. They are **gated on the callback being supplied**, so a deployment
+  passing none pays nothing and the two boot lines stay `serve()`'s. The plan's own proposal —
+  `applyTenantManifestSchema` — is **refuted on two grounds** and the decisive one is reachability:
+  its only caller is built solely under `--store pg-columns` while the shipped compose is
+  `--store pg`, so the check would have been dark on the deployment that ships.
   **A fourth refusal and a third report joined it in ADR-0345.** `rowFiltered` names the
   record-bearing obligations whose position's `ABAC_DENIAL_EFFECT` is `filters_rows` — derived
   through that map, so the string `"entity_list"` appears nowhere in the module's logic — and is
@@ -7120,6 +7210,62 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   the matcher and a test pins the two agreeing. `MAX_LIMIT` became `REGISTRY_LIST_MAX_LIMIT` because
   **eleven** sibling modules in this app hold the bare name privately, none exports it, and
   `index.ts` re-exports this file with `export *`.
+  **`--admin-role` names who may read and write a tenant's settings** (ADR-0396, `admin-grant.ts`),
+  repeatable, defaulting to `["erp_admin"]` so no shipped deployment's behaviour changed.
+  `BuildOperateHttpServerOptions.adminRoles` existed and `server.ts` forwarded it, and `node.ts`
+  set it at **neither** of its two `buildOperateHttpServer` literals while passing `settingsStore`
+  at both — so `compileOperateServer`'s `?? DEFAULT_ADMIN_ROLES` governed
+  `GET`/`PUT /v1/admin/settings` everywhere, including for a tenant serving its own activated
+  manifest that declares no such role. The default is right about the **manifest** (all seven packs
+  declare `erp_admin`) and was wrong about the **credential**, which is why this was live through
+  the documented bootstrap rather than hypothetical: `.env.example` grants the operator
+  `platform_admin`, measured **403** on both routes without the flag and 200 with it. `formatAdminGrant`
+  is the `[settings]` boot line — the settings grant was the one grant in the binary with no line at
+  all — and it names the roles the manifest does **not** declare *without* calling them a typo,
+  because the check is against the roles a caller's session carries and a platform operator's role
+  is legitimately outside the manifest (`membership-role-fence.ts`' distinction, read from the other
+  side). It is deliberately **not** shared with the marketplace grant at the same literal value: one
+  is a tenant-scoped grant over that tenant's own row and the other installs packs, and
+  `--notification-admin-role` / `--credential-admin-role` are the repo's precedent for two flags.
+  Worth knowing before touching either: **this app holds two `DEFAULT_ADMIN_ROLES` constants with
+  different member sets** — `recipient-resolver.ts`' `["erp_admin", "tenant_admin",
+  "platform_admin"]` for the notification `tenant_admins` audience, and `compile.ts`'
+  `["erp_admin"]` for this grant — which answer different questions and are both right to differ,
+  and the fact that one of them already named `platform_admin` is the evidence that the settings
+  default was an omission rather than a decision.
+  **`user-identity.ts` resolves a person's name and email once per request** (ADR-0396), behind the
+  `UiSchemaContext.userIdentity` seam, over `PostgresUserStore.findById` with a TTL cache and
+  in-flight collapse (`fcm-token.ts`'s idiom: N concurrent cold requests for one viewer make one
+  round trip). Keyed on the **user id alone** and not on `(tenant, user)`, because `meta.users`
+  carries no `tenant_id` — the same fact that gives that table no RLS (ADR-0358) — so a
+  tenant-keyed cache would hold N copies of one row and answer them inconsistently.
+  It **never throws** and reports through a **required** `onError`, which is the deliberate
+  inversion of `CachedAbacAttributeDirectory`'s propagating policy and the inversion is the
+  decision: there the value is an authorization input, so not knowing must deny, while here it is a
+  display name and a failed lookup must cost a label rather than the request — so an unreadable row
+  answers `null`, which is the same answer a person with no name gives, and the operator hears it
+  once per TTL instead of the viewer getting a 500. `onError` is required rather than optional for
+  ADR-0364's reason: an optional reporter defaulting to *say nothing* is the defect restated as a
+  default.
+  **`tenant-manifest-survey.ts` says of a tenant's own activated manifest what the boot lines say
+  of the deployment's pack** (ADR-0397), through `BuildOperateHttpServerOptions.onSurvey` — the
+  non-failure channel `TenantGatewayCache` did not have, beside its two failure-only callbacks.
+  `tenantSurveyHasFinding` is the predicate and it is deliberately **not** `totalSensitive > 0`: a
+  manifest whose classified fields are readable and writable by the roles it intends is the healthy
+  state, and reporting it is how a per-tenant warning becomes noise an operator filters, taking the
+  real findings with it — so a clean manifest is **silent**, which is the one place this departs
+  from the boot lines' say-it-either-way rule and the reason is scale (a line per tenant per
+  activation grows with the tenant count). It **borrows** `formatSensitiveFieldSurvey` and
+  `formatCursorDisclosure` rather than restating their sentences, so the boot line and the
+  per-tenant line cannot come to describe one finding differently; and it prefixes **every** line
+  rather than the block, because those formatters return a `\n`-joined block of already-prefixed
+  lines and tagging the block would leave lines 2..N unattributable in a multi-tenant log — the
+  first draft did exactly that and its own test caught it. It **reports and never refuses**
+  (ADR-0348's split: activation already validates, and refusing would take a tenant's whole
+  deployment away over a declaration), and the cursor remedy it names is the **deployment's**
+  `CURSOR_ENCRYPTION_SECRET` rather than anything the tenant can change, because one secret seals
+  every tenant with the key derived per tenant inside the sealer (ADR-0334: a remedy that cannot
+  work is worse than none).
   Append:
 
   **The anchor check's own finding** (ADR-0373). `listAnchoredForScope` used to **drop** a row the
@@ -7166,8 +7312,12 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `res.ok` true. The cookie is only a hint: the API verifies the token on every request, so a
   forged one is a 401 **from the API**.
   **It manages people since ADR-0364** — `/platform/users`, `/platform/users/[id]`, a Members panel
-  on `/platform/[id]` and `/account` — which is what made the ten identity routes
+  on `/platform/[id]` and `/account` — which is what made the **eleven** identity routes
   `--platform-user-routes` has mounted since ADR-0335 reachable by anybody without `curl`.
+  (Ten when ADR-0364 was written and eleven since ADR-0365 added `platform.users.stats`; the
+  ADR-0364 narrative above keeps **ten** because it was right then, which is the distinction
+  register P3.1 draws between a *drifted* figure and a wrong-when-written one. Count the `v(` call
+  sites in `buildPlatformUserRoutes`.)
   `lib/users.ts` is the contract and it **imports** `PlatformError` and `throwProblem` from
   `lib/platform.ts` rather than restating them, because the 401-redirect inside `throwProblem` is
   the half a second copy forgets. Three shapes are worth knowing. The status buttons are driven by
@@ -7192,6 +7342,18 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   same increment, where it was `pathname.startsWith("/platform") && !pathname.startsWith(…)` —
   an exclusion list that every new platform page has to be added to, and which lights two links at
   once when it is not.
+  **The chrome and `/account` name the person since ADR-0396**, through `viewerName` and
+  `viewerIsPerson` in `lib/schema.ts` — one spelling each, because the fallback chain
+  (`displayName ?? email ?? primaryRole`) decides the avatar initial *and* the account page's
+  heading and two copies would come to disagree about which. The avatar initial was taken from a
+  **role name** before, so every `erp_admin` in a deployment rendered the same letter.
+  `viewerIsPerson` is `userId !== null`, which is the client's whole test: it is what separates a
+  session from an api-key without the client re-deriving `principalKind`, and it gates the one
+  thing a service credential has no answer for. `email` is the fallback and never the role, so a
+  person with no stored name is shown their address rather than a label shared with everyone
+  holding that role; and `displayName` being **absent** versus **null** is preserved through
+  `UiViewerSchema` rather than coalesced, so the client can tell *we looked and there is no name*
+  from *nobody was looked up* (ADR-0331, at the wire).
   **`/notifications` lists the viewer's notices and can clear them** (ADR-0385), which is what made
   `--read-state-routes` landable: `markNoticeRead` and `markReadThrough` had zero callers, so the
   nav badge counted a set nothing could reduce. **The badge and the page are one number**, carried
@@ -9365,9 +9527,15 @@ opened them.
   follow*. `update ⊆ read` is enforced, `create` deliberately is not — supplying a value you know
   discloses nothing; changing one you cannot read destroys it.
   What remains, in order: **(1)** `--classified-write-mask` can now become the **default** rather
-  than opt-in for the shipped packs, since its boot refusal has nothing left to name there — but a
-  *tenant's* own activated manifest can still declare an ungranted classified field, so flipping it
-  needs that path surveyed too (ADR-0339's Q5, still open and now the blocker for this). **(2)**
+  than opt-in for the shipped packs, since its boot refusal has nothing left to name there — and the
+  blocker this entry named is **closed**: a tenant's own activated manifest is surveyed now
+  (ADR-0397, in `buildOperateHttpServer`), so the flag's refusal would be computed over the manifest
+  it governs rather than over the boot pack alone. What is left to decide is whether the per-tenant
+  answer should *refuse* an activation or stay a report, which is the question that survey settled
+  the other way — it reports, because refusing takes a tenant's whole deployment away over a
+  declaration activation validates. (The citation was **ADR-0339's Q6**, not Q5; this file carried
+  the off-by-one twice and both are corrected, which is register P3.1's pointer-into-a-list member.)
+  **(2)**
   nothing fences a **new** classified field being granted at all: the three rules check that a
   *declared* grant is coherent, not that one exists. A fourth rule — "a sensitive-classified field
   has a grant" — would refuse **zero** fields today and is the cheapest moment it will ever have,
@@ -9632,12 +9800,21 @@ opened them.
   check beside it. Verified live as a non-owner: one request, two deployments,
   `{"k":["a1-secret@example.test"],…}` and `s1.-sdvu8Oxt…`, with the body omitting the field in
   both.
-  What remains, in order: **(1)** the survey is **boot-time**, so a *per-tenant* activated manifest
-  (ADR-0314) that classifies a sortable field is surveyed by nothing. `buildOperateHttpServer` is
-  where ADR-0340 put the obligation check for exactly this reason and the same call belongs beside
-  it; the only open question is what a per-tenant *report* (not refusal) does when the tenant is not
-  the operator reading the log. Same shape as ADR-0339's Q5, which is still open and is the blocker
-  for both. **(2)** `--allow-cursor-disclosure` now acknowledges **two** findings — withheld rows
+  What remains, in order: ~~**(1)** the survey is boot-time~~ — **closed by ADR-0397**, and the
+  prescription in this entry was exactly right about the placement (`buildOperateHttpServer`, three
+  lines beside the obligation check, both inputs already on its literal) while **two** of its
+  surrounding claims were refuted. *"Same shape as ADR-0339's Q5, which is the blocker for both"* is
+  wrong twice over: the citation is **Q6**, and the two items do **not** share an input set — this
+  one needed zero plumbing while the sensitive-field survey needed `surveySensitiveFields` to take a
+  `SensitiveFieldPolicy` instead of a `SensitiveFieldDeclaration`, so neither blocked the other. What
+  they genuinely shared is the **missing report channel**: `TenantGatewayCache` carried only
+  `onInvalidManifest` and `onBuildRefused`, both failure-only, which is why ADR-0340's check reaches
+  an operator at all (it *throws*) and why a finding that must not refuse had nowhere to go. That is
+  `onSurvey`, and it is what made both halves one increment. Measured live as a non-owner, the
+  finding that proves it: on one process the boot `[cursor]` line reports **1** classified sortable
+  field and the per-tenant line reports **2** — `Employee.work_email` (inherited) and
+  **`Patron.email`**, which the tenant authored and the boot survey structurally could not see.
+  **(2)** `--allow-cursor-disclosure` now acknowledges **two** findings — withheld rows
   and a classified field's value — so an operator accepting the second necessarily accepts the
   first; splitting it is one flag and a decision about whether a second hatch earns its surface.
   **(3)** whether sorting by a field you cannot read should be refused **generally** rather than
@@ -11329,9 +11506,15 @@ third clause is not a flourish.
    deciding whether that function gets a caller or gets deleted (ADR-0337). Landable without a
    product decision: a boot report over the compliance half (5 of 6 declared ids have no definition;
    3 definitions are declared by nobody; `uae_moh` versus `uae-moh`), `region` alone, and — one line
-   above the literal — P2.16's `adminRoles: new Set(["erp_admin"])`, whose `node.ts:1336` citation
-   is stale and whose *first* member resolves through a `DEFAULT_ADMIN_ROLES` that has a **second
-   constant of the same name** in this app.
+   above the literal — P2.16's **marketplace** `adminRoles: new Set(["erp_admin"])` inside
+   `node.ts`'s `options.packCatalogFile !== null` block (anchored by symbol rather than by line: the
+   `:1336` citation this file carried twice was drifted, and its replacement drifted again inside the
+   increment that wrote it),
+   whose *first* member resolves through a `DEFAULT_ADMIN_ROLES` that has a **second constant of the
+   same name** in this app — and the two have **different member sets**
+   (`["erp_admin","tenant_admin","platform_admin"]` for the notification audience against
+   `["erp_admin"]` for the settings grant). ADR-0396 closed the settings half with `--admin-role`
+   and deliberately left this one, so it is now the whole of P2.16.
 8b. ~~**A deployment with no backups is certified DR-ready**, and the rule against it is written out
    twenty lines above the function that breaks it.~~ — **closed by ADR-0372**, and it was never a
    live P0: an adversarial pass over the audit's own verdicts refuted that grade on the discipline
@@ -11986,11 +12169,44 @@ land with or before it.
    (`pgp_sym_decrypt(col, key) = $1` is correct and unindexed, so an `eq` on a unique MRN is a
    sequential scan with a decrypt per row — the cliff ADR-0345 refused), and the partially-narrowed
    `?q` is still silent at request time, so a clinician searching an MRN gets an empty page.
-2. **No path surveys an activated per-tenant manifest's classified fields**, so ADR-0339's
-   write-open/read-closed asymmetry is still live there — `node.ts` admits it in a comment. Rises
-   to **P0 for any deployment serving activated manifests**, which is the headline Architect
-   feature. Its cheap companion is a kernel rule requiring a sensitive-classified field to carry a
-   grant at all, which would refuse zero fields today.
+2. ~~**No path surveys an activated per-tenant manifest's classified fields.**~~ — **closed by
+   ADR-0397**, which refuted this entry's prescribed home and both halves of its "cheap companion".
+   The defect held exactly as stated: `serve()` surveyed the boot pack and nothing surveyed a
+   tenant's own manifest, so ADR-0339's write-open/read-closed asymmetry was unmeasured for the one
+   input the Architect produces.
+   **The remedy named on the plan — `applyTenantManifestSchema` — is refuted on two grounds, the
+   decisive one being that its only caller is built solely under `--store pg-columns` while the
+   shipped compose is `--store pg`**, so the check would have been dark on the deployment that
+   ships. `buildOperateHttpServer` is the home, reached on every store and already holding three of
+   the four inputs; the enabling change is that `surveySensitiveFields` took a
+   `SensitiveFieldDeclaration` and spent it on **one line**
+   (`buildSensitiveFieldPolicy(declaration)("")`), which tied it to `serve()` — the only place such
+   a declaration exists. It takes the **resolver** now, which is not merely plumbing but strictly
+   more correct: the old call asked once with `""` and applied one answer to every entity, while the
+   seam's type permits per-entity variation and a deployment may supply its own `policyForEntity`.
+   Measured live as a non-owner on a tenant manifest extending the deployment's own pack: the boot
+   `[sensitive]` line counts **21** classified fields and the per-tenant line **23**, reporting
+   `unreadable by every declared role: 2 — Patron.email, Patron.tax_ref` on fields the tenant
+   authored. It **reports and never refuses** (ADR-0348's split: activation validates, and refusing
+   would take a tenant's whole deployment away over a declaration), through `onSurvey` — the
+   non-failure channel `TenantGatewayCache` did not have.
+   **Its "cheap companion" is withdrawn with its measurement** (ADR-0366's rule read forward). The
+   predicate *"a sensitive-classified field has a grant"* is **unsound**: `{}` and a `read`-only
+   `FieldPermission` both satisfy "carries an entry" and are byte-identical in effect to absence, so
+   the rule would pass the exact shape it exists to refuse. And *"would refuse zero fields today"* is
+   **false on the shipped compose**, because the Architect path is live and
+   `DESIGN_EXAMPLE_MANIFEST` carries 2 classified fields and 0 grants — so the rule would refuse the
+   platform's own worked example three times per design inside `while (attempts < 3)`. What the
+   measurement found instead, and what outranks the companion: **the design spec teaches
+   classification and withholds the grant syntax** — `DESIGN_SPEC` *instructs* the model to classify
+   (*"Classify sensitive fields: `pii` … `phi` … `commercial_sensitive` … `regulated`"*) and
+   describes `permissions` as a record whose values are `{ list, read, create, update, delete }`
+   plus `transitions`, with **no `fields` key anywhere in the spec** — so the model is told to mark
+   a field sensitive and never told how to say who may read or write it. That is why an AI-designed
+   manifest declares classifications and no field grants at all, and it is the increment: a prompt
+   change rather than a kernel rule. (The figure first recorded here, *"names `classified` 17 times
+   and `permissions.*.fields` zero times"*, is a grep count over the whole module rather than a
+   statement about the spec, so it is replaced by the two quotations, which a reader can check.)
 3. ~~**`proveWideningSafe` is complete, tested and wired to nothing**~~ — **closed by ADR-0363**,
    and the sharpest correction is to this entry's own framing: giving that function a caller is
    **not** the fix, because what it proves (*no current row violates this*) is strictly weaker than
@@ -12091,10 +12307,40 @@ land with or before it.
    three-valued, a refused tenant gets a 503 naming only the tenant and the refusal kind, and only
    permanent causes are memoised — with the ordering stated at the catch, because memoising before
    fixing the fallback would have *extended* the wrong-answer window from one request to a whole
-   TTL. What is left is Q4 and Q5: a **source** throw still resolves `none` and falls back (the
-   same class, rarer and uncached — the honest answer is a third disposition), and
-   `ai-design-routes.ts` still returns **200** on activation with no build check, so a tenant can
-   activate a manifest this deployment cannot serve and learn of it from a 503.
+   TTL. **Q4 is closed by ADR-0397 and its prescribed remedy is refuted; Q5 stands and is now the
+   whole of this item.**
+   The source throw really did resolve `none` and fall back, which on `--store pg` is the same store
+   object — so a read that *did not happen* served the tenant their own rows under the boot
+   manifest's rules, and it logged **nothing**. But *"the honest answer is a third disposition"* is
+   wrong: `GATEWAY_BUILD_REFUSAL_KINDS` already carries `unknown` with `permanent: false`, and
+   `remember` already holds the permanence decision, so routing the throw there gives a 503 that is
+   **returned unremembered** and re-asked on the next request — exactly what the open end wanted,
+   with **no** fourth `GatewayResolution` arm and no new enum member. Four lines.
+   Measured live as a non-owner by revoking the serving role's `SELECT` on
+   `meta.operate_tenant_manifests`, so the read genuinely raises: **503** with `retry-after: 60` on
+   both of two requests (two log lines, so uncached), and restoring the grant serves **200 on the
+   very next request with no restart**. Two existing tests had pinned the defect as the
+   specification, one of them in its own title (*"falls back rather than refusing when the manifest
+   source itself throws"*) — ADR-0372's class, which is why both are rewritten rather than deleted.
+   The live run also found a **false clause in the log line**: `onBuildRefused`'s message was
+   unconditionally *"manifest is valid and its gateway could not be built"*, which for a source
+   throw is not merely unhelpful but untrue — the manifest was never read — and it contradicted its
+   own detail clause (`permission denied for table operate_tenant_manifests`) in one sentence. It is
+   keyed on the refusal kind now, because for the five kinds that parse the manifest first the
+   clause is true and load-bearing: it is what tells an operator not to look there.
+   **Q5 remains**: `ai-design-routes.ts` still returns **200** on activation with no build check, so
+   a tenant can activate a manifest this deployment cannot serve and learn of it from a 503. The
+   measurement that scoped it is worth carrying — Q5 is the **root** of Q4's class rather than its
+   sibling, because every dishonest `serverFor` arm is dishonest only because the activation handler
+   already answered 200; an `activationCheck` seam running resolve → validate → obligations costs
+   0.65 ms for the refusal gate and under 7 ms for a full compile, with no database side effect on
+   `--store pg`, and honestly refuses 8 of the 9 reachable refusals plus both validation failures.
+   It must **not** claim to cover `ColumnEncryptionUnavailable` on `--store pg-columns`, where the
+   key check needs the column plan. Beside it, and separately: `diffFragment`'s bare catch makes the
+   design reviewer's page say *"This is the first system for this tenant"* for a tenant that has one,
+   hiding a measured `breaking / 40 warnings` behind `impact: none` — its own increment, because the
+   fix is a three-valued diff provenance crossing the kernel view type, the route mirror and the web
+   component, and because it misleads a **human** rather than a client.
 10. **Five workflow stores carry neither tenant context nor a scope predicate**, and the replayer
     that would detect the resulting drift has no caller. Not a cross-tenant HTTP answer today, so
     the live cost is the missing second belt plus the blocked detector — and note **five of six
@@ -12209,30 +12455,51 @@ land with or before it.
     left for a hardened deployment to break. The one open end is in ADR-0362's own table — whether
     the switch's loosening at the rekey's pre-destruction fence, correct for a
     `SUPERUSER NOBYPASSRLS` session and measured at a population of zero, wants a flag.
-16. **Two route families are guarded by a role name no deployment can change**, found while scoping
-    ADR-0364 and verified independently. `BuildOperateHttpServerOptions.adminRoles` exists
-    (`server.ts:220`) and is forwarded into `compileOperateServer` (`:360`) — and **`node.ts` never
-    sets it**, so `DEFAULT_ADMIN_ROLES = ["erp_admin"]` governs `GET`/`PUT /v1/admin/settings` on
-    every deployment there is, and **there is no `--admin-role` flag** to pass. Those two routes are
-    *always mounted* and ungated even by the subscription gate, deliberately, so that a lapsed tenant
-    can still load its billing screen. `node.ts:1336` is the second member and hardcodes the same
-    literal for the marketplace admin routes, also with no flag. It fails **closed** — a deployment
-    whose administrator role is named anything else simply cannot reach its own tenant settings,
-    rather than the wrong principal reaching them — which is why this sits in P2 and not P0: the
-    cost is an unreachable surface, not a disclosure. It is this run's recurring class on an
-    *option* rather than a column (ADR-0339's `policyForEntity` with no producer, ADR-0336's flag
-    subsystem with no evaluator), and the fix is one flag plus **two** wiring lines, with the open
-    question being whether the settings routes and the marketplace ones want one grant or two —
-    `--notification-admin-role` and `--credential-admin-role` are the precedent for two.
-    **One addition from a later measurement, which is why it is two lines and not one**: `node.ts`
-    has exactly two `buildOperateHttpServer(` call sites — the boot gateway and the **per-tenant**
-    one — and *neither* passes `adminRoles` while *both* pass `settingsStore`. So a tenant serving
-    its own activated manifest (ADR-0314) also gets the hardcoded `erp_admin` on its own settings
-    routes, even when that manifest declares no such role. The routes are gated on
-    `options.settingsStore !== undefined` and `node.ts` always constructs one and always passes it,
-    so `GET`/`PUT /v1/admin/settings` are always mounted on both. Fail-closed is confirmed at the
-    handler: `authorize` answers `""` on a role miss and the route returns 403 *"admin role
-    required"*.
+16. ~~**Two route families are guarded by a role name no deployment can change.**~~ — **the
+    settings half is closed by ADR-0396; the marketplace half stays, and the item's own grade
+    argument was wrong in the direction that made it look hypothetical.** The mechanism is exactly
+    as described: `BuildOperateHttpServerOptions.adminRoles` existed, `server.ts` forwarded it, and
+    `node.ts` set it at **neither** `buildOperateHttpServer` literal while passing `settingsStore`
+    at both — so `compileOperateServer`'s `?? DEFAULT_ADMIN_ROLES` (`["erp_admin"]`) governed
+    `GET`/`PUT /v1/admin/settings` on every deployment there is, including a tenant serving its own
+    activated manifest that declares no such role. `--admin-role` is the flag, repeatable, defaulting
+    to `["erp_admin"]` so no shipped deployment's behaviour changed, with a `[settings]` boot line
+    that reads the granted set back (the settings grant was the one grant in the binary with **no**
+    line at all) and `erp_admin` + `platform_admin` on the compose.
+    What the item got wrong: *"a deployment whose administrator role is named anything else"* made
+    it read as hypothetical, and **the defect is live through the documented bootstrap** — all seven
+    packs declare `erp_admin`, so the default is right about the *manifest* and wrong about the
+    *credential*, since `.env.example` grants the operator `platform_admin`. Measured live as a
+    non-owner: without the flag that operator is **403** on both routes while `erp_admin` is 200;
+    with it, both are 200. The console's sidebar links to that page with no role gate and the
+    subscription banner links to it by design, so the operator's first signal was the 403.
+    Two smaller corrections. *"One flag plus two wiring lines"* is right about `node.ts` and silent
+    about the rest, and `server.ts` and `compile.ts` need **zero** — which is the part that makes it
+    cheaper than it looks and which the item did not say. The honest form of the cost is the
+    **list** and not a count, because a count of edit sites is exactly the quantity that goes stale
+    (this sentence first carried **7**, which omitted the boot-line call and so understated by the
+    one site an operator reads): in `cli.ts` the `ServeOptions` field, the accumulator, the parse
+    arm, the default and the `--help` entry; in `node.ts` the `formatAdminGrant` call plus **both**
+    `buildOperateHttpServer` literals. And the `node.ts:1336` citation was
+    **drifted** rather than wrong-when-written (1336 in `df61cb8`, 1491 at `8805614`, 1562 at the
+    measurement, **1610** by the end of the increment that corrected it — so the corrected number
+    was stale before it was committed, which is why both copies now **anchor by symbol**:
+    the `adminRoles: new Set(["erp_admin"])` literal inside `node.ts`'s
+    `options.packCatalogFile !== null` block). This register's own anchor-by-heading lesson, paid
+    three times on one citation.
+    What remains is the **marketplace** half — that literal, which hardcodes the same value
+    with no flag and is **latent** (`--pack-catalog` appears 0 times in all three compose files and
+    is refused under `--store memory`). It is deliberately not folded into `--admin-role`: the
+    settings routes are a tenant-scoped grant over that tenant's own row, while the marketplace
+    routes install packs whose compatibility is checked against a fabricated `TenantContext`
+    (register P2.8), so they are different privileges — and `--notification-admin-role` /
+    `--credential-admin-role` are the repo's precedent for two. Whoever takes it should know the
+    measurement that came out of scoping this one: there are **two `DEFAULT_ADMIN_ROLES` constants
+    in this app with different member sets** — `recipient-resolver.ts`' is
+    `["erp_admin", "tenant_admin", "platform_admin"]` for the notification `tenant_admins` audience,
+    and `compile.ts`' is `["erp_admin"]` for this grant. The two answer different questions and are
+    both right to differ, but the fact that one of them **already named `platform_admin`** is the
+    evidence that the settings default was an omission rather than a decision.
 
 ### P3 — debt and stale documentation
 
@@ -12528,7 +12795,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 390 records; 311 Accepted, 79 Proposed (the
+title or status change cannot drift. 392 records; 313 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

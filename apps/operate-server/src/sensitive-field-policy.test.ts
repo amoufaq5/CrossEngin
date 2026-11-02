@@ -84,7 +84,13 @@ function survey(input: {
   const m = input.manifest ?? clinicalManifest();
   return surveySensitiveFields({
     manifest: m,
-    declaration: input.declaration ?? EMPTY_SENSITIVE_FIELD_DECLARATION,
+    // Through the real `buildSensitiveFieldPolicy` rather than a hand-built policy, so every test
+    // in this file still exercises the declaration→policy step it exercised before the survey's
+    // signature changed — the alternative (passing a literal policy) would have quietly dropped
+    // that step from 30-odd assertions.
+    policyForEntity: buildSensitiveFieldPolicy(
+      input.declaration ?? EMPTY_SENSITIVE_FIELD_DECLARATION,
+    ),
     roles: input.roles ?? Object.keys(m.roles ?? {}),
     classifiedWriteMask: input.classifiedWriteMask ?? true,
   });

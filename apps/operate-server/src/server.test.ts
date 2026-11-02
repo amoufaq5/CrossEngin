@@ -340,16 +340,137 @@ describe("OperateHttpServer — data-residency edge routing", () => {
  * `2 of 3 guarded` with nothing guarded.
  *
  * The unit is the **intersection** of the two interfaces' field names rather than everything the
- * app accepts, which is what keeps it free of a maintained list: the app has 29 options and the
- * gateway 30, 16 are shared, and only a shared one can be dropped here. A `notForwarded` map in
- * `compile.test.ts`'s shape would otherwise need 13 entries, and ADR-0288's lesson is that such a
- * list is the thing that goes wrong.
+ * app accepts, which is what keeps it free of a maintained list: only a shared field can be dropped
+ * here, and a `notForwarded` map in `compile.test.ts`'s shape would need an entry for every
+ * app-only option — ADR-0288's lesson being that such a list is the thing that goes wrong.
+ *
+ * **Do not restate the three counts here.** The figures move with every option added on either
+ * side: this sentence read "the app has 29 options and the gateway 30, 16 are shared" and was 34 /
+ * 35 / 18 two increments later, so a reader checking the comment would have found it wrong about
+ * all three. The floors below are one-sided for exactly that reason, and the intersection is
+ * re-derived on every run — print it from the test if you want today's number.
  *
  * `compile.ts` is read by relative path as **text**, which is the idiom `deployment-defaults.test.ts`
  * in this app already uses for `deploy/`: no build output is consulted, so the fence answers on a
  * fresh checkout, and a path that stopped resolving fails by name rather than silently emptying the
  * population.
  */
+/**
+ * The two surveys that used to run only at boot, now run wherever a manifest is compiled.
+ *
+ * `serve()` surveyed the boot pack and printed `[fields]` and `[cursor]`; a tenant's own activated
+ * manifest is compiled **inside this function** (ADR-0314) and was surveyed by nothing, so
+ * ADR-0339's write-open/read-closed asymmetry and ADR-0357's cursor disclosure were measured for
+ * the boot pack and for nothing a tenant ever authored.
+ *
+ * The register prescribed `applyTenantManifestSchema` and that is refuted: its only caller is
+ * built solely under `--store pg-columns` and the shipped compose is `--store pg`, so the check
+ * would have been dark on the deployment that ships. This function is reached on every store.
+ */
+describe("buildOperateHttpServer's manifest surveys", () => {
+  function build(over: Partial<Parameters<typeof buildOperateHttpServer>[0]> = {}): void {
+    buildOperateHttpServer({
+      edgeTrust: "untrusted",
+      manifest,
+      store: new InMemoryEntityStore(),
+      apiKeys: API_KEYS,
+      ...over,
+    });
+  }
+
+  it("reports both surveys to onSurvey, over the manifest it was handed", () => {
+    const reports: { sensitive: unknown; cursorDisclosure: unknown }[] = [];
+    build({
+      onSurvey: (r) => {
+        reports.push(r);
+      },
+    });
+    expect(reports).toHaveLength(1);
+    const r = reports[0] as {
+      sensitive: { totalSensitive: number };
+      cursorDisclosure: { verdict: string };
+    };
+    // `erp-retail` declares classified fields and a sortable classified one, so both halves have a
+    // member — a survey over a manifest with neither would pass vacuously.
+    expect(r.sensitive.totalSensitive).toBeGreaterThan(0);
+    expect(r.cursorDisclosure.verdict).toBe("plaintext_disclosing");
+  });
+
+  it("reports the cursor as sealed when the deployment supplies a sealing mode", () => {
+    // The same manifest, two answers — which is what makes the report a fact about the DEPLOYMENT
+    // and the manifest together rather than about the manifest alone.
+    const seen: string[] = [];
+    build({
+      cursorSealing: { mode: "sealed", sealer: null },
+      onSurvey: (r) => {
+        seen.push(r.cursorDisclosure.verdict);
+      },
+    });
+    expect(seen).toEqual(["sealed"]);
+  });
+
+  it("surveys nothing when nobody reads it", () => {
+    // ADR-0341's rule — the producer exists exactly when a consumer does. Not a micro-optimisation:
+    // `serve()` surveys the boot manifest itself before this function is reached, because
+    // `--classified-write-mask`'s refusal has to fire before anything mounts, so running the
+    // surveys here unconditionally would survey the boot pack twice and report it once.
+    //
+    // The observable is a DELTA and not zero, which is what the first draft of this test asserted
+    // and what measuring it refuted: `policyForEntity` has **two** consumers — the redaction
+    // registry `buildOperateGateway` builds also resolves it, once per entity that carries a
+    // classified field — so "never consulted" was never available. The survey's contribution is
+    // one call per entity of the manifest, which is derived here rather than hardcoded.
+    const count = (withSurvey: boolean): number => {
+      let calls = 0;
+      build({
+        policyForEntity: () => {
+          calls += 1;
+          return undefined;
+        },
+        ...(withSurvey ? { onSurvey: (): undefined => undefined } : {}),
+      });
+      return calls;
+    };
+    const entities = (manifest.entities ?? []).length;
+    expect(entities).toBeGreaterThan(1);
+    expect(count(true) - count(false)).toBe(entities);
+  });
+
+  it("consults policyForEntity per entity when a reader is supplied", () => {
+    // Per entity and not once with `""`, which is what `surveySensitiveFields` did when it took a
+    // declaration. The seam's type permits per-entity variation, its own doc says a per-entity
+    // declaration is "expressible later without moving it", and a deployment may supply its own
+    // resolver — asked per entity, the survey is right for all three.
+    const asked: string[] = [];
+    build({
+      policyForEntity: (entity) => {
+        asked.push(entity);
+        return undefined;
+      },
+      onSurvey: () => undefined,
+    });
+    // Real entity names, not the empty string the old call passed — which is the whole change.
+    expect(asked).not.toContain("");
+    // Every entity is asked about. Not an exact set equality, because the redaction registry asks
+    // too and its population is the classified-field-bearing subset, so `asked` legitimately
+    // carries repeats (measured: 66 calls over 54 entities, the 12 extra being the registry's).
+    for (const e of manifest.entities ?? []) expect(asked).toContain(e.name);
+  });
+
+  it("reports and never refuses, whatever the surveys find", () => {
+    // The one way these differ from the obligation check beside them. A write-open/read-closed
+    // field is a capability answer and a plaintext cursor is `CURSOR_DISCLOSURE_MAY_SERVE`-true on
+    // every verdict, so a tenant whose manifest has either still gets a working gateway — refusing
+    // would take a tenant's whole deployment away over a declaration activation validates
+    // (ADR-0348's split).
+    expect(() =>
+      build({
+        onSurvey: () => undefined,
+      }),
+    ).not.toThrow();
+  });
+});
+
 describe("buildOperateHttpServer's option forwarding", () => {
   const serverSrc = readFileSync(new URL("./server.ts", import.meta.url), "utf8");
   const compileSrc = readFileSync(

@@ -281,11 +281,31 @@ export class TenantGatewayCache {
     let stored: Record<string, unknown> | null;
     try {
       stored = await this.source.activeManifestFor(tenantId);
-    } catch {
-      // A source failure is transient *and* leaves nothing to refuse from — it is not known
-      // whether this tenant has a manifest at all — so it falls back for this call without being
-      // cached, and the next request re-asks the source.
-      return { kind: "none" };
+    } catch (err) {
+      /*
+       * A source failure is transient *and* leaves nothing to refuse from — it is not known
+       * whether this tenant has a manifest at all. It used to answer `{kind:"none"}`, which
+       * **falls back to the deployment's gateway**: on `--store pg` that is the same store object,
+       * so the tenant was served their own data under the boot manifest's rules, with their field
+       * grants, classification and any obligation absent (ADR-0359's finding, which fixed the two
+       * *validation* fallbacks and left this one). A read that did not happen is not evidence that
+       * a tenant has no manifest.
+       *
+       * It refuses now, and the register's prescription — *"the honest answer is a third
+       * disposition"* — is **refuted**: `GATEWAY_BUILD_REFUSAL_KINDS` already carries `unknown`
+       * with `permanent: false`, which is exactly a refusal that cannot be memoised. So this needs
+       * no fourth `GatewayResolution` arm and no new member; it needs the existing one. `remember`
+       * holds the permanence decision, so a non-permanent refusal is returned **unremembered** and
+       * the next request re-asks the source — the property this arm's old comment wanted and got
+       * by falling back instead of by refusing.
+       *
+       * Reported through `reportBuildRefused`, which it was not: a source failure logged nothing,
+       * so a deployment whose manifest store was down served every tenant the wrong manifest in
+       * silence.
+       */
+      const resolution = this.refusal("unknown");
+      this.reportBuildRefused(tenantId, "unknown", this.detailFor("unknown", err));
+      return this.remember(tenantId, resolution);
     }
     if (stored === null) return this.remember(tenantId, { kind: "none" });
 

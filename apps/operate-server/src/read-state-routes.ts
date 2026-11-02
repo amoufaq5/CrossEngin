@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 
-import type { PathSegment, ResolvedPrincipal, RouteDefinition } from "@crossengin/api-gateway";
+import {
+  principalUserId,
+  type PathSegment,
+  type ResolvedPrincipal,
+  type RouteDefinition,
+} from "@crossengin/api-gateway";
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
 import {
@@ -241,7 +246,12 @@ export function resolveViewer(
       denial: json(403, { error: "forbidden", detail: "no tenant resolves for this principal" }),
     };
   }
-  if (principal.principalKind !== "user" || !UUID_RE.test(principal.principalId)) {
+  // `principalUserId` rather than the two conjuncts inline: this was the third spelling of "does
+  // this credential name a person", beside `abac-attributes.ts`' total map and the UI-schema
+  // handler's absence of one — and the uuid half is load-bearing precisely because
+  // `ResolvedPrincipalSchema` has no parse site, so the shape it declares is not enforced here.
+  const userId = principalUserId(principal);
+  if (userId === null) {
     return {
       ok: false,
       denial: json(403, {
@@ -250,7 +260,7 @@ export function resolveViewer(
       }),
     };
   }
-  return { ok: true, viewer: { tenantId, userId: principal.principalId } };
+  return { ok: true, viewer: { tenantId, userId } };
 }
 
 export function bodyNamesAViewer(body: Record<string, unknown> | null): string | null {

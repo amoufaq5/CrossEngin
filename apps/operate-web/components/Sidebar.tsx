@@ -13,7 +13,15 @@ import {
   reportUnreadBadgeCount,
   useUnreadBadgeCount,
 } from "@/lib/notifications";
-import { accessibleEntities, entityByName, featureEnabled, groupByModule, roleLabel, useSchema } from "@/lib/schema";
+import {
+  accessibleEntities,
+  entityByName,
+  featureEnabled,
+  groupByModule,
+  roleLabel,
+  useSchema,
+  viewerName,
+} from "@/lib/schema";
 
 /**
  * The Platform group's links, declared rather than written out three times.
@@ -117,7 +125,11 @@ export function Sidebar() {
       {primaryRole ? (
         <div className="px-5 pt-4 pb-1">
           <div className="text-[11px] font-semibold uppercase tracking-wide text-ink-faint">Signed in as</div>
-          {/* The role and not the person, because `UiViewer` carries no name or email — see /account. */}
+          {/*
+            The person when the server resolves one, else the role — which is what this showed
+            before `UiViewer` carried an identity, and is still the right answer for a machine
+            credential and for a deployment with no user directory.
+          */}
           <Link
             href="/account"
             className={`block text-sm font-bold transition ${
@@ -125,8 +137,11 @@ export function Sidebar() {
             }`}
             title="Your account"
           >
-            {roleLabel(schema, primaryRole)}
+            {viewerName(schema) ?? roleLabel(schema, primaryRole)}
           </Link>
+          {viewerName(schema) !== null && (
+            <div className="text-[11px] text-ink-faint">{roleLabel(schema, primaryRole)}</div>
+          )}
         </div>
       ) : (
         <div className="px-5 pt-4 pb-1 text-[11px] font-semibold uppercase tracking-wide text-ink-faint">

@@ -259,6 +259,28 @@ services:
       # lockout, so a wrong current password counts toward the same lock a wrong login does.
       - --credential-admin-role
       - platform_admin
+      # Who may read and write THIS TENANT'S OWN settings -- GET/PUT /v1/admin/settings, the two
+      # routes behind the console's Settings and Billing pages. Repeatable, and BOTH names are
+      # needed here for a measured reason rather than for symmetry:
+      #
+      #   - erp_admin is the default the binary falls back to with no flag, and dropping it would
+      #     lock out every tenant administrator this pack declares;
+      #   - platform_admin is the role the bootstrap operator above holds, in BOTH the api-key spec
+      #     and the membership the documented walkthrough grants -- and before this flag existed
+      #     that operator got a 403 on their own tenant's settings while the sidebar linked to the
+      #     page unconditionally. The grant is not a manifest role and is not meant to be: the
+      #     check is a set membership over the roles a caller's SESSION carries, which come from
+      #     their membership, so an undeclared name works here where it would be inert in a
+      #     manifest-driven grant.
+      #
+      # These two routes are mounted on every deployment and deliberately sit OUTSIDE the
+      # subscription gate, so a lapsed tenant can still open its billing screen -- which is why a
+      # wrong grant here is a dead page rather than a disclosure, and why the boot `[settings]` line
+      # states who holds it either way.
+      - --admin-role
+      - erp_admin
+      - --admin-role
+      - platform_admin
       # The issuer and audience the token asserts and the gateway checks. They are this
       # deployment's own names -- nothing external resolves them -- but they must agree, and
       # without them the runtime falls back to `https://crossengin.io` and refuses a token minted

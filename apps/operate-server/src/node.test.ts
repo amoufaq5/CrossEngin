@@ -2,6 +2,10 @@ import { readFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { resolve } from "node:path";
 import { InMemoryEntityStore } from "@crossengin/operate-runtime";
+// The workspace's own comment stripper, shared by all twelve strategy rules. Not a local copy: a
+// `}` inside a doc comment unbalances the brace matcher below, and `stripComments` is the one
+// implementation whose regex-literal hazard has already been found and fixed (ADR-0356).
+import { stripComments } from "@crossengin/testing/strategy";
 import { describe, expect, it } from "vitest";
 
 import { parseServeArgs } from "./cli.js";
@@ -351,15 +355,24 @@ describe("serve() — the settlement coverage flag reaches both gateways and the
     expect(src.slice(at, at + 180)).toContain("allowUncoveredSettlement: options.allowUncoveredSettlement");
   });
 
-  it("is forwarded on again by buildOperateHttpServer, which is the unfenced hop", () => {
-    // The chain is three hops — `serve()` → `BuildOperateHttpServerOptions` →
-    // `CompileOperateServerOptions` — and only the first two are covered above. The third has no
-    // fence of its own: `compile.test.ts`' `notForwarded` map (ADR-0386) is over
-    // `buildOperateGateway` → `GatewayRuntime` in `@crossengin/operate-runtime`, and nothing
-    // compares `apps/operate-server/src/server.ts`' option literal against what
-    // `compileOperateServer` accepts. So the hop ADR-0386's defect lived on is, in *this* package,
-    // still only pinned per field — this is that pin for this field, and the general rule is that
-    // package's own open end rather than something this test can supply.
+  it("is forwarded on again by server.ts, the hop that IS class-fenced", () => {
+    // This comment used to say the opposite, and it was wrong when it was written — corrected here
+    // because a reader following it would write a fence that already exists and skip the hop that
+    // genuinely has none. Three corrections, each measured:
+    //
+    //   1. It named `CompileOperateServerOptions`, which has **one** occurrence in the whole
+    //      workspace: that comment. The real pair is `OperateRuntimeOptions` /
+    //      `OperateGatewayOptions`, and `server.ts` calls `buildOperateGateway`, not
+    //      `compileOperateServer`.
+    //   2. It called this hop unfenced. `server.test.ts` fences it as a class, over the
+    //      **intersection** of `BuildOperateHttpServerOptions` with
+    //      `OperateGatewayOptions ∪ OperateRuntimeOptions` — the union, so inherited fields are
+    //      seen. `git log -S` puts that fence and this comment in the **same commit**
+    //      (`8805614`), so the general rule it called another package's open end arrived with it.
+    //   3. The hop with no class fence is the one this very block covers per field: `serve()` →
+    //      `buildOperateHttpServer`. Nothing compares `node.ts`' two option literals against what
+    //      `BuildOperateHttpServerOptions` accepts, which is why each field needs its own pin and
+    //      why `adminRoles` sat dropped at both literals for four phases.
     //
     // Read from `node.test.ts` rather than from a `server.test.ts` block because the subject is
     // one wiring chain and splitting the assertions across two files is how half of one gets
@@ -379,5 +392,273 @@ describe("serve() — the settlement coverage flag reaches both gateways and the
     expect(after).toContain("settlementCoverageIsSuspect(settlementCoverage)");
     expect(after).toContain("console.warn(settlementLine)");
     expect(after).toContain("console.info(settlementLine)");
+  });
+});
+
+describe("serve() — the tenant-settings grant reaches both gateways", () => {
+  /**
+   * The sibling block above explains the mechanism; this is the same pin for `adminRoles`, and it
+   * is the field that proved the mechanism rather than merely being exposed to it. `adminRoles` has
+   * existed on `BuildOperateHttpServerOptions` and been forwarded by `server.ts` since ADR-0103, and
+   * `node.ts` passed it at **neither** literal — so `compileOperateServer`'s own
+   * `?? DEFAULT_ADMIN_ROLES` default (`["erp_admin"]`) governed `/v1/admin/settings` on every
+   * deployment there is, with no flag able to name it and no boot line announcing it.
+   *
+   * The drop was invisible three ways, which is ADR-0386's triple: `tsc` cannot see it because the
+   * option is optional and the caller spreads conditionally; no boot line contradicted it because
+   * there was no boot line; and no test caught it because the default is a *working* value for every
+   * shipped pack — all seven declare `erp_admin`. What it was wrong about is the *credential*:
+   * `deploy/.env.example` grants the bootstrap operator `platform_admin`, which no pack declares, so
+   * the documented operator met a 403 on a page the sidebar links to with no role gate.
+   */
+  const src = readFileSync(resolve(import.meta.dirname, "./node.ts"), "utf8");
+
+  it("forwards it to the boot gateway and to the per-tenant one", () => {
+    // Both, for ADR-0340's reason: `settingsStore` is passed at the per-tenant literal too, so
+    // `/v1/admin/settings` is mounted on a tenant's own gateway and a grant wired only at the boot
+    // one would leave exactly the tenant-authored manifest governed by the hardcoded default.
+    //
+    // Bounded by the NEXT call site rather than by a fixed window, which the sibling block above
+    // uses and which silently cannot reach this field: the per-tenant literal's own comments run
+    // past 6000 characters, so a generous-looking slice ends before `settingsStore` — the first
+    // draft of this test failed for that reason and not because the field was missing. A pair of
+    // assertions keeps it exact: the forward appears exactly twice in the file, and one of the two
+    // falls in each site's span.
+    // And NOT a count of the field across the file, which the sibling block's own comment warns
+    // about three lines up and which the first draft of this test did anyway: there are **three**
+    // occurrences of `adminRoles: options.adminRoles`, because the boot line reads the same option
+    // under the same name. A count would also have been satisfied by three forwards and no boot
+    // line, which is the half the `says the grant at boot` test below pins.
+    const sites = [...src.matchAll(/buildOperateHttpServer\(\{/g)].map((m) => m.index ?? -1);
+    expect(sites).toHaveLength(2);
+    const bounds = [
+      [sites[0] ?? 0, sites[1] ?? src.length],
+      [sites[1] ?? 0, src.length],
+    ] as const;
+    for (const [from, to] of bounds) {
+      expect(src.slice(from, to), `buildOperateHttpServer at ${from.toString()}`).toContain(
+        "adminRoles: options.adminRoles",
+      );
+    }
+  });
+
+  it("is declared and forwarded by server.ts without an `as never`", () => {
+    const serverSrc = readFileSync(resolve(import.meta.dirname, "./server.ts"), "utf8");
+    expect(serverSrc).toContain("readonly adminRoles?: readonly string[];");
+    expect(serverSrc).toContain("{ adminRoles: options.adminRoles as readonly RoleName[] }");
+    // The cast is needed (`RoleName` is branded) and `as never` is not the cast: it accepts any
+    // type at all, so it would have validated nothing if this field's type changed — ADR-0362's
+    // annotation-standing-in-for-a-check, in the forwarding literal for precisely this field.
+    expect(
+      serverSrc,
+      "adminRoles went back to `as never`, which accepts any type",
+    ).not.toContain("adminRoles: options.adminRoles as never");
+  });
+
+  it("says the grant at boot, which was the half with no surface at all", () => {
+    // The silence was the defect: every sibling grant prints a line and this one printed nothing,
+    // so an operator's first and only signal was the 403.
+    const at = src.indexOf("const adminGrant = formatAdminGrant({");
+    expect(at).toBeGreaterThan(-1);
+    const after = src.slice(at, at + 400);
+    expect(after).toContain("adminRoles: options.adminRoles");
+    expect(after).toContain("manifestRoleNames");
+    // Unconditional — not inside an `if` on the flag — because a deployment that declared nothing
+    // is exactly the one whose grant it needs to hear.
+    expect(after).toContain("console.info(adminGrant.message)");
+  });
+});
+
+/**
+ * The **general rule** over the hop the two blocks above pin per field, which is what those blocks
+ * should have been in the first place.
+ *
+ * `node.test.ts` had accumulated per-field pins — `allowUncoveredSettlement` (ADR-0391), then
+ * `adminRoles` and `userIdentity` — each written because the previous one's defect had just been
+ * found, and each covering exactly one field of 34. The comment above says so in its own third
+ * correction: *"Nothing compares `node.ts`' two option literals against what
+ * `BuildOperateHttpServerOptions` accepts, which is why each field needs its own pin."* Writing a
+ * third pin rather than the rule it names is ADR-0288's maintained list, and the list was already
+ * wrong: the rule found **two** dropped fields on its first run, neither of which any pin covered.
+ *
+ * What it found, and why a pin could not have: `idempotencyStore` and `rateLimitChecker` were
+ * absent from the per-tenant literal, so a tenant serving its own activated manifest fell back to
+ * the per-process in-memory pair `buildOperateGateway` installs. The idempotency one is **live on
+ * the shipped compose** — which passes `--idempotency-store` *and* `--ai-design`, and `--ai-design`
+ * implies `--per-tenant-manifests` — so ADR-0336's defect was silently restored for exactly the
+ * tenants ADR-0314 exists to serve. And `node.ts`' own comment above that literal asserted the
+ * opposite, naming two deployment-singleton exceptions when there were four, with the other two
+ * per-request. A comment claiming the property the code breaks, found by the rule and not by
+ * reading.
+ *
+ * The unit is **every field `BuildOperateHttpServerOptions` declares, against each literal**, with
+ * a per-site `notPassed` map carrying the reason. That is available here and is *not* available one
+ * hop in: `server.test.ts` fences `buildOperateHttpServer` → `buildOperateGateway` over the
+ * **intersection** of two interfaces' field names, which works only because names survive that hop
+ * — `cursorSealing` becomes `cursorSealer` across it and so is in neither fence's population. Here
+ * the literal's keys *are* the interface's field names, so the comparison is total.
+ *
+ * Three mechanics are load-bearing and each was wrong in a first draft:
+ *
+ *   1. **Comments are stripped first**, with the workspace's own `stripComments` — and this is
+ *      insurance against a false *green*, not a fix for a false red, which is the opposite of what
+ *      a first draft of this comment claimed. Measured both ways: the counts agree today (2 and 4
+ *      omissions either way), so removing the strip passes, and what it changes is the **span** —
+ *      the per-tenant literal reads 3,522 characters stripped and **9,628** raw, so the raw matcher
+ *      runs ~6,100 characters past the literal's true end. A field named anywhere in that tail
+ *      (`onInvalidManifest`'s block follows immediately) would read as passed. None is today,
+ *      which is why this is not load-bearing and is kept anyway: the failure it prevents is silent.
+ *   2. **The span is brace-matched, not a fixed window and not "up to the next call site."** A
+ *      6,000-character window cannot reach the per-tenant literal's later fields (the sibling block
+ *      above records that failure), and bounding by the next call site gives the boot site a
+ *      50,000-character span that swallows every intervening statement — under which
+ *      `rateLimitChecker` reads as passed because it is *mentioned* 26 lines later.
+ *   3. **The match is a word boundary, not `field\s*[,:]`.** A shorthand property inside a
+ *      conditional spread ends in `}` (`...(jwt !== null ? { jwt } : {})`), so a trailing-delimiter
+ *      regex reported 17 of 34 fields dropped at both sites — all of them present.
+ */
+describe("serve()'s two buildOperateHttpServer literals", () => {
+  const src = stripComments(readFileSync(resolve(import.meta.dirname, "./node.ts"), "utf8"));
+  const serverSrc = readFileSync(resolve(import.meta.dirname, "./server.ts"), "utf8");
+
+  /** The field names an interface declares at its own top level, from the source. */
+  function interfaceFields(text: string, name: string): readonly string[] {
+    const start = text.indexOf(`export interface ${name} `);
+    expect(start, `interface ${name} not found`).toBeGreaterThan(-1);
+    const open = text.indexOf("{", start);
+    let depth = 0;
+    let end = open;
+    for (let i = open; i < text.length; i += 1) {
+      if (text[i] === "{") depth += 1;
+      else if (text[i] === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          end = i;
+          break;
+        }
+      }
+    }
+    // Two-space indentation only, so a field of a NESTED object type is not read as a field of
+    // this interface — `requestSigning.keys` is four-spaced and would otherwise be compared.
+    return [...text.slice(open, end).matchAll(/^\s{2}readonly (\w+)\??:/gm)].map(
+      (m) => m[1] as string,
+    );
+  }
+
+  /** Each `buildOperateHttpServer({ … })` argument, brace-matched over comment-stripped source. */
+  function literals(): readonly { readonly at: number; readonly body: string }[] {
+    const out: { at: number; body: string }[] = [];
+    for (const m of src.matchAll(/buildOperateHttpServer\(\{/g)) {
+      const at = m.index ?? 0;
+      const open = src.indexOf("{", at);
+      let depth = 0;
+      let end = open;
+      for (let i = open; i < src.length; i += 1) {
+        if (src[i] === "{") depth += 1;
+        else if (src[i] === "}") {
+          depth -= 1;
+          if (depth === 0) {
+            end = i;
+            break;
+          }
+        }
+      }
+      out.push({ at, body: src.slice(open, end + 1) });
+    }
+    return out;
+  }
+
+  const accepted = interfaceFields(serverSrc, "BuildOperateHttpServerOptions");
+
+  /**
+   * Fields a given literal legitimately omits. Keyed by site index (0 = the boot gateway,
+   * 1 = the per-tenant one), because the two sites differ and collapsing them would excuse a drop
+   * at one site with a reason that holds only for the other.
+   */
+  const notPassed: readonly Readonly<Record<string, string>>[] = [
+    Object.freeze({
+      now: "a clock seam for a caller that constructs the server directly; serve() has no --now",
+      idGenerator:
+        "the same, and stronger: `idGenerator` has ZERO occurrences in node.ts, so there is no " +
+        "producer to forward — a flag for it has never existed",
+      onSurvey:
+        "serve() surveys the boot manifest ITSELF, before this function is reached, because " +
+        "--classified-write-mask's refusal has to fire before anything mounts and the [cursor] " +
+        "line has a declared order relative to checkAbacObligations. Passing it here would " +
+        "survey the same manifest twice and report it once. The per-tenant literal does pass it, " +
+        "and that asymmetry is the whole reason the option exists",
+    }),
+    Object.freeze({
+      now: "see the boot site",
+      idGenerator: "see the boot site",
+      webhookRoute:
+        "a deployment-wide route singleton, not per-request: the Stripe webhook is matched ahead " +
+        "of the gateway on the default server, which handles it for every tenant",
+      billingPortal:
+        "the same — POST /v1/meta/billing-portal stays on the default server. These two are the " +
+        "exceptions node.ts' own comment above the literal names, and they are the only two that " +
+        "hold: `idempotencyStore` and `rateLimitChecker` were in this map until the rule found " +
+        "them, and both are per-request",
+    }),
+  ];
+
+  it("passes every option it accepts, at both sites, or declares why not", () => {
+    const sites = literals();
+    expect(sites, "buildOperateHttpServer is not called exactly twice in node.ts").toHaveLength(
+      notPassed.length,
+    );
+
+    for (const [i, site] of sites.entries()) {
+      const excused = notPassed[i] ?? {};
+      const dropped = accepted.filter(
+        (f) => !new RegExp(`\\b${f}\\b`).test(site.body) && !(f in excused),
+      );
+      expect(
+        dropped,
+        `buildOperateHttpServer call ${(i + 1).toString()} (offset ${site.at.toString()}) does ` +
+          `not pass these options; forward them or declare why in notPassed[${i.toString()}]`,
+      ).toEqual([]);
+    }
+  });
+
+  it("declares no exemption for a field that is not an option, so the map cannot go stale", () => {
+    // The other direction (`pg-record-retention.ts`'s rule): an entry naming a field the interface
+    // no longer has is a reason nobody can check, and it would silently excuse nothing while
+    // reading as coverage.
+    for (const [i, excused] of notPassed.entries()) {
+      for (const f of Object.keys(excused)) {
+        expect(
+          accepted,
+          `notPassed[${i.toString()}] excuses ${f}, which BuildOperateHttpServerOptions does not declare`,
+        ).toContain(f);
+      }
+    }
+  });
+
+  it("reads real spans and a real interface, so the check above is not vacuous", () => {
+    const sites = literals();
+    expect(accepted.length, "BuildOperateHttpServerOptions read as empty").toBeGreaterThan(25);
+    for (const [i, site] of sites.entries()) {
+      // A span long enough to be the literal and short enough not to be half the file — the two
+      // failure modes of the two bounding strategies this rejected.
+      expect(site.body.length, `literal ${i.toString()} span`).toBeGreaterThan(900);
+      expect(site.body.length, `literal ${i.toString()} span`).toBeLessThan(20_000);
+      expect(site.body.trimEnd().endsWith("}"), `literal ${i.toString()} is unbalanced`).toBe(true);
+    }
+    // And `manifest` is passed at both, which is the one field no deployment can omit.
+    for (const site of sites) expect(site.body).toMatch(/\bmanifest\b/);
+  });
+
+  it("passes the replay guard and the rate-limit window to the per-tenant gateway", () => {
+    // The two the rule found. Pinned by name as well as by the rule, because the rule would be
+    // satisfied by moving them back into `notPassed` with a plausible-sounding reason — and the
+    // reason cannot be plausible: both are per-request, so the in-memory fallback is a divergence
+    // and not a singleton staying put. The idempotency one is ADR-0336's defect restored.
+    const perTenant = literals()[1];
+    expect(perTenant).toBeDefined();
+    expect(perTenant?.body).toMatch(/\bidempotencyStore\b/);
+    expect(perTenant?.body).toMatch(/\brateLimitChecker\b/);
+    expect(Object.keys(notPassed[1] ?? {})).not.toContain("idempotencyStore");
+    expect(Object.keys(notPassed[1] ?? {})).not.toContain("rateLimitChecker");
   });
 });

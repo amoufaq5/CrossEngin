@@ -186,6 +186,9 @@ import {
   surveySensitiveFields,
   type SensitiveFieldDeclaration,
 } from "./sensitive-field-policy.js";
+import { formatAdminGrant } from "./admin-grant.js";
+import { formatTenantManifestSurvey } from "./tenant-manifest-survey.js";
+import { userIdentityFromStore } from "./user-identity.js";
 import {
   AbacObligationsUnevaluable,
   checkAbacObligations,
@@ -1197,7 +1200,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // role the manifest declares, so the narrower set would produce a false boot refusal.
   const sensitiveSurvey = surveySensitiveFields({
     manifest,
-    declaration: sensitiveFieldDeclaration,
+    // The same resolver the gateway is given one literal down, rather than the declaration it was
+    // built from: one object answers the boot survey and every request, so the survey cannot be
+    // right about a policy the request path does not apply.
+    policyForEntity: sensitivePolicyForEntity,
     roles: Object.keys(manifest.roles ?? {}),
     classifiedWriteMask: options.classifiedWriteMask,
   });
@@ -1248,6 +1254,18 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     // from the outside — total redaction looks exactly like classification working.
     console.info(`[sensitive] ${formatSensitiveFieldSurvey(sensitiveSurvey)}`);
   }
+  // Said unconditionally, because the silence was the defect: the settings grant was the one grant
+  // in this binary with no boot line at all, so an operator's first signal that `erp_admin` is the
+  // only role reaching `/v1/admin/settings` was a 403 on a page the sidebar links to with no role
+  // gate. Placed beside the `[sensitive]` lines because it reads the same `manifestRoleNames` set,
+  // and immediately after them because its "not declared by this manifest" clause says the
+  // *opposite* of theirs — see `formatAdminGrant`.
+  const adminGrant = formatAdminGrant({
+    adminRoles: options.adminRoles,
+    manifestRoleNames,
+  });
+  if (adminGrant.level === "warn") console.warn(adminGrant.message);
+  else console.info(adminGrant.message);
   const apiKeys = apiKeySource.specs.map(parseApiKeySpec);
   // ADR-0358. Resolved *before* the JWKS, because the public half of this deployment's own signing
   // key is one of the JWKS entries and is derived from the seed rather than configured beside it.
@@ -1420,6 +1438,36 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             );
           },
         }
+      : undefined;
+  /*
+   * The signed-in person's own name and email for the UI-schema viewer.
+   *
+   * Its own cache rather than a share of `membershipDirectory`, and that is forced: this reads
+   * `meta.users`, which has no `tenant_id` and no RLS, so the answer is the same fact in every
+   * tenant a person holds a membership in — while that directory's key is `(tenantId, userId)`
+   * because an *attribute* legitimately differs per tenant. Sharing the key would have meant N
+   * reads of one row for a person in N tenants.
+   *
+   * Gated on a connection alone and not on `--credential-login`, because an api-key naming a real
+   * principal is a person too (`principals.ts`' fourth spec field), and `principalUserId` is what
+   * decides whether this is ever asked. On `--store memory` there is no user store, so the resolver
+   * is absent and the viewer simply carries no name — which is what every console rendered before
+   * these fields existed.
+   */
+  const userIdentity =
+    conn !== undefined
+      ? userIdentityFromStore(new PostgresUserStore(conn, schemaOpt), {
+          onError: (userId: string, error: unknown, servedStale: boolean): void => {
+            // Required rather than optional, because the failure mode is a silence: without this a
+            // deployment whose identity reads are failing would notice only by seeing every page
+            // say "Signed in as erp_admin" again. Never thrown — see `userIdentityFromStore`.
+            console.warn(
+              `[identity] could not resolve ${userId}'s own name and email` +
+                `${servedStale ? " (served the last known answer)" : " (the viewer carries none)"}:` +
+                ` ${error instanceof Error ? error.message : String(error)}`,
+            );
+          },
+        })
       : undefined;
   // Grouped so the evaluator, the keys it answers and the directory feeding it cannot be supplied
   // apart — see `BuildOperateHttpServerOptions.abac`.
@@ -3939,6 +3987,20 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     cursorSealing,
     allocator,
     settingsStore,
+    // Absent on `--store memory`, where there is no user store to read — so the viewer carries the
+    // person's `userId` (which comes from the principal) and no name, which is what every console
+    // rendered before these fields existed.
+    ...(userIdentity !== undefined ? { userIdentity } : {}),
+    // Unconditional, for `edgeTrust`'s reason one option over: this is the literal where the grant
+    // was dropped for four phases, and `compileOperateServer` defaults it to `["erp_admin"]`, so a
+    // drop here is invisible to `tsc` and produces a *working* deployment governed by a role name
+    // no flag could name. Both literals pass it, and this hop DOES have a class fence now —
+    // `node.test.ts` compares both literals against every field `BuildOperateHttpServerOptions`
+    // declares, which is what `server.test.ts` does one hop in and what three accumulated
+    // per-field pins here should have been. The by-name pin stays beside it rather than being
+    // replaced: the class rule is satisfied by moving a field into its `notPassed` map with a
+    // plausible reason, and for this field there is no plausible reason.
+    adminRoles: options.adminRoles,
     policyForEntity: sensitivePolicyForEntity,
     writeMaskMode,
     allowUncoveredSettlement: options.allowUncoveredSettlement,
@@ -4751,6 +4813,13 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       // billing, or the tamper-evident audit trail. Only the deployment-wide singletons that
       // are not per-request (the Stripe webhook + billing-portal routes) stay on the default
       // server, which still handles them for every tenant.
+      //
+      // That last sentence named two exceptions and there were **four**: `idempotencyStore` and
+      // `rateLimitChecker` were absent from the literal below and are per-request, so the claim
+      // was false in exactly the direction it was written to reassure. Both are passed now. It is
+      // *not* a comment to keep in step by hand — `node.test.ts` compares this literal against
+      // `BuildOperateHttpServerOptions` field by field, so a fifth exception has to declare
+      // itself with a reason rather than arriving in prose.
       build: async (tenantManifest, tenantId): Promise<OperateHttpServer> => {
         // Provision before compiling, not on first request: `storeFor` is synchronous and does not
         // provision, so a gateway built before `ensure` resolved would route that tenant's very
@@ -4837,6 +4906,17 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           apiKeys,
           allocator,
           settingsStore,
+          // The same resolver, because a person's own name is a fact about them rather than about
+          // whose manifest is being compiled — and a tenant serving its own activated manifest
+          // serves that same tenant's users, so a console on that path needs the identity exactly
+          // as the boot one does.
+          ...(userIdentity !== undefined ? { userIdentity } : {}),
+          // The deployment's grant, not the tenant's: `/v1/admin/settings` is mounted on a
+          // per-tenant gateway too (`settingsStore` is passed one line up), so without this a
+          // tenant serving its own activated manifest was governed by the hardcoded `erp_admin`
+          // even where that manifest declares no such role. Which roles administer a tenant's
+          // settings is a property of the deployment, so every gateway gets the same answer.
+          adminRoles: options.adminRoles,
           ...(jwt !== null ? { jwt } : {}),
           ...(extraRoutes !== undefined ? { extraRoutes } : {}),
           ...(entitlementResolver !== undefined ? { entitlementResolver } : {}),
@@ -4854,6 +4934,36 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           // per-tenant gateway too — one directory instance, so the cache is shared rather than
           // re-read per compiled tenant.
           ...(tenantStatusGate !== undefined ? { tenantStatusGate } : {}),
+          // The deployment's replay guard and rate-limit window, which this literal did not pass —
+          // so a tenant serving its own activated manifest fell back to the per-process
+          // `InMemoryIdempotencyStore` and `InMemoryRateLimitChecker` that `buildOperateGateway`
+          // installs when either is absent. Both are **per-request**, which is what makes the
+          // omission a divergence rather than a deployment-singleton staying put: the idempotency
+          // one restores ADR-0336's exact defect (a `Map` in one process, so a retried `POST`
+          // landing on another replica or after a restart executes twice) on a deployment that
+          // declared `--idempotency-store pg`, and it is live on the shipped compose, which passes
+          // that flag and `--ai-design` — and `--ai-design` implies `--per-tenant-manifests`.
+          //
+          // One instance shared across tenants rather than one per compiled gateway, which is the
+          // same answer the boot site gives and is right for both: `PostgresIdempotencyStore`
+          // scopes every statement by tenant and `PostgresRateLimitChecker` keys its window by
+          // policy, principal and route, so the records never merge. A per-gateway instance would
+          // have been the in-memory behaviour with a database attached.
+          ...(idempotencyStore !== undefined ? { idempotencyStore } : {}),
+          ...(rateLimitChecker !== undefined ? { rateLimitChecker } : {}),
+          // The two reporting surveys, which were boot-only — so ADR-0339's write-open/read-closed
+          // asymmetry and ADR-0357's cursor disclosure were measured for the boot pack and for
+          // nothing a tenant ever authored, which is exactly the input the Architect produces.
+          // Supplied HERE and not at the boot literal: `serve()` surveys the boot manifest itself
+          // before this function is reached (its refusal has to fire before anything mounts), so
+          // passing it there would survey the same manifest twice and report it once.
+          onSurvey: (report): void => {
+            const reading = formatTenantManifestSurvey(tenantId, report);
+            for (const line of reading.lines) {
+              if (reading.level === "warn") console.warn(line);
+              else console.info(line);
+            }
+          },
           defaultScheme: options.defaultScheme,
         }).httpServer;
       },
@@ -4869,10 +4979,21 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       // problem greps the subsystem, and the sibling 95 lines up already logs `[tenant-schema]`.
       // The detail is log-only — the 503 names the tenant and the refusal kind and nothing else,
       // because these messages enumerate entities, fields and policy keys.
+      // "manifest is valid" was unconditional and is **false for a source throw**, which is the
+      // refusal kind this increment added: the read did not happen, so nothing about the manifest
+      // was established — and asserting it sends an operator to inspect a design when the fault is
+      // a grant on `meta.operate_tenant_manifests`. Live, the old text read "tenant … manifest is
+      // valid and its gateway could not be built (unknown): permission denied for table
+      // operate_tenant_manifests", which contradicts itself in one sentence. Keyed on the kind
+      // rather than reworded for all of them, because for the five that parse the manifest first
+      // the clause is true and load-bearing: it is what tells an operator not to look there.
       onBuildRefused: (tenantId, kind, detail) =>
         console.error(
-          `[tenant-gateway] tenant ${tenantId} manifest is valid and its gateway could not be ` +
-            `built (${kind}); their requests get 503 until this is resolved: ${detail}`,
+          `[tenant-gateway] tenant ${tenantId} ` +
+            (kind === "unknown"
+              ? `could not be served and nothing about their manifest was established`
+              : `manifest is valid and its gateway could not be built`) +
+            ` (${kind}); their requests get 503 until this is resolved: ${detail}`,
         ),
     });
     // Cross-replica invalidation: activation on replica A is invisible to B/C until their TTL

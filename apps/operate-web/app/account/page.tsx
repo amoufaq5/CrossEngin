@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 
 import { Topbar } from "@/components/Topbar";
-import { roleLabel, useSchema, viewerRoles } from "@/lib/schema";
+import { roleLabel, useSchema, viewerIsPerson, viewerName, viewerRoles } from "@/lib/schema";
 import { redirectToLogin } from "@/lib/unauthorized";
 import type { PasswordChangeResult } from "@/lib/users";
 
@@ -254,11 +254,13 @@ export default function AccountPage() {
                   </dd>
                 </div>
               </dl>
-              <p className="mt-5 text-xs text-ink-faint">
-                Your name and email are not served by <span className="font-mono">UiSchema</span>,
-                whose viewer carries a primary role and a role list and no identity — so this page
-                can show the role you signed in with and not the person holding it.
-              </p>
+              {viewerName(schema) === null && (
+                <p className="mt-5 text-xs text-ink-faint">
+                  {viewerIsPerson(schema)
+                    ? "Your name and email could not be resolved — this deployment's user directory did not answer. The roles above come from your session and are correct either way."
+                    : "You are signed in with a machine credential (an API key), which names no person, so there is no name or email to show. The roles above are the ones that credential carries."}
+                </p>
+              )}
             </>
           )}
         </div>

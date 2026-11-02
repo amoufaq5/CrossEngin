@@ -1,7 +1,24 @@
 import type { ForwardedProto, HttpMethod, PipelineExecution } from "@crossengin/api-gateway";
-import type { AbacBatchEvaluator, AbacEvaluator, SensitiveFieldPolicy } from "@crossengin/auth";
-import type { CursorSealer, OpenApiCoverageGap } from "@crossengin/operate-runtime";
-import type { CursorSealingMode } from "./cursor-encryption.js";
+import type {
+  AbacBatchEvaluator,
+  AbacEvaluator,
+  RoleName,
+  SensitiveFieldPolicy,
+} from "@crossengin/auth";
+import type {
+  CursorSealer,
+  OpenApiCoverageGap,
+  UiUserIdentityResolver,
+} from "@crossengin/operate-runtime";
+// A value import, not a type-only one: `decideCursorDisclosure` and `surveySortableClassifiedFields`
+// are called below, which is what makes the per-tenant survey possible. There is no cycle —
+// `cursor-encryption.ts` references `server.js` zero times.
+import {
+  decideCursorDisclosure,
+  surveySortableClassifiedFields,
+  type CursorDisclosureDecision,
+  type CursorSealingMode,
+} from "./cursor-encryption.js";
 import type {
   HmacKeyLookup,
   MtlsClientLookup,
@@ -36,6 +53,7 @@ import {
 } from "./principals.js";
 import { applyTenantStatusGate, type TenantStatusGateOptions } from "./tenant-status-gate.js";
 import { AbacObligationsUnevaluable, checkAbacObligations } from "./abac-obligations.js";
+import { surveySensitiveFields, type SensitiveFieldSurvey } from "./sensitive-field-policy.js";
 import {
   withAbacAttributes,
   withMembershipRevocationCheck,
@@ -262,6 +280,8 @@ export interface BuildOperateHttpServerOptions {
   readonly openApiCoverage?: () => readonly OpenApiCoverageGap[];
   /** Backs the `/v1/admin/settings` endpoints + runtime numbering overrides. */
   readonly settingsStore?: SettingsStore;
+  /** Resolves the signed-in person's own name and email for the UI-schema viewer. */
+  readonly userIdentity?: UiUserIdentityResolver;
   /** Roles permitted to manage tenant settings. */
   readonly adminRoles?: readonly string[];
   /** Optional subscription gate: denies a lapsed tenant (past_due → read-only). */
@@ -321,6 +341,25 @@ export interface BuildOperateHttpServerOptions {
     readonly mode: CursorSealingMode;
     readonly sealer: CursorSealer | null;
   };
+  /**
+   * Where the two **reporting** surveys of this manifest go. Optional, and the absence is a
+   * coherent state rather than a drop: a caller that only wants a gateway need not read them.
+   *
+   * It exists because `TenantGatewayCache` had no channel for a report. Its two callbacks,
+   * `onInvalidManifest` and `onBuildRefused`, are both failure-only, which is why ADR-0340's
+   * obligation check reaches an operator at all — it **throws**, and the throw is classified into
+   * `GATEWAY_BUILD_REFUSAL_KINDS`. A finding that must not refuse had nowhere to be sent, so the
+   * sensitive-field and cursor-disclosure surveys stayed at boot and answered for the boot pack
+   * only. Both are reachable on every store now.
+   *
+   * Called **once per compiled manifest**, which is once at boot and once per tenant whose
+   * activated manifest is built or rebuilt — not per request. The cache memoises on the manifest
+   * hash, so a tenant's report is emitted when their design is activated rather than repeatedly.
+   */
+  readonly onSurvey?: (report: {
+    readonly sensitive: SensitiveFieldSurvey;
+    readonly cursorDisclosure: CursorDisclosureDecision;
+  }) => void;
   /**
    * The deployment's ABAC policy layer, or absent for none — in which case a manifest declaring an
    * obligation is refused below (ADR-0340).
@@ -435,6 +474,52 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
   });
   if (obligations.refusal !== null) throw new AbacObligationsUnevaluable(obligations);
 
+  /*
+   * The two surveys that were boot-only, run here for the same reason the obligation check is here:
+   * this function is what compiles a **tenant's own activated manifest**, so a check that lives in
+   * `serve()` answers for the boot pack and for nothing a tenant ever authored (ADR-0314).
+   *
+   * The register prescribed `applyTenantManifestSchema` for the sensitive-field half, and that is
+   * refuted by measurement: its only caller is built solely under `--store pg-columns`, while the
+   * shipped compose is `--store pg`, so the check would have been dark on the deployment that
+   * ships. `buildOperateHttpServer` is reached on every store.
+   *
+   * They **report and never refuse**, which is the one way they differ from the obligation check
+   * above, and the asymmetry is the same one those surveys already draw at boot:
+   *
+   *   - a write-open/read-closed classified field is a *capability* answer — the field is withheld
+   *     from readers and writable by whoever holds entity `update` — so a tenant whose manifest
+   *     has one still gets a working gateway, and refusing it would take a tenant's whole
+   *     deployment away over a declaration they can fix (ADR-0348's split: a property of the
+   *     manifest alone belongs to validation, and activation validates);
+   *   - a plaintext cursor is `CURSOR_DISCLOSURE_MAY_SERVE`-true on every verdict by construction.
+   *
+   * `onSurvey` is therefore a **non-failure** channel, which `TenantGatewayCache` did not have:
+   * it carried `onInvalidManifest` and `onBuildRefused` and nothing else, both failure-only, so
+   * ADR-0340's check only reaches an operator because it *throws*. A report had nowhere to go.
+   */
+  if (options.onSurvey !== undefined) {
+    // Computed only when something reads them, which is `--abac-policy`'s rule (ADR-0341: the
+    // producer exists exactly when a consumer does). Not a micro-optimisation: `serve()` surveys
+    // the boot manifest itself, before this function is reached, because
+    // `--classified-write-mask`'s refusal has to fire before anything is mounted — so running
+    // them here unconditionally would survey the boot pack twice and report it once.
+    const sensitive = surveySensitiveFields({
+      manifest: options.manifest,
+      // `?? (() => undefined)` is the empty policy, not a skip: with no declaration every
+      // sensitive field is unreadable by every role, which is exactly the state ADR-0339 measured
+      // on 39 of 46 and is the finding worth reporting rather than a reason to report nothing.
+      policyForEntity: options.policyForEntity ?? ((): undefined => undefined),
+      roles: Object.keys(options.manifest.roles ?? {}),
+      classifiedWriteMask: options.writeMaskMode === "classified",
+    });
+    const cursorDisclosure = decideCursorDisclosure({
+      mode: options.cursorSealing?.mode ?? "absent",
+      fields: surveySortableClassifiedFields(options.manifest),
+    });
+    options.onSurvey({ sensitive, cursorDisclosure });
+  }
+
   // The hmac specs reach the wiring as well as the lookup, and the two halves are separate for a
   // stated reason: `requestSigning.lookup` answers *which key verifies this signature* and lives in
   // `request-signing.ts` beside the derivation, while the resolver answers *who that key is* and
@@ -499,7 +584,14 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
       ? { openApiCoverage: options.openApiCoverage }
       : {}),
     ...(options.settingsStore !== undefined ? { settingsStore: options.settingsStore } : {}),
-    ...(options.adminRoles !== undefined ? { adminRoles: options.adminRoles as never } : {}),
+    ...(options.userIdentity !== undefined ? { userIdentity: options.userIdentity } : {}),
+    // `as readonly RoleName[]` and not `as never`: the widening from `readonly string[]` needs a
+    // cast because `RoleName` is branded, and `as never` accepts *any* type at all — so it would
+    // have validated nothing if this field's type ever changed, which is ADR-0362's
+    // annotation-standing-in-for-a-check in the forwarding literal for precisely this field.
+    ...(options.adminRoles !== undefined
+      ? { adminRoles: options.adminRoles as readonly RoleName[] }
+      : {}),
     ...(options.entitlementResolver !== undefined ? { entitlementResolver: options.entitlementResolver } : {}),
     ...(options.billingPortal !== undefined ? { billingPortal: options.billingPortal } : {}),
     ...(options.additionalWriteEffects !== undefined ? { additionalWriteEffects: options.additionalWriteEffects } : {}),
