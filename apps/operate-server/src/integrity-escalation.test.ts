@@ -32,6 +32,7 @@ import {
   type CompromiseCause,
   type IntegrityProofReport,
 } from "./integrity-proof.js";
+import { noWitnessMemory } from "./witness-memory.js";
 
 const TENANT_A = "11111111-1111-1111-1111-111111111111";
 const TENANT_B = "22222222-2222-2222-2222-222222222222";
@@ -90,6 +91,7 @@ function report(over: Partial<IntegrityProofReport> = {}): IntegrityProofReport 
     chainRowsRefused: [],
     anchorAudit: noAnchorFindings(TENANT_A),
     truncation,
+    witnessMemory: noWitnessMemory(),
     ...over,
   };
 }
@@ -704,6 +706,29 @@ describe("IntegrityEscalator — every compromise cause has a key that explains 
         ok: false,
         unreadable: [refused("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")],
       }),
+    },
+    // The memory axis. Both share one payload key (`witnessMemory`), which is the first time two
+    // causes do — see `COMPROMISE_CAUSE_PAYLOAD_KEY` for why the key names where the explanation
+    // is rather than which cause produced it.
+    witness_regressed: {
+      anchors: cleanAnchors(),
+      witnessMemory: {
+        outcome: "witness_regressed",
+        attestedWitness: 5,
+        attestedTail: 5,
+        attestedAt: AT,
+        detail: null,
+      },
+    },
+    verdict_disagrees_with_chain: {
+      anchors: cleanAnchors(),
+      witnessMemory: {
+        outcome: "prior_verdict_contradicted",
+        attestedWitness: 5,
+        attestedTail: 5,
+        attestedAt: AT,
+        detail: null,
+      },
     },
   };
 

@@ -27,9 +27,18 @@ import {
 } from "./chain-verify.js";
 import {
   PostgresIntegrityVerdictStore,
+  attestedWitnessFrom,
   integrityVerdictInputFor,
 } from "./integrity-verdict-store.js";
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
+import {
+  compareWitnessMemory,
+  formatWitnessMemory,
+  witnessMemoryShowsHistory,
+  witnessMemoryUnproven,
+  type WitnessMemoryCheck,
+  type WitnessMemorySource,
+} from "./witness-memory.js";
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 
@@ -184,6 +193,21 @@ export interface IntegrityProofReport {
    * the fact has to reach the verdict by an axis that pages.
    */
   readonly anchorAudit: AnchorAuditReport;
+  /**
+   * What a **prior** verdict attested about this scope, and whether this pass agrees with it.
+   *
+   * The fourth axis, and the first that is not a reading of a table *now*. Every axis above is a
+   * single-pass check over `(chain, anchors, audit rows)`, and two edits produce a state that is
+   * internally consistent — so each of them is right and none of them can refuse those two. See
+   * `witness-memory.ts` for the pair and the live measurements.
+   *
+   * Deliberately **not** in `canonicalStoredReport`/`integrityVerdictPayload`: adding a field there
+   * changes the bytes every stored verdict's digest was computed over, which is the parity ADR-0371
+   * reverted a field to preserve. The *verdict* this axis can change is already in those bytes; the
+   * reasoning behind it is a diagnostic, rendered where diagnostics are read, exactly as
+   * `fullBecause` is.
+   */
+  readonly witnessMemory: WitnessMemoryCheck;
 }
 
 /**
@@ -266,6 +290,17 @@ export async function proveScopeIntegrity(
     readonly auditRowLimit: number;
     readonly fromCheckpoint: boolean;
     readonly now: () => Date;
+    /**
+     * What a prior verdict attested about this scope, for the one axis that is about history.
+     *
+     * **Optional**, and its absence is `not_recorded` — a value on the report and a line in the
+     * unattended output, so the omission is observable. That is what keeps it clear of ADR-0386's
+     * trap, which is an optional field whose default makes its own omission *unobservable*; here a
+     * deployment that records no verdicts says so on every pass. `buildIntegrityProofLifecycle`
+     * supplies it exactly when `recordVerdict` is on, which is the same condition that builds the
+     * store — so the producer exists precisely when there is something to read (ADR-0341's rule).
+     */
+    readonly witnessMemory?: WitnessMemorySource;
   },
 ): Promise<IntegrityProofReport> {
   const chain = deps.fromCheckpoint
@@ -330,6 +365,19 @@ export async function proveScopeIntegrity(
     audit.unreadable,
   );
 
+  // Read **after** the anchor audit and the tail, so the comparison is against figures this pass
+  // has already settled, and compared against `correspondenceChain` rather than `chainRead.entries`
+  // for the reason the audit is: over a chain the reader refused a row of, an entry the prior
+  // verdict names may be one of the refused ones, and calling that *the chain no longer holds it*
+  // would attribute a finding to the wrong table. `chain_row_refused` already answers
+  // `compromised` for such a chain, so withholding this costs no verdict.
+  const witnessMemory = compareWitnessMemory({
+    read: deps.witnessMemory === undefined ? null : await deps.witnessMemory(scope),
+    current: truncation,
+    chain: correspondenceChain,
+    currentScanComplete: anchorAudit.complete,
+  });
+
   return {
     scope,
     verdict: integrityVerdictFor(
@@ -338,6 +386,7 @@ export async function proveScopeIntegrity(
       truncation,
       chainRead.unreadable,
       anchorAudit,
+      witnessMemory,
     ),
     verifiedAt: deps.now().toISOString(),
     chain,
@@ -345,6 +394,7 @@ export async function proveScopeIntegrity(
     truncation,
     chainRowsRefused: chainRead.unreadable,
     anchorAudit,
+    witnessMemory,
   };
 }
 
@@ -443,6 +493,13 @@ export const COMPROMISE_CAUSES = [
   "checkpoint_disagrees_with_chain",
   "audit_row_tampered",
   "audit_row_refused",
+  // The two memory causes come **last**, and the precedence is the whole reason to care: a genuine
+  // truncation with the anchors left alone exhibits `chain_truncated` *and* nothing else, while the
+  // same truncation with the anchors lowered onto it exhibits only these. So an operator meeting a
+  // real cut is still sent to the chain, and one meeting a laundered cut is sent to the anchor
+  // table and the prior verdict — which are the two rows that were edited.
+  "witness_regressed",
+  "verdict_disagrees_with_chain",
 ] as const;
 export type CompromiseCause = (typeof COMPROMISE_CAUSES)[number];
 
@@ -453,7 +510,11 @@ export type CompromiseCause = (typeof COMPROMISE_CAUSES)[number];
  * report is being *built* — the verdict is one of its fields — so a cause function taking a report
  * could not be the one the verdict is computed through, and two implementations of this judgement
  * are exactly what the escalation row's two-of-six already cost. A whole `IntegrityProofReport`
- * satisfies it, so the escalator asks the same function about the same five fields.
+ * satisfies it, so the escalator asks the same function about the same facts.
+ *
+ * (That last sentence said "the same five fields" and the count is **six** since the memory axis
+ * landed. It is a count of this interface's own members, which is exactly the quantity that goes
+ * stale — so it names the facts rather than counting them now.)
  */
 export interface CompromiseEvidence {
   readonly chain: ChainVerificationReport;
@@ -461,6 +522,13 @@ export interface CompromiseEvidence {
   readonly truncation: ChainTruncationCheck;
   readonly chainRowsRefused: readonly UnreadableRow[];
   readonly anchorAudit: AnchorAuditReport;
+  /**
+   * **Required**, so nothing reaches this judgement holding no answer on the one axis that is about
+   * history rather than about a table. A whole `IntegrityProofReport` satisfies it, which is what
+   * keeps the escalator asking the same function about the same facts; a fixture that omits it is a
+   * compile error, which is the fence rather than a permissive default it could inherit.
+   */
+  readonly witnessMemory: WitnessMemoryCheck;
 }
 
 /**
@@ -490,6 +558,18 @@ const COMPROMISE_CAUSE_HOLDS: Record<CompromiseCause, (evidence: CompromiseEvide
     e.anchorAudit.disagreeing !== null && e.anchorAudit.disagreeing.length > 0,
   audit_row_tampered: (e) => e.anchors !== null && e.anchors.tampered.length > 0,
   audit_row_refused: (e) => e.anchors !== null && e.anchors.unreadable.length > 0,
+  // Two causes for one axis, because the two findings send an operator to different rows: a
+  // regression says the anchor table holds less than it did, and a contradiction says the chain no
+  // longer holds the entry a prior verdict was anchored in. Either alone refuses the lowering
+  // attack, which is why both are here rather than one `witnessMemoryDisproves`.
+  //
+  // Each names its outcome, so what no *type* can fence is a ninth `WITNESS_MEMORY_OUTCOMES` member
+  // graded `disproves` and named by neither predicate — which would be `compromised` to
+  // `witness-memory.ts` and invisible to this judgement. `integrity-proof.test.ts` closes that by
+  // asserting the two sets agree in both directions: every outcome graded `disproves` is named by
+  // exactly one cause here, and every cause here names a real outcome.
+  witness_regressed: (e) => e.witnessMemory.outcome === "witness_regressed",
+  verdict_disagrees_with_chain: (e) => e.witnessMemory.outcome === "prior_verdict_contradicted",
 };
 
 /**
@@ -525,6 +605,7 @@ export function integrityVerdictFor(
   truncation: ChainTruncationCheck,
   chainRowsRefused: readonly UnreadableRow[],
   anchorAudit: AnchorAuditReport,
+  witnessMemory: WitnessMemoryCheck,
 ): IntegrityVerdict {
   const causes = compromiseCauses({
     chain,
@@ -532,6 +613,7 @@ export function integrityVerdictFor(
     truncation,
     chainRowsRefused,
     anchorAudit,
+    witnessMemory,
   });
   if (causes.length > 0) return "compromised";
   // A scan the ceiling stopped did not read the whole anchor table, so every count on that report is
@@ -549,6 +631,13 @@ export function integrityVerdictFor(
   // `unproven`'s own definition already covers this: *nothing is disproven, and something is not
   // established*.
   if (!anchorAudit.complete) return "unproven";
+  // The memory axis's own non-finding: a prior verdict exists and cannot be trusted, so this axis
+  // established nothing. Graded `unproven` rather than `compromised` for the asymmetry argued at
+  // `WITNESS_MEMORY_GRADE` — the verdict row is a *projection* whose writer swallows a failed write
+  // and calls the chain entry the record of record, and ADR-0373's forward hazard (a required field
+  // added to a `.strict()` stored shape) would otherwise be a paging sev1 caused by a schema
+  // evolution. The other five non-finding outcomes carry no claim at all and reach neither arm.
+  if (witnessMemoryUnproven(witnessMemory)) return "unproven";
   if (anchors === null) return "verified";
   // `anchors.ok` also requires nothing unanchored; that is split out here, because an unanchored
   // row is unproven rather than disproven and must not page anyone. A deployment upgrading from
@@ -755,7 +844,29 @@ function isEmptyScope(report: IntegrityProofReport): boolean {
   // — and treating that as empty would silently stop proving the scope altogether.
   const chainEmpty = report.truncation.tailSequence === null;
   const noAuditRows = report.anchors === null || report.anchors.checked === 0;
-  return report.verdict === "verified" && chainEmpty && noAuditRows && readEveryRowFound(report);
+  // A scope a prior verdict attested history for is **not** a scope with nothing to verify, whatever
+  // its three tables now hold. Without this clause the strongest form of the anchor `DELETE` is the
+  // quietest thing a tamperer can do: destroy a tenant's chain *and* its anchors and every axis
+  // answers `verified`, so this predicate called it new and the pass **discarded the report** —
+  // measured through the real `IntegrityProofScheduler` as `outcome: "skipped_empty"` with zero
+  // callbacks, no `onPass`, no `onFinding`, no stored row and no escalation.
+  //
+  // It reads the memory's *figures* rather than its outcome, and that is the load-bearing part: by
+  // the time this is asked the verdict is already `compromised` for a regression, so the verdict
+  // clause above would have caught that case on its own. What this clause adds is the one the
+  // verdict cannot reach — a prior verdict that is `prior_unanchored` or `unverifiable_here`, which
+  // carry no claim and so leave the verdict `verified` while still *proving* the scope had history.
+  //
+  // The residual is stated rather than hidden: a scope destroyed before anything ever attested it
+  // has no memory to refute "this scope is new", and is genuinely indistinguishable from one.
+  const hadHistory = witnessMemoryShowsHistory(report.witnessMemory);
+  return (
+    report.verdict === "verified" &&
+    chainEmpty &&
+    noAuditRows &&
+    !hadHistory &&
+    readEveryRowFound(report)
+  );
 }
 
 /**
@@ -857,12 +968,27 @@ export function formatIntegrityProof(report: IntegrityProofReport): string {
     // whose every row the chain contradicts. The first is the only one the scheduler fixes; the
     // other two are named by the audit's own lines below, so this arm points there rather than
     // guessing which.
+    //
+    // A **third** arm since the memory axis, and it is the one the register named this whole class
+    // for: *"run the checkpoint scheduler"* is the remedy that cannot work for a scope whose
+    // anchors were **destroyed**, and until there was a memory nothing could tell that scope from
+    // one that has simply never been anchored. Worse than useless, because running the scheduler
+    // *re-anchors at the then-current tail* — measured, `ON CONFLICT … DO NOTHING` does not fire
+    // for a row that is gone — which puts a fresh witness past the destroyed entries and makes the
+    // truncation permanently unprovable. So the one arm that used to send an operator to the
+    // scheduler is now the arm that tells them not to.
     lines.push(
-      anchorAuditHasFindings(report.anchorAudit)
-        ? "  truncation: not checkable (no checkpoint this audit will stand behind — see below)"
-        : "  truncation: not checkable (no checkpoint yet — run the checkpoint scheduler)",
+      witnessMemoryShowsHistory(report.witnessMemory)
+        ? "  truncation: not checkable, and this scope HAD anchors — do NOT run the checkpoint" +
+          " scheduler, which would anchor past the gap and make this unprovable"
+        : anchorAuditHasFindings(report.anchorAudit)
+          ? "  truncation: not checkable (no checkpoint this audit will stand behind — see below)"
+          : "  truncation: not checkable (no checkpoint yet — run the checkpoint scheduler)",
     );
   }
+  // The memory axis, silent on `consistent` — see `formatWitnessMemory` for why that one is the
+  // only silent outcome.
+  for (const line of formatWitnessMemory(report.witnessMemory)) lines.push(line);
   // Beside the chain and anchor refusals rather than inside the `anchors !== null` block, because
   // this axis is answered on every pass: the anchor table is read before the audit rows are looked
   // at, so a scope with no anchored rows at all still reports what its checkpoints say.
@@ -976,6 +1102,16 @@ export function buildIntegrityProofLifecycle(
         auditRowLimit: config.auditRowLimit,
         fromCheckpoint: config.fromCheckpoint,
         now,
+        // Supplied exactly when the store exists, which is `recordVerdict` — so the reader and the
+        // writer of this memory are turned on by one flag and a deployment cannot hold one without
+        // the other. `attestedWitnessFrom` owns the catch, because `rowToRecord` **throws** for a
+        // stored verdict the contract refuses or one that disagrees with itself, and letting that
+        // escape here would make the pass file `outcome: "error"` — no verdict, no finding, no
+        // page. That is ADR-0374's defect exactly, on a read this increment adds to the hourly
+        // path, so the refusal is routed at the seam rather than left to whoever calls it.
+        ...(verdicts !== null
+          ? { witnessMemory: (s: string | null) => attestedWitnessFrom(verdicts, s) }
+          : {}),
       }),
     ...(config.recordVerdict
       ? {

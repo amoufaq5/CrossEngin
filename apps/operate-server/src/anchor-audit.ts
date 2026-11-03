@@ -153,15 +153,27 @@ function indexChain(entries: readonly ChainedLogEntry[]): ChainIndex {
  * "these two hashes differ", and naming the weaker fact would send an operator to compare hashes
  * when the row simply needs its sequence put back.
  *
- * The final fall-through is this rule's measured limit and not only its truncation arm: it is also
- * what a **two-column** `UPDATE` produces. Setting `sequence_number` and `root_hash` in one
- * statement — lowering an anchor onto a surviving entry and taking that entry's hash with it — hides
- * a real truncation behind a report byte-identical to a healthy scope's, and raising one past the
- * tail with a hash the chain does not hold restores the false `chain_truncated` the one-column form
- * no longer produces. Both measured live as a non-owner (ADR-0375). It cannot be narrowed from here:
- * an anchor the chain does not reach *is* the truncation signature, so this table alone cannot
- * separate the two, and closing it needs evidence held elsewhere — the chain's own memory of a prior
- * witness, or an anchor table that is itself chained.
+ * A **two-column** `UPDATE` defeats this rule, and **the two forms reach it by different arms** —
+ * which this comment got wrong as written and which an instrumented run settled by counting the map
+ * calls each makes (ADR-0399):
+ *
+ *   - **Lowering** an anchor onto a surviving entry and taking that entry's hash with it is the
+ *     **agreement** arm, clause 1: one lookup, `get(2) -> h(2)`, returning `null` at the first line.
+ *     The anchor really does agree with the chain that survives, so there is nothing here to
+ *     narrow. It hides a real truncation behind a report **byte-identical** to a healthy scope that
+ *     only ever held that many entries — asserted by string equality on the joined formatter lines,
+ *     not by eye.
+ *   - **Raising** one past the tail with a hash the chain does not hold is the **fall-through**,
+ *     clause 4: three lookups, all missing. That restores the false `chain_truncated` the
+ *     one-column form no longer produces.
+ *
+ * So clause 4 is the truncation arm and the *raising* arm, and never the lowering one — branch 4 is
+ * in fact **unreachable** at a sequence the chain holds, because `index.hashAt.has(seq)` is true
+ * there and clause 3 claims it. Neither can be narrowed from here: an anchor the chain does not
+ * reach *is* the truncation signature, and an anchor that agrees is indistinguishable from a sound
+ * one, so this table alone cannot separate either pair. Closing it needs evidence held elsewhere —
+ * the chain's own memory of a prior witness (`witness-memory.ts`, which closes the lowering arm),
+ * or an anchor table that is itself chained (which the raising arm still waits on).
  */
 function disagreementFor(
   checkpoint: ChainCheckpoint,

@@ -498,8 +498,7 @@ import {
 } from "./audit-sampling-policy-source.js";
 import {
   formatChainVerification,
-  verifyChainFromCheckpoint,
-  verifyChainFull,
+  verifyChainForAudit,
   type ChainVerificationReport,
 } from "./chain-verify.js";
 import {
@@ -5693,15 +5692,27 @@ export async function runVerifyChain(options: VerifyChainOptions): Promise<Verif
     // Built in **both** modes now. It used to be built only for `--from-checkpoint`, because only a
     // bounded fold needed an anchor; the audit needs the table whichever fold ran.
     const checkpoints = new PostgresChainCheckpointStore(conn, schemaOpt);
-    const chain = options.fromCheckpoint
-      ? await verifyChainFromCheckpoint(reader, registry, checkpoints, tenantId)
-      : await verifyChainFull(reader, registry, tenantId);
-    // `chain: null`, so the correspondence half is not asked and the report says so. The two folds
-    // each hold the entries they read and neither hands them back, so asking it here would mean a
-    // second whole-chain load — two copies of a chain this command exists to walk — and for
-    // `--from-checkpoint` it would mean reading the prefix a bounded verification is defined not to.
-    // The integrity proof asks it, because it already loads the whole chain for the anchor half.
-    const anchors = await auditAnchors(tenantId, checkpoints, null);
+    // The verification **and** the entries it examined. `verifyChainForAudit` hands back what
+    // `foldFromGenesis` already loaded, which is five of the six reachable paths — the full mode
+    // plus all four bounded fallbacks — so the correspondence costs this command nothing on any of
+    // them and is `null` only on the one path a bounded fold is defined not to read the prefix for.
+    //
+    // Before this the command passed `chain: null` unconditionally, on the stated ground that
+    // "neither fold hands its entries back". That is true of the return *type* and was false of the
+    // behaviour, and the two findings it cost are the reason this is worth a shape: measured on a
+    // chain with every entry present, a **one-column** anchor lowering exited **0** here while the
+    // hourly pass answered `compromised`, and a one-column raising printed a **false** `TRUNCATED:
+    // … entries the chain was committed to are gone` that the hourly pass suppresses. So the
+    // command an operator runs by hand was the one missing both the detector and the suppressor.
+    const verification = await verifyChainForAudit(
+      reader,
+      registry,
+      checkpoints,
+      tenantId,
+      options.fromCheckpoint,
+    );
+    const chain = verification.report;
+    const anchors = await auditAnchors(tenantId, checkpoints, verification.correspondenceChain);
     // After the audit, so the witness is read before the tail it is compared against — and widening
     // that gap cannot manufacture a finding, since `truncated` needs `tail < witness`, so an append
     // in the window only ever clears the check while a delete in it is a truncation that really

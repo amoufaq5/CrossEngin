@@ -21,6 +21,7 @@ import {
   CHAIN_FULL_REASON_PHRASES,
   formatChainVerification,
   keyRegistryResolver,
+  verifyChainForAudit,
   verifyChainFromCheckpoint,
   verifyChainFull,
   type ChainFullReason,
@@ -545,6 +546,116 @@ describe("verifyChainFromCheckpoint refuses an anchor it cannot trust", () => {
       expect(report.mode === "from_checkpoint").toBe(checkpointAnchorsBoundedProof(provenance));
     },
   );
+});
+
+describe("verifyChainForAudit", () => {
+  it("hands back the entries a full fold examined, so a caller can audit the anchors", async () => {
+    // ADR-0375's open end said *"neither fold hands its entries back"*, which was true of the
+    // return type and false of the behaviour: `foldFromGenesis` loaded the whole chain and dropped
+    // it. So the correspondence was free for this path, and `verify-chain` — the command an
+    // operator runs by hand — was the one asking `auditAnchors(…, null)`.
+    const { store, fingerprint, publicKeyBase64 } = await seededChain(3);
+    const result = await verifyChainForAudit(
+      store,
+      fakeRegistry({ [fingerprint]: { publicKeyBase64 } }),
+      fakeCheckpoints(null),
+      TENANT,
+      false,
+    );
+    expect(result.report.mode).toBe("full");
+    expect(result.correspondenceChain).not.toBeNull();
+    expect(result.correspondenceChain?.map((e) => e.sequenceNumber)).toEqual([0, 1, 2]);
+  });
+
+  it("answers null for a bounded pass that read only the suffix", async () => {
+    // The one path where the prefix genuinely was not read. `null` is the provenance claim —
+    // *this pass holds no chain to compare* — rather than an empty list, which would read as
+    // *the chain reaches no anchor* and hand the audit a finding about the wrong table.
+    const { store, checkpoints, fingerprint, publicKeyBase64 } = await anchoredChain("verified_full");
+    const result = await verifyChainForAudit(
+      store,
+      fakeRegistry({ [fingerprint]: { publicKeyBase64 } }),
+      checkpoints,
+      TENANT,
+      true,
+    );
+    expect(result.report.mode).toBe("from_checkpoint");
+    expect(result.report.checkpointSequence).toBe(2);
+    expect(result.correspondenceChain).toBeNull();
+  });
+
+  it("hands them back on every bounded fallback, because those folded from genesis", async () => {
+    // Five of the six reachable paths go through `foldFromGenesis` — the full mode plus all four
+    // fallbacks — and the discriminator was already on the report: `mode === "full"` iff the whole
+    // chain was read. Asserted through the fallback whose cause is an unreadable anchor, which is
+    // the one a tampered deployment is in.
+    const { store, fingerprint, publicKeyBase64 } = await seededChain(4);
+    const refusing = {
+      latest: async (): Promise<never> => {
+        throw new CheckpointRowUnreadable(TENANT, { identity: "3", detail: "checkpointedBy: too_small" });
+      },
+    } as unknown as PostgresChainCheckpointStore;
+    const result = await verifyChainForAudit(
+      store,
+      fakeRegistry({ [fingerprint]: { publicKeyBase64 } }),
+      refusing,
+      TENANT,
+      true,
+    );
+    expect(result.report.fullBecause).toBe("anchor_unreadable");
+    expect(result.correspondenceChain?.length).toBe(4);
+  });
+
+  it("withholds them when the reader refused a row, which is the audit's own rule", async () => {
+    // `proveScopeIntegrity`'s provenance rule, applied here for the same reason: the
+    // correspondence's lookup maps are built from the entries that *parsed*, so over an incomplete
+    // chain an anchor pointing at the refused one reads as *the chain does not reach this anchor* —
+    // a witness it has not earned, or a `root_hash_mismatch` attributed to the wrong table.
+    const { store, entries, fingerprint, publicKeyBase64 } = await seededChain(3);
+    storedEntry(entries, 1)["actor_reference"] = "";
+    const result = await verifyChainForAudit(
+      store,
+      fakeRegistry({ [fingerprint]: { publicKeyBase64 } }),
+      fakeCheckpoints(null),
+      TENANT,
+      false,
+    );
+    // The refusal is still the verdict's business — this only withholds the correspondence input.
+    expect(result.report.ok).toBe(false);
+    expect(result.correspondenceChain).toBeNull();
+  });
+
+  it("answers an empty list for an empty chain, which is not the same claim as null", async () => {
+    // A genesis-anchored chain that holds nothing is a *reading*, so the audit may use it: every
+    // anchor over it is unreached, which is the truncation check's subject (ADR-0380). Collapsing
+    // that to `null` would say the prefix was not read, and the two send an operator to different
+    // tables.
+    const keyStore = new InMemoryKeyStore();
+    const record = await keyStore.createKey({ tenantId: null, algorithm: "ed25519", purpose: "evidence_sealing" });
+    const store = new PostgresChainLogStore(fakeChainPg().conn, keyStoreChainSigner(keyStore, record, null));
+    const result = await verifyChainForAudit(store, fakeRegistry({}), fakeCheckpoints(null), TENANT, false);
+    expect(result.report.ok).toBe(true);
+    expect(result.correspondenceChain).toEqual([]);
+  });
+
+  it("returns the same report the two public wrappers do, so neither mode forked", async () => {
+    // The wrappers unwrap `.report` from the same private functions, and that is the property worth
+    // pinning: a second fold written for the audit would be a verification an operator's command
+    // does not share with the hourly pass.
+    const full = await seededChain(3);
+    const registryFor = (c: { fingerprint: string; publicKeyBase64: string }) =>
+      fakeRegistry({ [c.fingerprint]: { publicKeyBase64: c.publicKeyBase64 } });
+    expect(
+      (await verifyChainForAudit(full.store, registryFor(full), fakeCheckpoints(null), TENANT, false)).report,
+    ).toEqual(await verifyChainFull(full.store, registryFor(full), TENANT));
+
+    const bounded = await anchoredChain("verified_full");
+    expect(
+      (await verifyChainForAudit(bounded.store, registryFor(bounded), bounded.checkpoints, TENANT, true)).report,
+    ).toEqual(
+      await verifyChainFromCheckpoint(bounded.store, registryFor(bounded), bounded.checkpoints, TENANT),
+    );
+  });
 });
 
 describe("formatChainVerification", () => {

@@ -662,3 +662,46 @@ describe("serve()'s two buildOperateHttpServer literals", () => {
     expect(Object.keys(notPassed[1] ?? {})).not.toContain("rateLimitChecker");
   });
 });
+
+describe("runVerifyChain — the anchor audit's chain argument", () => {
+  /**
+   * The one site that passed `auditAnchors(…, null)` unconditionally, and the one this increment
+   * changed. Read as text because `runVerifyChain` opens a real Postgres connection on its first
+   * line, which is this app's own idiom for a wiring fact a unit test cannot hold.
+   *
+   * It is a wiring fence and not a behaviour one: `chain-verify.test.ts` holds what
+   * `verifyChainForAudit` *answers* on every path, and nothing there can see a caller that asks
+   * for the entries and then discards them. That is precisely how this defect arrived — the
+   * correspondence was available on five of six paths and the call site passed `null` anyway.
+   */
+  const src = stripComments(readFileSync(resolve(import.meta.dirname, "./node.ts"), "utf8"));
+  const body = (() => {
+    const start = src.indexOf("export async function runVerifyChain(");
+    expect(start, "runVerifyChain declaration").toBeGreaterThan(-1);
+    return src.slice(start, src.indexOf("\n}", start));
+  })();
+
+  it("passes the entries the fold examined, and not a bare null", () => {
+    expect(body).toContain("auditAnchors(tenantId, checkpoints, verification.correspondenceChain)");
+    // The mutation this exists to catch is the pre-increment line, which typechecks and leaves
+    // every `chain-verify` test green: `correspondenceChain` is `readonly ChainedLogEntry[] | null`,
+    // so `null` is assignable and the audit answers `disagreeing: null` — *not asked* — on a
+    // deployment where it was asked and clean.
+    expect(body).not.toMatch(/auditAnchors\([^)]*,\s*null\s*\)/);
+  });
+
+  it("reaches the audit through verifyChainForAudit, so both modes share one fold", () => {
+    expect(body).toContain("verifyChainForAudit(");
+    // Neither wrapper, because each returns the report alone — so calling one here would mean a
+    // second load for the entries, and a chain read twice can be read differently.
+    expect(body).not.toContain("verifyChainFull(");
+    expect(body).not.toContain("verifyChainFromCheckpoint(");
+  });
+
+  it("audits the anchors before reading the tail, which is the ordering argument", () => {
+    // `proveScopeIntegrity`'s own: the witness is read before the tail it is compared against, so
+    // an append in the window only ever *clears* the truncation check while a delete in it is a
+    // truncation that really happened. Reversed, the window manufactures findings.
+    expect(body.indexOf("auditAnchors(")).toBeLessThan(body.indexOf("reader.tail("));
+  });
+});

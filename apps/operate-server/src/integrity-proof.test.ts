@@ -53,6 +53,12 @@ import {
   type CompromiseEvidence,
   type IntegrityProofReport,
 } from "./integrity-proof.js";
+import {
+  WITNESS_MEMORY_GRADE,
+  WITNESS_MEMORY_OUTCOMES,
+  noWitnessMemory,
+  witnessMemoryUnproven,
+} from "./witness-memory.js";
 
 const TENANT_A = "11111111-1111-1111-1111-111111111111";
 const TENANT_B = "22222222-2222-2222-2222-222222222222";
@@ -129,6 +135,7 @@ function report(over: Partial<IntegrityProofReport> = {}): IntegrityProofReport 
     chainRowsRefused: [],
     anchorAudit: anchorAudit(),
     truncation: noTruncation(),
+    witnessMemory: noWitnessMemory(),
     ...over,
   };
 }
@@ -613,21 +620,21 @@ describe("INTEGRITY_VERDICTS", () => {
 
 describe("integrityVerdictFor", () => {
   it("verified: the chain holds and every row matches its anchor", () => {
-    expect(integrityVerdictFor(chainOk(), anchors(), noTruncation(), [], noAnchorFindings())).toBe("verified");
+    expect(integrityVerdictFor(chainOk(), anchors(), noTruncation(), [], noAnchorFindings(), noWitnessMemory())).toBe("verified");
   });
 
   it("verified: the platform chain, which has no rows to anchor", () => {
-    expect(integrityVerdictFor(chainOk(), null, noTruncation(), [], noAnchorFindings())).toBe("verified");
+    expect(integrityVerdictFor(chainOk(), null, noTruncation(), [], noAnchorFindings(), noWitnessMemory())).toBe("verified");
   });
 
   it("compromised: a row no longer matches its anchor", () => {
     expect(
-      integrityVerdictFor(chainOk(), anchors({ ok: false, tampered: [tamperedResult] }), noTruncation(), [], noAnchorFindings()),
+      integrityVerdictFor(chainOk(), anchors({ ok: false, tampered: [tamperedResult] }), noTruncation(), [], noAnchorFindings(), noWitnessMemory()),
     ).toBe("compromised");
   });
 
   it("unproven: nothing disproven, but some rows carry no anchor", () => {
-    expect(integrityVerdictFor(chainOk(), anchors({ ok: false, unanchored: 1 }), noTruncation(), [], noAnchorFindings())).toBe(
+    expect(integrityVerdictFor(chainOk(), anchors({ ok: false, unanchored: 1 }), noTruncation(), [], noAnchorFindings(), noWitnessMemory())).toBe(
       "unproven",
     );
   });
@@ -640,6 +647,7 @@ describe("integrityVerdictFor", () => {
         noTruncation(),
         [],
         noAnchorFindings(),
+        noWitnessMemory(),
       ),
     ).toBe("compromised");
   });
@@ -648,8 +656,8 @@ describe("integrityVerdictFor", () => {
     // The anchors it holds cannot attest to anything once the chain they live in is broken, so a
     // clean anchor report must not soften the verdict.
     const broken = chainOk({ ok: false, integrity: { valid: false, brokenAt: 2 } });
-    expect(integrityVerdictFor(broken, anchors(), noTruncation(), [], noAnchorFindings())).toBe("compromised");
-    expect(integrityVerdictFor(broken, null, noTruncation(), [], noAnchorFindings())).toBe("compromised");
+    expect(integrityVerdictFor(broken, anchors(), noTruncation(), [], noAnchorFindings(), noWitnessMemory())).toBe("compromised");
+    expect(integrityVerdictFor(broken, null, noTruncation(), [], noAnchorFindings(), noWitnessMemory())).toBe("compromised");
   });
 
   it("compromised: valid links but an unverifiable signature", () => {
@@ -657,7 +665,7 @@ describe("integrityVerdictFor", () => {
       ok: false,
       signatures: { valid: false, checked: 4, results: [], unresolvedFingerprints: [], unreadable: [] },
     });
-    expect(integrityVerdictFor(unsigned, anchors(), noTruncation(), [], noAnchorFindings())).toBe("compromised");
+    expect(integrityVerdictFor(unsigned, anchors(), noTruncation(), [], noAnchorFindings(), noWitnessMemory())).toBe("compromised");
   });
 
   it("compromised: a chain row the contract refuses, through the chain half", () => {
@@ -675,8 +683,8 @@ describe("integrityVerdictFor", () => {
         unreadable: [refusedRow],
       },
     });
-    expect(integrityVerdictFor(refused, anchors(), noTruncation(), [], noAnchorFindings())).toBe("compromised");
-    expect(integrityVerdictFor(refused, null, noTruncation(), [], noAnchorFindings())).toBe("compromised");
+    expect(integrityVerdictFor(refused, anchors(), noTruncation(), [], noAnchorFindings(), noWitnessMemory())).toBe("compromised");
+    expect(integrityVerdictFor(refused, null, noTruncation(), [], noAnchorFindings(), noWitnessMemory())).toBe("compromised");
   });
 
   it("compromised: an audit row the reader refuses, where an unanchored one is only unproven", () => {
@@ -684,15 +692,15 @@ describe("integrityVerdictFor", () => {
       ok: false,
       unreadable: [{ identity: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", detail: "operation: too_small" }],
     });
-    expect(integrityVerdictFor(chainOk(), refused, noTruncation(), [], noAnchorFindings())).toBe("compromised");
+    expect(integrityVerdictFor(chainOk(), refused, noTruncation(), [], noAnchorFindings(), noWitnessMemory())).toBe("compromised");
     expect(
-      integrityVerdictFor(chainOk(), anchors({ ok: false, unanchored: 1 }), noTruncation(), [], noAnchorFindings()),
+      integrityVerdictFor(chainOk(), anchors({ ok: false, unanchored: 1 }), noTruncation(), [], noAnchorFindings(), noWitnessMemory()),
     ).toBe("unproven");
   });
 
   it("treats a zero-row anchor report as verified, not unproven", () => {
     expect(
-      integrityVerdictFor(chainOk(), anchors({ checked: 0, verified: 0 }), noTruncation(), [], noAnchorFindings()),
+      integrityVerdictFor(chainOk(), anchors({ checked: 0, verified: 0 }), noTruncation(), [], noAnchorFindings(), noWitnessMemory()),
     ).toBe("verified");
   });
 
@@ -702,7 +710,7 @@ describe("integrityVerdictFor", () => {
     // one table across (ADR-0373).
     const refusedAnchor: UnreadableRow = { identity: "4", detail: "provenance: invalid_enum_value" };
     expect(
-      integrityVerdictFor(chainOk(), anchors(), noTruncation(), [], refusedAnchors(refusedAnchor)),
+      integrityVerdictFor(chainOk(), anchors(), noTruncation(), [], refusedAnchors(refusedAnchor), noWitnessMemory()),
     ).toBe("compromised");
   });
 
@@ -720,7 +728,7 @@ describe("integrityVerdictFor", () => {
       // changes — which is what makes this the refusal's own answer.
       witnessSequence: 4,
     });
-    expect(integrityVerdictFor(chainOk(), anchors(), noTruncation(), [], audit)).toBe(
+    expect(integrityVerdictFor(chainOk(), anchors(), noTruncation(), [], audit, noWitnessMemory())).toBe(
       "compromised",
     );
   });
@@ -731,7 +739,7 @@ describe("integrityVerdictFor", () => {
     // escalation rows and frequently nothing else.
     const refusedAnchor: UnreadableRow = { identity: "4", detail: "provenance: invalid_enum_value" };
     expect(
-      integrityVerdictFor(chainOk(), null, noTruncation(), [], refusedAnchors(refusedAnchor)),
+      integrityVerdictFor(chainOk(), null, noTruncation(), [], refusedAnchors(refusedAnchor), noWitnessMemory()),
     ).toBe("compromised");
     expect(
       integrityVerdictFor(
@@ -740,6 +748,7 @@ describe("integrityVerdictFor", () => {
         noTruncation(),
         [],
         refusedAnchors(refusedAnchor),
+        noWitnessMemory(),
       ),
     ).toBe("compromised");
   });
@@ -754,7 +763,7 @@ describe("integrityVerdictFor", () => {
       scanned: 1,
       disagreeing: [{ kind: "sequence_relocated", sequenceNumber: 99, matchedAt: 4 }],
     });
-    expect(integrityVerdictFor(chainOk(), anchors(), noTruncation(), [], audit)).toBe(
+    expect(integrityVerdictFor(chainOk(), anchors(), noTruncation(), [], audit, noWitnessMemory())).toBe(
       "compromised",
     );
     expect(audit.refusedCount).toBe(0);
@@ -772,6 +781,7 @@ describe("integrityVerdictFor", () => {
         noTruncation(),
         [],
         anchorAudit({ scanned: 1000, complete: false, witnessSequence: 1000 }),
+        noWitnessMemory(),
       ),
     ).toBe("unproven");
   });
@@ -781,7 +791,7 @@ describe("integrityVerdictFor", () => {
     // the platform chain frequently has nothing anchored, and the coverage question is about a
     // different table, so the anchor half must not be able to answer it.
     const incomplete = anchorAudit({ scanned: 5, complete: false });
-    expect(integrityVerdictFor(chainOk(), null, noTruncation(), [], incomplete)).toBe("unproven");
+    expect(integrityVerdictFor(chainOk(), null, noTruncation(), [], incomplete, noWitnessMemory())).toBe("unproven");
     expect(
       integrityVerdictFor(
         chainOk(),
@@ -789,6 +799,7 @@ describe("integrityVerdictFor", () => {
         noTruncation(),
         [],
         incomplete,
+        noWitnessMemory(),
       ),
     ).toBe("unproven");
   });
@@ -801,6 +812,7 @@ describe("integrityVerdictFor", () => {
         noTruncation(),
         [],
         anchorAudit({ scanned: 5, complete: false, refused: [], refusedCount: 2 }),
+        noWitnessMemory(),
       ),
     ).toBe("compromised");
   });
@@ -812,22 +824,22 @@ describe("integrityVerdictFor — truncation", () => {
   it("compromised when the chain ends before a checkpoint it was committed to", () => {
     // The decisive case: every link and signature still verifies, because a truncated chain is a
     // shorter well-formed chain. Only the checkpoint reveals that history went missing.
-    expect(integrityVerdictFor(chainOk(), anchors(), cut, [], noAnchorFindings())).toBe("compromised");
+    expect(integrityVerdictFor(chainOk(), anchors(), cut, [], noAnchorFindings(), noWitnessMemory())).toBe("compromised");
   });
 
   it("outranks a clean chain and clean anchors", () => {
-    expect(integrityVerdictFor(chainOk({ ok: true }), anchors({ ok: true }), cut, [], noAnchorFindings())).toBe(
+    expect(integrityVerdictFor(chainOk({ ok: true }), anchors({ ok: true }), cut, [], noAnchorFindings(), noWitnessMemory())).toBe(
       "compromised",
     );
   });
 
   it("compromised on the platform chain too", () => {
-    expect(integrityVerdictFor(chainOk(), null, cut, [], noAnchorFindings())).toBe("compromised");
+    expect(integrityVerdictFor(chainOk(), null, cut, [], noAnchorFindings(), noWitnessMemory())).toBe("compromised");
   });
 
   it("not truncated when the tail is at or beyond the checkpoint", () => {
     expect(
-      integrityVerdictFor(chainOk(), anchors(), noTruncation({ checkpointSequence: 4, tailSequence: 4 }), [], noAnchorFindings()),
+      integrityVerdictFor(chainOk(), anchors(), noTruncation({ checkpointSequence: 4, tailSequence: 4 }), [], noAnchorFindings(), noWitnessMemory()),
     ).toBe("verified");
   });
 
@@ -841,6 +853,7 @@ describe("integrityVerdictFor — truncation", () => {
         noTruncation({ checkpointSequence: null, tailSequence: null }),
         [],
         noAnchorFindings(),
+        noWitnessMemory(),
       ),
     ).toBe("verified");
   });
@@ -866,6 +879,7 @@ describe("COMPROMISE_CAUSES", () => {
     chain: chainOk(),
     anchors: anchors(),
     truncation: noTruncation(),
+    witnessMemory: noWitnessMemory(),
     chainRowsRefused: [],
     anchorAudit: anchorAudit(),
     ...over,
@@ -893,15 +907,44 @@ describe("COMPROMISE_CAUSES", () => {
     },
     audit_row_tampered: { anchors: anchors({ ok: false, tampered: [tamperedResult] }) },
     audit_row_refused: { anchors: anchors({ ok: false, unreadable: [refusedRow] }) },
+    // The memory axis. Both fixtures leave every *other* axis clean, which is the whole point of
+    // this map: these two causes are the only ones that can fire over a chain and an anchor table
+    // that agree with each other, because that is exactly the state the two attacks produce.
+    witness_regressed: {
+      witnessMemory: {
+        outcome: "witness_regressed",
+        attestedWitness: 5,
+        attestedTail: 5,
+        attestedAt: AT,
+        detail: null,
+      },
+    },
+    verdict_disagrees_with_chain: {
+      witnessMemory: {
+        outcome: "prior_verdict_contradicted",
+        attestedWitness: 5,
+        attestedTail: 5,
+        attestedAt: AT,
+        detail: null,
+      },
+    },
   };
   const verdictOf = (e: CompromiseEvidence) =>
-    integrityVerdictFor(e.chain, e.anchors, e.truncation, e.chainRowsRefused, e.anchorAudit);
+    integrityVerdictFor(e.chain, e.anchors, e.truncation, e.chainRowsRefused, e.anchorAudit, e.witnessMemory);
+  /** The causes that read `witnessMemory.outcome`, which is one field and so names one of them. */
+  const MEMORY_CAUSES = ["witness_regressed", "verdict_disagrees_with_chain"] as const;
 
-  it("enumerates the seven conditions, the first six in the order they were asked in", () => {
+  it("enumerates the nine conditions, the first six in the order they were asked in", () => {
     // The seventh is placed beside its sibling rather than appended, so this assertion is also
     // where an insertion in the middle is visible: `compromiseCauses` filters, so inserting there
     // cannot change `causes[0]` for any evidence the original six describe, and the test below
     // asserting enum order over a full fixture is what holds that.
+    //
+    // The two memory causes are **appended** rather than placed, and that position is the finding
+    // rather than housekeeping: a real truncation with the anchors left alone exhibits
+    // `chain_truncated` and these two are silent, while the same truncation laundered by lowering
+    // the anchors onto it exhibits only these. So an operator meeting a genuine cut is still sent
+    // to the chain first, and precedence is what does that.
     expect([...COMPROMISE_CAUSES]).toEqual([
       "chain_truncated",
       "chain_broken_or_unsigned",
@@ -910,7 +953,56 @@ describe("COMPROMISE_CAUSES", () => {
       "checkpoint_disagrees_with_chain",
       "audit_row_tampered",
       "audit_row_refused",
+      "witness_regressed",
+      "verdict_disagrees_with_chain",
     ]);
+  });
+
+  it("cannot report both memory causes at once, because they are one field's outcome", () => {
+    // A property of the axis and not of this fixture, which is why it is asserted rather than left
+    // for the next reader to discover from the test below: both causes read
+    // `witnessMemory.outcome`, and `compareWitnessMemory` returns at the first conclusive clause,
+    // so one `WitnessMemoryCheck` names exactly one of them. Either alone is `compromised`, so
+    // nothing is lost — but "every cause at once" is **unsatisfiable**, and a fixture that tried
+    // would be asserting a state no report can hold.
+    const both = compromiseCauses(
+      evidence({ ...EXHIBITS.witness_regressed, ...EXHIBITS.verdict_disagrees_with_chain }),
+    );
+    expect(both).toHaveLength(1);
+    expect(MEMORY_CAUSES.filter((c) => both.includes(c))).toHaveLength(1);
+  });
+
+  it("names every witness-memory outcome graded `disproves`, and names no other", () => {
+    // The fence no *type* can give, and the one the two predicates above promise. Both read
+    // `witnessMemory.outcome` with `===`, so a tenth `WITNESS_MEMORY_OUTCOMES` member graded
+    // `disproves` and named by neither would be `compromised` to `witness-memory.ts` and invisible
+    // to this judgement — a verdict reading `verified` beside an axis that disproves something.
+    //
+    // Both directions, because neither half is sufficient. Forward catches the new outcome nobody
+    // wired; backward catches a cause whose predicate was edited to read an outcome that no longer
+    // exists, which would make it unreachable and leave a modelled cause with no producer
+    // (ADR-0384's class). Driven through `compromiseCauses` and `integrityVerdictFor` rather than
+    // by comparing the two constants, so what is asserted is the behaviour and not an agreement
+    // between two lists.
+    const named = new Set<string>();
+    for (const outcome of WITNESS_MEMORY_OUTCOMES) {
+      const memory = { ...noWitnessMemory(), outcome };
+      const causes = compromiseCauses(evidence({ witnessMemory: memory }));
+      const disproves = WITNESS_MEMORY_GRADE[outcome] === "disproves";
+      expect(causes.length, outcome).toBe(disproves ? 1 : 0);
+      if (disproves) {
+        expect(MEMORY_CAUSES, outcome).toContain(causes[0]);
+        named.add(causes[0] as string);
+        expect(verdictOf(evidence({ witnessMemory: memory })), outcome).toBe("compromised");
+      } else {
+        // The other two grades are the verdict's other two answers, and the mapping is what the
+        // verdict reads rather than what this axis says about itself.
+        expect(verdictOf(evidence({ witnessMemory: memory })), outcome).toBe(
+          witnessMemoryUnproven(memory) ? "unproven" : "verified",
+        );
+      }
+    }
+    expect([...named].sort()).toEqual([...MEMORY_CAUSES].sort());
   });
 
   it("names each cause, and only it, for evidence exhibiting exactly that one", () => {
@@ -944,9 +1036,12 @@ describe("COMPROMISE_CAUSES", () => {
     expect(
       compromiseCauses(evidence({ ...EXHIBITS.chain_truncated, ...EXHIBITS.audit_row_refused })),
     ).toEqual(["chain_truncated", "audit_row_refused"]);
-    // Every condition at once. The fixture is hand-built because two of the six are different
-    // fields of one `anchors`, but the **expectation** is the enum itself — so the precedence
-    // `chain_truncated` was given is a property of that list's order and of nothing else.
+    // Every condition that **can** hold at once, which is every member but one: the two memory
+    // causes are one field's outcome and so are mutually exclusive (asserted above). The
+    // expectation is therefore the enum minus whichever of the pair this fixture does not
+    // exhibit — derived from `COMPROMISE_CAUSES` rather than written out, so the precedence
+    // `chain_truncated` was given stays a property of that list's order and of nothing else, and
+    // a tenth member joins this assertion without it being edited.
     expect(
       compromiseCauses(
         evidence({
@@ -960,9 +1055,10 @@ describe("COMPROMISE_CAUSES", () => {
             disagreeing: [{ kind: "root_hash_mismatch", sequenceNumber: 4, matchedAt: null }],
           }),
           anchors: anchors({ ok: false, tampered: [tamperedResult], unreadable: [refusedRow] }),
+          ...EXHIBITS.witness_regressed,
         }),
       ),
-    ).toEqual([...COMPROMISE_CAUSES]);
+    ).toEqual(COMPROMISE_CAUSES.filter((c) => c !== "verdict_disagrees_with_chain"));
   });
 
   it("agrees with `anchorAuditDisproves` over the two causes that read that report", () => {
@@ -1879,6 +1975,7 @@ describe("a chain row the contract refuses", () => {
       truncation: noTruncation(),
       chainRowsRefused: [],
       anchorAudit: anchorAudit(),
+      witnessMemory: noWitnessMemory(),
     });
     expect(line).toContain("1 entry the contract refuses");
     expect(line).not.toMatch(/integrity BROKEN at 1,/);

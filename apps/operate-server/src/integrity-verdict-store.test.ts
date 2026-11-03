@@ -5,6 +5,7 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 import { describe, expect, it } from "vitest";
 
 import { AUDIT_ANCHOR_VERDICTS, type AuditAnchorVerdict } from "./audit-anchor.js";
+import { noWitnessMemory } from "./witness-memory.js";
 import {
   integrityVerdictPayload,
   noAnchorFindings,
@@ -131,6 +132,11 @@ function fullReportFor(report: IntegrityProofReportLike): IntegrityProofReport {
     // `storedIntegrityReportFor` were untouched by an axis that grew a second dimension.
     chainRowsRefused: [],
     anchorAudit: noAnchorFindings(report.scope),
+    // And the memory axis, for the same reason and with the same consequence: the payload does not
+    // commit to it, so this increment left all four of those functions alone and the parity check
+    // below is what proves it. A *fourth* axis landing with the bytes unchanged is the strongest
+    // form of that evidence the suite can carry.
+    witnessMemory: noWitnessMemory(),
   };
 }
 
@@ -280,6 +286,16 @@ function fakeVerdictDb(): FakeDb {
       if (idMatch !== null) list = list.filter((r) => r["verdict_id"] === p[Number(idMatch[1]) - 1]);
       const vMatch = /\bverdict = \$(\d+)/.exec(sql);
       if (vMatch !== null) list = list.filter((r) => r["verdict"] === p[Number(vMatch[1]) - 1]);
+      // `latestBaseline`'s two clauses. Taught to the fake rather than left out, because the
+      // predicate is written as a **literal** (`verdict = 'verified'`) which the parameter regex
+      // above cannot see — so without these a test for that read would filter nothing and assert
+      // the ordering of a list it was never given. A fake that silently ignores a `WHERE` clause is
+      // worse than no fake (ADR-0333).
+      const literalVerdict = /\bverdict = '([a-z_]+)'/.exec(sql);
+      if (literalVerdict !== null) list = list.filter((r) => r["verdict"] === literalVerdict[1]);
+      if (sql.includes("chain_sequence_number IS NOT NULL")) {
+        list = list.filter((r) => r["chain_sequence_number"] !== null);
+      }
       if (sql.includes("tenant_id IS NULL")) list = list.filter((r) => r["tenant_id"] === null);
       const tMatch = /tenant_id = \$(\d+)/.exec(sql);
       if (tMatch !== null) list = list.filter((r) => r["tenant_id"] === p[Number(tMatch[1]) - 1]);
@@ -293,9 +309,23 @@ function fakeVerdictDb(): FakeDb {
           return at < cursorAt || (at === cursorAt && String(r["verdict_id"]) < cursorId);
         });
       }
+      // Two orderings, because the statement chooses between them and the choice is the security
+      // property: `verified_at` is writer-supplied, `chain_sequence_number` is assigned by the
+      // chain's own append under an advisory lock. A fake that modelled only the first would read
+      // `latestBaseline`'s rows in the order the attacker controls.
+      const bySequence = sql.includes("ORDER BY chain_sequence_number DESC");
+      // **NULLS FIRST on DESC**, which is Postgres's default and the opposite of what `Number(null)`
+      // gives. Measured on PG 16.15: `ORDER BY seq DESC` over `(6, NULL, 4)` answers `NULL, 6, 4`.
+      // The fake sorted NULLs *last*, which made `latestBaseline`'s `IS NOT NULL` clause untestable —
+      // its mutation passed — while against a real database dropping that clause would return an
+      // unanchored forgery **first**. A fake wrong about NULL ordering hides exactly the row the
+      // clause exists to skip.
+      const NULL_FIRST = Number.POSITIVE_INFINITY;
+      const seqKey = (r: Record<string, unknown>): number =>
+        r["chain_sequence_number"] === null ? NULL_FIRST : Number(r["chain_sequence_number"]);
       list.sort((a, b) => {
-        const av = (a["verified_at"] as Date).getTime();
-        const bv = (b["verified_at"] as Date).getTime();
+        const av = bySequence ? seqKey(a) : (a["verified_at"] as Date).getTime();
+        const bv = bySequence ? seqKey(b) : (b["verified_at"] as Date).getTime();
         if (av !== bv) return bv - av;
         return String(b["verdict_id"]).localeCompare(String(a["verdict_id"]));
       });
@@ -862,6 +892,77 @@ describe("integrity-verdict-store — list, counts, latest", () => {
       integrityVerdictInputFor(reportFor({ verifiedAt: "2026-09-05T00:00:00.000Z" })),
     );
     expect((await store.latest({ kind: "all" }))?.verifiedAt).toBe("2026-09-05T00:00:00.000Z");
+  });
+
+  describe("latestBaseline", () => {
+    /** An anchored row of a given verdict, at a given chain sequence. */
+    const write = async (
+      store: PostgresIntegrityVerdictStore,
+      opts: { verdict: "verified" | "unproven" | "compromised"; seq: number | null; at: string },
+    ) =>
+      store.record(
+        integrityVerdictInputFor(
+          reportFor({ verdict: opts.verdict, verifiedAt: opts.at }),
+          opts.seq === null ? undefined : anchorAt(String(opts.seq).padStart(2, "e").repeat(32).slice(0, 64), opts.seq),
+        ),
+      );
+
+    it("skips a compromised row, so a finding does not erase its own baseline", async () => {
+      // Measured live as four consecutive passes with every anchor destroyed: pass 2 answered
+      // `compromised` and **recorded `checkpointSequence: null`**, so passes 3 and 4 read that row
+      // through `latest` and answered **`verified`** — the alarm fired once and the scope then read
+      // healthy for ever. This is the clause that makes the finding durable.
+      const db = fakeVerdictDb();
+      const store = new PostgresIntegrityVerdictStore(db.conn);
+      await write(store, { verdict: "verified", seq: 6, at: "2026-09-01T00:00:00.000Z" });
+      await write(store, { verdict: "compromised", seq: 7, at: "2026-09-02T00:00:00.000Z" });
+      expect((await store.latest({ kind: "all" }))?.verdict).toBe("compromised");
+      const baseline = await store.latestBaseline({ kind: "all" });
+      expect(baseline?.verdict).toBe("verified");
+      expect(baseline?.chainSequenceNumber).toBe(6);
+    });
+
+    it("skips an unproven row too, which established nothing", async () => {
+      const db = fakeVerdictDb();
+      const store = new PostgresIntegrityVerdictStore(db.conn);
+      await write(store, { verdict: "verified", seq: 6, at: "2026-09-01T00:00:00.000Z" });
+      await write(store, { verdict: "unproven", seq: 7, at: "2026-09-02T00:00:00.000Z" });
+      expect((await store.latestBaseline({ kind: "all" }))?.chainSequenceNumber).toBe(6);
+    });
+
+    it("skips an unanchored row, which no chain pins", async () => {
+      // The refuter's hole: a tenant-context session can INSERT its own tenant-scoped row here, so
+      // an unanchored forgery would shadow a baseline the chain pins. Skipping it loses no finding,
+      // because an unanchored row answers `prior_unanchored` → no claim anyway.
+      const db = fakeVerdictDb();
+      const store = new PostgresIntegrityVerdictStore(db.conn);
+      await write(store, { verdict: "verified", seq: 6, at: "2026-09-01T00:00:00.000Z" });
+      await write(store, { verdict: "verified", seq: null, at: "2099-01-01T00:00:00.000Z" });
+      const baseline = await store.latestBaseline({ kind: "all" });
+      expect(baseline?.chainSequenceNumber).toBe(6);
+      expect(baseline?.verifiedAt).toBe("2026-09-01T00:00:00.000Z");
+    });
+
+    it("orders by the chain's sequence and not by the writer's instant", async () => {
+      // `verified_at` is supplied by whoever wrote the row; `chain_sequence_number` is assigned by
+      // the chain's own append under an advisory lock. A fully self-consistent forged row carrying
+      // a future instant therefore cannot shadow the real baseline by its clock alone.
+      const db = fakeVerdictDb();
+      const store = new PostgresIntegrityVerdictStore(db.conn);
+      await write(store, { verdict: "verified", seq: 9, at: "2026-09-01T00:00:00.000Z" });
+      await write(store, { verdict: "verified", seq: 4, at: "2099-01-01T00:00:00.000Z" });
+      expect((await store.latest({ kind: "all" }))?.chainSequenceNumber).toBe(4);
+      expect((await store.latestBaseline({ kind: "all" }))?.chainSequenceNumber).toBe(9);
+    });
+
+    it("answers null for a scope whose verdicts are all findings, which is honest", async () => {
+      // The stated cost: nothing ever verified cleanly there, so there is no clean reading to
+      // compare against — and those verdicts are themselves the record.
+      const db = fakeVerdictDb();
+      const store = new PostgresIntegrityVerdictStore(db.conn);
+      await write(store, { verdict: "compromised", seq: 6, at: "2026-09-01T00:00:00.000Z" });
+      expect(await store.latestBaseline({ kind: "all" })).toBeNull();
+    });
   });
 
   it("fetches one verdict by id within scope and refuses a malformed id without querying", async () => {

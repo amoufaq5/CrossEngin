@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 21,178 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 21,234 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -1857,18 +1857,24 @@ report; `apps/operate-web` has none).
   the edit *because the stale root hash is still there* (both lowered anchors come back
   `root_hash_mismatch`, because their root hashes name entries the cut destroyed). **An adversarial
   pass over the commit found the other half of that sentence, and it bounds the whole increment: a
-  two-column `UPDATE` defeats the correspondence rule.** `disagreementFor` asks three questions and
-  every "no" falls through to *no finding*, which is deliberate for the case the truncation check owns
-  (an anchor the chain does not reach yet) and is also what setting both columns produces. Measured
-  by the same single statement as the same non-owner role: lowering each anchor **and** setting its
-  `root_hash` to the surviving entry at its new sequence reads `verified truncated=false witness=2
-  disagree=[] causes=[]`, byte-identical to a healthy scope; raising one to 99 **and** `root_hash :=
-  'f'*64` restores the false `chain_truncated` sev1. Neither costs the attacker anything extra — the
-  destination entry's hash is readable from the chain, and `UNIQUE (tenant_id, sequence_number)` only
-  needs the destination sequence free, which it is wherever an anchor moves *down* off its own. So
+  two-column `UPDATE` defeats the correspondence rule.** Measured by the same single statement as the
+  same non-owner role: lowering each anchor **and** setting its `root_hash` to the surviving entry at
+  its new sequence reads `verified truncated=false witness=2 disagree=[] causes=[]`, byte-identical
+  to a healthy scope; raising one to 99 **and** `root_hash := 'f'*64` restores the false
+  `chain_truncated` sev1. **Two of this paragraph's own claims are refuted by ADR-0399 and the
+  corrections are in `anchor-audit.ts`'s own comment**: the two forms reach the rule by *different*
+  arms, and the lowering is the **agreement** arm (clause 1, one map lookup) rather than the
+  fall-through — branch 4 is in fact unreachable at a sequence the chain holds, since
+  `index.hashAt.has(seq)` is true there and clause 3 claims it, verified by handing `auditAnchors` a
+  foreign hash at a held sequence and getting `root_hash_mismatch`. And "`UNIQUE (tenant_id,
+  sequence_number)` only needs the destination sequence free, which it is wherever an anchor moves
+  *down* off its own" is **not generally true** — a sibling anchor at the destination raises `23505`.
+  The stronger and correct availability argument is the one this paragraph did not make:
+  `sequence_number`'s only CHECK is `>= 0` with no upper bound and no reference, so the **up**-move is
+  **unconditionally** available. So
   this raises the cost of the cheap edits and closes none of the dear ones, and the two-column form is
   **quieter than the `DELETE`** below it, which at least leaves `witness=null` for an operator to see.
-  It is the top open end; the obvious detector beside it (`checkpointed_at` compared against
+  **The lowering arm is closed by ADR-0399** and the raising arm is not: the obvious detector beside it (`checkpointed_at` compared against
   `sequence_number`'s order) is recorded **with its refutation**, because it reaches neither arm — the
   lowering moves the anchors *in order*, so both orders are the same permutation, and the raising
   moves one row, which is trivially monotonic. With a sound
@@ -3229,6 +3235,69 @@ report; `apps/operate-web` has none).
   limiter whose counter is advanced by a party who does not hold the credential — so promoting it to
   a session refusal would be a remote session-kill. ADR-0384's class in four new places.
 
+  ADR-0399 closes ADR-0375's two open ends as one increment, and the class is **a check that was
+  single-pass over a state two edits make internally consistent**. Every check over the anchor table
+  before it read `(anchors, chain)` once, and the two cheapest attacks produce a reading that agrees
+  with itself — so no amount of care inside one pass can refuse them, and only **history** can.
+  Measured live as the non-owner `serving` role before anything was written: the **two-column
+  lowering** (destroy entries 3..5, then move the stranded anchors down onto surviving entries taking
+  those entries' hashes with them) read `verified witness=2 tail=2 truncated=false disagree=[]`, and
+  the **anchor `DELETE`** (3 rows, that table's isolation arm being `ALL`-scope with no `DELETE` arm)
+  read `verified witness=null` with the formatter printing *"not checkable (no checkpoint yet — run
+  the checkpoint scheduler)"* for a scope whose checkpoints were destroyed. With the chain wiped too,
+  the pass **discarded the report entirely** — `skipped_empty` with **zero** callbacks, no stored
+  row, no finding, no escalation. **Total destruction was quieter than tamper.**
+  The refutation is the deployment's own prior verdict, and the figures were already in the **signed**
+  bytes: `canonicalStoredReport` and `integrityVerdictPayload` commit `truncation.checkpointSequence`
+  *and* `truncation.tailSequence`, so a stored verdict attests the **pair** — ADR-0375's open end
+  names only the witness, and the tail is what makes the second detector possible. The chain stores
+  `payload_sha256` and **no payload column**, so the figures are *pinned* by the chain and *readable*
+  only from the verdict row, which makes the trust argument three-legged with the third leg the one
+  that had no caller: the row against its own digest (`storedReportMismatches`, which already runs
+  inside `rowToRecord` and **throws**), the row's digest against the chain entry it names (**this
+  increment**, and `storedReportMismatches`' own comment is the specification for it), and the entry
+  against its hash links and signature (what the pass already did).
+  Two independent detectors came out of that, and either alone refuses the lowering: a **witness
+  regression** (a prior verdict attested a higher witness than this pass can find) and a
+  **contradiction** (the chain does not hold the entry the prior verdict was anchored in, or holds it
+  carrying different content). Nine `WITNESS_MEMORY_OUTCOMES` over a three-valued grade, two
+  `COMPROMISE_CAUSES` members appended rather than placed — so a genuine cut with the anchors left
+  alone still reports `chain_truncated` first and an operator is sent to the chain — and the `verified
+  && chainEmpty` discard is gated on `witnessMemoryShowsHistory`.
+  **Four of the increment's own claims were refuted by measuring them, two of them its own code.**
+  An earlier clause excused an **empty** chain as *"absent says nothing"*, so the both-destroyed arm
+  answered `verified`; it is the strongest contradiction there is, because `record()` appends the
+  chain entry and only then stores the row, so **the verdict's own anchor proves an entry existed**.
+  The regression's formatter composed a *sentence* into a sentence, printing *"attested witness 5 at
+  …, and this pass found a prior verdict attested a witness and this scope's anchor table now has
+  none"* on a line read under a paging sev1. `chain-verify.ts`'s byte pair was the **compact** figure
+  mislabelled as the CLI's (the CLI prints `JSON.stringify(report, null, 2)`: 668 / **692** / 716 B
+  per entry at depths 0/1/2, so **66 MiB** at 100k and not 63). And the lowering-arm claim in that
+  same comment described the **pre-fix** CLI, which is now measured both ways through the built
+  binary — exit **0** with `witness 4 (unchecked)` before, exit **1** naming `sequence_relocated`
+  after, with the one-column *raising*'s false `TRUNCATED` **suppressed** and the two-column raising's
+  still standing.
+  **And the sharpest finding is one the refuters did not have: the detector erased its own baseline.**
+  `attestedWitnessFrom` read `latest`, and a pass that *finds* the regression records
+  `checkpointSequence: null` — so measured as four consecutive passes with every anchor destroyed,
+  pass 2 answered `compromised / witness_regressed` and passes 3 and 4 answered **`verified`**. The
+  alarm fired once and the scope then read healthy for ever. `latestBaseline` is the fix and its three
+  clauses each close a measured hole: **`verdict = 'verified'`** (a `compromised` row is the record of
+  a finding and an `unproven` one established nothing, so only a `verified` row is a baseline),
+  **`chain_sequence_number IS NOT NULL`** (an unanchored row carries no claim anyway, and a
+  tenant-context session can `INSERT` its own row here, so an unanchored forgery would otherwise
+  shadow a baseline the chain pins — and on real Postgres `ORDER BY … DESC` puts NULLs **first**, so
+  it would shadow it *first*), and **`ORDER BY chain_sequence_number DESC`** rather than
+  `verified_at DESC`, because the sequence is assigned by the chain's own append under an advisory
+  lock while the instant is supplied by whoever wrote the row. After it, all four passes report the
+  finding. The mutation that proved the second clause **passed at first**, because the test fake
+  sorted NULLs last where Postgres sorts them first — a fake wrong about NULL ordering hiding exactly
+  the row the clause exists to skip.
+  Verified live in eleven arms: the two-column lowering, the anchor `DELETE`, both with a real
+  truncation behind them, the two-column raising, total destruction, and the two arms where the
+  tamperer also corrupts the verdict row — which answer **`unproven`**, the stated cost, because a
+  corrupted projection degrades this axis rather than silencing it.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -3274,17 +3343,22 @@ increment. See **What's actually left** at the bottom for the current open ends.
   immutable-by-RLS once written. **No `DELETE`-scoped policy exists on any of the 32 — and that is a
   statement about the named arms, not about the behaviour** (ADR-0374). An `ALL`-scope isolation arm
   with a NULL `WITH CHECK` has its `USING` serve as the `WITH CHECK`, so it admits a tenant-scoped
-  `UPDATE` **and `DELETE`** of that tenant's own rows. Measured live as the non-owner `serving` role:
-  **78** `meta` tables carry such an arm, **0** of them carry a `DELETE` policy, and a tenant-context
-  session's `DELETE` count equalled the **owner's** row count, per table, on 6 of 6 scopes measured
+  `UPDATE` **and `DELETE`** of that tenant's own rows. Measured live as the non-owner `serving` role,
+  and **the figure this file carried was name-filtered** (ADR-0399): **115** `meta` tables carry such
+  an arm structurally (`polcmd = '*' AND polwithcheck IS NULL`), of which **78** are the ones named
+  `%_tenant_isolation` — the other 37 use `_tenant_or_platform` or a bare `_isolation` suffix and
+  behave identically. **0** of all 115 carry a `DELETE` policy, and a tenant-context session's
+  `DELETE` count equalled the **owner's** row count, per table, on 6 of 6 scopes measured
   — all rolled back. Per scope rather than as one triple, because the triple first recorded here
   (`1 / 12 / 3`) is answered by no scope: it stitched two tenants together. The empty-scope control
   is the other half of what makes it trustworthy: the
   same statement for a scope holding nothing answers `DELETE 0`, byte-identical to a refusal
   (ADR-0333's silent zero, in the measurement that would otherwise have read as protection). So what
   the platform split buys is that a *platform-scope* row cannot be deleted, or (on the 17) updated; a
-  tenant's own rows are a different question, and narrowing 78 isolation arms is one decision over the
-  whole catalog — see *What's actually left*. The one
+  tenant's own rows are a different question, and narrowing **115** isolation arms is one decision
+  over the whole catalog — which is 37 tables more than the "78 isolation arms" this sentence used to
+  scope it at, so **re-derive it from `pg_policy` rather than from a policy name** — see *What's
+  actually left*. The one
   remaining member of the write-split class is `meta.audit_integrity_verdicts`, whose hole is
   differently shaped — see *What's actually left*.
 - **Strict TypeScript.** No `any`. No `--no-verify`. Explicit return types on
@@ -6294,6 +6368,28 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   get no record — and `recordVerdict` defaults to **true**, so this is a default-on behaviour change
   rather than an opt-in. Verified live end to end: three ticks, three rows, anchored at consecutive
   chain sequences, served by the read route with `anchored: true`.
+  **And `latestBaseline` is what the memory axis reads, not `latest`** (ADR-0399). A separate read
+  rather than a narrowing, because `latest` serves `--audit-verdict-routes` where *the newest
+  verdict* genuinely means the newest and an operator asking what the last pass said must be shown a
+  `compromised` one. Three clauses, each closing a measured hole. **`verdict = 'verified'`**, because
+  reading `latest` made the detector erase its own baseline: measured as four consecutive passes with
+  every anchor destroyed, pass 2 answered `compromised / witness_regressed` and **recorded
+  `checkpointSequence: null`**, so passes 3 and 4 compared against that and answered **`verified`** —
+  the alarm fired once and the scope read healthy for ever. A `compromised` row is the record of a
+  finding and an `unproven` one established nothing; only a `verified` row is this deployment's own
+  statement that it looked and found nothing wrong. **`chain_sequence_number IS NOT NULL`**, because
+  an unanchored row answers `prior_unanchored` → no claim anyway, so skipping it loses no finding —
+  and it stops an unanchored forgery shadowing a baseline the chain pins, which a tenant-context
+  session can write here (that table's isolation arm is `ALL`-scope, so its `USING` doubles as its
+  `WITH CHECK`). On real Postgres `ORDER BY … DESC` puts NULLs **first**, so without it the forgery
+  wins *first* — and the mutation proving that clause **passed at first**, because the test fake
+  sorted NULLs last. **`ORDER BY chain_sequence_number DESC`** and not `verified_at DESC`: the
+  sequence is assigned by the chain's own append under an advisory lock while the instant is supplied
+  by whoever wrote the row — `storedReportMismatches` compares that column against the report's own
+  `verifiedAt`, so a *one-column* bump is already caught, and ordering on a figure the writer does not
+  choose is what makes a shadow need the chain's cooperation rather than a clock. The stated cost: a
+  scope whose verdicts are **all** findings has no baseline and the memory answers `no_prior_verdict`,
+  which is honest.
   **`integrityVerdictFor` is implemented through `compromiseCauses` since ADR-0374's addendum**, so
   the six conditions that answer `compromised` are an **enum** rather than six `return` statements:
   `COMPROMISE_CAUSES` × `COMPROMISE_CAUSE_HOLDS` (a total map of predicates) × the escalation's
@@ -6327,13 +6423,17 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   witness; neither → the chain does not reach this anchor, which is deliberately **not** a
   disagreement and **is** a witness, because that is exactly what truncation looks like and
   `ChainTruncationCheck` is its subject (folding it in would report one fact as two causes *and* take
-  the witness away from the check that needs it). **That fourth outcome is also the rule's measured
-  limit, and it is stated where the code is rather than only in the ADR**: it is what a **two-column**
-  `UPDATE` produces, so setting `sequence_number` and `root_hash` in one statement hides a truncation
-  under a report byte-identical to a healthy scope's and restores the false `chain_truncated` sev1 the
-  one-column form no longer produces. Narrowing it is not available here — an anchor the chain does
-  not reach *is* the truncation signature, so the fourth outcome cannot distinguish the two from the
-  anchor table alone, and closing it needs evidence that table does not hold. `disagreeing: null` means the correspondence was
+  the witness away from the check that needs it). **The rule's measured limit is a two-column
+  `UPDATE`, and ADR-0399 corrected which arms the two forms reach** — this entry and the source
+  comment both attributed both to the fourth outcome, and only the *raising* is there. Verified by
+  handing `auditAnchors` a foreign hash at a sequence the chain **holds** and getting
+  `root_hash_mismatch`: branch 4 is **unreachable** wherever `hashAt.has(seq)`, so the **lowering**
+  (setting `sequence_number` and `root_hash` together onto a surviving entry) is the **agreement**
+  arm, clause 1, one map lookup. Neither is narrowable from this table — an anchor the chain does not
+  reach *is* the truncation signature, and an anchor that agrees is indistinguishable from a sound
+  one — so closing either needs evidence that table does not hold: the **lowering** arm is closed by
+  `witness-memory.ts` (ADR-0399) and the raising arm still waits on an anchor table that is itself
+  chained. `disagreeing: null` means the correspondence was
   **not asked**, never "none found" (ADR-0331), and it is asked only over a chain the reader refused
   no row of — the maps would otherwise be incomplete and an anchor pointing at a refused entry would
   be named `root_hash_mismatch`, a finding attributed to the wrong table, while `chain_row_refused`
@@ -6345,6 +6445,41 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   absence of evidence is not evidence (ADR-0372). `!anchorAudit.complete` is therefore an `unproven`
   arm in `integrityVerdictFor` and **not** a seventh cause: a scan the ceiling stopped did not read
   the whole table, so `verified` would claim a reading nobody took, and nothing is disproven.
+  **`witness-memory.ts` is what a *prior* verdict attested, compared against this pass's reading**
+  (ADR-0399) — the one axis that is not single-pass, and so the only one that can refuse a state two
+  edits make internally consistent. Nine `WITNESS_MEMORY_OUTCOMES` and a `WITNESS_MEMORY_GRADE` over
+  `disproves` / `unproven` / `no_claim`, which is ADR-0372's distinction made explicit rather than
+  inferred from a boolean. Pure — no store dependency, so the whole adjudication is unit-testable and
+  `compareWitnessMemory` takes the chain the pass already loaded.
+  Two independent detectors, and **either alone refuses the lowering**: `witness_regressed` (a prior
+  verdict attested a higher witness than this pass can find) and `prior_verdict_contradicted` (the
+  chain does not hold the entry the prior verdict was anchored in, or holds it carrying different
+  content). The second is the one worth knowing about, because it is independent of the anchor table
+  entirely — the prior verdict's own chain entry sits at some sequence, and a truncation that removes
+  it is refuted by its absence whatever the anchors were edited to say.
+  Four decisions carry it. `prior_unreadable` is **`unproven` and not `disproves`**, the one grade
+  worth arguing: its two siblings one table over are `compromised` (ADR-0373 for a chain row,
+  ADR-0374 for an anchor row) and this is a row in a **projection** whose own writer swallows a
+  failed write, so grading it `compromised` would let a failed `record()` page somebody and would
+  make ADR-0373's stated forward hazard a paging sev1 caused by a schema evolution. The witness
+  comparison is gated on **`currentScanComplete`**, required rather than optional, because a cut
+  anchor scan's witness is a *lower bound* and a memory cause outranks `!anchorAudit.complete` — so
+  without the gate a coverage gap would page (`witness_not_comparable` is the ninth outcome and says
+  so on the one line that is about history). An **empty** chain read from genesis is
+  `prior_verdict_contradicted` and not excused, because `record()` appends the chain entry and only
+  then stores the row, so **the verdict's own anchor proves an entry existed** — an earlier draft
+  excused it and the both-destroyed arm answered `verified`. And `witnessMemoryShowsHistory` is a
+  **third** predicate beside the two grades because its consequence is different: it decides whether
+  the report is *published at all*, gating `isEmptyScope`'s discard.
+  `formatWitnessMemory` is silent on `consistent` alone, which a test pins as the exact set — and
+  prints each detail on **its own line** rather than composing it, because every detail is a full
+  sentence and the regression's composed form read *"attested witness 5 at …, and this pass found a
+  prior verdict attested a witness and this scope's anchor table now has none"*. Its absolute rule is
+  that **no value from the chain or from a stored row reaches a line it prints**; the details are
+  literals, pinned by a test that walks every arm and refuses a 64-hex or an ISO instant in one.
+  `noWitnessMemory()` is `not_recorded` and deliberately not `consistent`, for `noAnchorFindings`'
+  reason: a fixture asserting about another axis needs a way to say *this one carries no claim*
+  without asserting the clean answer.
   **And `CheckpointScheduler` verifies before it anchors, which it did not** (ADR-0371):
   `verifyChainFromCheckpoint`'s own doc comment said *"trust in the anchor comes from the earlier
   verification that produced it"*, and this scheduler — the **only** checkpoint writer in the
@@ -9034,12 +9169,16 @@ opened them.
   the severity of both and is the correction this addendum owed itself: ADR-0373's read-path fix
   covers the entries table and `readOne` catches **any** throw rather than only a `ZodError`, so the
   **write fence** was missing on two tables and not the detector.
-  What remains, in order: **(1)** **78 `meta` tables carry an `ALL`-scope `*_tenant_isolation` policy
-  with a NULL `WITH CHECK`, 0 of them carry a `DELETE` policy, and a tenant-context non-owner deleted
+  What remains, in order: **(1)** **115 `meta` tables carry an `ALL`-scope policy with a NULL
+  `WITH CHECK`, 0 of them carry a `DELETE` policy, and a tenant-context non-owner deleted
   every row the **owner** can see in its scope, on 6 of 6 scopes measured, across all three
   forensic tables** — so a tenant can destroy
   its own tamper-evident trail, and every argument in this file that reads "`DELETE` is reachable by
-  no policy" is about the *named arms*. Narrowing 78 arms from `ALL` to the three commands is one
+  no policy" is about the *named arms*. **The 78 this entry carried is name-filtered**
+  (`polname LIKE '%_tenant_isolation'`) and the structural census is **115**, re-derived from
+  `pg_policy` in ADR-0399 — the other 37 use `_tenant_or_platform` or a bare `_isolation` suffix and
+  behave identically, so the decision is 37 tables wider than this entry scoped it at. Narrowing 115
+  arms from `ALL` to the three commands is one
   decision over the whole catalog and would change what every tenant write path may do; the fix for
   the trail specifically may be narrower (a `FORCE ROW LEVEL SECURITY` plus three arms on the four
   forensic tables). **(2)** the two CHECKs are **standing manual SQL** on every existing deployment,
@@ -9074,30 +9213,28 @@ opened them.
   into a valid-shaped lie is a named finding rather than a silent `verified` or a false
   `chain_truncated`. The scheduler anchors again and reports what it anchored over, which is why
   `CHAIN_FULL_REASON_BLOCKS_ANCHORING`, `anchoringWouldBury` and `refused_anchor_would_bury` are gone.
-  What remains, in order: **(1)** **a two-column `UPDATE` defeats the correspondence rule**, found by
-  an adversarial pass over the commit and measured both ways as the same non-owner role: setting
-  `sequence_number` and `root_hash` in one statement hides a real truncation under a report
-  byte-identical to a healthy scope's, and restores the false `chain_truncated` sev1 the one-column
-  form no longer produces. `disagreementFor`'s three questions all fall through to *no finding*, which
-  is deliberate for the case the truncation check owns and is also what the two-column edit looks
-  like. No dearer to the attacker (the destination entry's hash is readable from the chain, and
-  `UNIQUE (tenant_id, sequence_number)` only needs the destination sequence free) and **quieter than
-  the `DELETE` below**, which at least leaves `witness=null`. Closing it needs evidence the anchor
-  table does not hold, which is the same Option G as (2) or an anchor table that is itself chained;
-  the obvious cheap detector — `checkpointed_at` against `sequence_number`'s order, which today is
-  compared against nothing — is recorded **with its refutation**, since it reaches neither arm (the
-  lowering moves the anchors in order, so both orders are one permutation; the raising moves one row).
-  **(2)** **a tenant can `DELETE` its own checkpoint rows**, and that leaves
-  no witness, no finding and a remedy that cannot work — measured, all three anchors deleted reads
-  `verified witness=null` with the formatter printing *"no checkpoint yet — run the checkpoint
-  scheduler"*. The chain already remembers what the last verdict saw (`integrityVerdictPayload`
-  commits `truncation.checkpointSequence` to a signed entry) and `witnessSequence` is monotone
-  non-decreasing, so a drop is evidence — but reading it makes one pass's verdict an **input** to the
-  next, needs an answer for the no-prior-verdict case, and is conditional on `recordVerdict`. Its own
-  increment, and the same one that closes (1). **(3)** `verify-chain` asks the correspondence in
-  **neither** mode, because neither fold
-  hands its entries back and a bounded command must not read the prefix; closing it means a shape
-  change or a second whole-chain load for the manual auditor. **(4)** the scan is a sequence of
+  What remains, in order: ~~**(1)** a two-column `UPDATE` defeats the correspondence rule~~ and
+  ~~**(2)** a tenant can `DELETE` its own checkpoint rows~~ — **both closed by ADR-0399**, as one
+  increment for the reason this entry gave (both need evidence the anchor table does not hold), and
+  that increment refuted **three** of what these two items said. The *lowering* reaches
+  `disagreementFor`'s **agreement** arm and not its fall-through, so "all three questions fall
+  through" was wrong about the arm that matters — branch 4 is unreachable at a sequence the chain
+  holds. "`UNIQUE (tenant_id, sequence_number)` only needs the destination sequence free" is **not
+  generally true** (a sibling anchor there raises `23505`); the correct and stronger argument is that
+  `sequence_number`'s only CHECK is `>= 0` with no upper bound, so the **up**-move is unconditionally
+  available. And **`witnessSequence` is not monotone** — the exclusion of a contradicted anchor is
+  conditional on a chain being supplied, which `proveScopeIntegrity` decides for itself — so the
+  detector is gated on `currentScanComplete` rather than resting on monotonicity, which is what a
+  draft of it did. Both closures carry a residual: the **raising** half of (1) is still a false
+  `TRUNCATED` on the CLI and the hourly pass, and closing it needs an anchor table that is itself
+  chained; and the memory degrades to `unproven` rather than `compromised` where the tamperer also
+  corrupts the prior verdict row, which is the stated cost. **(3)** ~~`verify-chain` asks the
+  correspondence in **neither** mode~~ — **closed by ADR-0399** too, and the shape change this item
+  predicted was not needed: `foldFromGenesis` already loaded the whole chain and discarded it, and
+  five of the six reachable paths go through it, so a sibling return type
+  (`ChainVerificationWithEntries`) left `ChainVerificationReport` untouched and cost no second read.
+  Measured both ways through the built CLI: a one-column lowering went exit **0** → exit **1** naming
+  `sequence_relocated`. **(4)** the scan is a sequence of
   per-statement snapshots inside one transaction, so a row whose `sequence_number` is edited between
   two pages can fall between them — `REPEATABLE READ` would close it and `withTenantContext` issues
   `set_config` first, so the isolation level cannot be set late. **(5)** `root_hash_mismatch` cannot
@@ -9115,6 +9252,36 @@ opened them.
   increment adds the checkpoint's. What has no fence is the question *which such pairs exist*, and
   the answer is not derivable from the catalog, because a foreign key is exactly the case where
   Postgres already enforces it and these are the cases where it cannot.
+
+- **A check that was single-pass, and what is left of it** (ADR-0399, closing ADR-0375's open ends 1,
+  2 and 3). The deployment's own prior verdict is a fourth axis on the integrity proof now, with two
+  independent detectors over it, and the two attacks ADR-0375 left open answer `compromised`.
+  What remains, in order: **(1)** **the two-column *raising* is still a false `TRUNCATED`**, on both
+  the hourly pass and the CLI, because nothing in the anchor table contradicts an anchor the chain
+  does not reach and the memory answers `consistent` for a witness that *advanced*. Closing it needs
+  an anchor table that is itself chained, which is ADR-0375's open end 5 and the same mechanism;
+  measured both ways, so this increment neither closed nor worsened it. **(2)** the memory degrades
+  to **`unproven`** where the tamperer also corrupts the prior verdict row — measured on two arms
+  (`report` edited, and `report` plus its digest) — which is strictly better than the `verified` it
+  replaces and is visible on the hourly line, but is the one place a cheaper write buys a quieter
+  answer. **(3)** a scope with a refused **chain** row answers `unverifiable_here` on this axis,
+  because `correspondenceChain` is `null` whenever any row is refused — so blanking one
+  `actor_reference` silences the memory's chain-dependent arms. Not a concealment path
+  (`chain_row_refused` is already `compromised`, which is louder), and it is `proveScopeIntegrity`'s
+  own provenance rule applied here, so the residual is a *lost sentence* rather than a lost verdict.
+  **(4)** a **fully self-consistent** forged verdict row carrying a higher `chain_sequence_number`
+  than the real baseline, and naming a chain entry that exists with matching digests, would shadow
+  it — which requires authoring a report whose own digest matches and whose chain entry commits to
+  it, so it needs the chain's cooperation and is caught by `prior_verdict_contradicted` on every
+  cheaper variant. **(5)** the comparison reads the witness and the tail and **not** the scope's
+  other attested figures (`anchors.checked`, `chain.signatures.checked`), which are in the same
+  signed bytes and would catch a different family — an audit-row count that fell, say. **(6)**
+  `witness_not_comparable` is reachable only past `CHECKPOINT_SCAN_CEILING` (1,000,000 rows), so it
+  is a reserved answer rather than a live arm, which is the same state ADR-0375 left its own
+  `complete: false` in. **(7)** nothing compares the attested **tail** against this pass's tail, so a
+  chain that lost entries with its anchors left alone is caught by `chain_truncated` and by
+  `prior_verdict_contradicted` but not by a tail regression of its own — three detectors over two
+  shapes, with the third unbuilt and probably unnecessary.
 
 - **Every money figure is read over the whole set, and what is left of it** (ADR-0367,
   user-directed). Thirteen capped reads drain their cursor to a declared ceiling now, and the
@@ -12921,6 +13088,28 @@ method is that a stale figure misleads.
    `(pw, pepper: string, opts: {params?, salt?})`, so a bare params object silently mints at the
    **defaults** — an `n=2` claim was about to be measured against a fixture holding `n=32768`.
    Round-trip a minted artifact through its own parser and assert the field you care about.
+
+   **ADR-0399 adds four members and a fifth shape, and the shape is the one this entry had not
+   named: a fake that is wrong about the database hides exactly the defect the fix is for.** The
+   mutation proving `latestBaseline`'s `IS NOT NULL` clause **passed**, because the test fake sorted
+   NULLs *last* (`Number(null) === 0`) where Postgres sorts them **first** on `DESC` — measured on
+   PG 16.15 over `(6, NULL, 4)` → `NULL, 6, 4` — so the clause whose whole job is to skip an
+   unanchored forgery was untestable, while against a real database dropping it would return that
+   forgery *first*. A vacuous mutation is the symptom; the cause is a fake modelling the opposite of
+   the ordering the security property rests on. The four ordinary members: `anchor-audit.ts`'s own
+   comment and this file both attributed the two-column **lowering** to `disagreementFor`'s
+   fall-through when it is the **agreement** arm (wrong-when-written, both strings introduced in
+   `feb3a25`, and branch 4 is in fact unreachable at a sequence the chain holds); the
+   `UNIQUE (tenant_id, sequence_number)` availability argument is false as stated and the correct one
+   is *stronger* (`sequence_number`'s only CHECK is `>= 0` with no upper bound, so the up-move is
+   unconditional); the **78** `meta` tables in the `ALL`-scope-with-NULL-`WITH CHECK` state is
+   **name-filtered** and the structural census is **115**, which widens a decision this file scopes
+   in two places; and the `matchedAt` figure cited as **ADR-0374:388** is **ADR-0375:391** —
+   `matchedAt` occurs nowhere in ADR-0374, so a reader grepping for it finds nothing and concludes
+   the figure was removed. One more from the same increment and it is this entry's own class landing
+   on a live comment: `chain-verify.ts`'s byte pair was the **compact** figure labelled as the CLI's,
+   and the CLI prints `JSON.stringify(report, null, 2)` — **both halves of a byte pair have to name
+   their indent or neither is checkable**.
 2. **Six concepts are modelled several times over, two with non-nesting member sets.** Data
    classification has five declarations — four identical and one, in `data-lineage`, **disjoint past
    two members**, so the moment anything bridges the kernel's classification into the lineage graph
@@ -13007,7 +13196,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 393 records; 314 Accepted, 79 Proposed (the
+title or status change cannot drift. 394 records; 315 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

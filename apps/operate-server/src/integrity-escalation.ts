@@ -246,6 +246,12 @@ export const COMPROMISE_CAUSE_PAYLOAD_KEY: Record<CompromiseCause, string> = {
   checkpoint_disagrees_with_chain: "anchorDisagreements",
   audit_row_tampered: "tampered",
   audit_row_refused: "unreadable.auditRows",
+  // Both memory causes resolve to one key, which is the first time two causes share one and is
+  // deliberate: the key names *where on the row the explanation is*, and both are explained by the
+  // same object — a reader following either cause finds the attested figures and the outcome that
+  // separates them. Splitting it would put the same three fields on the row twice under two names.
+  witness_regressed: "witnessMemory",
+  verdict_disagrees_with_chain: "witnessMemory",
 };
 
 // `planIntegrityEscalation` lived here: it built an incident record around an id the *caller* invented,
@@ -644,6 +650,17 @@ export class IntegrityEscalator {
             // `causes=[chain_truncated]` with `truncated: true`, so this row asserted that audit
             // history had been destroyed while every entry was present.
             anchorDisagreements: recordedDisagreements(report.anchorAudit),
+            // The fourth axis, and the only one that is not a reading of a table *now*. It carries
+            // the outcome plus the two figures a prior verdict attested — which are the figures
+            // this pass disagreed with, so the row says what changed rather than only that
+            // something did. `detail` is deliberately absent: it is prose for an operator's log
+            // line, where every other field here is a figure or an enum member.
+            witnessMemory: {
+              outcome: report.witnessMemory.outcome,
+              attestedWitness: report.witnessMemory.attestedWitness,
+              attestedTail: report.witnessMemory.attestedTail,
+              attestedAt: report.witnessMemory.attestedAt,
+            },
           },
           reason:
             operation === INTEGRITY_INCIDENT_OPERATION

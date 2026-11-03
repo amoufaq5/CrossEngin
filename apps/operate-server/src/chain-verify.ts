@@ -3,6 +3,7 @@ import {
   checkpointAnchorsBoundedProof,
   verifyChainIntegrity,
   type ChainCheckpoint,
+  type ChainedLogEntry,
 } from "@crossengin/forensics";
 import {
   CheckpointRowUnreadable,
@@ -156,6 +157,35 @@ export interface ChainVerificationReport {
 }
 
 /**
+ * A verification **and the entries it examined**, for a caller that also has to audit the anchor
+ * table against the chain.
+ *
+ * It is a sibling return type rather than a field on `ChainVerificationReport`, and that is a
+ * measurement rather than taste: `bin/operate-server.ts` prints `JSON.stringify(report, null, 2)`
+ * for `--format json`, so an entries field would put the entire chain on stdout. Measured on real
+ * rows through `PostgresChainLogReader`, **at the indentation the CLI actually uses**: 668 B per
+ * entry at the report's top level, **692 B** one level in (where an `entries` field would sit) and
+ * 716 B two in — so **66 MiB for a 100k-entry scope**, and 67 MiB with a gateway-shaped
+ * `actorReference` rather than the fixture's short one. (An earlier draft of this comment said
+ * ~656 B / ~63 MiB, which was the *compact* figure mislabelled: `JSON.stringify` with no indent
+ * gives 578 B here, and the CLI never calls it that way. Both halves of a byte pair have to name
+ * their indent or neither is checkable.) It would also travel through
+ * `CheckpointSchedulerOptions.verify`'s seam type, where no caller wants it.
+ *
+ * `correspondenceChain` is `null` when this mode did not read the prefix, which is exactly the
+ * bounded fold's one admitted-anchor path. ADR-0375's open end said *"neither fold hands its
+ * entries back"*, which is true of the return **type** and false of the behaviour: `foldFromGenesis`
+ * loads the whole chain at the top of this function and discarded it, and **five of the six
+ * reachable paths go through it** (the full mode plus all four bounded fallbacks). So the
+ * correspondence was free for every path but one, and the discriminator was already on the report —
+ * `mode === "full"` iff the whole chain was read.
+ */
+export interface ChainVerificationWithEntries {
+  readonly report: ChainVerificationReport;
+  readonly correspondenceChain: readonly ChainedLogEntry[] | null;
+}
+
+/**
  * The fold from genesis, with the reason it is being run **required**: it is the one input a caller
  * could get wrong, and reporting `requested` for an anchor the bounded path declined is precisely
  * the conflation `fullBecause` exists to end. `verifyChainFull`'s exported signature is unchanged,
@@ -166,7 +196,7 @@ async function foldFromGenesis(
   registry: PostgresKeyRegistry,
   tenantId: string | null,
   fullBecause: ChainFullReason,
-): Promise<ChainVerificationReport> {
+): Promise<ChainVerificationWithEntries> {
   // One load, two pure folds over that one array. `reader.verify` and `verifyStoredChainSignatures`
   // each load the chain themselves, so asking both read the table twice and held two whole-chain
   // copies for one fold — and a refused anchor makes this the steady state for a scope rather than
@@ -185,13 +215,22 @@ async function foldFromGenesis(
     read.unreadable,
   );
   return {
-    tenantId,
-    ok: integrity.valid && signatures.valid,
-    mode: "full",
-    fullBecause,
-    checkpointSequence: null,
-    integrity,
-    signatures,
+    report: {
+      tenantId,
+      ok: integrity.valid && signatures.valid,
+      mode: "full",
+      fullBecause,
+      checkpointSequence: null,
+      integrity,
+      signatures,
+    },
+    // The entries this fold examined, handed back rather than dropped — and `null` on a chain the
+    // reader refused a row of, which is `proveScopeIntegrity`'s own provenance rule for the same
+    // reason: the correspondence's lookup maps are built from the entries that *parsed*, so over an
+    // incomplete chain an anchor pointing at the refused one reads as *the chain does not reach
+    // this anchor*. That would hand it a witness it has not earned, or name it
+    // `root_hash_mismatch` — a finding attributed to the wrong table.
+    correspondenceChain: read.unreadable.length > 0 ? null : read.entries,
   };
 }
 
@@ -200,12 +239,47 @@ async function foldFromGenesis(
  * integrity (fold from genesis) AND per-entry signatures resolved through the key registry. `ok` requires
  * both.
  */
-export function verifyChainFull(
+export async function verifyChainFull(
   reader: PostgresChainLogReader,
   registry: PostgresKeyRegistry,
   tenantId: string | null,
 ): Promise<ChainVerificationReport> {
-  return foldFromGenesis(reader, registry, tenantId, "requested");
+  return (await foldFromGenesis(reader, registry, tenantId, "requested")).report;
+}
+
+/**
+ * The verification a caller that must also audit the anchors runs: the same two folds, plus the
+ * entries the fold examined where it read them.
+ *
+ * `verify-chain` is the caller, and the two findings it buys are the argument for the shape.
+ * Measured through the built CLI against a real cluster as the non-owner `serving` role, on a chain
+ * with every entry present, with and without this change:
+ *
+ *   - a **one-column lowering** (anchor 5 → 4, hash untouched) exited **0** with
+ *     `witness 4 (unchecked)` and `truncation: none` — ADR-0375's *"hides a real truncation"* arm —
+ *     and exits **1** now, naming `anchor at 4: sequence_relocated, whose root hash is the entry
+ *     at 5`;
+ *   - a **one-column raising** (5 → 99, hash untouched) printed a **false**
+ *     `TRUNCATED: a checkpoint witnesses sequence 99 and the chain ends at 5` and still exits 1 —
+ *     but with `sequence_relocated` and `truncation: none`, so the false truncation is
+ *     **suppressed** and the real finding named in its place.
+ *
+ * So the correspondence is a false-positive **suppressor** as much as a detector, and the command an
+ * operator runs by hand was the one without it. The suppression is **not general**, and the limit is
+ * measured rather than implied: the **two-column** raising (5 → 99 *and* `root_hash := 'f'*64`)
+ * still prints that false `TRUNCATED` both before and after, because nothing in the anchor table
+ * contradicts it — ADR-0375's own first open end, which this change neither closes nor worsens.
+ */
+export async function verifyChainForAudit(
+  reader: PostgresChainLogReader,
+  registry: PostgresKeyRegistry,
+  checkpoints: PostgresChainCheckpointStore,
+  tenantId: string | null,
+  fromCheckpoint: boolean,
+): Promise<ChainVerificationWithEntries> {
+  return fromCheckpoint
+    ? verifyChainFromCheckpointWithEntries(reader, registry, checkpoints, tenantId)
+    : foldFromGenesis(reader, registry, tenantId, "requested");
 }
 
 /**
@@ -229,6 +303,17 @@ export async function verifyChainFromCheckpoint(
   checkpoints: PostgresChainCheckpointStore,
   tenantId: string | null,
 ): Promise<ChainVerificationReport> {
+  return (await verifyChainFromCheckpointWithEntries(reader, registry, checkpoints, tenantId))
+    .report;
+}
+
+/** `verifyChainFromCheckpoint`'s body, keeping the entries where a fallback fold read them. */
+async function verifyChainFromCheckpointWithEntries(
+  reader: PostgresChainLogReader,
+  registry: PostgresKeyRegistry,
+  checkpoints: PostgresChainCheckpointStore,
+  tenantId: string | null,
+): Promise<ChainVerificationWithEntries> {
   // The anchor read has three outcomes and this is the one that used to leave the pass with none.
   // `latest` throws `CheckpointRowUnreadable` for a stored row the contract refuses, and that throw
   // escaped `proveScopeIntegrity` — so the hourly pass filed `outcome: "error"`, which means no
@@ -288,13 +373,20 @@ export async function verifyChainFromCheckpoint(
     suffix.unreadable,
   );
   return {
-    tenantId,
-    ok: integrity.valid && signatures.valid,
-    mode: "from_checkpoint",
-    fullBecause: null,
-    checkpointSequence: checkpoint.sequenceNumber,
-    integrity,
-    signatures,
+    report: {
+      tenantId,
+      ok: integrity.valid && signatures.valid,
+      mode: "from_checkpoint",
+      fullBecause: null,
+      checkpointSequence: checkpoint.sequenceNumber,
+      integrity,
+      signatures,
+    },
+    // The one path that genuinely has no prefix, and the only one ADR-0375's *"a bounded command
+    // must not read the prefix"* covers: this fold read `loadFrom(anchor + 1)`, so an anchor below
+    // the anchor it used is not in `suffix.entries` and comparing against it would report the
+    // prefix as missing. `null` says the question was not asked.
+    correspondenceChain: null,
   };
 }
 

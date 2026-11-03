@@ -3,6 +3,8 @@ import { type PgConnection, setPlatformWriteSql } from "@crossengin/kernel-pg";
 import { withTenantContext } from "@crossengin/operate-runtime-pg";
 import { z } from "zod";
 
+import type { AttestedWitnessRead } from "./witness-memory.js";
+
 /**
  * The readable projection of an audit-integrity verdict (ADR-0287 follow-up).
  *
@@ -733,6 +735,52 @@ export class PostgresIntegrityVerdictStore {
     });
   }
 
+  /**
+   * The newest verdict a scope stored that is a **baseline** — anchored, and `verified`.
+   *
+   * A separate read from `latest` rather than a narrowing of it, because `latest` serves
+   * `--audit-verdict-routes`, where *the newest verdict* genuinely means the newest and an operator
+   * asking "what did the last pass say" must be shown a `compromised` one.
+   *
+   * Three clauses, each closing a measured hole:
+   *
+   *   - **`verdict = 'verified'`**, because the memory axis reading `latest` erased its own baseline.
+   *     Measured live as four consecutive passes with every anchor destroyed: pass 2 answered
+   *     `compromised / witness_regressed` and **recorded `checkpointSequence: null`**, so passes 3
+   *     and 4 compared against *that* and answered **`verified`** — the alarm fired once and the
+   *     scope then read healthy for ever, with an operator who missed one `onFinding` given no
+   *     second chance. A `compromised` row is the record of a finding and an `unproven` one
+   *     established nothing; only a `verified` row is this deployment's own statement that it looked
+   *     and found nothing wrong, which is what a baseline is.
+   *   - **`chain_sequence_number IS NOT NULL`**, because an unanchored row answers
+   *     `prior_unanchored` → no claim anyway, so skipping it loses no finding — and it stops an
+   *     unanchored forgery shadowing a baseline the chain pins. A tenant-context session can
+   *     `INSERT` its own tenant-scoped row here (that table's isolation arm is `ALL`-scope, so its
+   *     `USING` doubles as its `WITH CHECK`), which is how that was reachable.
+   *   - **`ORDER BY chain_sequence_number DESC`** and not `verified_at DESC`: the sequence is
+   *     assigned by the chain's own append under an advisory lock, while `verified_at` is supplied
+   *     by whoever wrote the row. `storedReportMismatches` compares that column against the
+   *     report's own `verifiedAt`, so a *one-column* bump is already caught — but a fully
+   *     self-consistent forged row is not, and ordering on a figure the writer does not choose is
+   *     what makes the shadow need the chain's cooperation rather than a clock.
+   *
+   * The cost is stated rather than hidden: a scope whose verdicts are **all** `compromised` or
+   * `unproven` has no baseline and the memory answers `no_prior_verdict` — honest, because nothing
+   * ever verified cleanly there, and those verdicts are themselves the record.
+   */
+  async latestBaseline(scope: IntegrityVerdictReadScope): Promise<IntegrityVerdictRecord | null> {
+    return this.read(scope, async (tx, base) => {
+      const result = await tx.query(
+        `SELECT ${SELECT_COLUMNS} FROM ${this.table} WHERE ${base.conditions.join(" AND ")}` +
+          " AND verdict = 'verified' AND chain_sequence_number IS NOT NULL" +
+          " ORDER BY chain_sequence_number DESC, verdict_id DESC LIMIT 1",
+        base.params,
+      );
+      const row = result.rows[0];
+      return row === undefined ? null : this.rowToRecord(row);
+    });
+  }
+
   private filters(
     query: Pick<IntegrityVerdictListQuery, "verdict" | "from" | "to">,
     params: unknown[],
@@ -831,4 +879,60 @@ export function storedReportMismatches(record: IntegrityVerdictRecord): readonly
     issues.push("chain anchor is half-present");
   }
   return issues;
+}
+
+/**
+ * The newest **baseline** verdict a scope has stored, projected onto the figures the memory axis
+ * compares — and with this read's **refusal routed rather than thrown**.
+ *
+ * It reads `latestBaseline` and not `latest`, which is the correction an adversarial pass over this
+ * increment's own live measurement forced: `latest` returns the newest row of any kind, and a pass
+ * that *finds* the regression records `checkpointSequence: null`, so the next pass compared against
+ * that and answered `verified`. See `latestBaseline` for the measurement and for the two other
+ * clauses it carries.
+ *
+ * `rowToRecord` ends in `storedReportMismatches` and throws for a row the contract refuses *or* one
+ * that disagrees with its own digest, which is right for every caller it had: a route must not
+ * serve a verdict it cannot stand behind. It is wrong for the integrity pass, which is a new caller
+ * on the hourly path — an escaping throw there makes the pass file `outcome: "error"`, and that is
+ * no verdict, no finding, no stored row and no page. ADR-0374's defect precisely, and the increment
+ * that adds this read is the one that exists to close its sibling, so the catch lives here at the
+ * seam rather than wherever the pass happens to call it.
+ *
+ * Both causes collapse to one `unreadable`, carrying the message rather than the row: the two are
+ * not separable from here, their remedy is the same (look at that row), and the figures a tampered
+ * row carries are exactly what must not be believed. `storedReportMismatches` names the field that
+ * disagrees, which is what makes a corrupted memory *evidence* rather than a clean exit.
+ *
+ * This is the reader the module's own opening paragraph has specified since it was written — *"so a
+ * reader can go to the chain and confirm the two agree, and notice when a row names no entry at
+ * all"* — and had no implementation of. The comparison against the chain is `witness-memory.ts`'s,
+ * because that needs the entries and this needs the connection.
+ */
+export async function attestedWitnessFrom(
+  store: Pick<PostgresIntegrityVerdictStore, "latestBaseline">,
+  scope: string | null,
+): Promise<AttestedWitnessRead> {
+  try {
+    const record = await store.latestBaseline(
+      scope === null ? { kind: "platform" } : { kind: "tenant", tenantId: scope },
+    );
+    if (record === null) return { kind: "none" };
+    return {
+      kind: "attested",
+      attested: {
+        witnessSequence: record.report.truncation.checkpointSequence,
+        tailSequence: record.report.truncation.tailSequence,
+        verifiedAt: record.verifiedAt,
+        payloadSha256: record.payloadSha256,
+        chainEntryHash: record.chainEntryHash,
+        chainSequenceNumber: record.chainSequenceNumber,
+      },
+    };
+  } catch (err) {
+    return {
+      kind: "unreadable",
+      detail: err instanceof Error ? err.message : String(err),
+    };
+  }
 }
