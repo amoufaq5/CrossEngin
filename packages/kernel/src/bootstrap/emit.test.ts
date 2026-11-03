@@ -28,7 +28,7 @@ import {
   emitTable,
   emitTableConstraint,
 } from "./emit.js";
-import { META_SCHEMA_NAME, META_TABLES } from "./meta-schema.js";
+import { META_SCHEMA_NAME, META_TABLES, tenantDeleteFencedTables } from "./meta-schema.js";
 import {
   PUBLIC_ROLE,
   REFERENTIAL_ACTIONS,
@@ -923,8 +923,30 @@ describe("the catalog's own emission is unchanged", () => {
    */
   const statements = emitBootstrapSql(META_SCHEMA_NAME, META_TABLES);
 
-  it("writes no AS PERMISSIVE or AS RESTRICTIVE anywhere", () => {
-    expect(statements.filter((s) => / AS (PERMISSIVE|RESTRICTIVE)/.test(s))).toEqual([]);
+  it("writes AS RESTRICTIVE for exactly the sixteen DELETE fences, and AS PERMISSIVE never", () => {
+    // Until ADR-0400 this asserted the catalog wrote neither keyword, and it was a true statement
+    // about a mechanism with no producer: `RlsPolicy.permissive` was declared, emitted, introspected
+    // and diffed, and no table set it. The fence is the first producer, so the assertion becomes a
+    // both-directions one rather than a flip — the dangerous direction being a *seventeenth*
+    // restrictive policy nobody chose, which an `.toEqual([])` cannot see and a count would hide.
+    const restrictive = statements
+      .filter((sql) => / AS RESTRICTIVE/.test(sql))
+      .map((sql) => /CREATE POLICY "([^"]+)"/.exec(sql)?.[1] ?? "?")
+      .sort();
+    expect(restrictive).toEqual(
+      tenantDeleteFencedTables()
+        .map((t) => `${t}_no_tenant_delete`)
+        .sort(),
+    );
+    expect(restrictive).toHaveLength(16);
+    // `AS PERMISSIVE` is the `CREATE POLICY` default, so writing it is never necessary and a policy
+    // that does has had `permissive: true` declared by hand — which the catalog has no reason to do
+    // and which would make the omitted-means-permissive canonicalisation untestable.
+    expect(statements.filter((sql) => / AS PERMISSIVE/.test(sql))).toEqual([]);
+    // Non-vacuity: the keyword is produced at all, so a regex that stopped matching fails here.
+    expect(statements.some((sql) => sql.includes("AS RESTRICTIVE FOR DELETE USING (false)"))).toBe(
+      true,
+    );
   });
 
   it("writes a table-level CHECK line only for the table that declares one", () => {
@@ -958,14 +980,26 @@ describe("the catalog's own emission is unchanged", () => {
       "tenant_tombstones",
       "workflow_definitions",
     ]);
+    // The pre-ADR-0400 form of this asserted every policy left `permissive` undefined, with the
+    // reason that declaring it would change every existing policy's emitted SQL. That reason is
+    // what this now pins instead, and it is the half worth keeping: the sixteen DELETE fences are
+    // *added* policies, so no policy that existed before them declares permissiveness and none of
+    // their emitted statements moved. A `permissive: true` appearing on an isolation arm would be
+    // the regression that reason names, and it fails here.
+    const fenced = new Set(tenantDeleteFencedTables().map((t) => `${t}_no_tenant_delete`));
+    let fences = 0;
     for (const table of META_TABLES) {
       for (const policy of table.rls?.policies ?? []) {
-        // Nothing declares permissiveness yet; a restrictive policy added by hand would still be
-        // detected, which is the point of ADR-0298 — but the catalog itself must stay silent, or
-        // every existing policy's emitted SQL would change.
+        if (fenced.has(policy.name)) {
+          expect(policy.permissive, `${table.name}.${policy.name}`).toBe(false);
+          expect(policy.command, `${table.name}.${policy.name}`).toBe("DELETE");
+          fences += 1;
+          continue;
+        }
         expect(policy.permissive, `${table.name}.${policy.name}`).toBeUndefined();
       }
     }
+    expect(fences).toBe(16);
   });
 });
 

@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 21,234 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 21,237 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -3298,6 +3298,97 @@ report; `apps/operate-web` has none).
   tamperer also corrupts the verdict row — which answer **`unproven`**, the stated cost, because a
   corrupted projection degrades this axis rather than silencing it.
 
+  ADR-0400 is the first increment of a user-directed batch run, and the class is **a policy that
+  governs every command because nobody chose one**. `CREATE POLICY` defaults to `FOR ALL`, and an
+  `ALL`-scope policy's NULL `WITH CHECK` makes its `USING` serve as the check for every command — so
+  all **115** RLS-enabled `meta` tables admit a tenant-context `DELETE` of that tenant's own rows,
+  and that is not a decision anybody made. For 99 of them a tenant deleting its own row is its own
+  business. For **16** it is the opposite, and the predicate was **already in the repo**:
+  `PLATFORM_RECORD_TABLES` is the set the Article 17 erasure deliberately *retains*, and its own doc
+  comment is the whole argument — *"an auditor or a regulator reads these **after** the tenant is
+  gone, and a deletion must not be able to destroy them"* — written about the **platform's**
+  deletion, enforced against it, and said about the **tenant's** by nothing. **The retention set and
+  a DELETE fence are one judgement at two layers, and only one layer was enforced.** Measured live as
+  the non-owner `serving` role on **16 of 16** with the owner's own count beside each: the tenant's
+  DELETE removed exactly the rows the owner could see, with cross-tenant at 0 and an unprovisioned
+  tenant at 0 as controls.
+  Three facts decide that it is a fence and not a detector. **`DELETE` is the one command whose abuse
+  nothing detects** — an edited entry breaks its signature (ADR-0371) and ADR-0373/0374/0399 route
+  every unreadable or relocated row to `compromised`, while ADR-0375's own open end records that
+  every anchor `DELETE`d reads `verified` with `witness=null`; so the line is *prevent what cannot be
+  detected, keep detecting what can*. **No workspace rule could have found it**:
+  `SQL_STATEMENT_KINDS` is `["insert", "conflict_update", "update", "select"]` with **no `delete`
+  member**, so a DELETE is invisible as a *statement* to all twelve rules and appears only in the
+  weaker `references` list — a fourteenth reading of the fake-connection blind spot, where what is
+  missing is not a column, a value, a name or a session setting but a **command**. And
+  **`RlsPolicy.permissive` was a complete mechanism with no producer** (declared, emitted,
+  introspected, canonicalised, diffed; `grep -c "permissive:"` over the catalog answered **0**) —
+  this file's most-found shape, in the exact field the fence needs.
+  The remedy is **one added restrictive policy per table** rather than the backlog's narrowing, and
+  the reason is measurement rather than necessity: the two are **behaviourally identical** (both
+  leave `SELECT`/`INSERT`/`UPDATE` and remove `DELETE`), and **the scouting brief that said
+  narrowing would be refused by the reconciler was wrong** — keeping the arm's name gives 3 steps /
+  0 unreconciled, exactly ADR-0331's shape, and only *renaming* owes manual SQL forever, because
+  `allowLoosening` never reaches `policy_removed`. What the restrictive form wins is one policy per
+  table against three (16 steps against 48, or 345 catalog-wide), no `DROP` of a live isolation arm,
+  and a catalog that **says** `DELETE` is denied rather than implying it by absence. A hypothesis
+  that the narrowing would open a cross-tenant row move is **refuted**: with no `WITH CHECK`
+  declared, Postgres re-uses an `UPDATE` policy's `USING` as the check on the new row.
+  Three things are sharper than the fence. **The cost is a silent zero**: `DELETE` carries only a
+  `USING` clause, so one refused by RLS returns `DELETE 0` with **no error code**, byte-identical to
+  an empty scope — an `INSERT` refused raises `42501` and this raises nothing. That is why the set is
+  16 and not the 109 with no tenant-context DELETE writer: on a table with one it would be a route
+  that reports success and does nothing, which `meta.operate_entity_records` proves is live, being
+  the shipped `--store pg` entity-delete route. **The plan's own narrower variant is refuted — and
+  the first refutation written for it was itself wrong**, which is P3.1's refuter-on-the-corrections
+  clause paying out inside this increment. The draft said `FORCE ROW LEVEL SECURITY` would make
+  `eraseSharedTablesWithin` refuse `rls_would_confine_this_session` and so render the Article 17
+  erasure unrunnable; that **cannot happen for this variant**, because the erasure's probe asks about
+  its own *targets* and these sixteen tables are exactly the retention set it never targets. True of
+  a *catalog-wide* FORCE only. The real refutation is stronger: **FORCE does not close the defect at
+  all**, since the exposure is a tenant-context session and FORCE merely makes the owner into one —
+  measured on a FORCEd non-superuser-owned table, `DELETE 0` with no context and **`DELETE 1` under
+  that tenant's own context**, so a FORCEd owner deletes its own trail exactly as `serving` does.
+  It also does nothing on the shipped stack for a **narrower** reason than "the owner bypasses RLS":
+  it is **`rolsuper` and not `rolbypassrls`** that defeats FORCE, measured as a
+  `SUPERUSER NOBYPASSRLS` role still answering `DELETE 2` on a FORCEd table — so no role attribute
+  short of dropping `SUPERUSER` rescues it. And it is inexpressible, which `emit.ts:255` already
+  said (*"`TableRls` is `{enabled, policies}`"*), at an unnamed cost: `emit.ts`'s own DDL
+  confinement guard raises for a non-superuser owner on a FORCEd table, so FORCE would break the
+  migration path for the deployment it is meant to protect.
+  And **three test pins moved, two of which were pinning something false**: `emit.test.ts`'s *"writes
+  no AS PERMISSIVE or AS RESTRICTIVE anywhere"* and `canonical.test.ts`'s *"leaves every policy in
+  the real catalog permissive"* were true statements about a producerless mechanism, so the only
+  thing the catalog could demonstrate about `declaredPolicyPermissive` was its default — both are
+  **partitions** now rather than flips, because the dangerous direction is a *seventeenth*
+  restrictive policy nobody chose, which `.toEqual([])` cannot see and a count would hide. The third
+  is the find: `meta-schema.test.ts` asserted of `META_AUDIT_INTEGRITY_VERDICTS` that it had *"no
+  `UPDATE` arm **and no `DELETE` arm**, so a platform verdict is immutable by policy once written"*,
+  and **the inference is false** — an absent `DELETE` arm denies nothing while an `ALL`-scope arm is
+  present. The absence was read as a denial for three increments, in a comment whose own next clause
+  reads *"could forge a `verified` verdict for any tenant, flip a `compromised` one, **or delete
+  it**"*: ADR-0332 closed the forge and flip halves for another tenant's rows, and the delete half
+  for a tenant's own stayed open until now.
+  **A finding in passing, unrelated to the fence and in ADR-0389's family**:
+  `PostgresDesignJobStore.deleteExpired` carries the doc comment *"Platform-wide retention sweep —
+  spans tenants, so it must NOT run under a tenant RLS context"*, and measured against
+  `meta.operate_design_jobs` — which carries only the isolation policy — the non-owner unscoped, as
+  the doc instructs, answers **`DELETE 0`**, the owner `DELETE 1`, and the non-owner *with* a tenant
+  context `DELETE 1` confined to that tenant. **Its own doc comment is what makes it vacuous** on a
+  least-privilege deployment, and `tenant_id` is NOT NULL there so ADR-0389's proof applies: a
+  platform `DELETE` arm requiring `tenant_id IS NULL` would admit no row. The honest fix is
+  per-tenant iteration.
+  **Four measurement defects of mine, each caught by a control rather than by reading.** A vacuous
+  run read as clean (three setup failures printed zeros, closed by a non-vacuity floor); **a "before"
+  that was an "after"** (the first probe left its policy behind, so the next run's baseline carried
+  the fence and the exposure was nearly reported refuted — *a destructive probe that creates state
+  must tear it down*); a measurement at the wrong layer (FORCE measured against a superuser and
+  `rsa=false` read as "FORCE does not confine the owner"); and **a fixture that landed at the wrong
+  scope**, because the generator selected NOT NULL defaultless columns and six of the sixteen declare
+  `tenant_id` *nullable*, so those rows went to platform scope and the probe was vacuous on exactly
+  the six tables that matter most — surfaced by having put the owner's own count in the output
+  column.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -3340,25 +3431,41 @@ increment. See **What's actually left** at the bottom for the current open ends.
   entry's `signingKeyFingerprint` resolves against, so a session able to both append to the trail and
   register a key could re-sign a rewritten chain and have it verify). **12** of them are mutable and
   get an `UPDATE` arm too; the other **17** are append-only, so a platform row there is
-  immutable-by-RLS once written. **No `DELETE`-scoped policy exists on any of the 32 — and that is a
-  statement about the named arms, not about the behaviour** (ADR-0374). An `ALL`-scope isolation arm
+  immutable-by-RLS once written — figures as ADR-0332 measured its own increment, and the catalog has
+  grown since: re-derived in ADR-0400 the whole-catalog shape is **33** tables with an `INSERT` arm,
+  **13** with an `UPDATE` arm and **20** append-only, and per write-GUC it is `record_write` 18,
+  `config_write` 11, `audit_write` 3, `key_write` 1. Read the catalog, not these numbers.
+  **Sixteen `DELETE`-scoped policies exist since ADR-0400, and they are the catalog's first
+  restrictive ones** — one per `PLATFORM_RECORD_TABLES` member, denying a tenant-context `DELETE` of
+  the platform's own evidence about that tenant. Before them **no `DELETE`-scoped policy existed on
+  any table, and that was a statement about the named arms rather than about the behaviour**
+  (ADR-0374). An `ALL`-scope isolation arm
   with a NULL `WITH CHECK` has its `USING` serve as the `WITH CHECK`, so it admits a tenant-scoped
   `UPDATE` **and `DELETE`** of that tenant's own rows. Measured live as the non-owner `serving` role,
   and **the figure this file carried was name-filtered** (ADR-0399): **115** `meta` tables carry such
   an arm structurally (`polcmd = '*' AND polwithcheck IS NULL`), of which **78** are the ones named
-  `%_tenant_isolation` — the other 37 use `_tenant_or_platform` or a bare `_isolation` suffix and
-  behave identically. **0** of all 115 carry a `DELETE` policy, and a tenant-context session's
+  `%_tenant_isolation` — and **ADR-0399's own correction of this sentence was itself slightly wrong**
+  (P3.1 one level in): it said the other 37 use `_tenant_or_platform` or a bare `_isolation`, which is
+  27 + 8 = **35**, while **two** match neither
+  (`operate_tenant_manifests_tenant_or_platform_review`, `audit_integrity_verdicts_tenant_or_platform_audit`).
+  Five naming families, 78 + 27 + 8 + 1 + 1 = 115, confirmed three ways. **0** of all 115 carried a
+  `DELETE` policy before ADR-0400 and 16 do now, and a tenant-context session's
   `DELETE` count equalled the **owner's** row count, per table, on 6 of 6 scopes measured
-  — all rolled back. Per scope rather than as one triple, because the triple first recorded here
+  — all rolled back, then re-measured in ADR-0400 on **16 of 16** of the fenced tables with the
+  owner's own count beside each as the control. Per scope rather than as one triple, because the triple first recorded here
   (`1 / 12 / 3`) is answered by no scope: it stitched two tenants together. The empty-scope control
   is the other half of what makes it trustworthy: the
   same statement for a scope holding nothing answers `DELETE 0`, byte-identical to a refusal
   (ADR-0333's silent zero, in the measurement that would otherwise have read as protection). So what
   the platform split buys is that a *platform-scope* row cannot be deleted, or (on the 17) updated; a
-  tenant's own rows are a different question, and narrowing **115** isolation arms is one decision
-  over the whole catalog — which is 37 tables more than the "78 isolation arms" this sentence used to
-  scope it at, so **re-derive it from `pg_policy` rather than from a policy name** — see *What's
-  actually left*. The one
+  tenant's own rows were a different question, and **ADR-0400 answered it for sixteen of the 115 and
+  deliberately not for the other 99**: the predicate is *the Article 17 erasure retains this table
+  because it outlives its tenant*, which is `PLATFORM_RECORD_TABLES` — so the retention set and the
+  fence are one judgement at two layers, where only one layer had been enforced. 109 of the 115 have
+  no tenant-context `DELETE` writer and could be fenced; they are not, because a denial needs a
+  reason rather than an opportunity. `UPDATE` stays open on all 115 by decision: on the chain it is
+  *detected* (the signature breaks) where a `DELETE` is detected by nothing. **Re-derive the census
+  from `pg_policy` rather than from a policy name** — see *What's actually left*. The one
   remaining member of the write-split class is `meta.audit_integrity_verdicts`, whose hole is
   differently shaped — see *What's actually left*.
 - **Strict TypeScript.** No `any`. No `--no-verify`. Explicit return types on
@@ -3403,6 +3510,17 @@ packages exist at only one layer, noted below where that is true.
   cross-validate, diff, patch, `manifestHash`, `meta.extends` resolution — entity
   *ordering* lives with the store that creates tables, ADR-0285), and
   `tenancy/` + `workflow/` (tenant resolution, workflow definition validation).
+  **`retainedRecordNoTenantDelete(table)` is the catalog's one restrictive-policy constructor**
+  (ADR-0400), beside `TENANT_ISOLATION_USING` and read by all sixteen
+  `PLATFORM_RECORD_TABLES` members. Its `using` is the literal **`"false"`** and not a `tenant_id`
+  comparison, because the subject is the *command* rather than the row: a predicate over
+  `tenant_id` would read as though some tenant's rows were deletable, and the policy says no
+  session reaching RLS may delete here at all. One helper rather than sixteen literals for
+  `scopeFilter`'s reason, and `tenantDeleteFencedTables()` beside it answers the inverse — which
+  catalogued tables carry such a policy — so the fence's own census is derived from the catalog
+  instead of being a second list (ADR-0288's shape, wrong four times). An absent `DELETE` arm
+  denies nothing while an `ALL`-scope arm is present, which is the inference three increments read
+  the other way; see the RLS bullet.
   **`bootstrap/emit.ts`'s row-counting guards count *violations* since ADR-0363, and every one of
   them opens with a confinement assertion.** `emitAddTableConstraintIfUnviolated` /
   `emitReplaceTableConstraintIfUnviolated` emit
@@ -7733,7 +7851,7 @@ platform-level Postgres tables. Each new package adds tables there and updates
 `_meta_migrations` is created by `kernel-pg`'s applier for its own per-statement hash bookkeeping and
 is deliberately not emitted from the catalog. Verified. Count the catalog, not the database.
 
-Four invariants the test suite enforces:
+Five invariants the test suite enforces:
 
 1. Every `tenant_id`-bearing table has RLS enabled.
 2. Foreign-key references resolve to a table declared **earlier** in
@@ -7744,8 +7862,13 @@ Four invariants the test suite enforces:
    matching `INSERT` arm; and a write grant is always ANDed with `tenant_id IS NULL` and never
    appears on a `SELECT` policy. That is a rule plus a count rather than a maintained list, because
    a maintained list is what ADR-0288's `needsAuditEmitter` was and it was wrong three times —
-   `kernel-pg`'s canonical test matches `/_platform_(audit_)?(read|write|update)$/` and asserts
-   **78**, so a 30th table cannot land without the number moving.
+   `kernel-pg`'s canonical test matches
+   `/(_platform_(audit_)?(read|write|update)|_no_tenant_delete)$/` and asserts **98**, so a 30th
+   table cannot land without the number moving. The count was **78** over the narrower regex until
+   ADR-0400, whose sixteen `DELETE` fences are the catalog's first narrowed arms that **deny**
+   rather than elevate — so they belong in that census for the same reason the platform arms do
+   (each is a policy whose name says what it narrows), and the alternative, a second count beside
+   it, is the maintained list the invariant exists to avoid.
 4. **Both sides of a cross-column comparison are one type** (ADR-0335), or the constraint is not a
    constraint. `crossColumnTypeDisagreements` extracts binary comparisons between two bare column
    identifiers and requires their declared types to agree. It exists because making
@@ -7766,6 +7889,18 @@ Four invariants the test suite enforces:
    only in that store's `UPDATE` predicate and every approval raised `42804`. A rule over the
    *operands a store compares* is the open end; `pg-column-bindings.ts` already derives which symbol
    a parameter carries, so the operands are resolvable.
+5. **A restrictive policy exists iff the Article 17 erasure retains the table** (ADR-0400) — the
+   catalog's only restrictive policies are the sixteen `DELETE` fences, one per
+   `PLATFORM_RECORD_TABLES` member, and the biconditional is asserted in **both** directions by
+   `pg-record-retention.ts` over the two halves read from disk. The partitions beside it are what
+   make it checkable rather than merely stated: `emit.test.ts` asserts the sixteen emit
+   `AS RESTRICTIVE FOR DELETE USING (false)` and **every other policy emits neither keyword**
+   (which pins the pre-ADR-0400 comment's own worry that adding the field would change every
+   existing policy's SQL), and `canonical.test.ts` asserts every policy outside the sixteen leaves
+   `permissive` undefined. A **partition** and not a count, because the dangerous direction is a
+   *seventeenth* restrictive policy nobody chose, which `.toEqual([])` cannot see and a count would
+   hide. `tenantDeleteFencedTables()` derives the set from `META_TABLES` rather than restating it,
+   so the catalog is the one place the sixteen are named.
 
 **`TENANT_FK` is absent from the 16 `PLATFORM_RECORD_TABLES`** (ADR-0335), on the rule that *a table
 whose purpose is to outlive the tenant it describes cannot be a `CASCADE` child of that tenant's
@@ -8088,6 +8223,17 @@ them **in both directions** (`protected_table_cascades` / `_not_in_catalog` / `_
 demands exactly one finding naming it. Both directions is the part that carries the weight: ADR-0334
 established that *location* was never what made ADR-0288's `needsAuditEmitter` wrong, the absence of a
 both-ways comparison was.
+**It gained a third half in ADR-0400** (`protected_table_unfenced` / `fenced_table_not_protected`),
+because the retention set and the `DELETE` fence are **one judgement at two layers** and the rule
+already held one of them: a table the erasure retains because it outlives its tenant is a table that
+tenant must not be able to destroy. `readDeleteFencedTables` derives the fenced set off the catalog
+by matching `retainedRecordNoTenantDelete("…")` as text — so the declaration lives in exactly one
+place and the comparison needs no second list — and **throws** rather than reporting nothing when
+that helper is renamed, which is the one way a text-derived set can silently become empty and read
+as *fully fenced* (ADR-0334's rule, since a rule that reports nothing is indistinguishable from a
+rule that passes). The two arms fail in opposite directions and both matter: an unfenced protected
+table is a tenant able to destroy the platform's evidence about it, while a fenced table the erasure
+does *not* retain is a `DELETE` denied for no stated reason.
 The fifth is `pg-unreachable-stores.ts` (ADR-0336), **the storeless rule's inverse**: that rule asks
 which catalogued table has no store, and this one asks **which store has no caller**. The two are
 different questions, which ADR-0335 demonstrated by *moving* a defect rather than closing it —
@@ -8737,6 +8883,16 @@ isolated copy of the package instead, which is the better answer when more than 
   artifact asks that. A **real** database cannot see it either: both stores answered
   `?state=draft` with a 200, one with every row and one with none. The only fences that fit are the
   store refusing before it issues the statement and a boot survey naming the pairs.
+  **And a whole SQL command is outside every one of them** (ADR-0400), which is a second shared
+  blind spot and the one where the gap is structural rather than a matter of which question is
+  asked: `SQL_STATEMENT_KINDS` is `["insert", "conflict_update", "update", "select"]` with **no
+  `delete` member**, so a `DELETE` never becomes a `SqlStatement` and appears only in the weaker
+  `references` list. No rule can check a `DELETE`'s `WHERE` columns against the catalog, ask whether
+  it is scoped, or notice that a table nothing deletes from has gained a deleter. What is missing
+  here is not a column, a value, a name, a session setting or a question — it is a **command**, and
+  it is why the 115-table `DELETE` exposure ADR-0400 closed had to be found by reading `pg_policy`
+  rather than by any of the twelve rules. Adding the member is a scanner change with a census behind
+  it, because every rule reading `scanWorkspaceSql().statements` would start seeing a new kind.
   **And a store can opt itself out of all of them by how it names its table** (ADR-0358). The
   scanner resolves `this.x = `${ident}.tbl`` by chasing `ident` back to a literal, and it reads
   `options.schema ?? "meta"` and a `const` but **not a parameter default** — so
@@ -9169,19 +9325,22 @@ opened them.
   the severity of both and is the correction this addendum owed itself: ADR-0373's read-path fix
   covers the entries table and `readOne` catches **any** throw rather than only a `ZodError`, so the
   **write fence** was missing on two tables and not the detector.
-  What remains, in order: **(1)** **115 `meta` tables carry an `ALL`-scope policy with a NULL
-  `WITH CHECK`, 0 of them carry a `DELETE` policy, and a tenant-context non-owner deleted
-  every row the **owner** can see in its scope, on 6 of 6 scopes measured, across all three
-  forensic tables** — so a tenant can destroy
-  its own tamper-evident trail, and every argument in this file that reads "`DELETE` is reachable by
-  no policy" is about the *named arms*. **The 78 this entry carried is name-filtered**
-  (`polname LIKE '%_tenant_isolation'`) and the structural census is **115**, re-derived from
-  `pg_policy` in ADR-0399 — the other 37 use `_tenant_or_platform` or a bare `_isolation` suffix and
-  behave identically, so the decision is 37 tables wider than this entry scoped it at. Narrowing 115
-  arms from `ALL` to the three commands is one
-  decision over the whole catalog and would change what every tenant write path may do; the fix for
-  the trail specifically may be narrower (a `FORCE ROW LEVEL SECURITY` plus three arms on the four
-  forensic tables). **(2)** the two CHECKs are **standing manual SQL** on every existing deployment,
+  What remains, in order: ~~**(1)** 115 `meta` tables carry an `ALL`-scope policy with a NULL
+  `WITH CHECK` and a tenant can destroy its own tamper-evident trail~~ — **closed for the sixteen
+  that matter by ADR-0400**, which found the predicate already in the repo
+  (`PLATFORM_RECORD_TABLES`, the set the erasure *retains* because it outlives its tenant) and
+  fenced each with a restrictive `FOR DELETE USING (false)` policy — the catalog's first restrictive
+  policies, and the first producer `RlsPolicy.permissive` has ever had. Measured 16 of 16 before and
+  after as a non-owner with the owner's own count as the control. Three things that entry said are
+  corrected by it: the structural census is right but **"the other 37 use `_tenant_or_platform` or a
+  bare `_isolation`" is 35**, with two matching neither suffix; **narrowing the arms is *not* the
+  costly option** (keeping the name is 3 steps / 0 unreconciled, so the register's implied cost
+  ordering was wrong in both directions); and **the `FORCE ROW LEVEL SECURITY` variant is refuted**,
+  because the exposure is a tenant-context session and FORCE only makes the owner into one — a
+  FORCEd non-superuser owner still answers `DELETE 1` under its own tenant's context. What is left of
+  the entry is the 99 unfenced tables and the `UPDATE` half, both in ADR-0400's open ends, plus the
+  one new finding it leaves: `SQL_STATEMENT_KINDS` has **no `delete` member**, so no workspace rule
+  can see a `DELETE` as a statement at all. **(2)** the two CHECKs are **standing manual SQL** on every existing deployment,
   reported with their statements until run. **(3)** the remedy for a refused anchor reaches an
   operator in the **log line only** — the identity and the field path, and no route to the row, which
   is the diagnostics console (ADR-0364 Q6) again. **(4)** `anchorRowsRefused` is at most one row by
@@ -9282,6 +9441,51 @@ opened them.
   chain that lost entries with its anchors left alone is caught by `chain_truncated` and by
   `prior_verdict_contradicted` but not by a tail regression of its own — three detectors over two
   shapes, with the third unbuilt and probably unnecessary.
+
+- **A tenant can no longer delete the platform's evidence about it, and what is left of it**
+  (ADR-0400, closing the sixteen-table half of the register's RLS entry). The fence is sixteen
+  restrictive `FOR DELETE USING (false)` policies, one per `PLATFORM_RECORD_TABLES` member, derived
+  back off the catalog by `tenantDeleteFencedTables()` and compared against the erasure's retention
+  set **both ways** by `pg-record-retention.ts`' third half.
+  What remains, in order: **(1)** **`UPDATE` is open on all 115 by decision**, and the **eleven**
+  members of the sixteen that nothing updates are where that decision is weakest. **Both figures in
+  the first draft of this item were wrong and correcting them changed its axis**, which is P3.1's
+  class inside the increment citing it: it said *six* carry a declared platform `UPDATE` arm and
+  *ten* take no `UPDATE` from any writer, and measured it is **two** arms (`crypto_keys`,
+  `access_review_templates`) and **five** writers (`crypto_keys`, `gdpr_deletion_requests`,
+  `access_review_evidence`, `access_review_campaigns`, `access_review_items`) — two sets whose
+  intersection is `crypto_keys` **alone**, so the policy arm was the wrong question. Three of the
+  five write through the **isolation** arm as a tenant-context session, so a restrictive
+  `FOR UPDATE` there would break a live writer under this fence's own silent zero; and
+  `access_review_templates` carries an arm over a table with **zero statements of any kind**. The
+  candidate set is the sixteen minus the five, and on those a restrictive `FOR UPDATE` would
+  *prevent* what ADR-0374 currently detects. Two things keep it a separate increment: a restrictive
+  `FOR UPDATE` carries both `USING` **and** `WITH CHECK`, so its behaviour is not this one's shape,
+  and a writer census is a statement about *today's* workspace where the `DELETE` census is one
+  about the catalog. **The grep that produced the wrong figure is the lesson**: a pattern over
+  `UPDATE\s+(\$\{\w+\}|meta)\.` answers **0 sites for all sixteen**, because `key-registry.ts`
+  writes `UPDATE ${this.schema}.${TABLE}` with `TABLE` a module constant — so ask
+  `scanWorkspaceSql()`, which exists to resolve exactly that, rather than a pattern narrower than
+  the artifact.
+  **(2)** **the 99 unfenced exposed tables**, of which 109 − 16 = 93 have no tenant-context `DELETE`
+  writer and so would cost nothing mechanically — and would say nothing either. Whether any holds
+  records a tenant should not destroy is a per-table judgement, and the right output of making it is
+  probably additions to `PLATFORM_RECORD_TABLES` rather than a second list. **(3)** **the silent
+  zero**: a `DELETE` this fence refuses returns `DELETE 0` with no error code, so a route wrongly
+  fenced reports success and does nothing — nothing in the repo can detect that, and the only
+  general answer is a rule over the workspace's `DELETE` statements, which needs (4) first.
+  **(4)** **`SQL_STATEMENT_KINDS` has no `delete` member** (`["insert", "conflict_update", "update",
+  "select"]`), so none of the twelve rules sees a `DELETE` as a statement and it appears only in the
+  weaker `references` list. Adding it would let `pg-column-coverage.ts` check a `DELETE`'s `WHERE`
+  columns and would give (3) its mechanism; it is a scanner change with a census behind it, since
+  every rule reading `scanWorkspaceSql().statements` would start seeing a new kind. **(5)** the
+  fence is **inert for an owner**, and `--store pg-columns` requires its serving role to own the
+  *entity* tables but not the `meta` ones — whether such a deployment's role is confined on `meta`
+  was not measured, and it decides whether the fence is live there. **(6)**
+  `PostgresDesignJobStore.deleteExpired` sweeps nothing on a least-privilege deployment and its own
+  doc comment is why (see the ADR-0400 narrative); it needs per-tenant iteration, and
+  `operate_design_jobs.tenant_id` being NOT NULL means ADR-0389's unsatisfiability proof applies to
+  the obvious platform-arm fix.
 
 - **Every money figure is read over the whole set, and what is left of it** (ADR-0367,
   user-directed). Thirteen capped reads drain their cursor to a declared ceiling now, and the
@@ -10437,7 +10641,13 @@ opened them.
   plus 13 cases through the real stores, and a fresh-cluster bootstrap of **958/958** statements whose
   re-plan came back clean. The arithmetic that confirms the shape axis is the live policy census —
   `ALL 114`, `SELECT 34`, `INSERT 32`, **`UPDATE 12`** — twelve `UPDATE` arms for twelve mutable
-  tables. What remains: **15 of the 29 have no store** (machine-counted in ADR-0334; ADR-0332's
+  tables. **All four of those figures have drifted** (ADR-0400, re-derived from the built catalog):
+  the census is now `ALL 115`, `SELECT 36`, `INSERT 33`, `UPDATE 13`, `DELETE 16`, so the arithmetic
+  the sentence rests on still holds in *shape* (thirteen `UPDATE` arms for thirteen mutable tables)
+  and none of the numbers is current. They drifted because tables were added, not because anything
+  was wrong when written — so the remedy is to **count the catalog** rather than to re-number this
+  line again, and the `DELETE 16` is new rather than drifted (ADR-0400's fence).
+  What remains: **15 of the 29 have no store** (machine-counted in ADR-0334; ADR-0332's
   "fourteen" was the count of those that *do* have one, transposed), so their write arms are
   capability with no caller — and the honest total is **16 of 29**, because `meta.notification_templates`
   has two stores and **neither can ever write a platform row**: both throw
@@ -13110,6 +13320,40 @@ method is that a stale figure misleads.
    on a live comment: `chain-verify.ts`'s byte pair was the **compact** figure labelled as the CLI's,
    and the CLI prints `JSON.stringify(report, null, 2)` — **both halves of a byte pair have to name
    their indent or neither is checkable**.
+
+   **ADR-0400 adds four members and the first is this entry's own correction-of-a-correction clause
+   paying out on the increment that wrote it.** ADR-0399's correction of the `78` → `115` census was
+   right about the number and **wrong in its gloss**: *"the other 37 use `_tenant_or_platform` or a
+   bare `_isolation` suffix"* is 27 + 8 = **35**, and two of the 115 match neither
+   (`operate_tenant_manifests_tenant_or_platform_review`,
+   `audit_integrity_verdicts_tenant_or_platform_audit`) — five naming families, not three, and a
+   `LIKE` filter built from that sentence would still miss two. Found by deriving the histogram
+   rather than by re-reading the ADR. The second is **four drifted figures in one sentence**:
+   CLAUDE.md's live policy census read `ALL 114, SELECT 34, INSERT 32, UPDATE 12` and the catalog now
+   answers `ALL 115, SELECT 36, INSERT 33, UPDATE 13, DELETE 16` — *drifted*, because tables were
+   added and nothing was wrong when written, so the remedy is to count the catalog rather than to
+   re-number the line again. And the third is **a refutation of mine that a refuter caught before it
+   shipped**: I wrote that `FORCE ROW LEVEL SECURITY` on the sixteen would make the Article 17
+   erasure refuse, and it cannot, because the erasure's probe asks about its own *targets* and those
+   sixteen are the retention set it never targets. The claim is true only of a catalog-wide FORCE.
+   The replacement refutation is strictly stronger — FORCE does not close the defect at all, since
+   the exposure is a tenant-context session and FORCE merely makes the owner into one — so the cost
+   of the error was a weaker argument rather than a wrong decision; but it was in the ADR's
+   Alternatives, which is the one place a reader looks to find out why an option was *not* taken.
+   **A fourth landed in the same increment, after the three above, and it is the first member whose
+   correction changed what the open question *asks*.** My own ADR-0400 open question 1 said *"six
+   of the sixteen carry a declared platform `UPDATE` arm and must keep it; the other ten take no
+   `UPDATE` from any writer"* — **two** figures, **both wrong when written**, and the two halves
+   measure different things: it is **two** arms and **five** writers, intersecting in `crypto_keys`
+   alone, so the policy arm the question was built on is nearly disjoint from the writer that
+   decides the answer. The cause is this register's own most-repeated technique failure one layer
+   down: the writer half came from a grep over `UPDATE\s+(\$\{\w+\}|meta)\.`, which returns **0
+   sites for all sixteen** because `key-registry.ts` writes `UPDATE ${this.schema}.${TABLE}` with
+   `TABLE` a module constant — and **zero reads as a clean result**, which is the increment's own
+   measurement-defect 1 restated. The repository has a resolver for exactly that
+   (`workspace-sql-scan.ts`, which chases a table name back to its literal and is the input to nine
+   workspace rules), so the rule is: **a census over the workspace asks the workspace's own
+   scanner, never a pattern.**
 2. **Six concepts are modelled several times over, two with non-nesting member sets.** Data
    classification has five declarations — four identical and one, in `data-lineage`, **disjoint past
    two members**, so the moment anything bridges the kernel's classification into the lineage graph
@@ -13196,7 +13440,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 394 records; 315 Accepted, 79 Proposed (the
+title or status change cannot drift. 395 records; 316 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

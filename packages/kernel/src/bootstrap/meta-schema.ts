@@ -1,4 +1,4 @@
-import type { ColumnReference, TableDefinition } from "./types.js";
+import type { ColumnReference, RlsPolicy, TableDefinition } from "./types.js";
 
 /**
  * The reference a **tenant data** table's `tenant_id` carries. `ON DELETE CASCADE` is right there:
@@ -80,6 +80,100 @@ const USER_OWNED_FK: ColumnReference = {
  */
 const TENANT_ISOLATION_USING =
   "tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID";
+
+/**
+ * A restrictive policy denying `DELETE` to every session row-level security confines, for a table
+ * the Article 17 erasure deliberately **retains**.
+ *
+ * ## Why these tables and no others
+ *
+ * `PLATFORM_RECORD_TABLES` in `@crossengin/tenant-lifecycle-pg` is a judgement with one line per
+ * table, and its own sentence is this fence's whole argument: *"an auditor or a regulator reads
+ * these **after** the tenant is gone, and a deletion must not be able to destroy them."* That was
+ * written about the **platform's** deletion and enforced against it. Nothing said it about the
+ * **tenant's** — and an `ALL`-scope isolation policy whose `WITH CHECK` is NULL has its `USING`
+ * serve as the check for every command, so a tenant-context session could delete its own rows from
+ * all sixteen. Measured live as a non-owner before this landed: the count equalled the owner's own
+ * count of that tenant's rows, on the chain, its checkpoints, the audit log and the verdicts. The
+ * retention set and this fence are **one judgement at two layers**, and only one layer was enforced.
+ *
+ * The exposure is not a decision anybody made: `CREATE POLICY` defaults to `FOR ALL`, so a catalog
+ * that writes one expression and says nothing about commands gets every command. All 115 RLS-enabled
+ * `meta` tables are in that shape. This fences the sixteen where a tenant deleting its own row
+ * destroys the platform's evidence about it, which is the harm; for the rest a tenant's own row is
+ * its own business.
+ *
+ * ## Why `DELETE` and not `UPDATE`
+ *
+ * An edited row is **detected**. On the chain it breaks the entry's Ed25519 signature, which
+ * `verifyStoredChainSignatures` is the only check in the stack to bind to the stored columns
+ * (ADR-0371), and ADR-0399's witness memory refuses an edited anchor. A **deleted** row is detected
+ * by nothing: ADR-0375's own open end records that every anchor `DELETE`d reads `verified` with
+ * `witness=null`, and the formatter then prints *"not checkable (no checkpoint yet)"* for a scope
+ * whose checkpoints were destroyed. So the line is **prevent what cannot be detected, keep detecting
+ * what can** — and **five** of the sixteen have an `UPDATE` or `ON CONFLICT … DO UPDATE` writer in
+ * the workspace (`crypto_keys`, `gdpr_deletion_requests`, `access_review_evidence`,
+ * `access_review_campaigns`, `access_review_items`), so a blanket `UPDATE` denial would refuse
+ * writes this repository performs.
+ *
+ * The axis there is the **writer** and not the policy arm, which is worth stating because the first
+ * draft of this comment got it wrong in both figures: only **two** of the sixteen carry a declared
+ * platform `UPDATE` arm (`crypto_keys`, `access_review_templates`), and the two sets intersect in
+ * `crypto_keys` alone — three of the five writers go through the *isolation* arm as a tenant-context
+ * session, while `access_review_templates`' arm sits on a table with no statements of any kind. The
+ * figure came from a grep over `UPDATE\s+(\$\{\w+\}|meta)\.`, which answers **0 for all sixteen**
+ * because `key-registry.ts` writes `UPDATE ${this.schema}.${TABLE}` with `TABLE` a module constant;
+ * `workspace-sql-scan.ts` resolves exactly that and is what the corrected figure comes from.
+ *
+ * ## Why restrictive, rather than narrowing the `ALL` arm to three commands
+ *
+ * The two are **behaviourally identical** — both leave `SELECT`/`INSERT`/`UPDATE` reaching the
+ * tenant's own rows and remove `DELETE`. The difference is mechanical, and it was measured rather
+ * than preferred: this is one *added* policy per table, which `planSchemaReconciliation` plans as
+ * `create_policy` with nothing unreconciled and a clean re-plan on a populated converged database,
+ * where narrowing is a `replace_policy` that drops and recreates the live isolation arm plus two
+ * further `create_policy` steps. One policy against three, additive against a drop, and a catalog
+ * that **says** `DELETE` is denied rather than implying it by absence.
+ *
+ * ## What it does not reach, which is most of what matters
+ *
+ * A policy binds only a session row-level security confines, so **the owner is unaffected and a
+ * superuser doubly so**: measured on PG 16, a non-superuser owner under `FORCE ROW LEVEL SECURITY`
+ * is confined (`DELETE 0` with no tenant context) while a superuser is not confined even under
+ * FORCE. The shipped compose connects as `POSTGRES_USER`, the bootstrap superuser that ran
+ * `migrate`, so on that deployment this fence changes nothing. It is for a **least-privilege serving
+ * role** — the configuration every store in this repo is written for, and the one ADR-0389 found the
+ * job queue silently depending on the absence of.
+ *
+ * The Article 17 erasure cannot conflict with it even in principle, and that is stronger than the
+ * usual argument: these sixteen tables *are* its retention set, so `eraseSharedTablesWithin` never
+ * targets them. Separately it sets no tenant context and refuses
+ * `rls_would_confine_this_session`, so a restrictive policy could not reach it in any case.
+ *
+ * ## The cost, which is why the set is sixteen and not a hundred and nine
+ *
+ * **A DELETE this denies is silent.** `DELETE` carries only a `USING` clause and no `WITH CHECK`,
+ * so a refused one returns `DELETE 0` with no error code — byte-identical to an empty scope, which
+ * is this repository's own silent-zero class. An `INSERT` refused by RLS raises `42501` and an
+ * operator sees it; this raises nothing. On a table whose records nobody deletes that costs nothing,
+ * and on a table with a legitimate tenant-context `DELETE` writer it would be a **route that
+ * reports success and does nothing**. 109 of the 115 exposed tables have no such writer and could
+ * therefore be fenced, and that is deliberately not what this does: the argument above is about
+ * records that outlive their tenant, and for a `slo_evaluations` or a `cost_attribution` row a
+ * tenant deleting its own is nobody else's business. A denial needs a reason, not an opportunity.
+ */
+function retainedRecordNoTenantDelete(table: string): RlsPolicy {
+  return {
+    name: `${table}_no_tenant_delete`,
+    command: "DELETE",
+    // `false`, not a `tenant_id` comparison: the subject is the **command** and not the row. A
+    // restrictive policy is ANDed with every permissive policy that matched, so this denies the
+    // command outright instead of narrowing which rows it reaches — which is what makes it
+    // per-command and leaves the isolation arm's other three commands exactly as they were.
+    using: "false",
+    permissive: false,
+  };
+}
 
 export const META_TENANTS: TableDefinition = {
   schema: "meta",
@@ -518,6 +612,7 @@ export const META_AUDIT_LOG: TableDefinition = {
         command: "INSERT",
         check: "tenant_id IS NULL AND current_setting('app.platform_audit_write', true) = 'on'",
       },
+      retainedRecordNoTenantDelete("audit_log"),
     ],
   },
 };
@@ -554,6 +649,7 @@ export const META_COMPLIANCE_ATTESTATIONS: TableDefinition = {
         name: "compliance_attestations_tenant_isolation",
         using: TENANT_ISOLATION_USING,
       },
+      retainedRecordNoTenantDelete("compliance_attestations"),
     ],
   },
 };
@@ -3777,6 +3873,7 @@ export const META_TENANT_LIFECYCLE_EVENTS: TableDefinition = {
         command: "SELECT",
         using: "current_setting('app.platform_audit', true) = 'on'",
       },
+      retainedRecordNoTenantDelete("tenant_lifecycle_events"),
     ],
   },
 };
@@ -3911,6 +4008,7 @@ export const META_GDPR_DELETION_REQUESTS: TableDefinition = {
         command: "SELECT",
         using: "current_setting('app.platform_audit', true) = 'on'",
       },
+      retainedRecordNoTenantDelete("gdpr_deletion_requests"),
     ],
   },
 };
@@ -4205,6 +4303,7 @@ export const META_TENANT_TOMBSTONES: TableDefinition = {
         command: "SELECT",
         using: "current_setting('app.platform_audit', true) = 'on'",
       },
+      retainedRecordNoTenantDelete("tenant_tombstones"),
     ],
   },
 };
@@ -6475,6 +6574,7 @@ export const META_ACCESS_REVIEW_TEMPLATES: TableDefinition = {
         using: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
         check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
       },
+      retainedRecordNoTenantDelete("access_review_templates"),
     ],
   },
 };
@@ -6619,6 +6719,7 @@ export const META_ACCESS_REVIEW_CAMPAIGNS: TableDefinition = {
         name: "access_review_campaigns_tenant_isolation",
         using: TENANT_ISOLATION_USING,
       },
+      retainedRecordNoTenantDelete("access_review_campaigns"),
     ],
   },
 };
@@ -6748,6 +6849,7 @@ export const META_ACCESS_REVIEW_ITEMS: TableDefinition = {
         name: "access_review_items_tenant_isolation",
         using: TENANT_ISOLATION_USING,
       },
+      retainedRecordNoTenantDelete("access_review_items"),
     ],
   },
 };
@@ -6893,6 +6995,7 @@ export const META_ACCESS_REVIEW_DECISIONS: TableDefinition = {
         name: "access_review_decisions_tenant_isolation",
         using: TENANT_ISOLATION_USING,
       },
+      retainedRecordNoTenantDelete("access_review_decisions"),
     ],
   },
 };
@@ -7020,6 +7123,7 @@ export const META_ACCESS_REVIEW_EXCEPTIONS: TableDefinition = {
         name: "access_review_exceptions_tenant_isolation",
         using: TENANT_ISOLATION_USING,
       },
+      retainedRecordNoTenantDelete("access_review_exceptions"),
     ],
   },
 };
@@ -7148,6 +7252,7 @@ export const META_ACCESS_REVIEW_EVIDENCE: TableDefinition = {
         name: "access_review_evidence_tenant_isolation",
         using: TENANT_ISOLATION_USING,
       },
+      retainedRecordNoTenantDelete("access_review_evidence"),
     ],
   },
 };
@@ -10205,6 +10310,7 @@ export const META_CRYPTO_KEYS: TableDefinition = {
         using: "tenant_id IS NULL AND current_setting('app.platform_key_write', true) = 'on'",
         check: "tenant_id IS NULL AND current_setting('app.platform_key_write', true) = 'on'",
       },
+      retainedRecordNoTenantDelete("crypto_keys"),
     ],
   },
 };
@@ -11262,6 +11368,7 @@ export const META_CERTIFICATION_REPORTS: TableDefinition = {
         command: "INSERT",
         check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
+      retainedRecordNoTenantDelete("certification_reports"),
     ],
   },
 };
@@ -11406,6 +11513,7 @@ export const META_FORENSIC_CHAIN_ENTRIES: TableDefinition = {
         command: "INSERT",
         check: "tenant_id IS NULL AND current_setting('app.platform_audit_write', true) = 'on'",
       },
+      retainedRecordNoTenantDelete("forensic_chain_entries"),
     ],
   },
 };
@@ -11570,6 +11678,7 @@ export const META_FORENSIC_CHAIN_CHECKPOINTS: TableDefinition = {
         command: "INSERT",
         check: "tenant_id IS NULL AND current_setting('app.platform_audit_write', true) = 'on'",
       },
+      retainedRecordNoTenantDelete("forensic_chain_checkpoints"),
     ],
   },
 };
@@ -11916,6 +12025,7 @@ export const META_AUDIT_INTEGRITY_VERDICTS: TableDefinition = {
         command: "INSERT",
         check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
+      retainedRecordNoTenantDelete("audit_integrity_verdicts"),
     ],
   },
 };
@@ -12447,3 +12557,27 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_NOTIFICATION_FAX_OBSERVATIONS,
   META_TENANT_DATA_KEYS,
 ];
+
+/**
+ * The tables whose catalogued policies deny a tenant-context `DELETE` — **derived from the catalog**
+ * rather than listed beside it, so the set and the policies that implement it cannot drift apart.
+ *
+ * The predicate is `permissive === false && command === "DELETE"` and deliberately not the policy's
+ * *name*: a name is a convention and this is a property of the emitted SQL. ADR-0399 is the reason
+ * that distinction is spelled out here — the structural census of the exposed tables is **115** while
+ * the subset whose policy name ends `_tenant_isolation` is 78, and a figure filtered by name was
+ * carried in this repository's own notes for two increments.
+ *
+ * `@crossengin/kernel` cannot import `PLATFORM_RECORD_TABLES`, which lives in a package that depends
+ * on it, so the two halves are compared **from disk in both directions** by
+ * `packages/testing/src/strategy/pg-record-retention.ts` — the rule that already owns exactly this
+ * cross-package comparison, for the reason ADR-0335 gave it: a one-way comparison is what ADR-0288's
+ * maintained list was made of.
+ */
+export function tenantDeleteFencedTables(): readonly string[] {
+  return META_TABLES.filter((table) =>
+    (table.rls?.policies ?? []).some(
+      (policy) => policy.permissive === false && policy.command === "DELETE",
+    ),
+  ).map((table) => table.name);
+}

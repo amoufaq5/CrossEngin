@@ -1,10 +1,10 @@
 # ADR index
 
-394 records. Generated from the ADR files themselves — regenerate rather than
+395 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 315  **Proposed:** 79
+- **Accepted:** 316  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -406,3 +406,4 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0397](0397-the-manifest-nobody-surveyed.md) | The manifest nobody surveyed | — | Accepted | 2026-11-02 |
 | [0398](0398-a-ceiling-with-no-floor-and-a-refusal-with-no-name.md) | A ceiling with no floor, and a refusal with no name | — | Accepted | 2026-11-03 |
 | [0399](0399-a-check-that-was-single-pass.md) | A check that was single-pass | — | Accepted | 2026-11-03 |
+| [0400](0400-a-policy-that-governs-every-command.md) | A policy that governs every command because nobody chose one | — | Accepted | 2026-11-03 |

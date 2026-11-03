@@ -49,6 +49,20 @@ export const RECORD_RETENTION_FINDING_KINDS = [
   "protected_table_undeclared_here",
   /** A name this rule expects to be protected that the erasure no longer protects. */
   "expected_protection_absent",
+  /**
+   * A table the erasure protects that carries no restrictive `DELETE` policy, so the tenant whose
+   * records it keeps can delete them itself. The retention set's own sentence is *"an auditor or a
+   * regulator reads these after the tenant is gone, and a deletion must not be able to destroy
+   * them"* — true of the platform's deletion and, until ADR-0400, unenforced against the tenant's.
+   */
+  "protected_table_unfenced",
+  /**
+   * A restrictive `DELETE` policy on a table the erasure does **not** protect. The other direction,
+   * and the one a one-way comparison would miss: the fence's whole justification is that these
+   * tables outlive their tenant, so a fence somewhere else is a denial with no argument behind it —
+   * and on a table with a legitimate tenant-context `DELETE` writer it is a broken route.
+   */
+  "fenced_table_not_protected",
 ] as const;
 export type RecordRetentionFindingKind = (typeof RECORD_RETENTION_FINDING_KINDS)[number];
 
@@ -144,6 +158,32 @@ export function readCascadingTenantTables(root: string = REPO_ROOT): readonly st
   return out;
 }
 
+/**
+ * Every catalogued table carrying a restrictive `DELETE` fence, read out of the one call shape the
+ * catalog uses to declare one.
+ *
+ * Read as **text** for this module's own stated reason — importing `@crossengin/kernel` would make
+ * the dependency graph cyclic and reading `kernel/dist` would make the rule green only after a
+ * build. `tenantDeleteFencedTables()` is the same census derived from the built objects, and the two
+ * are deliberately independent: the kernel's own test pins the derivation, and this one compares the
+ * source against the erasure. A rule that imported the derivation would be comparing the catalog
+ * with itself, which is the shape ADR-0353 found standing over `META_DEPLOYMENTS.target` while four
+ * of its columns were drifted.
+ *
+ * The parse **refuses rather than guessing** if the call shape stops holding, because a scan with a
+ * silent "could not read" bucket is the next member of this defect's class.
+ */
+export function readDeleteFencedTables(root: string = REPO_ROOT): readonly string[] {
+  const src = readFileSync(join(root, CATALOG), "utf8");
+  if (!src.includes("function retainedRecordNoTenantDelete")) {
+    throw new Error(
+      `retainedRecordNoTenantDelete is not declared in ${CATALOG}; the fence's helper has been ` +
+        `renamed or removed, so this parse no longer finds the policies it reports on`,
+    );
+  }
+  return [...src.matchAll(/retainedRecordNoTenantDelete\("([a-z_]+)"\)/g)].map((m) => m[1]!);
+}
+
 /** Both directions of the rule. An empty array is the only passing result. */
 export function auditRecordRetention(
   root: string = REPO_ROOT,
@@ -180,6 +220,36 @@ export function auditRecordRetention(
         detail:
           `${table} is no longer in PLATFORM_RECORD_TABLES; if that is deliberate, remove it here ` +
           `too, and note that it then becomes erasable`,
+      });
+    }
+  }
+
+  // The third half (ADR-0400), compared both ways for the same reason as the first two: the fence
+  // set and the retention set are one judgement, so either changing without the other is a defect
+  // whichever side it arrives from.
+  const fenced = new Set(readDeleteFencedTables(root));
+  for (const table of [...protectedTables].sort()) {
+    if (!fenced.has(table)) {
+      findings.push({
+        kind: "protected_table_unfenced",
+        table,
+        detail:
+          `${table} is kept by the Article 17 erasure because it outlives its tenant, and ` +
+          `carries no restrictive DELETE policy — so a tenant-context session can delete its ` +
+          `own rows from it, which the owner's count equalled when this was measured live; add ` +
+          `retainedRecordNoTenantDelete("${table}") to its policies`,
+      });
+    }
+  }
+  for (const table of [...fenced].sort()) {
+    if (!protectedTables.has(table)) {
+      findings.push({
+        kind: "fenced_table_not_protected",
+        table,
+        detail:
+          `${table} carries a restrictive DELETE policy and is not in PLATFORM_RECORD_TABLES, ` +
+          `so the fence's argument — that these records outlive the tenant they describe — does ` +
+          `not apply to it; if the table has a tenant-context DELETE writer the fence breaks it`,
       });
     }
   }

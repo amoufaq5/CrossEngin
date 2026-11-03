@@ -1522,7 +1522,15 @@ describe("table column shapes", () => {
     // Twelve such forgeries succeeded live as a non-owner role before the split and none after.
     const policies = META_AUDIT_INTEGRITY_VERDICTS.rls?.policies ?? [];
     expect(META_AUDIT_INTEGRITY_VERDICTS.rls?.enabled).toBe(true);
-    expect(policies).toHaveLength(3);
+    expect(policies).toHaveLength(4);
+
+    // ADR-0400's restrictive `FOR DELETE USING (false)` arm is the fourth, and it closes the last
+    // clause of the comment above: the split stopped an elevated reader forging or flipping a
+    // verdict for *another* tenant, while deleting its **own** stayed open until this fence, because
+    // the isolation arm's NULL `WITH CHECK` makes its `USING` serve DELETE too.
+    const noDelete = policies.find((p) => p.name === "audit_integrity_verdicts_no_tenant_delete");
+    expect(noDelete?.command).toBe("DELETE");
+    expect(noDelete?.permissive).toBe(false);
 
     const isolation = policies[0];
     expect(isolation?.command).toBeUndefined();
@@ -1551,10 +1559,17 @@ describe("table column shapes", () => {
     expect(write?.check).toContain("app.platform_record_write");
     expect(write?.check).toContain("tenant_id IS NULL");
     expect(write?.check).not.toContain("app.platform_audit_write");
-    // Append-only: no `UPDATE` arm and no `DELETE` arm, so a platform verdict is immutable by
+    // Append-only for a *platform* row: no `UPDATE` arm, so a verdict at NULL scope is immutable by
     // policy once written. `verdict_id` is `aiv_` + the sha256 of the canonical report, so changing
     // any field yields a different row and there is no stable handle to aim an `UPDATE` at.
-    expect(policies.map((p) => p.command ?? "ALL")).toEqual(["ALL", "SELECT", "INSERT"]);
+    //
+    // The pre-ADR-0400 form of this comment read "no `UPDATE` arm **and no `DELETE` arm**, so a
+    // platform verdict is immutable by policy once written", and the inference is **false**: an
+    // absent `DELETE` arm denies nothing while an `ALL`-scope arm is present, because `FOR ALL`
+    // governs every command. The absence was read as a denial for three increments. The `DELETE`
+    // entry below is the arm that makes the claim true, and it is restrictive precisely so that it
+    // denies rather than permits.
+    expect(policies.map((p) => p.command ?? "ALL")).toEqual(["ALL", "SELECT", "INSERT", "DELETE"]);
   });
 
   it("META_TENANT_TOMBSTONES outlives the users and the tenant it names", () => {
@@ -1715,7 +1730,13 @@ describe("table column shapes", () => {
 
   it("META_TENANT_TOMBSTONES is readable after its tenant is gone, by SELECT only", () => {
     const policies = META_TENANT_TOMBSTONES.rls?.policies ?? [];
-    expect(policies).toHaveLength(2);
+    expect(policies).toHaveLength(3);
+
+    // The third is ADR-0400's DELETE fence, which makes this test's own title literally true: the
+    // platform reads by SELECT only, and the tenant the record outlives can no longer delete it.
+    const noDelete = policies.find((p) => p.name === "tenant_tombstones_no_tenant_delete");
+    expect(noDelete?.command).toBe("DELETE");
+    expect(noDelete?.permissive).toBe(false);
     const platform = policies.find((p) => p.name === "tenant_tombstones_platform_audit_read");
     const isolation = policies.find((p) => p.name === "tenant_tombstones_isolation");
     // Isolation alone makes the record unreadable by the only people who need it: a tombstone
@@ -1901,7 +1922,14 @@ describe("table column shapes", () => {
 
   it("META_GDPR_DELETION_REQUESTS is readable after its tenant is gone, by SELECT only", () => {
     const policies = META_GDPR_DELETION_REQUESTS.rls?.policies ?? [];
-    expect(policies).toHaveLength(2);
+    expect(policies).toHaveLength(3);
+
+    // ADR-0400's DELETE fence. ADR-0322's premise is that a tombstone naming a request exists iff
+    // that request's deletion committed, which needs the request to still be there — so a tenant
+    // deleting its own request would destroy the reconciler's only conclusive evidence.
+    const noDelete = policies.find((p) => p.name === "gdpr_deletion_requests_no_tenant_delete");
+    expect(noDelete?.command).toBe("DELETE");
+    expect(noDelete?.permissive).toBe(false);
     const platform = policies.find((p) => p.name === "gdpr_deletion_requests_platform_audit_read");
     expect(platform?.command).toBe("SELECT");
     expect(platform?.using).toBe("current_setting('app.platform_audit', true) = 'on'");
@@ -1916,7 +1944,13 @@ describe("table column shapes", () => {
 
   it("META_AUDIT_LOG splits the platform read off as SELECT rather than widening isolation", () => {
     const policies = META_AUDIT_LOG.rls?.policies ?? [];
-    expect(policies).toHaveLength(3);
+    expect(policies).toHaveLength(4);
+
+    // ADR-0400's DELETE fence: the isolation arm stays at the `ALL` default, which is exactly what
+    // let a tenant-context session delete its own entries until a restrictive arm denied the command.
+    const noDelete = policies.find((p) => p.name === "audit_log_no_tenant_delete");
+    expect(noDelete?.command).toBe("DELETE");
+    expect(noDelete?.permissive).toBe(false);
     const isolation = policies.find((p) => p.name === "audit_log_tenant_isolation");
     const platform = policies.find((p) => p.name === "audit_log_platform_audit_read");
     // The isolation half stays at the `ALL` default and never mentions the flag: an elevated
