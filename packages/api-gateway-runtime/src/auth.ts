@@ -1,6 +1,8 @@
 import {
   API_KEY_HEADER,
   REQUEST_SIGNATURE_HEADER_LOWER,
+  bareAuthScheme,
+  isPrincipalRefused,
   type AuthOutcome,
   type AuthScheme,
   type IncomingRequest,
@@ -322,9 +324,59 @@ export function authSchemeToken(headerValue: string): string | null {
   return TCHAR_TOKEN_RE.test(candidate) ? candidate : null;
 }
 
+/**
+ * Whether a header **presented** anything -- `undefined`, absent and whitespace-only are one fact
+ * (ADR-0398).
+ *
+ * This is ADR-0365's rule, which `parseAuthHeader` already states in its own words eight lines below
+ * the `api_key_query` arm -- *"an empty value is nothing supplied rather than something
+ * malformed"* -- and applied to two of its four message positions. `api_key_query` and
+ * `hmac_signature` followed it; `authorization` and `x-api-key` tested `!== undefined`, so an empty
+ * value was read as a credential that **was** presented. Measured through the built parser:
+ *
+ *   `Authorization: ""`  -> `{kind:"unrecognized", schemeToken:null}`  -- recorded
+ *                           `credential_unrecognized`, a claim that a credential arrived in a scheme
+ *                           this build does not know, for a header that carried nothing.
+ *   `x-api-key: ""`      -> `{kind:"credential", scheme:"api_key_header", token:""}` -- worse, since
+ *                           that is a **served** scheme, so the deployment's opaque-token matcher is
+ *                           invoked with `sha256("")`: the single value ADR-0394 refuses by name one
+ *                           scheme over, as the one well-formed fingerprint that can denote nothing.
+ *
+ * And both **masked a later position**: each returns before the `mtls` arm, so on a cert-forwarding
+ * edge a client sending either empty header was refused instead of being authenticated by its
+ * certificate -- measured with a valid `clientCertSha256` alongside, which changed neither answer.
+ * That is the inverse of the ordering ADR-0384 established, where a verdict meaning *nothing
+ * recognised this* must not outrank something that did: here something that recognised **nothing**
+ * outranked something that did.
+ *
+ * A type predicate so the arms keep reading the **raw** value: ADR-0395's `trimStart` reasoning is
+ * about a trailing space surviving into `authSchemeToken`, and trimming at the read point would
+ * quietly make that fix redundant rather than leaving it to do its job.
+ *
+ * **Commas are stripped as well as whitespace, and that is a second hole rather than tidiness.** A
+ * `.trim()`-only rule is defeated by sending the header **twice**: Node joins duplicate values with
+ * `", "`, so two empty ones arrive as `", "` -- non-empty, hence "present", and the deployment's
+ * opaque-token matcher is then invoked with `sha256(",")`, which is one character away from the
+ * exact harm the paragraph above says this prevents. Measured over a raw socket against the live
+ * server: a single empty `x-api-key` answered `tenant_required` (absent, correct) and two empty ones
+ * answered `api key not recognized` (a credential). `authorization` escapes on the Node transport
+ * only because `IncomingMessage` keeps the **first** value for that one name, and not on the
+ * Fetch/Workers transport, where `Headers.get()` joins it too -- so there all three positions fell.
+ * Found by an adversarial pass over ADR-0398; not a regression, since `!== undefined` admitted the
+ * joined value too, but the first fix generalised an incomplete rule to two more positions instead
+ * of closing the class.
+ *
+ * A **repeat carrying real values** still presents -- `"a, a"` keeps its letters -- and that is
+ * deliberate: it names something, the lookup misses, and the refusal is honest. What this closes is
+ * a value with no content at all, however many times it was sent.
+ */
+export function headerPresents(value: string | undefined): value is string {
+  return value !== undefined && value.replaceAll(",", "").trim().length > 0;
+}
+
 export function parseAuthHeader(request: IncomingRequest): ParseAuthHeaderResult {
   const header = request.headers["authorization"];
-  if (header !== undefined) {
+  if (headerPresents(header)) {
     const trimmed = header.trim();
     const lower = trimmed.toLowerCase();
     if (lower.startsWith("bearer ")) {
@@ -333,9 +385,55 @@ export function parseAuthHeader(request: IncomingRequest): ParseAuthHeaderResult
     if (lower.startsWith("basic ")) {
       return { kind: "credential", scheme: "basic", token: trimmed.slice(6).trim() };
     }
+    // A **bare** auth-scheme token, with no credential after it, for a scheme this build refuses
+    // (ADR-0398). `Authorization: Basic` reached the residual before this and recorded
+    // `credential_in_unrecognized_scheme` with `schemeToken: null` -- *no scheme was named at all*
+    // -- for a header that plainly names one, because `authSchemeToken` finds no `SP` and its rule
+    // is that a value without one is potentially a bare credential. That rule is right for
+    // `ce_live_abc` and wrong for `Basic`, and the two are separable only against the tokens this
+    // build knows.
+    //
+    // This is the spelling ADR-0395's `trimStart` fix could **not** reach, and the reachable one:
+    // `"Basic "` is stripped to `"Basic"` by Node's parser and by `Headers` (RFC 9110 §5.5), so
+    // that fix was latent at a seam only an embedder reaches, while a bare `Basic` arrives verbatim
+    // over both transports.
+    //
+    // **Two corrections to what that ADR and an earlier draft of this comment claimed about it.**
+    // ADR-0395 row 7 graded the gap *Real* and spoke of "an alarm keyed on
+    // `scheme_unsupported_basic`"; **there is no such alarm**. Nothing in the workspace keys on an
+    // auth outcome or an authenticate-stage reason -- `GATEWAY_DRIFT_CODES`' twelve members concern
+    // none of them, and the only non-test readers of either string are comments -- and the reason
+    // is not even *persisted* on a shipped deployment, since a row needs
+    // `--gateway-execution-capture`, which appears **0** times in all three compose files. So what
+    // this closes is the **record**, which is worth closing on its own terms: a header that plainly
+    // names a scheme is no longer recorded as naming none. Whether anything ever reads it is a
+    // separate question whose answer today is *nothing*.
+    //
+    // And it closes **one of three** spellings rather than the class. Measured through the built
+    // parser, `Basic\tx` and `Basic\u000bx` still reach the residual, because `authSchemeToken`
+    // requires a literal U+0020 -- so a tab or a vertical tab after the scheme name is a
+    // non-empty, scheme-naming value still recorded as naming no scheme. Narrower than a bare
+    // `Basic` (a client has to go out of its way) and the same defect.
+    //
+    // The sharper argument for the arm is one neither the ADR nor that draft made, and it is a
+    // **disclosure** rather than a usefulness point: the residual body enumerates this
+    // deployment's served-scheme census ("it serves bearer_jwt, api_key_header" -- four schemes
+    // with every gate on), while the `basic` arm is deployment-independent and names two remedies.
+    // So recognising the scheme *reduces* what an anonymous caller learns about the deployment.
+    //
+    // Restricted to `refused` schemes, which is not a special case but the control flow one layer
+    // up: `runtime.ts` answers `treatment !== "served"` before reading the token, so the empty
+    // token below is provably never consumed. For a **served** scheme it would be -- so recognising
+    // a bare `Bearer` would hand the JWT verifier `""` and record a claim about a credential nobody
+    // sent, which is why the residual stays the answer there. That asymmetry is the reason
+    // ADR-0395 declined to do this symmetrically, satisfied rather than overridden.
+    const bare = bareAuthScheme(trimmed);
+    if (bare !== null) {
+      return { kind: "credential", scheme: bare, token: "" };
+    }
   }
   const apiKeyHeader = request.headers[API_KEY_HEADER];
-  if (apiKeyHeader !== undefined) {
+  if (headerPresents(apiKeyHeader)) {
     return { kind: "credential", scheme: "api_key_header", token: apiKeyHeader.trim() };
   }
   // An **empty** value stays `absent`, and that is not an oversight: ADR-0365 settled it for every
@@ -377,8 +475,10 @@ export function parseAuthHeader(request: IncomingRequest): ParseAuthHeaderResult
   // stage rather than done here, because the result type carries one opaque `token` and a signature
   // is three fields — splitting it here would mean either a second shape on this union or a parse
   // whose failure this function has no way to report.
+  // Already followed the rule inline; reading it off the shared predicate instead so the four
+  // positions cannot drift back apart (ADR-0398).
   const signature = request.headers[REQUEST_SIGNATURE_HEADER_LOWER];
-  if (signature !== undefined && signature.trim().length > 0) {
+  if (headerPresents(signature)) {
     return { kind: "credential", scheme: "hmac_signature", token: signature.trim() };
   }
   // The residual comes **before** `mtls`, and that ordering is the whole of what "the message named
@@ -391,7 +491,7 @@ export function parseAuthHeader(request: IncomingRequest): ParseAuthHeaderResult
   // cert-forwarding edge answered `mtls`: the caller asked to authenticate one way and was
   // authenticated another, silently — which is the shape this whole increment exists to refuse, and
   // which the comment below used to claim could not happen while the code above it did it.
-  if (header !== undefined) {
+  if (headerPresents(header)) {
     // `trimStart` and **not** `trim`, because `authSchemeToken`'s own rule is *no space means no
     // auth-scheme, so the value is potentially a bare token and nothing is reported* — and trimming
     // the **end** destroys the very space that rule reads. `Authorization: Basic ` and
@@ -409,13 +509,14 @@ export function parseAuthHeader(request: IncomingRequest): ParseAuthHeaderResult
     // is a direct `buildIncomingRequest` caller, whose `headers` is a plain record — the same seam
     // ADR-0394 made `EdgeTrust` required at, and which has one non-test caller today. So this is a
     // fail-closed correctness fix at a seam no client reaches and an embedder does, not the alarm
-    // gap the draft described. That gap is **real and belongs to a different change**: an alarm
-    // keyed on `scheme_unsupported_basic` does miss `Authorization: Basic` with no credential,
-    // which records `credential_in_unrecognized_scheme` — and this change moves it in **neither**
-    // direction, because that reason comes from the `basic` recognition arm two screens up,
-    // `"Basic"` does not start with `"basic "`, and the value reaches this arm identically before
-    // and after. Closing it means recognising a credential-less `Basic` as the scheme it names,
-    // which is the paragraph below.
+    // gap the draft described. That gap **belongs to a different change and is not an alarm gap at
+    // all**: a bare `Authorization: Basic` really does record
+    // `credential_in_unrecognized_scheme` where a credentialed one records
+    // `scheme_unsupported_basic`, and this change moves it in **neither** direction (that reason
+    // comes from the `basic` recognition arm two screens up, `"Basic"` does not start with
+    // `"basic "`, and the value reaches this arm identically before and after). But ADR-0398
+    // measured the consumer side and **nothing keys on either string** — see the bare-token arm
+    // below, which closes it as a *record* defect rather than as a missed alarm.
     //
     // `trimStart` is correct where both alternatives are not: `trim` loses `"Basic "` and
     // `"Bearer "`, and leaving the value untrimmed loses `"  Negotiate x"` and `"\tNegotiate YIIZ"`,
@@ -482,6 +583,14 @@ export async function resolvePrincipalForCredential(
   });
   if (resolved === null) {
     return { principal: null, outcome: "principal_not_found" };
+  }
+  // The refusal names its own outcome, so this is a pass-through and not a translation: a mapping
+  // here would be a second place to decide what a resolver meant, and the resolver is the only
+  // thing that knows (ADR-0398). The type confines it to the two outcomes that are statements about
+  // an existing principal, so no resolver can route itself to `authenticated` or to a claim about a
+  // credential.
+  if (isPrincipalRefused(resolved)) {
+    return { principal: null, outcome: resolved.refusedAs };
   }
   return {
     principal: { ...resolved, authScheme: input.scheme, resolvedAt: input.nowIso },

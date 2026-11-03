@@ -48,15 +48,135 @@ export const PASSWORD_HASH_BYTES = 64;
  * ceiling at 2^14 that nobody declared, and computing it from the documented formula would leave
  * the default parameters failing by 3 KiB. The factor of 2 is deliberate headroom over the
  * measured minimum rather than a value fitted to it.
+ *
+ * It takes `p` because `256 * n * r` -- what this computed until ADR-0398 -- is **not** always
+ * above `128 * r * (n + p + 2)`: the two cross at `n = p + 2`, so for `n < p + 2` the allowance was
+ * *below* the requirement and scrypt threw the very error this function exists to avoid. The hole
+ * sat exactly on `parsePasswordHash`'s own floor, which admits `n = 2`, and `n = 2, p = 1` is the
+ * one parameter set that function called re-derivable and this one could not derive. Measured on
+ * pure Node (v22.23.4): `n=2, r=1, p=1` threw under `256*n*r` and answers in 0 ms
+ * under this form, while at the shipped defaults the two forms differ by **6,144 bytes** of
+ * allowance (67,108,864 -> 67,115,008) and by nothing else. The cost is unchanged *by
+ * construction* and not merely measured-small: `maxmem` is a **ceiling** node compares against,
+ * never an allocation, so raising it cannot make a derivation dearer -- 15 runs each put the
+ * medians at 73.0 ms and 74.9 ms over ranges of 65.6-78.3 and 68.3-77.7, which is one noise
+ * distribution. (An earlier draft of this comment quoted "74 ms -> 77 ms" beside the allowance
+ * delta, which reads as a consequence of it. It is not one.) So the correction closes the
+ * degenerate corner at the root for free, rather than being worked around one level up by a floor
+ * nobody could derive from the formula.
  */
-export function scryptMaxmem(n: number, r: number): number {
-  return 256 * n * r;
+export function scryptMaxmem(n: number, r: number, p: number): number {
+  return 256 * r * (n + p + 2);
 }
 
 export interface PasswordScryptParams {
   readonly n: number;
   readonly r: number;
   readonly p: number;
+}
+
+/**
+ * The two resources a parameter set spends, bounded separately -- which is the whole decision, and
+ * it is what a single ceiling gets wrong.
+ *
+ * CPU is proportional to `n * r * p` and memory to `128 * r * (n + p + 2)`, so **`p` buys CPU for
+ * free**: measured on 4 cores at the shipped `n=2^15, r=8`, `p=512` costs **29.8 s at 34.1 MB** and
+ * `p=1024` **60.7 s at 34.6 MB** -- flat memory at every value. `r` buys both, so an *unbounded* `r`
+ * is stopped by the host rather than by us: `r=1024` needs **4.3 GB**, and N=2^24 at r=8 answers
+ * `Deriving bits failed` against a 17 GB requirement. ADR-0395 named `r` as the hazard and quoted
+ * ~30 s; that figure is `p`'s. A ceiling on memory alone would admit the 60-second row; one on CPU
+ * alone would admit the 4.3 GB row. Hence two.
+ *
+ * **But "`r`'s own worst case is the one the host refuses for us" was false of the band that
+ * matters**, and an adversarial pass over ADR-0398 measured it: *inside* these ceilings `r` is the
+ * **dearest** lever, not the self-limiting one. Three admitted sets at identical work 4,194,304 span
+ * **972 ms to 3,481 ms** -- `n=2, r=2^20, p=2` is 3,481 ms, `n=2, r=1, p=2^21` 2,959 ms, and the
+ * n-heavy `n=2^19, r=8, p=1` only 1,329 ms -- so `n * r * p` is a *cost model* and not a wall-clock
+ * one, and a bound stated in work does not bound latency uniformly across shapes. The host refuses
+ * nothing these ceilings admit; the ceilings are the whole fence.
+ *
+ * The column's CHECK is `[0-9]+` three times -- no bound, no digit cap -- so `p=99999999` stores
+ * and, linear in `p`, costs **~5.9 million seconds (68 days)** on one of four libuv threads at
+ * 34 MB. (An earlier draft said ~1.6 million, which understates it 3.7x and is inconsistent with
+ * this comment's own `p=1024` figure one paragraph up -- 60.7 s / 1024 is 59 ms per `p`. It looks
+ * like the `r=1024` row's 15.0 s transposed onto `p`.) Four such rows starve fs and dns for every
+ * request, not only logins.
+ *
+ * 16x admits OWASP's N=2^17 floor, which is 4x the default, with room for a deployment to raise it
+ * twice more. 1 GiB is ~30x the default's 33.6 MB. Neither is a tight bound and neither can be: a
+ * legitimate OWASP-floor hash already costs hundreds of milliseconds, so the job here is to make
+ * the worst case recoverable rather than to eliminate cost -- and **the worst admitted case is
+ * ~3.5 s, not the ~1.3 s an earlier draft claimed**, which was the n-heavy shape stated as the cap.
+ *
+ * Two cautions for anyone quoting these numbers. **The wall-clock figures in this file come from at
+ * least two hosts**: the cost table below puts N=2^17 at 501-981 ms where a later pass measured
+ * 313.6 ms for the same parameters, a 1.6-1.9x spread, so a figure here is a *host's* measurement
+ * and only the ratios travel. And **`PASSWORD_MEMORY_CEILING_BYTES` bounds OpenSSL's `Blen+Vlen`,
+ * not resident memory**: a p-heavy set runs at ~1.9x its model and `n=2, r=1677721, p=1` peaks at
+ * ~1,275 MB against a model of 1 GiB minus 384 bytes, so "stays allocatable on a small VM" is
+ * understated by about 200 MB at the extreme.
+ */
+export const PASSWORD_WORK_CEILING_FACTOR = 16;
+/**
+ * 1 GiB. Not expressed as a multiple, because what bounds it is the host and not the default.
+ *
+ * **It is also, by coincidence, `128 * N * r` at `N=2^20, r=8` -- the *documented* formula
+ * `scryptMaxmem` calls the trap eleven lines above** -- so it lands exactly **3,072 bytes** below
+ * the real `128 * r * (N + p + 2)` requirement for that set, which is the same 3,072 bytes that
+ * comment names as the whole problem. The consequence is that scrypt's canonical file-encryption
+ * set (Percival's own `N=2^20, r=8, p=1`, and libsodium's `SENSITIVE` preset) is refused *by this
+ * ceiling* and not only by the work one.
+ *
+ * Left at a round 1 GiB rather than nudged to `1 GiB + 3,072`, on two grounds. The effect is nil:
+ * that set is **32x** the default's work and the CPU ceiling refuses it at 16x regardless, so
+ * raising this constant changes nothing admitted. And the constant means *what this host can
+ * allocate*, which is a round number by nature; deriving it from a parameter set would be the
+ * category error the coincidence invites. Said out loud because the next reader will draw the
+ * inference an adversarial pass over ADR-0398 drew, and it is worth knowing it is not the
+ * provenance.
+ */
+export const PASSWORD_MEMORY_CEILING_BYTES = 1_073_741_824;
+
+/** `n * r * p` for the shipped defaults, which both ceilings are stated relative to. */
+export const PASSWORD_DEFAULT_WORK =
+  PASSWORD_SCRYPT_DEFAULTS.n * PASSWORD_SCRYPT_DEFAULTS.r * PASSWORD_SCRYPT_DEFAULTS.p;
+
+/**
+ * Whether this build will derive under these parameters at all.
+ *
+ * One predicate with two readers, so the write path and the read path cannot come to disagree about
+ * which hashes exist -- a hash `hashPassword` accepted and `parsePasswordHash` then refused would be
+ * a row written by this binary that this binary calls unreadable.
+ *
+ * **Four clauses, and the third is not a cost bound.** RFC 7914 §6 requires `N < 2^(16*r)`, and
+ * OpenSSL enforces it -- reporting the violation with **the same error code as a memory-limit
+ * failure** (`error:030000AC … memory limit exceeded`, `ERR_CRYPTO_INVALID_SCRYPT_PARAMS`), which
+ * is why it reads as a `maxmem` problem and is not one: such a set throws at **any** `maxmem`,
+ * `MAX_SAFE_INTEGER` included. Without this clause the two cost ceilings admitted **127** sets that
+ * cannot derive at all -- every `r = 1` with `n >= 2^16` -- so `parsePasswordHash` admitted the row
+ * and `deriveScrypt` threw, which by this module's own account becomes a retryable **503 with a
+ * false diagnosis** that bypasses the `credential_unreadable` 401. That is the exact defect
+ * ADR-0398 exists to close, and the two ceilings *created* its reachable population; found by an
+ * adversarial pass over that increment rather than by it. It only ever bites at `r = 1`, because
+ * the work ceiling already forces `n <= 2^22` and `2^32` is the bound at `r = 2`.
+ *
+ * Shape first, and **the ordering's original justification was backwards**: it read *"a
+ * non-power-of-two `n` makes the cost arithmetic meaningless rather than merely large"*, implying
+ * the shape check is self-sufficient. It is not -- `n & (n - 1)` coerces to int32, so it answers
+ * *power of two* for non-powers at or above 2^31 (`2^32 + 4` measured as admitted by that clause
+ * alone), and what saves it is the **cost** ceiling forcing `n <= 4,194,304`, well inside int32.
+ * So shape first is right only because cost follows; raising or removing the work ceiling makes the
+ * shape check live, and it would need `Math.log2(n) % 1 === 0` to stand alone.
+ */
+export function passwordParamsAreDerivable(params: PasswordScryptParams): boolean {
+  const { n, r, p } = params;
+  if (!Number.isInteger(n) || n < 2 || (n & (n - 1)) !== 0) return false;
+  if (!Number.isInteger(r) || r < 1 || !Number.isInteger(p) || p < 1) return false;
+  // RFC 7914 §6, enforced by OpenSSL under a misleading error code. `2 ** (16 * r)` is `Infinity`
+  // for `r >= 64`, which is the right answer: there is no `n` the work ceiling admits at that `r`.
+  if (n >= 2 ** (16 * r)) return false;
+  if (n * r * p > PASSWORD_DEFAULT_WORK * PASSWORD_WORK_CEILING_FACTOR) return false;
+  return 128 * r * (n + p + 2) <= PASSWORD_MEMORY_CEILING_BYTES;
 }
 
 /** Why a candidate password did not verify. Never distinguishes *wrong* from *no such user*. */
@@ -99,15 +219,24 @@ export function encodePasswordHash(parsed: ParsedPasswordHash): string {
 export function parsePasswordHash(encoded: string): ParsedPasswordHash | null {
   const m = ENCODED_RE.exec(encoded);
   if (m === null) return null;
-  const n = Number(m[1]);
-  const r = Number(m[2]);
-  const p = Number(m[3]);
+  const params = { n: Number(m[1]), r: Number(m[2]), p: Number(m[3]) };
   // A stored hash whose parameters are degenerate cannot be re-derived, and treating it as a
   // mismatch would tell the caller their password was wrong. `unreadable_hash` is a different
   // fact and the caller is expected to act on it differently.
-  if (!Number.isInteger(n) || n < 2 || (n & (n - 1)) !== 0) return null;
-  if (!Number.isInteger(r) || r < 1 || !Number.isInteger(p) || p < 1) return null;
-  return { kdf: PASSWORD_KDF, params: { n, r, p }, saltHex: m[4]!, hashHex: m[5]! };
+  //
+  // Since ADR-0398 that covers *cost* as well as shape, and the cost half is what the comment
+  // above was already promising and not delivering. `deriveScrypt` **throws** for a parameter set
+  // this used to admit, and a throw out of `verifyPassword` is not an `unreadable_hash`: it
+  // propagates through `verifyLogin` to the route's `ctx.verify` catch, which answers
+  // `503 "The credential directory could not be reached. Retry shortly."` -- a retryable status
+  // with a false diagnosis (the directory was reached; one row is unusable) that also bypasses the
+  // `credential_unreadable` **401** arm built for exactly this. Refusing here is what routes the
+  // row back to the answer this function's own contract names.
+  //
+  // The ceiling is on the two resources rather than on each parameter, because the hazard moves
+  // between them: see `passwordParamsAreDerivable`.
+  if (!passwordParamsAreDerivable(params)) return null;
+  return { kdf: PASSWORD_KDF, params, saltHex: m[4]!, hashHex: m[5]! };
 }
 
 /**
@@ -149,7 +278,12 @@ async function deriveScrypt(
       input,
       salt,
       PASSWORD_HASH_BYTES,
-      { N: params.n, r: params.r, p: params.p, maxmem: scryptMaxmem(params.n, params.r) },
+      {
+        N: params.n,
+        r: params.r,
+        p: params.p,
+        maxmem: scryptMaxmem(params.n, params.r, params.p),
+      },
       (err, derived) => {
         if (err) reject(err instanceof Error ? err : new Error(String(err)));
         else resolve(derived);
@@ -173,6 +307,17 @@ export async function hashPassword(
   const salt = opts.salt ?? randomBytes(PASSWORD_SALT_BYTES);
   if (salt.length !== PASSWORD_SALT_BYTES) {
     throw new Error(`password salt must be ${PASSWORD_SALT_BYTES.toString()} bytes`);
+  }
+  // Refused at the write as well as the read, and a throw rather than a `null` because this is the
+  // salt-length guard's position: a caller supplying its own parameters has made a mistake it can
+  // fix, where a *stored* row is a fact the reader has to absorb. Without it the two halves could
+  // disagree -- `hashPassword` would mint a row `parsePasswordHash` calls unreadable, which is the
+  // one shape a shared predicate exists to make unrepresentable.
+  if (!passwordParamsAreDerivable(params)) {
+    throw new Error(
+      `scrypt parameters outside this build's bounds: n=${params.n.toString()}` +
+        ` r=${params.r.toString()} p=${params.p.toString()}`,
+    );
   }
   const derived = await deriveScrypt(password, pepper, salt, params);
   return encodePasswordHash({

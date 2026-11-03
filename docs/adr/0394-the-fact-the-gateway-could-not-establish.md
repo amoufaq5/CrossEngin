@@ -191,10 +191,17 @@ falsely-true control where today there is an honest refusal (ADR-0337's directio
   is the remedy, which is why this is stated rather than guarded: a boot refusal would have to guess
   which of the two an operator meant, and the condition (*is there a TLS terminator in front of
   me*) is the very fact this ADR establishes the process cannot know.
-  Nothing else reads `request.scheme` on the request path: `requiresHttpsTransport` and
+  Nothing else reads `request.scheme` on the request path: `schemeRequiresHttps` and
   `SCHEMES_REQUIRING_HTTPS` have **zero callers** between them, so no request is refused for being
   plain HTTP, and `forwardedFor`'s only reader (`computeOriginIp`) is callerless too. That is the
   whole reason the other four facts could be gated with no behaviour change at all.
+  (Two corrections, both made by ADR-0398 while measuring this sentence rather than re-reading it.
+  As written it named **`requiresHttpsTransport`**, which `git log -S --all` finds in no source file
+  in any commit — a symbol cited as evidence for a census, which has never existed; the real
+  predicate is `schemeRequiresHttps`. And the census has since **split**: ADR-0398's
+  `plaintextTransportClause` gives `schemeRequiresHttps` a reader, so it is
+  `SCHEMES_REQUIRING_HTTPS` alone that still has none. Wrong-when-written on the name, drifted on
+  the count.)
 
 - **Neutral.** `edgeTrust` is required at **five** interfaces — `BuildIncomingRequestInput`,
   `RawToIncomingOptions`, `OperateHttpServerOptions`, `BuildOperateHttpServerOptions`,

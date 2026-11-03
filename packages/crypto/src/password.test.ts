@@ -12,6 +12,7 @@ import {
   hashPassword,
   parsePasswordHash,
   passwordHashIsStale,
+  passwordParamsAreDerivable,
   scryptMaxmem,
   spendPasswordWork,
   verifyPassword,
@@ -69,11 +70,81 @@ describe("scryptMaxmem", () => {
   });
 
   it("clears the measured minimum with headroom at every parameter set", () => {
-    for (const n of [1024, 16384, 32768, 65536, 131072]) {
-      for (const r of [8, 16]) {
-        expect(scryptMaxmem(n, r)).toBeGreaterThan(128 * r * (n + 1 + 2));
+    // `p` is in the loop since ADR-0398, and its absence was the defect: the title said "every
+    // parameter set" while the loop varied two of three and hardcoded `p = 1`, which is precisely
+    // the slice on which the old `256 * n * r` happened to be sufficient. The requirement the
+    // comment above already states correctly, `128*r*(n+p+2)`, crosses `256*n*r` at `n = p + 2`.
+    for (const n of [2, 4, 1024, 16384, 32768, 65536, 131072]) {
+      for (const r of [1, 8, 16]) {
+        for (const p of [1, 2, 8, n, n + 4]) {
+          expect(scryptMaxmem(n, r, p)).toBeGreaterThan(128 * r * (n + p + 2));
+        }
       }
     }
+  });
+
+  it("every parameter set the predicate admits can actually derive", async () => {
+    // The assertion above is pure arithmetic: it compares `scryptMaxmem` against a formula written
+    // in this file and never calls `scrypt`. That is how ADR-0398 shipped a predicate admitting
+    // **127** sets that throw at any `maxmem` -- `r = 1` with `n >= 2^16`, refused by RFC 7914 §6's
+    // `N < 2^(16*r)` and reported by OpenSSL under the *memory-limit* error code. 10 of that loop's
+    // own 105 members were in that state while it passed, which is this repo's
+    // documented-the-hazard-and-checked-nothing shape for the fifth time.
+    //
+    // So this one derives. Small `n` only, because the point is the **shape** boundary rather than
+    // cost: `r = 1` at `n = 2^15` is the largest admitted `r = 1` set and the pairs either side of
+    // the cap are what the clause is about.
+    const probes: readonly (readonly [number, number, number])[] = [
+      [2, 1, 1], // the degenerate corner the maxmem fix closed
+      [2, 8, 1],
+      [4, 1, 2], // where the old and new maxmem forms are exactly equal
+      [32768, 1, 1], // the largest n an r=1 set may carry
+      [1024, 8, 8],
+      [32768, 8, 1], // the shipped defaults
+    ];
+    for (const [n, r, p] of probes) {
+      expect(passwordParamsAreDerivable({ n, r, p }), `admits ${n}/${r}/${p}`).toBe(true);
+      const encoded = await hashPassword("pw", PEPPER, { params: { n, r, p } });
+      expect(await verifyPassword("pw", encoded, PEPPER), `derives ${n}/${r}/${p}`).toBe("matched");
+    }
+  });
+
+  it("refuses an n beyond RFC 7914's 2^(16*r), which throws at any maxmem", async () => {
+    // `scrypt` throws **synchronously** here rather than calling back with an error, and under
+    // `error:030000AC … memory limit exceeded` -- so it reads as a `maxmem` problem and is not one.
+    // Measured at `maxmem: Number.MAX_SAFE_INTEGER`: `n=65536, r=1` throws, `n=32768, r=1` does not.
+    for (const [n, r, p] of [
+      [65536, 1, 1],
+      [131072, 1, 1],
+      [4194304, 1, 1],
+    ] as const) {
+      expect(passwordParamsAreDerivable({ n, r, p }), `refuses ${n}/${r}/${p}`).toBe(false);
+      expect(parsePasswordHash(`scrypt$${n}$${r}$${p}$${"a".repeat(32)}$${"b".repeat(128)}`)).toBeNull();
+    }
+    // And the clause is not a blanket ban on those `n`: the same sizes are fine at `r >= 2`, where
+    // the bound is 2^32 and the work ceiling is what decides.
+    expect(passwordParamsAreDerivable({ n: 65536, r: 2, p: 1 })).toBe(true);
+    expect(passwordParamsAreDerivable({ n: 131072, r: 8, p: 1 })).toBe(true);
+  });
+
+  it("the old form was below the requirement for n < p + 2, which is where n=2 sat", () => {
+    // The boundary, measured against real `scrypt` on Node v22.23.4: `n=2, r=1, p=1` threw
+    // `ERR_CRYPTO_INVALID_SCRYPT_PARAMS` under `256*n*r` and answers in 0 ms under this form;
+    // `n=4, r=1, p=1` worked under both. Same boundary at larger `p`: `n=1024, p=1024` threw and
+    // `n=2048, p=1024` did not.
+    const oldForm = (n: number, r: number): number => 256 * n * r;
+    for (const [n, r, p] of [
+      [2, 1, 1],
+      [2, 8, 1],
+      [1024, 8, 1024],
+    ] as const) {
+      expect(oldForm(n, r)).toBeLessThan(128 * r * (n + p + 2));
+      expect(scryptMaxmem(n, r, p)).toBeGreaterThan(128 * r * (n + p + 2));
+    }
+    // And it is a no-op where every real hash lives: 6,144 bytes of extra allowance at the
+    // shipped defaults, which is why the correction carries no behaviour change for them.
+    const { n, r, p } = PASSWORD_SCRYPT_DEFAULTS;
+    expect(scryptMaxmem(n, r, p) - oldForm(n, r)).toBe(6144);
   });
 
   it("the default parameters really do derive, which is what the headroom buys", async () => {
@@ -123,6 +194,109 @@ describe("encode / parse", () => {
     expect(parsePasswordHash(`scrypt$1$8$1$${salt}$${hash}`)).toBeNull(); // N < 2
     expect(parsePasswordHash(`scrypt$1024$0$1$${salt}$${hash}`)).toBeNull(); // r = 0
     expect(parsePasswordHash(`scrypt$1024$8$0$${salt}$${hash}`)).toBeNull(); // p = 0
+  });
+
+  it("refuses a parameter set whose cost this build will not pay", () => {
+    // ADR-0398. The column's CHECK is `[0-9]+` three times, so every one of these stores; what
+    // refuses them is this parse. Measured costs on 4 cores at the shipped n=2^15, r=8:
+    // p=512 is 29.8 s at 34.1 MB and p=1024 is 60.7 s at 34.6 MB -- linear in `p` and flat in
+    // memory, so `p` is the lever and it is the one ADR-0395 did not name.
+    const salt = "a".repeat(32);
+    const hash = "b".repeat(128);
+    const at = (n: number, r: number, p: number): string =>
+      `scrypt$${n.toString()}$${r.toString()}$${p.toString()}$${salt}$${hash}`;
+
+    expect(parsePasswordHash(at(32768, 8, 512))).toBeNull(); // 29.8 s measured, 34 MB
+    expect(parsePasswordHash(at(32768, 8, 99999999))).toBeNull(); // ~19 days, storable today
+    expect(parsePasswordHash(at(32768, 1024, 1))).toBeNull(); // 4.3 GB
+    expect(parsePasswordHash(at(16777216, 8, 1))).toBeNull(); // 17 GB
+
+    // And admits every parameter set a real deployment can hold: the shipped defaults, the two
+    // weaker sets this suite's own fixtures use, and OWASP's N=2^17 floor the module's cost table
+    // prices at ~700 ms -- which is the band the 16x ceiling exists to keep open.
+    expect(parsePasswordHash(at(32768, 8, 1))).not.toBeNull();
+    expect(parsePasswordHash(at(16384, 8, 1))).not.toBeNull();
+    expect(parsePasswordHash(at(512, 8, 1))).not.toBeNull();
+    expect(parsePasswordHash(at(131072, 8, 1))).not.toBeNull();
+  });
+
+  it("n=2 round-trips, which it could not before the maxmem correction", async () => {
+    // The sharper half of ADR-0398. `n=2, p=1` satisfied every clause of the floor -- integer,
+    // >= 2, a power of two -- so `parsePasswordHash` called it re-derivable, and `deriveScrypt`
+    // threw `ERR_CRYPTO_INVALID_SCRYPT_PARAMS` because `256*n*r` sat below the requirement for
+    // `n < p + 2`. A throw out of `verifyPassword` is not `unreadable_hash`: it propagates to the
+    // login route's `ctx.verify` catch and answers a retryable 503 claiming the credential
+    // directory was unreachable -- a false diagnosis that also bypasses the `credential_unreadable`
+    // 401 built for exactly this row.
+    //
+    // The fix is the formula, not a higher floor, and this proves the whole path: the row parses,
+    // and the derivation it promised now actually happens.
+    const encoded = await hashPassword("pw", PEPPER, { params: { n: 2, r: 1, p: 1 } });
+    expect(parsePasswordHash(encoded)?.params).toEqual({ n: 2, r: 1, p: 1 });
+    expect(await verifyPassword("pw", encoded, PEPPER)).toBe("matched");
+    expect(await verifyPassword("nope", encoded, PEPPER)).toBe("mismatched");
+  });
+
+  it("imposes no work FLOOR, because a weak stored hash is upgraded by the login it allows", () => {
+    // Deliberate, and the one place this parse is permissive where the write path is strict --
+    // ADR-0348's `update` / `read` asymmetry, read the other way round. A floor would refuse a
+    // credential that works today, and `passwordHashIsStale` plus the login's `rehashTo` already
+    // answer a weak row by accepting it once and re-deriving under the deployment's current
+    // parameters. Refusing it instead would deny the very login that performs the upgrade, so the
+    // floor here is *derivability* and strength is the write path's business.
+    //
+    // The cost of that permissiveness is a timing oracle while the weak row stands, and it is
+    // measured rather than reasoned: live against the real route on PG 16.15, an `n=2` row refuses
+    // a wrong password in **10 ms** against an 82-87 ms floor for every other refusal -- ~8.5x
+    // cheaper, which is what tells a guesser the row is weak. The ratio is the durable form and
+    // "~0 ms" is not: once scrypt is free the HMAC and the round trip dominate, so the absolute
+    // figure is a property of the host.
+    //
+    // It closes itself on the **first successful login** -- the same run measured the correct
+    // password at 88 ms, the column move from `n=2` to the shipped 32768, and the next wrong
+    // password back at the full 87 ms. So the window is open until the legitimate holder
+    // authenticates once, and permanently open only for an account nobody ever signs in as.
+    // Saying it is open full stop overstates the exposure; saying a floor would close it inverts
+    // the remedy, because the floor denies the login that performs the upgrade.
+    const salt = "a".repeat(32);
+    const hash = "b".repeat(128);
+    expect(parsePasswordHash(`scrypt$2$1$1$${salt}$${hash}`)).not.toBeNull();
+    expect(passwordHashIsStale(`scrypt$2$1$1$${salt}$${hash}`)).toBe(true);
+  });
+
+  it("refuses a caller's own hostile parameters at the write, with a message naming them", async () => {
+    // A throw and not a `null`, at the salt-length guard's position: a caller supplying parameters
+    // has made a mistake it can fix, where a *stored* row is a fact the reader must absorb.
+    await expect(
+      hashPassword("pw", PEPPER, { params: { n: 32768, r: 8, p: 512 } }),
+    ).rejects.toThrow(/outside this build's bounds: n=32768 r=8 p=512/);
+    await expect(hashPassword("pw", PEPPER, { params: { n: 32768, r: 1024, p: 1 } })).rejects.toThrow(
+      /outside this build's bounds/,
+    );
+    // The shipped defaults are not refused, which is the non-vacuity floor for the two above.
+    await expect(
+      hashPassword("pw", PEPPER, { params: PASSWORD_SCRYPT_DEFAULTS }),
+    ).resolves.toMatch(/^scrypt\$32768\$8\$1\$/);
+  });
+
+  it("the write path and the read path refuse the same parameter sets", () => {
+    // One predicate, two readers. A set `hashPassword` accepts and `parsePasswordHash` refuses
+    // would be a row this binary wrote and calls unreadable, which is the shape the shared
+    // predicate makes unrepresentable -- asserted rather than assumed, over the band and past it.
+    const salt = "a".repeat(32);
+    const hash = "b".repeat(128);
+    for (const params of [
+      { n: 32768, r: 8, p: 1 },
+      { n: 512, r: 8, p: 1 },
+      { n: 131072, r: 8, p: 1 },
+      { n: 2, r: 1, p: 1 },
+      { n: 32768, r: 8, p: 512 },
+      { n: 32768, r: 1024, p: 1 },
+      { n: 1000, r: 8, p: 1 },
+    ]) {
+      const encoded = `scrypt$${params.n.toString()}$${params.r.toString()}$${params.p.toString()}$${salt}$${hash}`;
+      expect(passwordParamsAreDerivable(params)).toBe(parsePasswordHash(encoded) !== null);
+    }
   });
 
   it("matches the shape META_USERS.credential_hash constrains", () => {

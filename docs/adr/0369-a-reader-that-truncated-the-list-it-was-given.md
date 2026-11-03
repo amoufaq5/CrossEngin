@@ -258,7 +258,7 @@ a status clients retry for a condition no retry can fix. Two defects in one esca
 and the retryability — and it is ADR-0359's `writeTxn` finding reproduced inside the increment that
 cites it. Every test passed, because every test supplies a well-formed role list.
 
-So the check moved into `verifyLogin` as a twelfth `LoginRefusal`, `membership_role_unusable`,
+So the check moved into `verifyLogin` as an eleventh `LoginRefusal`, `membership_role_unusable`,
 `false` in `REFUSAL_COUNTS_AGAINST_LOCKOUT` (the password was correct; counting it would lock a
 user out for a defect they cannot fix — `credential_unreadable`'s reasoning on the far side of the
 verification). Verified live: the response is now byte-identical to a wrong-password refusal, and

@@ -1,4 +1,9 @@
-import { principalNamesAPerson, type ResolvedPrincipal } from "@crossengin/api-gateway";
+import {
+  isPrincipalRefused,
+  principalNamesAPerson,
+  type PrincipalRefused,
+  type ResolvedPrincipal,
+} from "@crossengin/api-gateway";
 import type { PrincipalResolver, PrincipalResolverInput } from "@crossengin/api-gateway-runtime";
 import { DEFAULT_MAX_STALE_MS } from "./tenant-status-gate.js";
 
@@ -295,11 +300,28 @@ export function withAbacAttributes(
   directory: AbacAttributeDirectory,
 ): PrincipalResolver {
   return {
-    async resolve(input: PrincipalResolverInput): Promise<ResolvedPrincipal | null> {
+    async resolve(
+      input: PrincipalResolverInput,
+    ): Promise<ResolvedPrincipal | PrincipalRefused | null> {
       const resolved = await resolver.resolve(input);
       // No principal, so nothing to decorate — and returning the same `null` keeps the fail-closed
       // 401 the wrapped resolver decided on.
       if (resolved === null) return null;
+      // A refusal passes straight through, undecorated: there is nothing to attach attributes to
+      // and the wrapped resolver's verdict is final (ADR-0398).
+      //
+      // Unreachable in the shipped wiring, and the reason is **not** the composition order — which
+      // the first draft of this comment got backwards. `server.ts` wraps the revocation check
+      // *outside* this decoration, so on the way in this function runs **first** and the revocation
+      // check inspects what it returns. The arm is unreachable because nothing *beneath* it
+      // refuses: its inner resolver is `buildPrincipalWiring`'s, which answers a principal or
+      // `null`. Both wrappers' refusal arms are in that state, each for its own inner resolver, and
+      // either stops being vacuous the moment a refusing resolver is composed below it — which is
+      // why this is a fact about the current wiring and not about this function.
+      //
+      // The compiler insists regardless: `principalNamesAPerson` reads `principalKind`, which a
+      // refusal has not got.
+      if (isPrincipalRefused(resolved)) return resolved;
       if (!principalNamesAPerson(resolved)) return resolved;
       // A membership is keyed `(user_id, tenant_id)`, so with no tenant there is no scope to read in
       // and no row to read. The gateway already decided whether such a request may proceed.
@@ -361,9 +383,13 @@ export function withMembershipRevocationCheck(
   onRefused?: (tenantId: string, userId: string) => void,
 ): PrincipalResolver {
   return {
-    async resolve(input: PrincipalResolverInput): Promise<ResolvedPrincipal | null> {
+    async resolve(
+      input: PrincipalResolverInput,
+    ): Promise<ResolvedPrincipal | PrincipalRefused | null> {
       const resolved = await resolver.resolve(input);
       if (resolved === null) return null;
+      // Already refused by something inside, so there is no membership question left to ask.
+      if (isPrincipalRefused(resolved)) return resolved;
       if (!principalNamesAPerson(resolved)) return resolved;
       // No tenant means no `(user_id, tenant_id)` row to read, so there is no membership to have
       // been revoked. The gateway already decided whether such a request may proceed.
@@ -371,7 +397,13 @@ export function withMembershipRevocationCheck(
       const attributes = await directory.attributesFor(resolved.tenantId, resolved.principalId);
       if (attributes !== null) return resolved;
       onRefused?.(resolved.tenantId, resolved.principalId);
-      return null;
+      // `principal_disabled` and not `null`, which the gateway maps to `principal_not_found`
+      // (ADR-0398). The caller's answer is unchanged -- one 401, nothing about why, which is this
+      // function's own decision two paragraphs up -- and the **record** stops saying that a
+      // principal who exists does not. A revoked membership was aggregated beside genuinely unknown
+      // principals in `idx_gateway_pipeline_auth_outcome`, so the one query an operator would run to
+      // tell a revocation from a bad subject could not separate them.
+      return { refusedAs: "principal_disabled" };
     },
   };
 }

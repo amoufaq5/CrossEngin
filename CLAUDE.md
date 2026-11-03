@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 21,141 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 21,178 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -1472,7 +1472,7 @@ report; `apps/operate-web` has none).
   on the one route whose entire design is that every refusal looks identical, and as a status
   clients retry for a condition no retry fixes. ADR-0359's `writeTxn` finding reproduced inside the
   increment citing it, past every test, because every test supplies a well-formed role list. It is
-  a twelfth `LoginRefusal` now (`membership_role_unusable`, not counting against the lockout, since
+  the **eleventh** `LoginRefusal` (`membership_role_unusable`, not counting against the lockout, since
   the password was correct), verified byte-identical to a wrong-password refusal with the role named
   in the log — and the throw stays as a backstop this path can no longer reach, `dischargeAbac`'s
   shape. The predicate was also spelled **twice**, which is this increment's own class, and is one
@@ -3138,10 +3138,96 @@ report; `apps/operate-web` has none).
   https`**, so its scheme is unchanged whatever the gate decides, and `hmac_signature` needs two
   flags no compose passes. Either flag is the remedy, which is why there is no boot refusal — it
   would have to guess which, over a condition (*is there a terminator in front of me*) this ADR
-  establishes the process cannot know. Nothing else reads `request.scheme`:
-  `requiresHttpsTransport` and `SCHEMES_REQUIRING_HTTPS` have **zero callers** between them, and
+  establishes the process cannot know. Nothing else read `request.scheme` at the time:
+  `schemeRequiresHttps` and `SCHEMES_REQUIRING_HTTPS` had **zero callers** between them, and
   `forwardedFor`'s only reader is callerless — which is why the other four facts were gated with no
-  behaviour change at all.
+  behaviour change at all. **Two corrections to that sentence, both made by measuring it**
+  (ADR-0398): it named `requiresHttpsTransport`, which `git log -S` finds in **no source file in any
+  commit** — a function cited as evidence for a census that has never existed, where the real
+  predicate is `schemeRequiresHttps`; and the census itself is now false, because
+  `plaintextTransportClause` reads it to emit the boot line's plaintext-transport clause. So the
+  pair split: one has a reader and `SCHEMES_REQUIRING_HTTPS` does not. Wrong-when-written on the
+  name and drifted on the count, which is the pair this file's own P3.1 entry says to classify
+  rather than quietly re-number.
+
+  ADR-0398 closes ADR-0395's six open ends, and the class is **a decision recorded somewhere that
+  does not decide anything**. They read as six unrelated items — a parser arm, a KDF bound, a timing
+  equaliser, two callerless constants, an unproduced enum member, a proxy's headers — and in each
+  one the repo had already done the hard part: the support map knew `basic` was refused and the
+  parser did not consult it for a credential-less header, `parsePasswordHash` validated a stored
+  parameter set's *shape* and nothing bounded its *cost*, the login equalised work across five
+  refusal arms and not the sixth, two constants encoded two real judgements that no function read,
+  `AUTH_OUTCOMES` modelled `principal_locked` and nothing could return it, and the console proxy
+  decided in one line that exactly one response header was worth forwarding.
+  **The `maxmem` hole was at the root and the obvious fix was one level up.** `scryptMaxmem`
+  computed `256 * n * r` against node's real `128 * r * (n + p + 2)`, and the two **cross at
+  `n = p + 2`** — so for `n < p + 2` the allowance sat *below* the requirement and scrypt threw the
+  very error the function exists to avoid, with the hole sitting exactly on `parsePasswordHash`'s
+  own `n >= 2` floor. Measured both ends on Node v22.23.4: `n=2, r=1, p=1` threw under the old form
+  and answers in 0 ms under the corrected one, and at the shipped `n=2^15, r=8` the old form crosses
+  at **`p = 32766` runs, `p = 32767` does not**. So the fix is the formula and not a higher floor,
+  and it is a **6,144-byte** no-op at the defaults (67,108,864 → 67,115,008). A floor would also
+  have been the wrong remedy for a second reason: `rehashTo` is how a weak stored hash is upgraded,
+  so a floor denies the very login that performs the upgrade (ADR-0348's asymmetry read the other
+  way round).
+  **One cost ceiling gets the wrong resource, which is why there are two.** CPU is `n * r * p` and
+  memory `128 * r * (n + p + 2)`, so **`p` buys CPU for free** — at `n=2^15, r=8`, `p=512` is 29.8 s
+  at 34.1 MB and `p=1024` 60.7 s at 34.6 MB, flat memory at every value — while `r` is the opposite
+  and therefore self-limiting, `r=1024` being 15.0 s but needing 4.3 GB a small VM cannot allocate.
+  **ADR-0395 named `r` as the hazard and quoted ~30 s; that figure is `p`'s**, and `r`'s own worst
+  case is the one the host refuses on our behalf. A memory ceiling alone admits the 60-second row, a
+  CPU ceiling alone the 4.3 GB row. The column's CHECK is `[0-9]+` three times with no bound, so
+  `p=99999999` stores and costs ~1.6 million seconds on one of four libuv threads.
+  Two refusals are **created by the fix** and so had to land with it. Bounding the parameters turns
+  an unparseable row from a throw-into-the-route's-catch (a retryable **503** claiming the credential
+  directory was unreachable) into a clean 401 — and *a clean refusal that costs nothing is an
+  oracle*, so `unreadable_hash` now spends `spendPasswordWork` like the other five arms. Measured
+  live: the hostile `p=512` row went from a 503 at ~17 s to a **401 at 87 ms**, indistinguishable
+  from a wrong password at 84 ms and an unknown email at 82 ms.
+  **And the two ceilings then created the very defect the increment exists to close, which an
+  adversarial pass caught before it shipped.** RFC 7914 §6 requires `N < 2^(16·r)` and OpenSSL
+  enforces it **under the memory-limit error code**, so it presents as a `maxmem` problem and is
+  not one: such a set throws at `Number.MAX_SAFE_INTEGER`, and throws *synchronously*. The ceilings
+  alone admitted **127 sets that cannot derive at all** — every `r=1` with `n >= 2^16` — so
+  `parsePasswordHash` admitted the row and `deriveScrypt` threw, which is the 503-with-a-false-
+  diagnosis this increment is about. `passwordParamsAreDerivable` has a **third clause** now
+  (882 admitted sets, 0 throws, the 127 refused), and **why no test caught it is the reusable
+  half**: the test titled *"clears the measured minimum with headroom at every parameter set"*
+  iterates 105 members of which 10 cannot run at any `maxmem` and asserts only
+  `scryptMaxmem(n,r,p) > 128·r·(n+p+2)` — **pure arithmetic against a formula written in the same
+  file, never calling `scrypt`**. Fifth instance of this file's documented-the-hazard-and-checked-
+  nothing shape (ADR-0351, ADR-0362, ADR-0372, ADR-0395); two tests derive now.
+  **The declared residual is measured rather than asserted, and it self-heals.** An `n=2` row
+  refuses a wrong password in **10 ms** against that 82–87 ms floor — ~8.5× cheaper, which is what
+  tells a guesser the row is weak — and the *ratio* is the durable form where "~0 ms" is not, since
+  once scrypt is free the HMAC and the round trip dominate. The same run measured the correct
+  password at 88 ms, the column moving `n=2` → 32768, and the next wrong password back at the full
+  87 ms: so the window is open **until the holder authenticates once**, and permanently open only
+  for an account nobody ever signs in as.
+  Three things were sharper than the six items. A **seventh, unnamed** finding: an empty
+  `Authorization` or `x-api-key` value was recorded `credential_malformed` — a claim about the
+  caller's credential, about a caller that supplied none — where ADR-0365's established rule is that
+  an empty value is *nothing supplied*; `headerPresents` is one predicate at all four positions and
+  live, `Authorization: ""` now answers byte-identically to no credential at all. **Three of this
+  increment's own claims were refuted by measuring them before committing**: the six security
+  headers are *not* on every response (an early auth refusal, a no-route 404 and `/health` carry
+  none, so the proxy's loss was confined to authenticated responses), `www-authenticate` was *never*
+  dropped because the runtime never sends it as a header (only as a problem-document extension, zero
+  header-valued producers), and `cache-control` is a real member no survey had named. And the
+  **producerless `AUTH_OUTCOMES` census needs `dist/` excluded to mean anything** — a repo-wide grep
+  returns the whole 19-member union on every query because the built `.d.ts` inlines it — after
+  which four members have no producer and **both apparent producers are homonyms**: `mfa_required`
+  in `packages/sso`, which declares its own `LOGIN_OUTCOMES` and has zero importers (ADR-0354's
+  defect, inside the increment citing it), and `weak_tls_rejected` as a *problem-type registry key*,
+  the same string in the same package family under a different vocabulary. Three of the four look
+  like **category errors** rather than gaps: a TLS version is a transport property with no
+  credential evaluated, `mfa_required` is a challenge this gateway does not issue, and the scope
+  check lives in `dispatch_handler` recording `insufficient_scope` — **transposed** against the
+  enum's `scope_insufficient`, so nothing could match them up by string even by accident. Only
+  `principal_locked` is coherent-but-unproduced, and it gains a shape
+  (`PRINCIPAL_REFUSAL_OUTCOMES`) with deliberately no producer, because the lockout is a login rate
+  limiter whose counter is advanced by a party who does not hold the credential — so promoting it to
+  a session refusal would be a remote session-kill. ADR-0384's class in four new places.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -4128,6 +4214,25 @@ packages exist at only one layer, noted below where that is true.
   `RECOGNISABLE_AUTH_SCHEMES` and
   `SERVED_AUTH_SCHEMES` are **derived** from the map and never restated, which is what makes the
   literal pin on the second one a fence rather than a second spelling.
+  **`authSchemeToken` is the structured half of the prose `recognisedFrom` since ADR-0398**, set on
+  all eight entries, and `BARE_AUTH_SCHEME_TOKENS` is derived from it — admitting a bare token only
+  where the treatment is `refused`, so a credential-less `Authorization: Basic` is refused **by
+  name** with its reason where it used to fall to the generic residual, and a **served** scheme can
+  never be captured: `Bearer ` with no token must stay a `bearer_jwt` refusal rather than become a
+  named refusal about a scheme this build does serve. Beside it,
+  `PRINCIPAL_REFUSAL_OUTCOMES` / `PrincipalRefused` / `isPrincipalRefused` widen a resolver's answer
+  to a **third** thing — a refusal, where `null` meant *no such principal* and so recorded a claim
+  about a principal that exists. `principal_locked` is in that pair with deliberately **no
+  producer**: the lockout is a login rate limiter whose counter is advanced by a party who does not
+  hold the credential, so promoting it to a session refusal would be a remote session-kill. The
+  widening is **covariant**, so no existing `PrincipalResolver` implementation needed editing.
+  **`STRONG_AUTH_SCHEMES` is kept rather than deleted, with its expiry condition named**: it is
+  `SERVED` minus `api_key_header`, a judgement the support map does not make, and its consumer would
+  be `mfa_required`, which has no producer — so it is a declaration with a checkable condition for
+  its own removal rather than a leftover (ADR-0337's test is *a second spelling of live code*, which
+  it is not). The pair split, and the other half has a reader now:
+  `schemeRequiresHttps` is read by `plaintextTransportClause`, while `SCHEMES_REQUIRING_HTTPS` still
+  has none.
   **`hmac_signature` is `served` since ADR-0393, which leaves `indistinguishable` with one member**
   — and the scheme left that treatment by *satisfying its argument* rather than by the argument being
   withdrawn: the stated ground was that no wire position had been **chosen**, and choosing a
@@ -4869,6 +4974,27 @@ packages exist at only one layer, noted below where that is true.
   because a corrupt row must not be counted as a failed attempt — it would lock a user out of an
   account whose password they typed correctly. No floor on a user's password, deliberately: the
   floor is on the **deployment's** pepper, through `parseCredentialPepper`.
+  **And `scryptMaxmem` takes `p` since ADR-0398, because `256·n·r` is not always above the
+  requirement.** The two cross at `n = p + 2`, so for `n < p + 2` the allowance sat *below*
+  `128·r·(n+p+2)` and scrypt threw the very error that function exists to avoid — with the hole
+  sitting exactly on `parsePasswordHash`'s own `n >= 2` floor. Measured both ends on Node v22.23.4:
+  `n=2, r=1, p=1` threw under the old form and answers in 0 ms under `256·r·(n+p+2)`, and at the
+  shipped `n=2^15, r=8` the old form crosses at **`p=32766` runs, `p=32767` does not**. The
+  correction is a **6,144-byte** no-op at the defaults (67,108,864 → 67,115,008), so it closes a
+  degenerate corner at the root rather than being worked around one level up by a floor nobody could
+  derive from the formula. `passwordParamsAreDerivable` is the **two** ceilings beside it, and two
+  because a single one bounds the wrong resource: CPU is `n·r·p` and memory `128·r·(n+p+2)`, so **`p`
+  buys CPU for free** (at `n=2^15, r=8`: `p=512` is 29.8 s at 34.1 MB, `p=1024` 60.7 s at 34.6 MB —
+  flat memory at every value) while **`r` is self-limiting** (`r=1024` is 15.0 s and needs 4.3 GB,
+  which a small VM cannot allocate). A memory ceiling alone admits the 60-second row and a CPU
+  ceiling alone the 4.3 GB row. One predicate with **two readers** — `parsePasswordHash` answers
+  `null`, `hashPassword` **throws** — so a hash this binary writes and then calls unreadable is
+  unrepresentable; and still **no work floor**, because `rehashTo` is the remedy for a weak stored
+  hash and a floor denies the very login that performs the upgrade (ADR-0348 read the other way
+  round). The cost of that permissiveness is measured rather than reasoned: live, an `n=2` row
+  refuses a wrong password in **10 ms** against an 82–87 ms floor, ~8.5× cheaper, and the window
+  closes on the **first successful login** — the same run saw the column move to 32768 and the next
+  refusal back at 87 ms.
   `ed25519PublicKeyFromSeed` is the other ADR-0358 addition, in `signing.ts`, and it exists so a
   deployment that signs its own tokens holds **one** secret. The reason is sharper than
   convenience: `signEd25519(seedA, pubB, m)` **does not throw** — node builds the key from `d` and
@@ -7311,6 +7437,43 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   default, so a redirect would hand every caller a 200 carrying the login page's HTML with
   `res.ok` true. The cookie is only a hint: the API verifies the token on every request, so a
   forged one is a 401 **from the API**.
+  **And since ADR-0398 the proxy forwards what the API sets, by deny-list.** Its response handling
+  was a one-entry allow-list, `{ "content-type": ... }`, so a browser saw **1 of 7** headers on an
+  authenticated response — none of the six security headers the gateway merges — and would have
+  dropped the next header the API added too. `forwardedResponseHeaders` passes everything but the
+  hop-by-hop and body-describing fields plus `set-cookie`, and the **opposite shapes are each right
+  for their own reason**: on the request this app is a security boundary deciding what of the
+  browser's the API may see, so anything unnamed is withheld; on the response the API is the
+  authority and this app is a pipe. Verified live against a deliberately hostile origin that gzips
+  and sets every denied header — `content-encoding`, `content-length` (37, the *gzipped* length
+  against an 18-byte decoded body, so forwarding it would truncate the response) and `set-cookie`
+  are dropped while the body still parses, and `cache-control`, `retry-after`, `ratelimit-limit` and
+  **`x-custom-upstream`** survive. That last one is what proves the *shape*: it is a header the
+  gateway has never set, so the next one it adds survives too, which an allow-list cannot do.
+  **An adversarial pass over that fix found three defects it had not named and refuted two of its
+  own claims**, and the refuted pair is the instructive half. *The six security headers are not on
+  "every response"* — the rule is `runtime.ts`'s `if (ctx.finalResponse !== null)`, so they ride on
+  a response the pipeline carries to `apply_security_headers`, meaning a handler **success** (2xx,
+  204 included) and **not** any gateway denial *or* handler refusal: 401, 403, 404 and 422 all carry
+  none, because a handler 4xx is mapped to a denial envelope that short-circuits the stage. And
+  *`www-authenticate` was never dropped because the runtime never sends it* is **false in all three
+  clauses**: `problems.ts` sets it as a real header, measured live as `Bearer realm="crossengin"` on
+  a junk-api-key 401, so the old allow-list did drop it and the deny-list starts forwarding it. The
+  claim came from a grep truncated by `head -10` that stopped before the one producing file — **a
+  census read off a truncation**, which is the cheapest way there is to be confidently wrong.
+  The three unnamed defects: a successful **DELETE through the console was a 500**, because
+  `new Response("", {status: 204})` throws (`null` is the only body 204/205/304 accept) and both an
+  entity delete and an association unlink answer 204 — pre-existing, in the function this increment
+  rewrote, and it made `forwardedResponseHeaders` unreachable on the one status whose `content-type`
+  fallback would matter; **a static deny-list cannot implement RFC 9110 §7.6.1**, which supplies no
+  list at all (the eight-name enumeration everyone quotes is RFC 2616 §13.5.1, obsoleted) but
+  defines `Connection` as the *mechanism*, so upstream's own `Connection: keep-alive, x-secret-hop`
+  had `x-secret-hop` forwarded to the browser; and **`vary: authorization` forwarded verbatim is a
+  lie this proxy creates**, since the browser never sends that header — the route mints it from the
+  cookie — so a cache is told the response varies by something the client does not control when it
+  varies by `Cookie`, which paired with a forwarded `cache-control: public` is a cross-user cache
+  shape. All three are fixed: `NULL_BODY_STATUSES`, `connectionNamedFields` reading upstream's own
+  `Connection`, and `vary: Cookie` **stated rather than forwarded**.
   **It manages people since ADR-0364** — `/platform/users`, `/platform/users/[id]`, a Members panel
   on `/platform/[id]` and `/account` — which is what made the **eleven** identity routes
   `--platform-user-routes` has mounted since ADR-0335 reachable by anybody without `curl`.
@@ -11812,7 +11975,12 @@ three make the rest honest, cheap or verifiable.
    button for an hour (ADR-0335), and which ADR-0385 measured again from the other side: commenting
    out that increment's one publish line leaves both `tsc` and `next build` green, because
    `operate-web` sets no `noUnusedLocals`, so **a UI fix there is fenced by nothing**. The honest
-   next step for this item is a test runner for that app, not more rules.
+   next step for this item is a test runner for that app, not more rules. ADR-0398 is the third
+   measurement from inside it and sharpens what the absence costs: that increment's
+   `forwardedResponseHeaders` is a pure function with an argued deny-list and **no unit test is
+   possible**, because there is no runner to add one to — so it is fenced by a live probe against a
+   hand-built hostile origin and by nothing that will run again. The probe is in ADR-0398's notes
+   and will not be re-run by CI, which is exactly the shape this item describes.
 4. **GDPR Article 15 access and Article 20 portability have no code path at all**, against fifteen
    increments of Article 17. `@crossengin/data-lineage` has zero importers, its six tables are
    declared `unbuilt_subsystem`, there is no SAR route, store, scheduler or flag, and
@@ -12709,6 +12877,50 @@ method is that a stale figure misleads.
    **a refuter aimed at the corrections is worth as much as one aimed at the claims**, and it is
    cheapest to run before the commit that carries them, since the corrections are what the next
    increment designs against.
+
+   **ADR-0398's adversarial pass is the clearest demonstration this entry has, because the refuters
+   were aimed at claims not yet committed and found a live defect among them.** Ten of that
+   increment's claims were refuted, three defects it had not named were found, and one of the three
+   was its **own fix creating the defect it exists to close** (two cost ceilings admitting 127
+   parameter sets that cannot derive at any `maxmem`). Three shapes came out that this entry had
+   not recorded. **`head -N` on a census is how you get a wrong census**: the claim that
+   `www-authenticate` is never sent as a header came from a grep truncated before the one producing
+   file, and it yielded not merely a wrong fact but a wrong *decision* — a paragraph refusing to fix
+   an imagined gap. **A ratio needs its layer named**: a timing channel measured at ~1.8 million×
+   on the function and ~11× on the route is one number about two things, and the one that belongs in
+   a comment about an oracle is what a caller can sample. And **a test can assert a formula against
+   itself**: that ceiling's own test compared `scryptMaxmem` against a formula written in the same
+   file and never called `scrypt`, so it passed over 10 members of its own loop that cannot derive —
+   the fifth documented-the-hazard-and-checked-nothing member and the first where the check and the
+   thing checked were authored in one commit.
+
+   **ADR-0398 also adds two long-standing members and a fourth shape, which is a measurement taken
+   at the wrong layer.** The two members are both **wrong when written** rather than drifted,
+   which `git` settles in one command each: `membership_role_unusable` is the **eleventh**
+   `LoginRefusal` and both ADR-0369 and this file called it the twelfth, while `git show` on the
+   commit that introduced it counts 11; and `requiresHttpsTransport`, named here and in ADR-0394 as
+   one of two symbols in a zero-callers census, **appears in no source file in any commit** — a
+   function cited as evidence, where the real predicate is `schemeRequiresHttps`. A name that has
+   never existed is the most expensive kind of stale figure, because grepping for it returns nothing
+   and the natural conclusion is that the symbol was deleted rather than that the sentence is
+   fiction.
+   The new shape: **a defect measured on a function is a claim about that function, and asserting it
+   of the request path needs the transport measured too.** ADR-0395's own addendum had already paid
+   this once (a trailing-space `Authorization` value that the HTTP parser strips before any code
+   sees it, so the defect was real at the builder seam and unreachable over either transport), and
+   ADR-0398 paid it again in the other direction: *three* of its own about-to-be-committed claims
+   were refuted by measuring them — the six security headers are not on "every response",
+   `www-authenticate` was never dropped because it is never sent as a header, and `cache-control`
+   was a member nothing had named. All three were in a doc comment written minutes earlier by an
+   author who had the live server to hand.
+   Two probe errors from the same increment are worth carrying as technique rather than as members.
+   **A positive control that does not return 200 is not a control**: a fixture file recorded a hash
+   and not its plaintext, so a "correct password" row was a second wrong-password probe wearing the
+   wrong label, and the five-row table it sat in read as "nothing logs in". And **a fixture you have
+   not read back is not a fixture**: `hashPassword(pw, pepper, params)` is
+   `(pw, pepper: string, opts: {params?, salt?})`, so a bare params object silently mints at the
+   **defaults** — an `n=2` claim was about to be measured against a fixture holding `n=32768`.
+   Round-trip a minted artifact through its own parser and assert the field you care about.
 2. **Six concepts are modelled several times over, two with non-nesting member sets.** Data
    classification has five declarations — four identical and one, in `data-lineage`, **disjoint past
    two members**, so the moment anything bridges the kernel's classification into the lineage graph
@@ -12795,7 +13007,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 392 records; 313 Accepted, 79 Proposed (the
+title or status change cannot drift. 393 records; 314 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

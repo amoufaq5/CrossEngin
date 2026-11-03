@@ -12,6 +12,42 @@ export const AUTH_SCHEMES = [
 ] as const;
 export type AuthScheme = (typeof AUTH_SCHEMES)[number];
 
+/**
+ * The schemes whose credential proves enough that a second factor is not owed.
+ *
+ * **Kept with no reader, deliberately, and this is the argument** -- ADR-0395 offered *delete, or
+ * give them a reader* over this and `SCHEMES_REQUIRING_HTTPS`, and measurement splits the pair:
+ * that one is wired to the boot survey (ADR-0398) and this one is not, because the surface that
+ * would read it does not exist yet.
+ *
+ * It fails ADR-0337's deletion test, whose rule is *a second spelling of live code*. This is not
+ * one: the criterion is what the credential **proves**, and an api key is a bearer secret that
+ * proves possession of a long-lived string where the other three prove possession of a key used on
+ * this request. `AUTH_SCHEME_SUPPORT` does not make that judgement -- the map says a scheme is
+ * authenticated here -- and `auth-resolution.test.ts` argues in the source that the two may
+ * legitimately disagree, asserting the set against the map rather than beside it for that reason.
+ *
+ * **It is currently equal to `SERVED_AUTH_SCHEMES` minus `api_key_header`, and that is a
+ * coincidence rather than the definition.** An adversarial pass over ADR-0398 dated it: the
+ * equality has held only since `mtls` was served on 2026-10-31, and before that `SERVED` was two or
+ * three schemes against this set's three, so they were unequal for the whole of Phase 1 to 4. This
+ * is a Phase-1 constant that `SERVED` grew into, the subtraction is **unfenced** (the test asserts
+ * `STRONG ⊆ SERVED`, not the difference), and it is unstable in the unsafe direction: if `basic`
+ * were ever served -- considered and refused in ADR-0395 -- the subtraction would include a
+ * password re-sent on every request, failing the stated criterion by the **same** objection the
+ * api-key exclusion rests on. So read the criterion, not the arithmetic.
+ *
+ * Its consumer would be `mfa_required`, the one `AuthOutcome` that could act on a credential
+ * strength grade -- and that outcome has **no producer anywhere in the workspace**. So this is a
+ * modelled judgement waiting on a step-up surface, and the keep has a **checkable expiry
+ * condition** rather than being open-ended: when `mfa_required` gains a producer, this set is what
+ * it reads, and if a step-up surface is ever declined on the record then both go together.
+ *
+ * `isStrongAuthScheme` below is callerless with it, as is `isAuthSuccess` -- three consecutive
+ * one-line predicates over three sets, of which only `schemeRequiresHttps` now has a reader. They
+ * are left as the sets' published shape rather than deleted for tidiness: the open end asked about
+ * the **sets**, and an exported predicate removed is a breaking change made for no measured gain.
+ */
 export const STRONG_AUTH_SCHEMES: ReadonlySet<AuthScheme> = new Set([
   "bearer_jwt",
   "mtls",
@@ -72,6 +108,24 @@ export interface AuthSchemeSupport {
    * is one of the two halves of this increment's own defect.
    */
   readonly recognisedFrom: string | null;
+  /**
+   * The RFC 9110 §11.6.2 auth-scheme token that names this scheme in an `Authorization` header, or
+   * `null` for a scheme recognised from some other position (`api_key_header`, `api_key_query`,
+   * `mtls`, `hmac_signature`) or from none.
+   *
+   * It exists because `recognisedFrom` is **prose** and the request path needs the token as a
+   * value: ADR-0398 gave a credential-less `Authorization: Basic` the refusal its scheme already
+   * has, and deriving *which* scheme a bare token names cannot be done from a sentence. Structured
+   * here rather than as a second constant beside `parseAuthHeader`, which would be ADR-0288's
+   * maintained list -- and a test asserts each token against the prefix that arm matches, in both
+   * directions, so the map and the recognition cannot come to disagree.
+   *
+   * Deliberately not used to *generate* the credential arms: their order is load-bearing
+   * (Authorization before `x-api-key` before the query before the residual before `mtls`, each for
+   * its own stated reason) and generating them would make that order a property of this map's
+   * declaration order instead.
+   */
+  readonly authSchemeToken: string | null;
   /** Why this treatment and not another. Rendered to an operator, so it names a consequence. */
   readonly reason: string;
 }
@@ -220,6 +274,7 @@ export const AUTH_SCHEME_SUPPORT: Readonly<Record<AuthScheme, AuthSchemeSupport>
   bearer_jwt: {
     treatment: "served",
     recognisedFrom: "an Authorization header with the Bearer auth-scheme",
+    authSchemeToken: "Bearer",
     reason:
       "verified here: EdDSA signature against the configured JWKS, then exp, iss and aud; nbf is " +
       "honoured when present and never required",
@@ -227,11 +282,13 @@ export const AUTH_SCHEME_SUPPORT: Readonly<Record<AuthScheme, AuthSchemeSupport>
   api_key_header: {
     treatment: "served",
     recognisedFrom: `an ${API_KEY_HEADER} header`,
+    authSchemeToken: null,
     reason: "resolved here against the deployment's opaque-token lookup",
   },
   anonymous: {
     treatment: "not_a_credential",
     recognisedFrom: "no credential in any recognised position",
+    authSchemeToken: null,
     reason:
       "the absence of a credential, not one of its kinds — the value a principal and a pipeline row carry when nothing was presented",
   },
@@ -291,6 +348,7 @@ export const AUTH_SCHEME_SUPPORT: Readonly<Record<AuthScheme, AuthSchemeSupport>
   basic: {
     treatment: "refused",
     recognisedFrom: "an Authorization header with the Basic auth-scheme",
+    authSchemeToken: "Basic",
     reason:
       "not served: Basic carries a userid and a password and nothing else, while an authorization " +
       "answer here needs a tenant as well — one person holds different roles in different tenants " +
@@ -301,12 +359,14 @@ export const AUTH_SCHEME_SUPPORT: Readonly<Record<AuthScheme, AuthSchemeSupport>
   hmac_signature: {
     treatment: "served",
     recognisedFrom: `a ${REQUEST_SIGNATURE_HEADER} header`,
+    authSchemeToken: null,
     reason:
       `verified here at authenticate: the key id names the signing key, the timestamp is checked against a symmetric tolerance, and the HMAC-SHA256 is compared in constant time against a canonical message covering the method, path, sorted query, body digest, host and scheme. Reserving its own header rather than an Authorization auth-scheme token is why it did not need one chosen: ${REQUEST_SIGNATURE_HEADER} is distinct from CrossEngin-Signature, the payload-authenticity format, so no verifier has to guess which canonical message a value is over`,
   },
   api_key_query: {
     treatment: "refused",
     recognisedFrom: "an api_key query parameter",
+    authSchemeToken: null,
     // The ADR citation this used to carry is gone for the reason given on `basic`: the string is
     // interpolated into the 401 body, and an internal document number is unactionable to the caller
     // reading it. The *rule* it referenced is restated in one clause instead, which is the half that
@@ -318,12 +378,16 @@ export const AUTH_SCHEME_SUPPORT: Readonly<Record<AuthScheme, AuthSchemeSupport>
   mtls: {
     treatment: "served",
     recognisedFrom: `a ${CLIENT_CERT_FINGERPRINT_HEADER} header from a trusted edge`,
+    authSchemeToken: null,
     reason:
       `resolved here against the deployment's client-certificate registry — and it is the one served scheme this gateway does not *verify*. The other three establish the fact from bytes plus a key they hold: bearer_jwt checks a signature, api_key_header looks the token up, hmac_signature recomputes the MAC. A TLS handshake happens at the edge, so what arrives is the edge's assertion in ${CLIENT_CERT_FINGERPRINT_HEADER}, and the only decision available here is whether to believe it. So the scheme is reachable exactly when a deployment declares that its edge performs mutual TLS and overwrites that header, which is what makes the fingerprint the edge's statement rather than the caller's`,
   },
   bearer_opaque: {
     treatment: "indistinguishable",
     recognisedFrom: null,
+    // `null` and not `"Bearer"`: the token it would name is the one `bearer_jwt` already claims,
+    // which is this treatment's whole reason. A token here would assert a position it does not hold.
+    authSchemeToken: null,
     reason:
       "the Bearer auth-scheme is claimed by bearer_jwt and nothing on the wire separates them; a token-shape test would *grant* rather than refuse, because the opaque lookup api_key_header already uses matches the whole api-key string, so routing a non-JWT bearer token to it would accept an api key presented in Authorization — a capability decision, not a parser one",
   },
@@ -467,6 +531,45 @@ export const RECOGNISABLE_AUTH_SCHEMES: readonly AuthScheme[] = Object.freeze(
 export const SERVED_AUTH_SCHEMES: readonly AuthScheme[] = Object.freeze(
   AUTH_SCHEMES.filter((s) => AUTH_SCHEME_SUPPORT[s].treatment === "served"),
 );
+
+/**
+ * The schemes a **bare** `Authorization` auth-scheme token is enough to name -- lowercased token to
+ * scheme, derived and never listed (ADR-0398).
+ *
+ * `refused` and not `served`, and the line is drawn by the request path's own control flow rather
+ * than by preference: `runtime.ts` answers `treatment !== "served"` with `scheme_not_supported`
+ * **before** the credential is read, so for a refused scheme the credential is irrelevant -- it is
+ * denied by name whatever it carries, and presence is therefore sufficient to answer. A served
+ * scheme's answer depends entirely on the credential, so recognising presence there would hand its
+ * verifier an empty string and record a claim about a credential nobody presented. The residual is
+ * the honest answer for `Authorization: Bearer`, and that is why this is not symmetric.
+ *
+ * `api_key_query` contributes nothing because its token is `null`: it is recognised from a query
+ * parameter, so there is no `Authorization` spelling of it to be bare. The live set is therefore
+ * `{basic}` -- one member, derived, and it grows by itself if a scheme is ever refused with a token.
+ */
+export const BARE_AUTH_SCHEME_TOKENS: ReadonlyMap<string, AuthScheme> = new Map(
+  AUTH_SCHEMES.flatMap((s) => {
+    const { treatment, authSchemeToken } = AUTH_SCHEME_SUPPORT[s];
+    return treatment === "refused" && authSchemeToken !== null
+      ? ([[authSchemeToken.toLowerCase(), s]] as const)
+      : [];
+  }),
+);
+
+/**
+ * The scheme a whole `Authorization` value names when it carries no credential at all, or `null`.
+ *
+ * Case-insensitive because RFC 9110 §11.6.2 makes the auth-scheme token case-insensitive, and the
+ * value is compared **whole**: a bare token is exactly what `authSchemeToken` cannot report, since
+ * its rule is *no space means no auth-scheme, so the value is potentially a bare credential and
+ * nothing is named*. That rule is right for `ce_live_abc` and wrong for `Basic`, and the two are
+ * separable only against the set of tokens this build knows -- which is what makes this a lookup
+ * rather than a heuristic.
+ */
+export function bareAuthScheme(headerValue: string): AuthScheme | null {
+  return BARE_AUTH_SCHEME_TOKENS.get(headerValue.trim().toLowerCase()) ?? null;
+}
 
 export const AUTH_OUTCOMES = [
   "anonymous",
@@ -822,6 +925,78 @@ export const resolveAuth = (
   // it asserted an authentication over bytes that contain no signature.
   return { outcome: "authenticated", reason: "credential_valid" };
 };
+
+/**
+ * The `AuthOutcome` members that are a statement about a principal that **exists** -- as against
+ * `principal_not_found`, which says no principal was located at all (ADR-0398).
+ *
+ * The distinction had no channel to travel through: `PrincipalResolver.resolve` answered
+ * `ResolvedPrincipal | null` and `resolvePrincipalForCredential` mapped every `null` to
+ * `principal_not_found`, so ADR-0381's membership-revocation gate -- which returns `null` for a
+ * person whose membership was revoked -- recorded *this principal does not exist* for one that
+ * plainly does, while `principal_disabled` sat in `AUTH_OUTCOMES` with zero producers. That is
+ * ADR-0384's finding one outcome across: `credential_malformed` was a claim about the caller's
+ * credential for a gateway gap, and this was a claim about the directory for a deliberate
+ * revocation. The caller is told the same thing either way (one 401, nothing about why -- the gate's
+ * own decision); what changes is the **record**, which `idx_gateway_pipeline_auth_outcome`
+ * aggregates, so a revocation was counted beside genuinely unknown principals.
+ *
+ * Both members are expressible by any resolver, which is the point of a set rather than one new
+ * value: it stops the gateway modelling an outcome it has no way to produce.
+ *
+ * `principal_locked` keeps no producer, and the reason is a **refusal to wire one** rather than an
+ * absence. The repo's only lockout is `credentialIsLocked`, a *login rate limiter*: its counter is
+ * advanced by failed password attempts, which is to say by a party who does **not** hold the
+ * credential. Promoting that to a session refusal would hand anyone who knows an email address a
+ * remote session-kill -- a few wrong guesses and the real holder's live sessions stop. So the
+ * outcome stays expressible and unproduced until something locks a *principal* rather than metering
+ * a guesser.
+ *
+ * An earlier draft of this comment argued instead that "no request reaching this stage can be
+ * carrying a locked account's session, because the lockout answers before a token is minted". That
+ * is **false**, and measuring it is what produced the reason above: nothing on the request path
+ * reads `credential_locked_until` (zero readers in either gateway package), `membershipFor` does not
+ * join `meta.users`, and `--session-token-ttl` is unset on the shipped compose, so a lock at T1
+ * leaves a session minted at T0 served for up to an hour. The conclusion survived; its premise did
+ * not.
+ *
+ * The wider census, which is the item's real shape: **five** of the nineteen `AUTH_OUTCOMES` had no
+ * producer -- these two plus `scope_insufficient`, `mfa_required` and `weak_tls_rejected` -- and
+ * they are the contiguous tail of the original Phase-1 fifteen, while every outcome added since
+ * arrived with one. So it is one declaration habit rather than five omissions. This gives one of the
+ * five a producer and leaves **four**; the other three are recorded in *What's actually left* rather
+ * than fixed here, because each belongs to a different stage, and two of them are worse than
+ * unproduced: a weak-TLS denial records `anonymous`, and a scope denial would record
+ * `authenticated` -- the success value.
+ *
+ * Two of those four are producerless for a reason that is easy to miss and worth stating, because a
+ * plain grep reads them as produced. `weak_tls_rejected` *is* assigned, at `resolveAuth`'s TLS arm
+ * below -- and `resolveAuth` is callerless, so the producer is unreachable (ADR-0336's distinction:
+ * module reachability is not symbol reachability). And `mfa_required` matches four non-declaring
+ * sites that belong to a **homonym**: `@crossengin/sso`'s own login-audit outcome enum, in a package
+ * with zero importers. Counting those as producers is ADR-0354's bare-name-map defect, and this
+ * census made it once before the figure was checked.
+ */
+export const PRINCIPAL_REFUSAL_OUTCOMES = ["principal_disabled", "principal_locked"] as const;
+export type PrincipalRefusalOutcome = (typeof PRINCIPAL_REFUSAL_OUTCOMES)[number];
+
+/**
+ * A resolver's third answer: the principal was located and must not be served.
+ *
+ * Returned rather than thrown, because a throw at this stage is a 500 and this is an ordinary
+ * refusal; and a distinct shape rather than a nullable field on `ResolvedPrincipal`, so a caller
+ * cannot read a refused principal's `principalId` by forgetting to check.
+ */
+export interface PrincipalRefused {
+  readonly refusedAs: PrincipalRefusalOutcome;
+}
+
+/** Narrows a resolver's answer, since `null` and a refusal both mean *do not serve this*. */
+export function isPrincipalRefused(
+  value: ResolvedPrincipal | PrincipalRefused | null,
+): value is PrincipalRefused {
+  return value !== null && "refusedAs" in value;
+}
 
 export interface ResolvedPrincipal {
   readonly principalId: string;

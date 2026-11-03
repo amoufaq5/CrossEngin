@@ -13,9 +13,11 @@ import {
   authSchemeTreatment,
   ParsedAuthCredentialSchema,
   ResolvedPrincipalSchema,
+  BARE_AUTH_SCHEME_TOKENS,
   SCHEMES_REQUIRING_HTTPS,
   STRONG_AUTH_SCHEMES,
   isAuthSuccess,
+  bareAuthScheme,
   isStrongAuthScheme,
   principalAbacAttributes,
   resolveAuth,
@@ -423,6 +425,63 @@ describe("AUTH_SCHEME_SUPPORT", () => {
       const support = AUTH_SCHEME_SUPPORT[scheme];
       expect(support.recognisedFrom === null).toBe(support.treatment === "indistinguishable");
     }
+  });
+
+  it("an Authorization auth-scheme token is declared exactly for the schemes read from there", () => {
+    // ADR-0398. `authSchemeToken` is the structured half of `recognisedFrom`, so the two must agree
+    // about which position names a scheme -- derived from the prose rather than asserted beside it,
+    // because a hand-listed pair is what would drift.
+    for (const scheme of AUTH_SCHEMES) {
+      const { recognisedFrom, authSchemeToken } = AUTH_SCHEME_SUPPORT[scheme];
+      const fromAuthorization =
+        recognisedFrom !== null && recognisedFrom.includes("Authorization header");
+      expect(
+        authSchemeToken !== null,
+        `${scheme}: a token iff recognised from an Authorization header`,
+      ).toBe(fromAuthorization);
+      if (authSchemeToken !== null) {
+        // A `token68`-adjacent shape: RFC 9110 §11.6.2 makes it a `token`, and the prose names it.
+        expect(authSchemeToken).toMatch(/^[A-Za-z][A-Za-z0-9-]*$/);
+        expect(recognisedFrom).toContain(authSchemeToken);
+      }
+    }
+  });
+
+  it("bearer_opaque declares no token, which is the whole of its treatment", () => {
+    // The one entry where `null` is a statement rather than an absence: its token *would* be
+    // `Bearer`, which `bearer_jwt` holds, and that collision is why nothing on the wire can
+    // separate the two. Asserted against `bearer_jwt`'s token so the reason is visible here.
+    expect(AUTH_SCHEME_SUPPORT.bearer_opaque.authSchemeToken).toBeNull();
+    expect(AUTH_SCHEME_SUPPORT.bearer_jwt.authSchemeToken).toBe("Bearer");
+    expect(AUTH_SCHEME_SUPPORT.bearer_opaque.treatment).toBe("indistinguishable");
+  });
+
+  it("a bare auth-scheme token names a refused scheme and never a served one", () => {
+    // The asymmetry is the decision, and it is derived: `runtime.ts` refuses a non-served scheme
+    // before reading the credential, so presence is sufficient there and is not for a served
+    // scheme, whose verifier would be handed an empty string.
+    expect(bareAuthScheme("Basic")).toBe("basic");
+    expect(bareAuthScheme("basic")).toBe("basic"); // RFC 9110: the token is case-insensitive
+    expect(bareAuthScheme("BASIC")).toBe("basic");
+    expect(bareAuthScheme("  Basic  ")).toBe("basic");
+    // Served schemes and non-tokens answer null, so the residual keeps them.
+    expect(bareAuthScheme("Bearer")).toBeNull();
+    expect(bareAuthScheme("Negotiate")).toBeNull();
+    expect(bareAuthScheme("Basic Zm9vOmJhcg==")).toBeNull(); // has a credential; a real arm takes it
+    expect(bareAuthScheme("ce_live_abcdef")).toBeNull(); // a bare api-key must stay unnamed
+    expect(bareAuthScheme("")).toBeNull();
+
+    // And the set is exactly the refused schemes carrying a token -- compared both ways, so a
+    // scheme that changes treatment moves in this map without anyone editing it.
+    const expected = AUTH_SCHEMES.filter(
+      (s) =>
+        AUTH_SCHEME_SUPPORT[s].treatment === "refused" &&
+        AUTH_SCHEME_SUPPORT[s].authSchemeToken !== null,
+    );
+    expect([...BARE_AUTH_SCHEME_TOKENS.values()].sort()).toEqual([...expected].sort());
+    // One member today, and the figure is asserted so that a second arrives visibly rather than
+    // quietly widening what a credential-less header can name.
+    expect(BARE_AUTH_SCHEME_TOKENS.size).toBe(1);
   });
 
   it("every reason is prose and none merely restates its own key", () => {

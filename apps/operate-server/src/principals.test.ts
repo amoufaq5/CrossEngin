@@ -1,4 +1,4 @@
-import type { IncomingRequest } from "@crossengin/api-gateway";
+import { isPrincipalRefused, type IncomingRequest } from "@crossengin/api-gateway";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -99,7 +99,11 @@ describe("buildPrincipalWiring", () => {
     // have handed the id to `cancelled_by_user_id`, which has the same key. And since the id is
     // shared, two keys in one tenant would have shared read state.
     const principal = await wiring.principalResolver.resolve({ principalRef: "k1" } as never);
-    expect(principal?.principalKind).toBe("service_account");
+    // Narrowed rather than cast (ADR-0398 widened `resolve` to carry a refusal): an api-key
+    // resolution must answer a principal, so a refusal here would be a defect and the assertion
+    // says so instead of coercing past it.
+    expect(isPrincipalRefused(principal)).toBe(false);
+    expect(isPrincipalRefused(principal) ? null : principal?.principalKind).toBe("service_account");
   });
 
   it("still resolves a key that names its principal as a user", async () => {

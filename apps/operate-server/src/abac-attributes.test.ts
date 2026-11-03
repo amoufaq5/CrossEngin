@@ -1,4 +1,10 @@
-import { principalAbacAttributes, type ResolvedPrincipal } from "@crossengin/api-gateway";
+import {
+  PRINCIPAL_REFUSAL_OUTCOMES,
+  isPrincipalRefused,
+  type PrincipalRefused,
+  principalAbacAttributes,
+  type ResolvedPrincipal,
+} from "@crossengin/api-gateway";
 import type { PrincipalResolver, PrincipalResolverInput } from "@crossengin/api-gateway-runtime";
 import { describe, expect, it, vi } from "vitest";
 
@@ -423,13 +429,30 @@ describe("CachedAbacAttributeDirectory", () => {
   });
 });
 
+/**
+ * Narrows a resolver's answer to a principal, **failing** the test on a refusal.
+ *
+ * Since ADR-0398 `resolve` can answer a `PrincipalRefused`, and `principalAbacAttributes` reads a
+ * principal. An assertion rather than a cast: every `withAbacAttributes` path below must resolve or
+ * pass through, never refuse, so a refusal here is a defect and not something to coerce past -- a
+ * cast would be ADR-0362's type annotation standing in for a check.
+ */
+function asPrincipal(
+  value: ResolvedPrincipal | PrincipalRefused | null,
+): ResolvedPrincipal | null {
+  if (isPrincipalRefused(value)) {
+    throw new Error(`expected a principal, got a refusal: ${value.refusedAs}`);
+  }
+  return value;
+}
+
 describe("withAbacAttributes", () => {
   it("attaches the resolved attributes to a user principal", async () => {
     const directory = directoryOf({ [`${TENANT_A}|${USER}`]: { department: "oncology" } });
     const resolved = await withAbacAttributes(resolverFor(principal()), directory).resolve(
       RESOLVER_INPUT,
     );
-    expect(principalAbacAttributes(resolved)).toEqual({ department: "oncology" });
+    expect(principalAbacAttributes(asPrincipal(resolved))).toEqual({ department: "oncology" });
   });
 
   it("attaches a genuinely empty record, which is not the same as absent", async () => {
@@ -437,7 +460,7 @@ describe("withAbacAttributes", () => {
     const resolved = await withAbacAttributes(resolverFor(principal()), directory).resolve(
       RESOLVER_INPUT,
     );
-    expect(principalAbacAttributes(resolved)).toEqual({});
+    expect(principalAbacAttributes(asPrincipal(resolved))).toEqual({});
   });
 
   it("leaves the field absent when no active membership resolves", async () => {
@@ -447,7 +470,7 @@ describe("withAbacAttributes", () => {
     );
     expect(resolved).not.toBeNull();
     expect("abacAttributes" in (resolved as object)).toBe(false);
-    expect(principalAbacAttributes(resolved)).toBeNull();
+    expect(principalAbacAttributes(asPrincipal(resolved))).toBeNull();
   });
 
   it("never looks a service_account up, because every bare api key shares one id", async () => {
@@ -457,7 +480,7 @@ describe("withAbacAttributes", () => {
       directory,
     ).resolve(RESOLVER_INPUT);
     expect(directory.calls).toEqual([]);
-    expect(principalAbacAttributes(resolved)).toBeNull();
+    expect(principalAbacAttributes(asPrincipal(resolved))).toBeNull();
   });
 
   it("never looks an ai_architect or system principal up either", async () => {
@@ -483,7 +506,7 @@ describe("withAbacAttributes", () => {
       directory,
     ).resolve(RESOLVER_INPUT);
     expect(directory.calls).toEqual([]);
-    expect(principalAbacAttributes(resolved)).toBeNull();
+    expect(principalAbacAttributes(asPrincipal(resolved))).toBeNull();
   });
 
   it("returns null unchanged when the wrapped resolver resolves nothing", async () => {
@@ -531,7 +554,7 @@ describe("withAbacAttributes", () => {
       directory,
     ).resolve(RESOLVER_INPUT);
     expect(directory.calls).toEqual([`${TENANT_B}|${USER}`]);
-    expect(principalAbacAttributes(resolved)).toEqual({ ward: "b" });
+    expect(principalAbacAttributes(asPrincipal(resolved))).toEqual({ ward: "b" });
   });
 
   it("composes over the store directory and its cache end to end", async () => {
@@ -543,7 +566,7 @@ describe("withAbacAttributes", () => {
       now: clock.now,
     });
     const decorated = withAbacAttributes(resolverFor(principal()), directory);
-    await expect(decorated.resolve(RESOLVER_INPUT).then(principalAbacAttributes)).resolves.toEqual({
+    await expect(decorated.resolve(RESOLVER_INPUT).then((v) => principalAbacAttributes(asPrincipal(v)))).resolves.toEqual({
       department: "oncology",
     });
     await decorated.resolve(RESOLVER_INPUT);
@@ -598,7 +621,7 @@ describe("withMembershipRevocationCheck", () => {
       });
   });
 
-  it("refuses a user principal whose membership resolves null", async () => {
+  it("refuses a user principal whose membership resolves null, as principal_disabled", async () => {
     const directory = directoryOf({});
     const refused: string[] = [];
     const resolved = await withMembershipRevocationCheck(
@@ -606,10 +629,34 @@ describe("withMembershipRevocationCheck", () => {
       directory,
       (t, u) => refused.push(`${t}|${u}`),
     ).resolve(RESOLVER_INPUT);
-    // `null`, not a throw: the gateway's auth stage turns it into the same 401 a bad signature
-    // gets, so the caller learns their session is no longer good and nothing about why.
-    expect(resolved).toBeNull();
+    // A refusal and not a throw: the gateway's auth stage turns it into the same 401 a bad
+    // signature gets, so the caller learns their session is no longer good and nothing about why.
+    //
+    // `principal_disabled` and no longer `null` (ADR-0398). `null` means *nothing resolved*, which
+    // the gateway records as `principal_not_found` — and a revoked membership belongs to a person
+    // who exists, so that was a claim about the directory for a deliberate revocation. The
+    // **caller's** answer is identical either way; the record stops being false, and
+    // `idx_gateway_pipeline_auth_outcome` can now separate a revocation from an unknown subject.
+    expect(resolved).toEqual({ refusedAs: "principal_disabled" });
+    expect(isPrincipalRefused(resolved)).toBe(true);
     expect(refused).toEqual([`${TENANT_A}|${USER}`]);
+  });
+
+  it("the refusal it returns is one the gateway's resolver path can name", async () => {
+    // Ties this gate to the mapping without building a whole `IncomingRequest`: what
+    // `resolvePrincipalForCredential` does with a refusal is asserted in
+    // `api-gateway-runtime/src/auth.test.ts`, over both members, and what this gate *produces* is
+    // asserted here. The composition of the two is verified against the real server rather than
+    // here — ADR-0395's addendum measured a defect on a function and asserted it of the request
+    // path, and three transports disagreed, so the end-to-end claim is made where it is testable.
+    const resolved = await withMembershipRevocationCheck(
+      resolverFor(principal()),
+      directoryOf({}),
+    ).resolve(RESOLVER_INPUT);
+    expect(isPrincipalRefused(resolved)).toBe(true);
+    if (isPrincipalRefused(resolved)) {
+      expect(PRINCIPAL_REFUSAL_OUTCOMES).toContain(resolved.refusedAs);
+    }
   });
 
   it("admits a user principal whose membership is active, unchanged", async () => {
@@ -676,6 +723,22 @@ describe("withMembershipRevocationCheck", () => {
       withAbacAttributes(resolverFor(principal()), directory),
       directory,
     );
-    expect(await composed.resolve(RESOLVER_INPUT)).toBeNull();
+    expect(await composed.resolve(RESOLVER_INPUT)).toEqual({ refusedAs: "principal_disabled" });
+  });
+
+  it("passes an inner refusal through undecorated when the order is reversed", async () => {
+    // The order `node.ts` does *not* wire, asserted anyway (ADR-0398): `withAbacAttributes` has to
+    // be right about a refusal independently of which call site composes it, and the compiler
+    // insists — `principalNamesAPerson` reads `principalKind`, which a refusal has not got. So the
+    // arm exists, is unreachable in the shipped wiring, and is pinned here rather than argued.
+    const directory = directoryOf({});
+    const reversed = withAbacAttributes(
+      withMembershipRevocationCheck(resolverFor(principal()), directory),
+      directory,
+    );
+    const resolved = await reversed.resolve(RESOLVER_INPUT);
+    expect(resolved).toEqual({ refusedAs: "principal_disabled" });
+    // Undecorated: no `abacAttributes` key was attached on the way out.
+    expect(resolved === null ? [] : Object.keys(resolved)).toEqual(["refusedAs"]);
   });
 });

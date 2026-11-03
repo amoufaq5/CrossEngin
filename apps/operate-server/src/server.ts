@@ -538,9 +538,21 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
       ? withAbacAttributes(wiring.principalResolver, options.abac.attributeDirectory)
       : wiring.principalResolver;
   /*
-   * The revocation check wraps **outside** the attribute decoration, so a refused principal is
+   * The revocation check wraps **outside** the attribute decoration.
+   *
+   * **Both clauses of what this comment used to claim for that are false**, measured by running the
+   * built modules and counting the directory calls (ADR-0398). It read *"so a refused principal is
    * refused before anything is attached to it — and the inner `attributesFor` it then never reaches
-   * costs nothing, while if it did the entry is already in the cache.
+   * costs nothing"*. An outer wrapper's `resolve` calls the inner one **first**, so the attribute
+   * decoration runs, `attributesFor` is called, the attributes are attached, and only then does the
+   * revocation check look — and call `attributesFor` a second time. Shipped order: two calls, the
+   * second a cache hit. Reversed: one. Nothing is "never reached"; it is reached first.
+   *
+   * Reversing it would be strictly better — one directory call, and `withAbacAttributes`' refusal
+   * pass-through arm would stop being dead code — and it is deliberately **not** done here, because
+   * the ordering is latent (it needs `--abac-policy` *and* `--credential-login` together) and a
+   * composition change argued from a corrected comment deserves its own increment rather than
+   * riding on one. Recorded as an open question instead.
    *
    * Two declarations and not one: the directory arrives under `--abac-policy` and the gate under
    * `--credential-login`, so a deployment can have either, both or neither. `sessionRevocation`

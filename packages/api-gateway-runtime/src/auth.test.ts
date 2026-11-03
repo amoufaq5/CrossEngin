@@ -4,8 +4,16 @@ import {
   sha256,
   signEd25519,
 } from "@crossengin/crypto";
+import { readFileSync } from "node:fs";
+
 import {
+  AUTH_OUTCOMES,
+  AUTH_OUTCOME_SUCCEEDS,
+  AUTH_SCHEMES,
   AUTH_SCHEME_SECURITY_DOC,
+  AUTH_SCHEME_SUPPORT,
+  REQUEST_SIGNATURE_HEADER_LOWER,
+  PRINCIPAL_REFUSAL_OUTCOMES,
   RECOGNISABLE_AUTH_SCHEMES,
   type IncomingRequest,
 } from "@crossengin/api-gateway";
@@ -491,12 +499,19 @@ describe("parseAuthHeader", () => {
     };
 
     // Refutes `trim`: the caller's own trailing space is what used to hide the scheme.
-    it.each([
-      ["Basic ", "Basic"],
-      ["Bearer ", "Bearer"],
-    ])("reports the scheme for %j, which trim() loses", (header, expected) => {
-      expect(tokenFor(header)).toBe(expected);
-    });
+    //
+    // `"Basic "` has **left this table** since ADR-0398 and is asserted below instead: the presence
+    // arm now claims it as the `basic` scheme, so it reaches `scheme_unsupported_basic` rather than
+    // the residual. That is a deliberate improvement on ADR-0395's answer for the same shape and it
+    // subsumes it -- but `"Bearer "` stays here, because `bearer_jwt` is **served** and presence
+    // recognition would hand its verifier an empty credential. One table, two treatments, and the
+    // difference between the rows is the whole rule.
+    it.each([["Bearer ", "Bearer"]])(
+      "reports the scheme for %j, which trim() loses, for a SERVED scheme",
+      (header, expected) => {
+        expect(tokenFor(header)).toBe(expected);
+      },
+    );
 
     // Refutes leaving it untrimmed: `indexOf(" ")` would answer 0 and the transform refuses that.
     // Deliberately not `"  Basic x"`, which the transform answers `"Basic"` for and which **never
@@ -523,6 +538,134 @@ describe("parseAuthHeader", () => {
         expect(tokenFor(header)).toBeNull();
       },
     );
+  });
+
+  describe("an empty header value is nothing presented (ADR-0398)", () => {
+    // ADR-0365's rule, which this function already states in its own words beside the
+    // `api_key_query` arm and applied to two of its four message positions. Measured before the
+    // fix: `Authorization: ""` answered `{kind:"unrecognized"}` -- recording
+    // `credential_unrecognized`, a claim that a credential arrived in a scheme this build does not
+    // know -- and `x-api-key: ""` answered a **served** credential with an empty token, so the
+    // deployment's opaque matcher was invoked with `sha256("")`.
+    it.each([
+      ["authorization", ""],
+      ["authorization", "   "],
+      ["authorization", "\t"],
+      ["x-api-key", ""],
+      ["x-api-key", "  "],
+      [REQUEST_SIGNATURE_HEADER_LOWER, ""],
+    ])("treats %s: %j as absent", (name, value) => {
+      expect(parseAuthHeader(fixtureRequest({ headers: { [name]: value } })).kind).toBe("absent");
+    });
+
+    it("no longer masks a later recognising position", () => {
+      // The sharper half, and the inverse of ADR-0384's ordering rule: something that recognised
+      // **nothing** outranked something that did, because both arms returned before `mtls`. So on a
+      // cert-forwarding edge a client sending either empty header was refused rather than
+      // authenticated by its certificate.
+      const cert = "a".repeat(64);
+      for (const name of ["authorization", "x-api-key"]) {
+        const r = parseAuthHeader(
+          fixtureRequest({ headers: { [name]: "" }, clientCertSha256: cert }),
+        );
+        expect(r.kind, name).toBe("credential");
+        if (r.kind === "credential") {
+          expect(r.scheme, name).toBe("mtls");
+          expect(r.token, name).toBe(cert);
+        }
+      }
+    });
+
+    it("leaves every non-empty value exactly as it was", () => {
+      // The non-vacuity floor: the rule must reach only the empty case.
+      const cases: readonly [Record<string, string>, string][] = [
+        [{ authorization: "Bearer abc.def.ghi" }, "bearer_jwt"],
+        [{ authorization: "Basic Zm9vOmJhcg==" }, "basic"],
+        [{ authorization: "Basic" }, "basic"],
+        [{ "x-api-key": "ce_live_abc" }, "api_key_header"],
+      ];
+      for (const [headers, scheme] of cases) {
+        const r = parseAuthHeader(fixtureRequest({ headers }));
+        expect(r.kind, JSON.stringify(headers)).toBe("credential");
+        if (r.kind === "credential") expect(r.scheme).toBe(scheme);
+      }
+      // And an unrecognised scheme still reaches the residual with its token reported.
+      const residual = parseAuthHeader(fixtureRequest({ headers: { authorization: "Negotiate x" } }));
+      expect(residual.kind).toBe("unrecognized");
+      if (residual.kind === "unrecognized") expect(residual.schemeToken).toBe("Negotiate");
+    });
+
+    it("the predicate is one rule, read by every header position", () => {
+      // Read as text, because a forwarded presence test is identical to a missing one from the type
+      // system's point of view -- ADR-0386's class. Two positions tested `!== undefined` and two
+      // spelled the rule inline; converging them is what stops them drifting apart again.
+      const src = readFileSync(new URL("./auth.ts", import.meta.url), "utf8");
+      const body = src.slice(src.indexOf("export function parseAuthHeader"));
+      expect(body).not.toMatch(/\.trim\(\)\.length > 0/); // no second spelling survives
+      expect((body.match(/headerPresents\(/g) ?? []).length).toBe(4);
+    });
+  });
+
+  describe("a bare auth-scheme token for a refused scheme (ADR-0398)", () => {
+    const schemeOf = (authorization: string): string | null => {
+      const r = parseAuthHeader(fixtureRequest({ headers: { authorization } }));
+      return r.kind === "credential" ? r.scheme : null;
+    };
+
+    // The reachable spelling, and the one ADR-0395's `trimStart` could not touch: a bare `Basic`
+    // carries no whitespace for a parser to strip, so it arrives verbatim over both transports --
+    // where `"Basic "` is normalised to it by Node's parser and by `Headers` (RFC 9110 §5.5).
+    it.each([["Basic"], ["basic"], ["BASIC"], ["Basic "], ["  Basic"]])(
+      "claims %j as the basic scheme, so it is refused by name",
+      (header) => {
+        expect(schemeOf(header)).toBe("basic");
+      },
+    );
+
+    it("carries an empty token, which the refusal provably never reads", () => {
+      const r = parseAuthHeader(fixtureRequest({ headers: { authorization: "Basic" } }));
+      expect(r.kind).toBe("credential");
+      if (r.kind === "credential") expect(r.token).toBe("");
+    });
+
+    // The asymmetry, asserted rather than described. A bare SERVED scheme must stay in the
+    // residual: its verifier consumes the token, so claiming it would record a claim about a
+    // credential nobody presented.
+    it.each([["Bearer"], ["bearer"], ["Negotiate"], ["Digest"]])(
+      "leaves %j to the residual",
+      (header) => {
+        expect(parseAuthHeader(fixtureRequest({ headers: { authorization: header } })).kind).toBe(
+          "unrecognized",
+        );
+      },
+    );
+
+    it("does not disturb a credential-bearing value in either scheme", () => {
+      expect(schemeOf("Basic Zm9vOmJhcg==")).toBe("basic");
+      expect(schemeOf("Bearer abc.def.ghi")).toBe("bearer_jwt");
+    });
+
+    it("every declared auth-scheme token matches the prefix its own arm tests", () => {
+      // The both-ways fence (`pg-record-retention.ts`' rule). `parseAuthHeader` keeps hardcoded
+      // `"bearer "` / `"basic "` prefixes because their ORDER relative to `x-api-key`, the query
+      // parameter, the residual and `mtls` is load-bearing and generating the arms would make that
+      // order a property of the map's declaration order. So the map and the arms are compared as
+      // text instead, in both directions: a token with no arm, and an arm with no token.
+      const src = readFileSync(new URL("./auth.ts", import.meta.url), "utf8");
+      const declared = AUTH_SCHEMES.flatMap((s) => {
+        const t = AUTH_SCHEME_SUPPORT[s].authSchemeToken;
+        return t === null ? [] : [[s, t.toLowerCase()] as const];
+      });
+      expect(declared.length).toBeGreaterThan(1); // non-vacuity floor
+      for (const [scheme, token] of declared) {
+        expect(src, `${scheme}: no arm matches the declared token`).toContain(
+          `lower.startsWith("${token} ")`,
+        );
+      }
+      // And no arm matches a prefix no scheme declares.
+      const armed = [...src.matchAll(/lower\.startsWith\("([a-z-]+) "\)/g)].map((m) => m[1]!);
+      expect(armed.sort()).toEqual(declared.map(([, t]) => t).sort());
+    });
   });
 
   /**
@@ -618,6 +761,37 @@ describe("resolvePrincipalForCredential", () => {
     });
     expect(result.outcome).toBe("principal_not_found");
     expect(result.principal).toBeNull();
+  });
+
+  it("passes a resolver's refusal through as its own outcome, not as principal_not_found", async () => {
+    // ADR-0398. Before this there was no third answer, so ADR-0381's revocation gate returned
+    // `null` and the record said *this principal does not exist* for one that does. Both members
+    // are exercised, because the point of the set is that the gateway no longer models an outcome a
+    // resolver has no way to produce.
+    for (const refusedAs of PRINCIPAL_REFUSAL_OUTCOMES) {
+      const result = await resolvePrincipalForCredential({
+        request: fixtureRequest(),
+        scheme: "bearer_jwt",
+        principalRef: "u1",
+        scopes: [],
+        resolver: { resolve: () => Promise.resolve({ refusedAs }) },
+        nowIso: "2026-05-16T12:00:00.000Z",
+      });
+      expect(result.outcome).toBe(refusedAs);
+      expect(result.principal).toBeNull();
+      // Not a success, which is what keeps the refusal fail-closed however it is routed.
+      expect(AUTH_OUTCOME_SUCCEEDS[refusedAs]).toBe(false);
+    }
+  });
+
+  it("every principal-refusal outcome is a real AuthOutcome the catalog already admits", () => {
+    // The set is a subset of `AUTH_OUTCOMES` rather than a parallel vocabulary, so it needs no
+    // `auth_outcome` CHECK migration -- both members were already catalogued with no producer,
+    // which is the gap this closes. Asserted so a third member cannot be invented here and then
+    // fail a write on every deployment (ADR-0384 had to widen that CHECK for exactly this reason).
+    for (const o of PRINCIPAL_REFUSAL_OUTCOMES) {
+      expect(AUTH_OUTCOMES).toContain(o);
+    }
   });
 
   it("returns authenticated + populated principal when resolver finds them", async () => {

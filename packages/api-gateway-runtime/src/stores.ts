@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import type {
   IdempotencyRecord,
   IncomingRequest,
+  PrincipalRefused,
   ResolvedPrincipal,
   RouteDefinition,
 } from "@crossengin/api-gateway";
@@ -15,7 +16,13 @@ export interface PrincipalResolverInput {
 }
 
 export interface PrincipalResolver {
-  resolve(input: PrincipalResolverInput): Promise<ResolvedPrincipal | null>;
+  /**
+   * `null` is *nothing resolved*; a `PrincipalRefused` is *this principal exists and must not be
+   * served* (ADR-0398). Widening the **return** type is covariant, so every resolver written against
+   * the old two-valued signature still satisfies this one and nothing had to be edited to keep
+   * compiling -- which is what made the distinction cheap enough to add once it was needed.
+   */
+  resolve(input: PrincipalResolverInput): Promise<ResolvedPrincipal | PrincipalRefused | null>;
 }
 
 export interface IdempotencyStore {

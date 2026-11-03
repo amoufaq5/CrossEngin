@@ -1,6 +1,7 @@
 import {
   AUTH_SCHEMES,
   AUTH_SCHEME_SUPPORT,
+  schemeRequiresHttps,
   type AuthScheme,
   type AuthSchemeTreatment,
 } from "@crossengin/api-gateway";
@@ -128,11 +129,58 @@ function joinNames(names: readonly string[]): string {
 }
 
 /**
+ * Gives `SCHEMES_REQUIRING_HTTPS` the reader ADR-0395 asked for, at the layer where the value is
+ * honest (ADR-0398).
+ *
+ * That set had exactly one consumer -- its own predicate `schemeRequiresHttps`, which nothing
+ * called -- and the open end offered *delete, or give them a reader*. Deleting fails ADR-0337's own
+ * test, since neither set is a second spelling of live code: the set's criterion is **travel**
+ * ("this credential must not travel in the clear"), which is why `mtls` is excluded as a category
+ * error rather than as a false member, and nothing else in the tree answers it.
+ *
+ * The reader is a **boot line** and deliberately not a request-path stage, and the measurement is
+ * what decides it: on the shipped compose `request.scheme` reports `https` for a request that
+ * genuinely travels in the clear over the Caddy-to-api hop, so a stage reading it would be
+ * falsely-true for exactly the case it exists to catch (ADR-0337's direction). A boot line comparing
+ * one declaration against another claims no more than it knows.
+ *
+ * **An earlier draft said `request.scheme` is "a process-wide declaration from `--scheme`, not a
+ * per-request transport observation", full stop. That is true only for an untrusted edge**, and an
+ * adversarial pass over ADR-0398 found the other half: `operate-server`'s `server.ts` computes
+ * `edgeTrust === "trusted" ? (headerScheme(raw) ?? this.scheme) : this.scheme`, so under
+ * `--trusted-edge-client-cert` it *is* per-request, read from `x-forwarded-proto`. The disagreement
+ * then runs in the **dangerous** direction: `--scheme https` plus a trusted edge forwarding
+ * `x-forwarded-proto: http` leaves this line **silent** over requests whose credential really did
+ * travel in the clear -- exactly the case a per-request stage would catch. So the boot line is the
+ * weaker reading, which is the honest claim, and "the two cannot disagree" is not. Bounded: the
+ * shipped compose passes `--scheme https` and `--trusted-edge-client-cert` appears **0** times in
+ * every compose file.
+ *
+ * It therefore fires **only** on a declared `http` and says nothing on `https` -- never "these are
+ * safe", which would be the claim the input cannot support (ADR-0372: an absence of evidence is not
+ * evidence). `--scheme` defaults to `http`, so the clause is live for a deployment that forgot the
+ * flag and silent on the one that ships.
+ */
+function plaintextTransportClause(
+  served: readonly AuthScheme[],
+  declaredScheme: "http" | "https",
+): readonly string[] {
+  if (declaredScheme === "https") return [];
+  const exposed = served.filter((s) => schemeRequiresHttps(s));
+  if (exposed.length === 0) return [];
+  return [
+    `--scheme is http, so ${joinNames([...exposed])} ${exposed.length === 1 ? "travels" : "travel"}` +
+      ` in the clear unless an edge terminates TLS in front of this process` +
+      ` (pass --scheme https once one does)`,
+  ];
+}
+
+/**
  * The boot line.
  *
  * ADR-0376's rule: a capability an operator cannot confirm from the log is the one they disbelieve
  * — and here the thing to confirm is a *refusal*, which is harder to confirm by trying it than a
- * capability is, because before this increment trying it answered 200.
+ * capability is, because before ADR-0395 trying it answered 200.
  *
  * There is deliberately **no level**: every other survey in `operate-server` that warns does so for
  * a condition that deployment can reach, and the only condition worth warning about here — this
@@ -141,7 +189,20 @@ function joinNames(names: readonly string[]): string {
  * `api_key_header` is always configured there. A `warn` arm describing a state the caller cannot
  * produce is ADR-0381's own finding one file over, and the fix for that was to delete the arm.
  */
-export function formatAuthSchemeSurvey(input: AuthSchemeServingInput): string {
+export function formatAuthSchemeSurvey(
+  input: AuthSchemeServingInput,
+  /**
+   * The deployment's `--scheme`. **Required**, which is this file's own argument for
+   * `hmacKeyLookupConfigured` one field across: an optional parameter defaulting to `https` would
+   * make its own omission unobservable and silence the clause on exactly the deployment it is for.
+   *
+   * A parameter rather than a fifth `AuthSchemeServingInput` field, because the declared scheme is a
+   * property of the **deployment** and not of the gateway runtime -- so threading it through
+   * `GatewayRuntimeOptions` would add a forwarding hop of exactly the shape ADR-0386 found a dropped
+   * field in, for a fact the one call site already holds.
+   */
+  declaredScheme: "http" | "https",
+): string {
   const served = servedAuthSchemesFor(input);
   const refused = authSchemesByTreatment("refused");
   const indistinguishable = authSchemesByTreatment("indistinguishable");
@@ -171,6 +232,7 @@ export function formatAuthSchemeSurvey(input: AuthSchemeServingInput): string {
     // `?api_key=…`. So the clause is unconditional and now true, which is the shape to keep: a
     // condition here would have been a second place to encode which refusals are reachable.
     `refusing ${joinNames([...refused])} by name`,
+    ...plaintextTransportClause(served, declaredScheme),
     // Phrased for however many members there are rather than for two: this clause read "a request
     // in **either**" while `indistinguishable` was `bearer_opaque` and `hmac_signature`, and
     // serving the second left a boot line offering a choice of one. The count is a property of the

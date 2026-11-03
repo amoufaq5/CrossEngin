@@ -4040,7 +4040,13 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // path cannot disagree about which credentials this deployment accepts (ADR-0361). Said either
   // way, including when there is nothing to report: the thing to confirm here is a *refusal*, which
   // is harder to confirm by trying it than a capability is — before this, trying it answered 200.
-  console.info(`[auth] ${formatAuthSchemeSurvey(gateway.runtime.authSchemeServing)}`);
+  // The declared `--scheme` is the second argument since ADR-0398, and it is read from `options`
+  // rather than off the runtime on purpose: it is a property of the **deployment**, so threading it
+  // through `GatewayRuntimeOptions` would add a forwarding hop of exactly the shape ADR-0386 found a
+  // dropped field in, for a fact this one call site already holds.
+  console.info(
+    `[auth] ${formatAuthSchemeSurvey(gateway.runtime.authSchemeServing, options.defaultScheme)}`,
+  );
   // ADR-0386. Said either way, including when nothing is relaxed, because the thing an operator has
   // to be able to confirm is a *requirement* -- and before this every one of these guards was
   // `present && wrong`, so a token carrying none of the three verified as `authenticated`. A relaxed

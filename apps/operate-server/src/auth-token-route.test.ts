@@ -286,9 +286,15 @@ describe("verifyLogin", () => {
     expect(roleFor).not.toHaveBeenCalled();
   });
 
-  it("spends password work on every refusal that precedes a verification", async () => {
+  it("spends password work on every refusal, including the one that follows a verification", async () => {
     // The timing equaliser. Each of these paths could answer in under a millisecond and would then
     // be an account enumerator; the derivation is what makes them cost what a real account costs.
+    //
+    // The title said "every refusal that **precedes** a verification" until ADR-0398, and that
+    // scoping is exactly how the gap survived: `credential_unreadable` *follows* the verification,
+    // because `verifyPassword` answers `unreadable_hash` out of `parsePasswordHash` before deriving
+    // anything, so it was the one refusal on this route that answered instantly. A test whose title
+    // names a subset covers a subset.
     const cases: readonly StubState[] = [
       { tenant: null, record: null },
       { tenant: { tenantId: TENANT, status: "suspended" } },
@@ -300,6 +306,11 @@ describe("verifyLogin", () => {
           lockedUntil: new Date(NOW.getTime() + 60_000).toISOString(),
         }),
       },
+      // `credential_unreadable`, both causes. The first is a shape the parse has always refused
+      // (N is not a power of two); the second is one ADR-0398 added to that arm, which is why the
+      // oracle had to close in the same change rather than be left wider than it was found.
+      { record: await activeRecord({ credentialHash: `scrypt$1000$8$1$${"a".repeat(32)}$${"b".repeat(128)}` }) },
+      { record: await activeRecord({ credentialHash: `scrypt$32768$8$512$${"a".repeat(32)}$${"b".repeat(128)}` }) },
     ];
     // A real verification at these parameters is the baseline; every refusal must be of the same
     // order rather than instant. Measured as a floor, not an equality -- a tight equality would be

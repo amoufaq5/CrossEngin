@@ -290,6 +290,33 @@ export async function verifyLogin(input: VerifyLoginInput): Promise<LoginOutcome
     input.pepper,
   );
   if (!PASSWORD_OUTCOME_ADMITS[outcome]) {
+    if (outcome === "unreadable_hash") {
+      // The seventh equaliser site, and the one arm that had none (ADR-0398). `verifyPassword`
+      // answers `unreadable_hash` from `parsePasswordHash` **before** deriving anything, so this
+      // refusal returned at the route's floor where every other one pays a full derivation. The
+      // ratio to quote is the **route's**, because that is what an unauthenticated caller samples:
+      // measured live, a refusal that derives nothing answers in **7 ms** against **79-81 ms** for
+      // every other refusal on this route, ~11x. (`parsePasswordHash` itself costs 0.05 us, so the
+      // *function* ratio is ~1.8 million -- a true figure about the wrong layer, and an earlier
+      // draft of this comment split the difference at "~1000x", which is neither.) On a route whose
+      // entire design is that every refusal is byte-identical, that is a channel saying *this
+      // account's stored hash is one this build cannot read* -- a fact about a specific account.
+      //
+      // It is a pre-existing oracle rather than one this increment created, and the pre-existing
+      // population is narrower than it looks: `users_credential_hash_check` refuses a foreign
+      // format outright (an argon2 string is rejected by the column, verified), so what reaches
+      // this arm is a `scrypt$`-shaped row whose *numeric* parameters the CHECK admits and the
+      // parser's shape rules refuse -- `n=0`, `n=1`, `n=3`, `n=6` all store and all parse to `null`.
+      // This increment **widens** that population by adding the two cost ceilings, so an
+      // out-of-bounds `p` or `r` now lands here too. Enlarging a timing channel while leaving it
+      // open is not a trade worth making for a one-line spend.
+      //
+      // Deliberately here and not in `verifyPassword`, which is a pure predicate: all seven spend
+      // sites are in this function, so one place owns the route's timing policy. And deliberately
+      // not counted against the lockout, which is unchanged -- `REFUSAL_COUNTS_AGAINST_LOCKOUT`
+      // excludes it because a corrupt row must not lock out a user whose password was correct.
+      await spendPasswordWork(password, input.pepper, params);
+    }
     return {
       ok: false,
       refusal: outcome === "unreadable_hash" ? "credential_unreadable" : "password_mismatch",

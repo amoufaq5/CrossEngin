@@ -129,7 +129,7 @@ describe("authSchemesByTreatment", () => {
 
 describe("formatAuthSchemeSurvey", () => {
   it("names the served schemes, the refusals and the indistinguishable one", () => {
-    const line = formatAuthSchemeSurvey(ALL);
+    const line = formatAuthSchemeSurvey(ALL, "https");
     expect(line).toContain("serving bearer_jwt, api_key_header, mtls and hmac_signature");
     expect(line).toContain("refusing");
     for (const scheme of authSchemesByTreatment("refused")) {
@@ -150,7 +150,7 @@ describe("formatAuthSchemeSurvey", () => {
    * recorded as `credential_not_found`.
    */
   it("names a served scheme whose verifier is not configured", () => {
-    const line = formatAuthSchemeSurvey(API_KEY_ONLY);
+    const line = formatAuthSchemeSurvey(API_KEY_ONLY, "https");
     expect(line).toContain("bearer_jwt is served by this binary and has no JWKS verifier configured");
   });
 
@@ -165,7 +165,7 @@ describe("formatAuthSchemeSurvey", () => {
    * happens to read correctly, so nothing else would ever have caught it.
    */
   it("names the right missing fact per scheme, with no plural-subject clause", () => {
-    const line = formatAuthSchemeSurvey(NEITHER);
+    const line = formatAuthSchemeSurvey(NEITHER, "https");
     expect(line).toContain("bearer_jwt is served by this binary and has no JWKS verifier configured");
     expect(line).toContain(
       "api_key_header is served by this binary and has no opaque-token lookup configured",
@@ -175,33 +175,87 @@ describe("formatAuthSchemeSurvey", () => {
   });
 
   it("omits the unconfigured clause when both verifiers are present", () => {
-    expect(formatAuthSchemeSurvey(ALL)).not.toContain("is served by this binary and has");
+    expect(formatAuthSchemeSurvey(ALL, "https")).not.toContain("is served by this binary and has");
   });
 
   it("says 'none' rather than an empty gap when nothing is served", () => {
-    expect(formatAuthSchemeSurvey(NEITHER)).toContain("serving none");
+    expect(formatAuthSchemeSurvey(NEITHER, "https")).toContain("serving none");
   });
 
   // Said either way, including when there is nothing to warn about — ADR-0376's rule, which is why
   // the affirmative case is asserted rather than only the finding.
   it("is a non-empty sentence in every configuration", () => {
     for (const input of [ALL, NEITHER, API_KEY_ONLY, SIGNATURE_ONLY]) {
-      const line = formatAuthSchemeSurvey(input);
+      const line = formatAuthSchemeSurvey(input, "https");
       expect(line.length).toBeGreaterThan(60);
       expect(line.startsWith("auth schemes:")).toBe(true);
     }
   });
 
   it("never renders a scheme name twice in one clause", () => {
-    const line = formatAuthSchemeSurvey(ALL);
-    const occurrences = (line.match(/api_key_header/g) ?? []).length;
-    expect(occurrences).toBe(1);
+    // Counted **per clause** since ADR-0398, which is what the title has always said. It counted
+    // per line, and that was equivalent only while no two clauses could legitimately name the same
+    // scheme -- the plaintext-transport clause does, by design: it names the subset of the served
+    // schemes whose credential must not travel in the clear, so an operator reading
+    // `serving bearer_jwt, api_key_header, …` learns which of those are exposed. Repetition across
+    // clauses is the information; repetition within one is the defect this guards.
+    for (const declared of ["http", "https"] as const) {
+      const line = formatAuthSchemeSurvey(ALL, declared);
+      for (const clause of line.split("; ")) {
+        for (const scheme of AUTH_SCHEMES) {
+          const n = (clause.match(new RegExp(scheme, "g")) ?? []).length;
+          expect(n, `${declared}: "${clause}" names ${scheme} ${n.toString()} times`).toBeLessThan(
+            2,
+          );
+        }
+      }
+    }
+  });
+
+  it("names the served schemes that travel in the clear, and only on a declared http", () => {
+    // ADR-0398 gives `SCHEMES_REQUIRING_HTTPS` its reader here. `--scheme` defaults to `http`, so
+    // this is live for a deployment that forgot the flag and silent on the shipped compose, which
+    // passes `--scheme https`.
+    const plaintext = formatAuthSchemeSurvey(ALL, "http");
+    expect(plaintext).toContain("--scheme is http");
+    expect(plaintext).toContain("pass --scheme https");
+    // The members are derived, so the clause names exactly the served schemes in the set. `mtls` is
+    // served here and must NOT appear in it: its exclusion from the set is a category error rather
+    // than an omission, because an mtls credential **is** the transport.
+    const clause = plaintext.split("; ").find((c) => c.startsWith("--scheme is http"));
+    expect(clause).toBeDefined();
+    expect(clause).toContain("bearer_jwt");
+    expect(clause).toContain("api_key_header");
+    expect(clause).toContain("hmac_signature");
+    expect(clause).not.toContain("mtls");
+
+    // And says nothing on https -- never "these are safe", which the input cannot support:
+    // `--scheme` is a declaration, and on the shipped compose it reads `https` for a request that
+    // genuinely travels in the clear over the edge-to-api hop (ADR-0372).
+    const declaredTls = formatAuthSchemeSurvey(ALL, "https");
+    expect(declaredTls).not.toContain("--scheme");
+    expect(declaredTls).not.toContain("in the clear");
+  });
+
+  it("is silent when no served scheme is in the set, even on http", () => {
+    // The non-vacuity floor from the other side: the clause is a function of the *intersection*, so
+    // a deployment serving only `mtls` has nothing to report however it declares its scheme.
+    const mtlsOnly = formatAuthSchemeSurvey(
+      {
+        jwtVerifierConfigured: false,
+        opaqueLookupConfigured: false,
+        hmacKeyLookupConfigured: false,
+        mtlsClientLookupConfigured: true,
+      },
+      "http",
+    );
+    expect(mtlsOnly).not.toContain("in the clear");
   });
 
   // A credential must not reach a log line, and the survey is the one place in this increment that
   // renders prose at boot: it reads the map and the two booleans and never a request.
   it("renders only declared names, never a token or a header value", () => {
-    const line = formatAuthSchemeSurvey(ALL);
+    const line = formatAuthSchemeSurvey(ALL, "https");
     for (const word of line.split(/[\s,;]+/)) {
       const bare = word.replace(/[^\w-]/g, "");
       if (bare.length === 0) continue;
@@ -220,20 +274,20 @@ describe("formatAuthSchemeSurvey", () => {
   // `hmac_signature` because that is its position in `AUTH_SCHEMES`, which is the order-preservation
   // property restated.
   it("uses 'and' for two and a comma list for more", () => {
-    expect(formatAuthSchemeSurvey(ALL)).toContain(
+    expect(formatAuthSchemeSurvey(ALL, "https")).toContain(
       "bearer_jwt, api_key_header, mtls and hmac_signature",
     );
-    expect(formatAuthSchemeSurvey(ALL)).toContain("api_key_query and basic");
+    expect(formatAuthSchemeSurvey(ALL, "https")).toContain("api_key_query and basic");
     expect(
       formatAuthSchemeSurvey({
         jwtVerifierConfigured: true,
         opaqueLookupConfigured: true,
         hmacKeyLookupConfigured: false,
         mtlsClientLookupConfigured: false,
-      }),
+      }, "https"),
     ).toContain("serving bearer_jwt and api_key_header");
     // And the one-member form, which the indistinguishable clause is now the only user of.
-    expect(formatAuthSchemeSurvey(ALL)).toContain("bearer_opaque names no position on the wire");
-    expect(formatAuthSchemeSurvey(ALL)).toContain("a request in it is refused");
+    expect(formatAuthSchemeSurvey(ALL, "https")).toContain("bearer_opaque names no position on the wire");
+    expect(formatAuthSchemeSurvey(ALL, "https")).toContain("a request in it is refused");
   });
 });
