@@ -13351,6 +13351,27 @@ land with or before it.
     columns ADR-0402 found **by hand** are on that list, and so is ADR-0374's named *"sharpest
     remainder"* — see the `verified_at` correction in the meta-schema section, where the column is
     squarely in the class and the census simply could not reach it.
+    **Whoever writes that scanner should read ADR-0402's `inclusive` alternative first**, because the
+    obvious instrument is unsound and its failure is silent: on the pinned zod 3.25.76 `.positive()`,
+    `.gt(0)`, `.min(0)` and `.nonnegative()` are **four spellings with two behaviours and one
+    `value`**, differing only in `_def.checks[].inclusive`, so a reader that takes `value` and ignores
+    `inclusive` reads `.positive()` as `.min(0)` and reports every `> 0`-or-stricter column as a
+    narrowing. Measured, that manufactures **three** artefacts on this catalog, and they are three
+    columns where contract and CHECK agree *most* tightly (`crypto_keys.key_version`,
+    `pack_versions.bundle_size_bytes`, `slo_evaluations.target` — each refuses 0 on both sides). The
+    third forecloses the cheap fix: `.gt(0)` is byte-identical in `_def.checks` to `.positive()` and
+    the spelling appears nowhere in `_def`, so special-casing the *name* cannot reach it.
+    **The inverse axis also quantifies this entry's own bound in one unit**, re-derived from the
+    catalog rather than taken from the pass that measured it: **268** numeric columns *carrying* a
+    CHECK = **153** on a writerless table + **115** on a writer-bearing one, and the 115 = **64**
+    with a resolvable `(receiverType.property)` (**68** distinct pairs, the four
+    `notification_dispatches` counters each bound twice) + **6** bound with the property unresolved +
+    **45** unbound. So **51 columns carry a CHECK, sit on a table with a writer, and cannot be paired
+    with a contract field at all** — the residual, concentrated in seven `access_review_evidence`
+    rates, five `notification_deliveries`, five `rate_limit_decisions`, five
+    `audit_integrity_verdicts` counters and four tables' `revision`. That pass's own partition summed
+    to **272** against 268 because it put the 68 *pair* count where a *column* count belongs; see
+    P3.1, since the arithmetic failing is what made the figure usable.
 12c. ~~**A declared `created_at` or `updated_at` silently replaces the server's stamp.**~~ —
     **closed by ADR-0402, which refuted three of this entry's four clauses and its prescribed
     remedy.** The mechanism held exactly as described. What did not: *"these two **cannot** be
@@ -13893,6 +13914,54 @@ method is that a stale figure misleads.
    weakened a fence by 31 for every shape it protects; subtracting the 37 instant ranges **by
    equality against the helper that generates them** keeps it at 25 exactly. **A fence that fails
    because you added a known member wants the member explained, not the number moved.**
+
+   **ADR-0402's own adversarial pass adds eight members — two new shapes, five errors in the
+   correction it audited and one technique defect of its own — and it is the first whose subject was
+   a claim that never shipped.** A refuter was aimed
+   at a mid-increment correction about the *inverse* axis — a catalogued CHECK narrower than its
+   contract — and found the correction stands on its claim, its mechanism and its number, with five
+   errors of its own; the correction was then never published, so nothing committed was ever wrong
+   and the pass's durable content sat in a scratchpad until the next increment delivered it. That is
+   the first shape: **a refuter's findings are delivered by content, not by whether the claim
+   survived**, because stranding the verdict strands a reusable hazard and a quantified bound with it.
+   The second is **a partition whose parts are counted in different units**, which does not add up
+   and whose overcount hides inside a plausible total: `153 writerless + 39 bound-and-resolvable +
+   29 interface-typed seams + 51 unbound` sums to **272** against a measured **268**, because
+   `39 + 29 = 68` counts **(column, property) pairs** while every other term counts **columns** — the
+   four `notification_dispatches` counters being bound by two schemas each. Re-derived in one unit
+   the 115 writer-bearing columns are `64 + 6 + 45`, so the pass's **51** is right *as a column
+   count* and its 68 is in the wrong unit. Nothing in this process had ever **added a partition up**,
+   and that one command is the whole remedy — demonstrated on this paragraph, whose own first draft
+   said *"seven members"* over a list of 2 + 5 + 1, caught by summing it rather than by reading it.
+   Then five ordinary members. **An auditor used the instrument the audited document refuses**: its
+   `0 real narrowings` came from an offline comparison of a deparsed CHECK against a zod refinement,
+   which is the method ADR-0402 *opens* by showing unsound twice on its own measurement — it happens
+   to agree with the three direct live probes, and it is still not a measurement. **A correction
+   under-stated in its own favour**: it reported its instrument manufacturing **one** artefact where
+   it manufactures **three**, consistent with a CHECK parser handling `>=` and not `> 0`, which is
+   the direction a refuter is least likely to be challenged on. **A correction cited the wrong
+   mechanism**: it called the defect *"exactly the reader defect ADR-0402 documents and fixed"*, and
+   the two are the same relationship on **opposite sides in opposite directions** — that one is a
+   regex over CHECK *text* under-reporting *coverage* on the column side, this one is zod
+   introspection ignoring `inclusive` over-reporting a *narrowing* on the contract side (measured on
+   the pre-delivery tree: `inclusive` occurred **0** times in that ADR, and `_def.checks` occurs **0**
+   times in `packages` and `apps` to this day, so the instrument exists in no committed rule). The
+   citation that *is* right is that ADR's per-candidate floor, which would have caught it outright,
+   because the contract refuses 0. **An error cut in the correction's own favour**: *"the repo names
+   this defect one commit later"* is wrong because ADR-0402 was introduced **at HEAD** — the measurer
+   reproduced a defect the tree it was auditing had already named, which is worse than the sentence
+   it wrote. And **a true sentence that reads as a wider claim**: *"the contract and the CHECK agree
+   on every probe"* is true as stated, while the **column** does not agree with the contract at 2³¹
+   (live `22003 integer out of range` against a contract that accepts) — narrower by **type**, one
+   probe past the edge of the table either party measured.
+   The pass's own technique defect is the most reusable thing in it and is this run's non-vacuity
+   floor one layer in: **its first live probe refused every value, including the positive controls.**
+   `meta.crypto_keys` is refused there by **two** policies and the pass named one — its `ALL`-scope
+   `crypto_keys_tenant_or_platform` has a NULL `WITH CHECK`, so its `USING` is the check and with no
+   tenant context it is `tenant_id = NULL`, never true; and `crypto_keys_platform_write` is
+   `INSERT`-scoped on `tenant_id IS NULL AND current_setting('app.platform_key_write', true) = 'on'`,
+   which the non-owner had not claimed. **A probe table in which the accepted value is refused is not
+   a measurement**, and the tell is free: assert a row landed before reporting that a row was refused.
 2. **Six concepts are modelled several times over, two with non-nesting member sets.** Data
    classification has five declarations — four identical and one, in `data-lineage`, **disjoint past
    two members**, so the moment anything bridges the kernel's classification into the lineage graph

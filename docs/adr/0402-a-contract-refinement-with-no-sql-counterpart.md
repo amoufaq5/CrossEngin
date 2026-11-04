@@ -280,6 +280,31 @@ design and the floor is what removed it.
 `created_at: datetime` yields a **nullable** TIMESTAMPTZ where the system column is NOT NULL, so
 the type alone loses the guarantee the column exists to carry.
 
+**Introspecting a zod refinement through `_def.checks[].value`** — the obvious instrument for the
+scanner increment open question 4 asks for, and the one an adversarial pass over this increment used
+on the inverse axis. Refused, with the measurement that refuses it, because **`value` alone does not
+carry the boundary**. On the pinned zod 3.25.76:
+
+```
+positive()     checks=[{kind:"int"},{kind:"min",value:0,inclusive:false}]   0: REFUSE
+gt(0)          checks=[{kind:"int"},{kind:"min",value:0,inclusive:false}]   0: REFUSE
+min(0)         checks=[{kind:"int"},{kind:"min",value:0,inclusive:true }]   0: ACCEPT
+nonnegative()  checks=[{kind:"int"},{kind:"min",value:0,inclusive:true }]   0: ACCEPT
+```
+
+Four spellings, two behaviours, **one `value`** — so a reader that takes `check.value` and ignores
+`check.inclusive` reads `.positive()` as `.min(0)` and reports every `> 0`-or-stricter column as a
+narrowing of a contract that admits zero. The pass measured that defect manufacturing **three**
+artefacts on this catalog, and probed against both sides here they are three columns where the two
+agree *most* tightly — `meta.crypto_keys.key_version` (`INTEGER`, `key_version >= 1`,
+`KeyRegistryRecordSchema.keyVersion` `.int().positive()`), `meta.pack_versions.bundle_size_bytes`
+(`BIGINT`, `> 0`, `PackVersionRecordSchema.bundleSizeBytes` `.int().positive()`) and
+`meta.slo_evaluations.target` (`NUMERIC(8,6)`, `> 0 AND <= 1`, `SloEvaluationRecordSchema.target`
+`.gt(0).lte(1)`). Each contract refuses 0 and each CHECK refuses 0: the instrument reports a
+disagreement precisely where there is none. The third is the one that forecloses the cheap fix —
+`.gt(0)` is **byte-identical** in `_def.checks` to `.positive()`, and the spelling appears nowhere in
+`_def`, so special-casing the *name* cannot reach it. Read `inclusive`, or do not read `_def`.
+
 ## Consequences
 
 **The migration.** On a fresh database all 57 new constraints are in the emitted bootstrap —
@@ -349,6 +374,37 @@ exists so a caller holding a reporting channel — `applyTenantManifestSchema` a
    very file) but because the table is one of the 19. So the honest statement is that the class's
    population is *the binding index's reach*, and raising it is a scanner increment with a census
    behind it, not more CHECKs. 158 JSONB columns carry no CHECK and the index resolves 2.
+
+   **An independent pass over the inverse axis quantifies that bound in one unit, and correcting its
+   own arithmetic is what makes it usable.** An adversarial reviewer measured the *other* direction —
+   a catalogued CHECK narrower than its contract, which this increment does not touch — over the
+   column set that direction can even be asked about, namely the catalogued columns of a numeric type
+   that **carry** a CHECK. Re-derived here from the built catalog rather than taken from its notes:
+   **268** such columns, of which **153** sit on a table `STORELESS_TABLES` declares writerless and
+   **115** on a writer-bearing one. Both figures reproduce exactly. Its partition of the 115 does
+   **not**, and the failure is instructive: it reported `39 authoritatively bound and resolvable + 29
+   interface-typed seams carrying no refinement + 51 unbound`, which with the 153 sums to **272**
+   against a total of 268 — because **39 + 29 = 68 is a count of (column, property) *pairs* while
+   every other term is a count of *columns***. Measured, the 115 partition as
+   **64 columns carrying a resolvable `(receiverType.property)` — 68 distinct pairs, the four
+   `meta.notification_dispatches` counters each being bound by both `DispatchAdvanceUpdate` and
+   `DispatchInput` — plus 6 bound through a binding whose property does not resolve, plus 45
+   unbound**, which sums to 115. So its **51 is right and is a column count** (45 + 6: a column whose
+   binding resolves to no contract property cannot be compared against a refinement either), and its
+   68 is in the wrong unit. The residual that matters for *this* ADR's census is therefore the same
+   51 from the other side, and its shape is concrete — seven `access_review_evidence` rates, five
+   `notification_deliveries` fields, five `rate_limit_decisions`, five `audit_integrity_verdicts`
+   counters (the table whose `verified_at` is this question's own named remainder), and four tables'
+   `revision` columns.
+
+   Two things about that pass are worth keeping beside the figure. Its `0 real narrowings` on the
+   comparable set was produced by **the instrument this ADR opens by declaring unsound for exactly
+   this purpose** — an offline comparison of a deparsed CHECK against a zod refinement — so it is
+   recorded as its claim and not as a measurement; what *is* measured is the three columns it named,
+   each probed against both sides directly (see the Alternatives' `inclusive` entry). And its own
+   stated bound, *"established on the checkable set, not proven over the axis"*, is the honest form
+   and is the form this question takes: a census's population is what its index can reach, and the
+   unreached part is not evidence of absence.
 5. **The two `HASH_ALGORITHMS` constants** (P2.13(b)) are a contract edit whose stored-digest
    consequence is unmeasured, and `CheckpointMeta.algorithm` is typed `string` rather than either
    enum, so nothing would catch a third spelling either.
