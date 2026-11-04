@@ -427,12 +427,19 @@ describe("policy role canonicalization", () => {
     // alone served it only for the readers who do not need it. Verified as a non-owner after a real
     // deletion: the isolation-only read answered 0 events and the elevated read answered the record.
     //
-    // **98 since ADR-0400**: the sixteen `_no_tenant_delete` arms, one per `PLATFORM_RECORD_TABLES`
+    // **98 since ADR-0400**: sixteen `_no_tenant_delete` arms, one per `PLATFORM_RECORD_TABLES`
     // member. They are the first narrowed arms here that **deny** rather than elevate — every one of
     // the 82 above widens what a platform session may do, and these narrow what a tenant session
     // may do — which is why they are the catalog's first restrictive policies and why the name says
     // what it denies rather than which grant it reads.
-    expect(narrowed).toBe(98);
+    //
+    // **100 since ADR-0401**: `invoices` and `tenant_credits`, the erasure's *statutory* retention
+    // half, which ADR-0400 left exposed while CLAUDE.md claimed the fence covered the whole
+    // retention set. Note for anyone comparing this against the register: invariant 3 there said
+    // the count "was **78** over the narrower regex until ADR-0400", and 78 is the
+    // `%_tenant_isolation` family count borrowed from a different census ~4,400 lines away. This
+    // test asserted **82**, which is what the line above says and what `git show 4e66c0e` carries.
+    expect(narrowed).toBe(100);
   });
 });
 
@@ -652,14 +659,14 @@ describe("declaredPolicyPermissive", () => {
     expect(declaredPolicyPermissive({ name: "p", using: "true", permissive: false })).toBe(false);
   });
 
-  it("answers restrictive for exactly the sixteen DELETE fences, permissive for the rest", () => {
+  it("answers restrictive for exactly the eighteen DELETE fences, permissive for the rest", () => {
     // Until ADR-0400 this read "leaves every policy in the real catalog permissive", and it was a
     // true statement about a mechanism with no producer: `permissive` was declared, emitted,
     // introspected, canonicalised here and diffed, and no table set it — so the only thing the
     // catalog could demonstrate about this function was its default. The fence is the first
     // producer, so the assertion is a partition rather than a flip, and the dangerous direction is
-    // a *seventeenth* restrictive policy nobody chose: `.toBe(true)` could not have seen one, and a
-    // count would hide which table gained it.
+    // a *nineteenth* restrictive policy nobody chose: `.toBe(true)` could not have seen one, and a
+    // count would hide which table gained it. Eighteen since ADR-0401.
     const restrictive: string[] = [];
     for (const t of META_TABLES) {
       for (const policy of t.rls?.policies ?? []) {
@@ -672,6 +679,6 @@ describe("declaredPolicyPermissive", () => {
         .map((t) => `${t}.${t}_no_tenant_delete`)
         .sort(),
     );
-    expect(restrictive).toHaveLength(16);
+    expect(restrictive).toHaveLength(18);
   });
 });

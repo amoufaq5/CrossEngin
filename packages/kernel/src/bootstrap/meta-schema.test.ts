@@ -241,7 +241,13 @@ describe("the platform write grants", () => {
     // On an `ALL`-scope policy the `USING` expression also serves as the `WITH CHECK`, which is the
     // defect this increment closes — and it would hand the grant a DELETE besides. Nothing in the
     // catalog deletes a platform row (retirement is a status column in every one of these
-    // contracts), so `DELETE` is deliberately reachable by no policy at all.
+    // contracts), so **no platform write grant reaches a `DELETE`**, which is what this asserts.
+    //
+    // Deliberately not "`DELETE` is reachable by no policy at all", which this comment said until
+    // ADR-0401 and which is false repo-wide since ADR-0400: the catalog carries DELETE-scoped
+    // policies now. They are *restrictive* and deny rather than elevate, so they grant nothing and
+    // the assertion below is unaffected — but the sentence was the same false-by-absence inference
+    // ADR-0400 corrected two files away while leaving two copies of it standing.
     for (const c of grantedClauses()) {
       expect(`${c.table}.${c.name}: ${c.command}`).toMatch(/: (INSERT|UPDATE)$/);
     }

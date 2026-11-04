@@ -1,5 +1,5 @@
 import { qualifyTable, quoteIdent } from "../ddl/identifiers.js";
-import { PUBLIC_ROLE } from "./types.js";
+import { POLICY_CLAUSES_BY_COMMAND, PUBLIC_ROLE } from "./types.js";
 import type {
   ColumnDefinition,
   ColumnReference,
@@ -632,6 +632,33 @@ export function emitRlsPolicy(table: TableDefinition, policy: RlsPolicy): string
         " WITH CHECK, which would permit every row",
     );
   }
+  // Refused next: a clause the declared command cannot carry (ADR-0401). This emitter had the rule
+  // written down one clause below — *"`CREATE POLICY … FOR INSERT USING (…)` is refused by
+  // Postgres"* — and guarded nothing, which is this repository's own
+  // documented-the-hazard-and-checked-nothing class (ADR-0351, ADR-0362, ADR-0372, ADR-0395,
+  // ADR-0398). Worse, `emit.test.ts` pinned that exact illegal SQL as the correct emission, looping
+  // over all five commands with `using` set, 34 lines above the sibling test whose comment explains
+  // why it cannot run.
+  //
+  // Zero members in the catalog, before or after the DELETE fence — so this refuses nothing that
+  // was ever emitted, which is precisely when it is cheapest to add. The reachable population is a
+  // *new* declaration: the catalog has paired a non-default command with a clause 82 times across
+  // ADR-0313 and ADR-0332 and got it right every time, and ADR-0400's DELETE arm is the fourth
+  // command to be declared rather than the first, so what this prevents is the fifth such edit.
+  const allowed = POLICY_CLAUSES_BY_COMMAND[policy.command ?? "ALL"];
+  if (policy.using !== undefined && !allowed.using) {
+    throw new Error(
+      `RLS policy ${JSON.stringify(policy.name)} on ${tableName} declares USING with` +
+        ` FOR ${policy.command}, which Postgres refuses: that command inspects no existing row`,
+    );
+  }
+  if (policy.check !== undefined && !allowed.check) {
+    throw new Error(
+      `RLS policy ${JSON.stringify(policy.name)} on ${tableName} declares WITH CHECK with` +
+        ` FOR ${policy.command}, which Postgres refuses: that command writes no row`,
+    );
+  }
+
   let stmt = `CREATE POLICY ${quoteIdent(policy.name)} ON ${tableName}`;
   // Every clause is written only when declared. Omitting one is not a weaker statement than writing
   // the default: `CREATE POLICY` means `AS PERMISSIVE FOR ALL TO PUBLIC` either way, which is what

@@ -30,6 +30,7 @@ import {
 } from "./emit.js";
 import { META_SCHEMA_NAME, META_TABLES, tenantDeleteFencedTables } from "./meta-schema.js";
 import {
+  POLICY_CLAUSES_BY_COMMAND,
   PUBLIC_ROLE,
   REFERENTIAL_ACTIONS,
   RLS_POLICY_COMMANDS,
@@ -292,12 +293,38 @@ describe("emitRlsPolicy", () => {
     ).toBe(`CREATE POLICY "p" ON "meta"."x" FOR SELECT USING (true);`);
   });
 
-  it("emits every command spelling", () => {
+  it("emits every command spelling, with the clause that command can carry", () => {
+    // This looped over all five commands with `using` set and asserted
+    // `FOR INSERT USING (true)` was correct — SQL Postgres **refuses**, pinned as the intended
+    // emission 34 lines above the sibling test whose comment explains why it cannot run. ADR-0401
+    // added the guard; the test becomes a partition driven by the same total map, so a sixth command
+    // cannot be asserted into either half by accident.
     for (const command of RLS_POLICY_COMMANDS) {
-      expect(emitRlsPolicy(minimalTable, { name: "p", using: "true", command })).toBe(
-        `CREATE POLICY "p" ON "meta"."x" FOR ${command} USING (true);`,
-      );
+      const clauses = POLICY_CLAUSES_BY_COMMAND[command];
+      if (clauses.using) {
+        expect(emitRlsPolicy(minimalTable, { name: "p", using: "true", command })).toBe(
+          `CREATE POLICY "p" ON "meta"."x" FOR ${command} USING (true);`,
+        );
+      } else {
+        expect(() =>
+          emitRlsPolicy(minimalTable, { name: "p", using: "true", command }),
+        ).toThrow(/declares USING with FOR INSERT/);
+      }
+      if (clauses.check) {
+        expect(emitRlsPolicy(minimalTable, { name: "p", check: "true", command })).toBe(
+          `CREATE POLICY "p" ON "meta"."x" FOR ${command} WITH CHECK (true);`,
+        );
+      } else {
+        expect(() =>
+          emitRlsPolicy(minimalTable, { name: "p", check: "true", command }),
+        ).toThrow(/declares WITH CHECK with FOR (SELECT|DELETE)/);
+      }
     }
+    // Non-vacuity in both directions: the map really does refuse some pairs and admit others, so a
+    // map that answered `true` everywhere — which is the pre-ADR-0401 behaviour — fails here.
+    const cmds = [...RLS_POLICY_COMMANDS];
+    expect(cmds.filter((c) => !POLICY_CLAUSES_BY_COMMAND[c].using)).toEqual(["INSERT"]);
+    expect(cmds.filter((c) => !POLICY_CLAUSES_BY_COMMAND[c].check)).toEqual(["SELECT", "DELETE"]);
   });
 
   it("emits TO with quoted role names", () => {
@@ -923,12 +950,16 @@ describe("the catalog's own emission is unchanged", () => {
    */
   const statements = emitBootstrapSql(META_SCHEMA_NAME, META_TABLES);
 
-  it("writes AS RESTRICTIVE for exactly the sixteen DELETE fences, and AS PERMISSIVE never", () => {
+  it("writes AS RESTRICTIVE for exactly the eighteen DELETE fences, and AS PERMISSIVE never", () => {
     // Until ADR-0400 this asserted the catalog wrote neither keyword, and it was a true statement
     // about a mechanism with no producer: `RlsPolicy.permissive` was declared, emitted, introspected
     // and diffed, and no table set it. The fence is the first producer, so the assertion becomes a
-    // both-directions one rather than a flip — the dangerous direction being a *seventeenth*
+    // both-directions one rather than a flip — the dangerous direction being a *nineteenth*
     // restrictive policy nobody chose, which an `.toEqual([])` cannot see and a count would hide.
+    //
+    // Eighteen since ADR-0401, which fenced the two statutory-retention tables. The floor below is a
+    // non-vacuity guard and not the claim: what makes this a partition is the `toEqual` against the
+    // derived set, so the number only has to move when the set does.
     const restrictive = statements
       .filter((sql) => / AS RESTRICTIVE/.test(sql))
       .map((sql) => /CREATE POLICY "([^"]+)"/.exec(sql)?.[1] ?? "?")
@@ -938,7 +969,7 @@ describe("the catalog's own emission is unchanged", () => {
         .map((t) => `${t}_no_tenant_delete`)
         .sort(),
     );
-    expect(restrictive).toHaveLength(16);
+    expect(restrictive).toHaveLength(18);
     // `AS PERMISSIVE` is the `CREATE POLICY` default, so writing it is never necessary and a policy
     // that does has had `permissive: true` declared by hand — which the catalog has no reason to do
     // and which would make the omitted-means-permissive canonicalisation untestable.
@@ -999,7 +1030,7 @@ describe("the catalog's own emission is unchanged", () => {
         expect(policy.permissive, `${table.name}.${policy.name}`).toBeUndefined();
       }
     }
-    expect(fences).toBe(16);
+    expect(fences).toBe(18);
   });
 });
 

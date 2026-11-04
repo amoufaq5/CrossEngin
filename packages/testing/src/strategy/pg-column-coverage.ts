@@ -906,8 +906,16 @@ export function literalBody(text: string): string | null {
  *  - `<array>.join(…)`, resolved later once the array is known.
  *
  * A parameter with no `??` default is deliberately *not* bound: `entity-ops.ts` takes a `table`
- * argument that is a tenant's own entity table, and guessing a value for it would turn a genuinely
- * dynamic statement into a confident wrong finding.
+ * argument this scan cannot resolve, and guessing a value for it would turn a genuinely dynamic
+ * statement into a confident wrong finding.
+ *
+ * It is **not** "a tenant's own entity table", which this said until ADR-0401. Its sole caller sets
+ * `this.table = \`${schema}.operate_entity_records\`` (`entity-store.ts:109`), so the real target is
+ * the catalogued `meta.operate_entity_records` — unresolvable *here* because the value arrives
+ * through a parameter rather than because the table is dynamic. That distinction is load-bearing
+ * rather than pedantic: `meta.operate_entity_records` is the shipped `--store pg` entity-delete
+ * route's table and ADR-0400's own named example of a table that must **not** be `DELETE`-fenced, so
+ * a reader taking this sentence at face value concludes the catalog does not describe it.
  */
 /**
  * Comments removed and concatenated literals joined, with every newline left where it was so that a
@@ -1478,14 +1486,26 @@ export type PgScanGap = z.infer<typeof PgScanGapSchema>;
  *    the catalog by hand when this list was written. Resolving them statically would mean assuming
  *    what an arbitrary function does with an array, and an assumption that is wrong once produces a
  *    confident false finding, which is how a check gets muted.
- *  - **A target that is dynamic by construction.** A tenant's own entity table, an arbitrary table
- *    handed to the encryption write path, or `_meta_migrations` — which is in the `meta` schema and
- *    deliberately *not* in `META_TABLES`, because `kernel-pg`'s applier creates it for its own hash
- *    bookkeeping. None of these is a catalogued table, so there is nothing to compare them to.
+ *  - **A target this scan cannot resolve.** An arbitrary table handed to the encryption write path,
+ *    `_meta_migrations` — which is in the `meta` schema and deliberately *not* in `META_TABLES`,
+ *    because `kernel-pg`'s applier creates it for its own hash bookkeeping — or a table arriving
+ *    through a function parameter.
  *
- * What is **not** on this list is the load-bearing fact: every `INSERT` in the workspace whose
- * target is a catalogued table is read and checked. The gaps are reads, partial updates, and tables
- * the catalog does not describe.
+ * **Two of those targets are catalogued, and this comment used to deny it** (ADR-0401). It read
+ * *"None of these is a catalogued table, so there is nothing to compare them to"*, followed by
+ * *"the load-bearing fact: every `INSERT` in the workspace whose target is a catalogued table is
+ * read and checked"*, and both are false: `entity-ops.ts`'s `table` parameter resolves to
+ * `meta.operate_entity_records` and `job-cancellation.ts`'s to `meta.job_runs`, so `entity-ops.ts`
+ * holds an `INSERT` into a catalogued table that this scan reports unresolved — a case falling into
+ * none of the three categories the old summary enumerated. The per-entry reasons below were correct
+ * all along; it was the generalisation above them that was wrong, and `job-cancellation.ts`' own
+ * reason text contradicted it in the same constant.
+ *
+ * So the honest statement is narrower: every `INSERT` whose target this scan **resolves** to a
+ * catalogued table is read and checked, and the gaps are reads, partial updates, tables the catalog
+ * does not describe, **and catalogued tables named through a parameter**. That last category is the
+ * one to watch if ADR-0400's open question 4 ever adds a `delete` member to `SQL_STATEMENT_KINDS`:
+ * `meta.operate_entity_records`' confined `DELETE` writer lands in exactly this gap.
  */
 export const PG_SCAN_GAPS: readonly PgScanGap[] = [
   {
@@ -1593,7 +1613,10 @@ export const PG_SCAN_GAPS: readonly PgScanGap[] = [
   {
     file: "packages/operate-runtime-pg/src/entity-ops.ts",
     expression: "${table}",
-    reason: "the JSONB document table is passed in, and these helpers are generic over it",
+    reason:
+      "the JSONB document table is passed in, and these helpers are generic over it — the one " +
+      "caller passes `${schema}.operate_entity_records`, so unlike the gap above this target IS " +
+      "catalogued and the gap is the parameter rather than the table",
   },
 ];
 

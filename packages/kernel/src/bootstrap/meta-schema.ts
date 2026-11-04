@@ -99,9 +99,22 @@ const TENANT_ISOLATION_USING =
  *
  * The exposure is not a decision anybody made: `CREATE POLICY` defaults to `FOR ALL`, so a catalog
  * that writes one expression and says nothing about commands gets every command. All 115 RLS-enabled
- * `meta` tables are in that shape. This fences the sixteen where a tenant deleting its own row
- * destroys the platform's evidence about it, which is the harm; for the rest a tenant's own row is
- * its own business.
+ * `meta` tables are in that shape, and the set this fences is **exactly the set the Article 17
+ * erasure retains** — `RETAINED_SHARED_TABLES`, the erasure's own derived union, currently 18. For
+ * the rest a tenant's own row is its own business.
+ *
+ * The union has **two** halves and they are retained for opposite reasons, which is why the
+ * predicate is the union rather than either half (ADR-0401). `PLATFORM_RECORD_TABLES` (16) is the
+ * platform's record of what happened to a tenant: not the tenant's data, not an Article 17 subject,
+ * silent in the proof. `STATUTORY_RETENTION_TABLES` (2) is the opposite on every axis — those rows
+ * *are* the data subject's, Article 17 *does* reach them, Article 17(3)(b) is why they stay, and the
+ * proof **names** them with their obligation. ADR-0400 fenced the first half and left the second,
+ * which is the one shape where the exposure is worse than a missing record: `meta.tenant_credits`'
+ * own retention comment says that retaining the invoices and destroying the credit notes *"would
+ * leave a retained record that overstates the tax charged, which is a worse outcome than keeping
+ * neither"* — and a tenant-context `DELETE` on that table alone produced exactly that, under a
+ * signed `erased_and_retained` attestation still naming the obligation. Two reasons, one act
+ * forbidden, so one arm.
  *
  * ## Why `DELETE` and not `UPDATE`
  *
@@ -146,21 +159,43 @@ const TENANT_ISOLATION_USING =
  * job queue silently depending on the absence of.
  *
  * The Article 17 erasure cannot conflict with it even in principle, and that is stronger than the
- * usual argument: these sixteen tables *are* its retention set, so `eraseSharedTablesWithin` never
- * targets them. Separately it sets no tenant context and refuses
- * `rls_would_confine_this_session`, so a restrictive policy could not reach it in any case.
+ * usual argument: this set *is* its retention set by construction, so `eraseSharedTablesWithin`
+ * never targets a fenced table. The general reason is stronger still and does not depend on
+ * disjointness at all — **a restrictive policy and that erasure are mutually exclusive by
+ * construction**, because a policy binds only a session `row_security_active` reports confined and
+ * that is precisely the session the erasure refuses up front as
+ * `rls_would_confine_this_session`. It holds no grant it could claim to get past one: measured,
+ * zero `set_config` calls in `shared-table-erasure.ts` and `deletion-pipeline.ts` between them, so
+ * the probe refusal is its *only* protection rather than a belt beside one. So no restrictive
+ * `DELETE` policy on any `meta` table — including one on an erasure **target** — could ever refuse
+ * it.
  *
  * ## The cost, which is why the set is sixteen and not a hundred and nine
  *
- * **A DELETE this denies is silent.** `DELETE` carries only a `USING` clause and no `WITH CHECK`,
- * so a refused one returns `DELETE 0` with no error code — byte-identical to an empty scope, which
- * is this repository's own silent-zero class. An `INSERT` refused by RLS raises `42501` and an
- * operator sees it; this raises nothing. On a table whose records nobody deletes that costs nothing,
- * and on a table with a legitimate tenant-context `DELETE` writer it would be a **route that
- * reports success and does nothing**. 109 of the 115 exposed tables have no such writer and could
- * therefore be fenced, and that is deliberately not what this does: the argument above is about
- * records that outlive their tenant, and for a `slo_evaluations` or a `cost_attribution` row a
- * tenant deleting its own is nobody else's business. A denial needs a reason, not an opportunity.
+ * **A DELETE this denies is silent at the SQL layer.** `DELETE` carries only a `USING` clause and no
+ * `WITH CHECK`, so a refused one returns `DELETE 0` with no error code — byte-identical to an empty
+ * scope, which is this repository's own silent-zero class. An `INSERT` refused by RLS raises `42501`
+ * and an operator sees it; this raises nothing.
+ *
+ * **What a *caller* sees is not silence, and ADR-0400 said it was** (ADR-0401). Traced on that
+ * ADR's own named example: `meta.operate_entity_records` is the shipped `--store pg` entity-delete
+ * route, `entity-ops.ts`' statement ends `return res.rowCount > 0`, so a fenced `DELETE 0` makes
+ * `PostgresEntityStore.remove` answer `false`, and the handler's delete arm reads
+ * `if (!removed) return json(404, …)`. A wrongly-fenced route therefore answers a visible **404 for
+ * a record that exists** — still a wrong answer, and a worse one than a no-op, but not a success.
+ * The silence is real one layer down, where nothing distinguishes the refusal from an empty scope;
+ * the 404 is what the one reachable route turns it into, and a route that reported success would be
+ * a different defect from the one this comment used to describe.
+ *
+ * That cost is why the set is the retention union and not the whole exposed catalog. 109 of the 115
+ * exposed tables have no tenant-context `DELETE` writer at all and could therefore be fenced for
+ * free; the remainder of those 109 deliberately are not, because the argument above is about
+ * records something outside the tenant is entitled to read afterwards, and for a `slo_evaluations`
+ * or a `cost_attribution` row a tenant deleting its own is nobody else's business. **A denial needs
+ * a reason, not an opportunity** — and note the 6/109 split is "has a *confined* writer", not "has a
+ * writer": `meta.operate_design_jobs` sits in the 109 despite holding the workspace's
+ * most-discussed `DELETE`, because that sweep is deliberately unconfined and a restrictive policy
+ * cannot reach it.
  */
 function retainedRecordNoTenantDelete(table: string): RlsPolicy {
   return {
@@ -1411,7 +1446,22 @@ export const META_INVOICES: TableDefinition = {
   ],
   rls: {
     enabled: true,
-    policies: [{ name: "invoices_tenant_isolation", using: TENANT_ISOLATION_USING }],
+    policies: [
+      { name: "invoices_tenant_isolation", using: TENANT_ISOLATION_USING },
+      // Fenced for the *other* retention reason (ADR-0401). The sixteen
+      // `PLATFORM_RECORD_TABLES` fences are the platform's record of what happened to a tenant; this
+      // row is unambiguously the tenant's own data, and what keeps it is Article 17(3)(b) — a
+      // statutory obligation on the issuer. Both reasons forbid the same act, so both earn the same
+      // arm: a tenant may not delete a tax document the platform is required to keep.
+      //
+      // Deliberately a restrictive arm and **not** a move into `PLATFORM_RECORD_TABLES`, which is
+      // the remedy ADR-0400's open question 2 prescribes for the unfenced residue. That move would
+      // drop this table out of `partitionSharedTables`' statutory group, so `statutoryRetained`
+      // empties, `sharedTableRetention` answers null, and the proof degrades from
+      // `erased_and_retained` to `erased` — a tombstone claiming it destroyed the one table the law
+      // required it to keep. The fence leaves the partition untouched.
+      retainedRecordNoTenantDelete("invoices"),
+    ],
   },
 };
 
@@ -1486,6 +1536,16 @@ export const META_TENANT_CREDITS: TableDefinition = {
     enabled: true,
     policies: [
       { name: "tenant_credits_tenant_isolation", using: TENANT_ISOLATION_USING },
+      // The sharper of the pair, and the one this table's own retention comment already describes
+      // as the worst outcome available: *"retaining the invoices and destroying these would leave a
+      // retained record that overstates the tax charged, which is a worse outcome than keeping
+      // neither."* Deleting `tenant_credits` alone is exactly that state, and until ADR-0401 a
+      // tenant-context `DELETE` produced it — through this table's lone `ALL`-scope arm, whose NULL
+      // `WITH CHECK` makes its `USING` the check for every command — leaving the retained invoices
+      // overstating the tax under a signed `erased_and_retained` attestation that still named the
+      // obligation. Nothing refused it, nothing warned, and no verdict could see it: the proof
+      // commits to the *scope* composed, and the scope was correct.
+      retainedRecordNoTenantDelete("tenant_credits"),
     ],
   },
 };
@@ -12018,9 +12078,20 @@ export const META_AUDIT_INTEGRITY_VERDICTS: TableDefinition = {
         // `INSERT`-scoped with no `UPDATE` arm, because `verdict_id` is `aiv_` + the sha256 of the
         // canonical report: changing any field yields a *different row*, so there is no stable
         // handle to aim an `UPDATE` at, and an in-place edit would be ADR-0323's `scope_tampered`
-        // in the one table whose purpose is to be checkable against the chain. `DELETE` is
-        // reachable by no policy, which matters more here than on the other 31 — deleting a
-        // `compromised` verdict leaves no mismatch for anything to detect.
+        // in the one table whose purpose is to be checkable against the chain.
+        //
+        // `DELETE` is denied by the restrictive arm below rather than by the absence of a permissive
+        // one, which matters more here than on the write-split tables carrying no such fence:
+        // deleting a `compromised` verdict leaves no mismatch for anything to detect. This sentence
+        // read *"`DELETE` is reachable by no policy, which matters more here than on the other 31"*
+        // until ADR-0401, and both halves were wrong. The inference was the one ADR-0400 corrected
+        // in `meta-schema.test.ts` for this very table and left standing here, six lines above the
+        // arm it had just added: **an absent `DELETE` arm denies nothing while an `ALL`-scope
+        // isolation policy is present**, because `FOR ALL` governs every command. And 31 was wrong
+        // when written, not drifted — the comparison class is the tables carrying a platform
+        // `INSERT` arm, which numbered 33 at every commit this comment has existed in, so "the
+        // other" was 32 from the first keystroke. Derive any such figure from
+        // `tenantDeleteFencedTables()` and the arm census rather than writing one down.
         name: "audit_integrity_verdicts_platform_write",
         command: "INSERT",
         check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
@@ -12568,11 +12639,18 @@ export const META_TABLES: readonly TableDefinition[] = [
  * the subset whose policy name ends `_tenant_isolation` is 78, and a figure filtered by name was
  * carried in this repository's own notes for two increments.
  *
- * `@crossengin/kernel` cannot import `PLATFORM_RECORD_TABLES`, which lives in a package that depends
- * on it, so the two halves are compared **from disk in both directions** by
+ * `@crossengin/kernel` cannot import the erasure's retention sets, which live in a package that
+ * depends on it, so the two halves are compared **from disk in both directions** by
  * `packages/testing/src/strategy/pg-record-retention.ts` — the rule that already owns exactly this
  * cross-package comparison, for the reason ADR-0335 gave it: a one-way comparison is what ADR-0288's
  * maintained list was made of.
+ *
+ * What that rule compares is `RETAINED_SHARED_TABLES`, the erasure's own derived union of both
+ * retention sets, and **not** `PLATFORM_RECORD_TABLES` alone (ADR-0401). The distinction is not
+ * pedantic: it was the narrower comparison for one increment, during which the asserted
+ * biconditional *forbade* fencing the two statutory tables — the right-to-left arm would have
+ * reported them `fenced_table_not_protected` — while CLAUDE.md claimed the wider one. A rule
+ * narrower than the invariant it is cited for is worse than no rule, because it passes.
  */
 export function tenantDeleteFencedTables(): readonly string[] {
   return META_TABLES.filter((table) =>

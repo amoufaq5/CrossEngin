@@ -334,8 +334,10 @@ describe("collectModuleBindings", () => {
   });
 
   it("does not invent a value for an undefaulted parameter", () => {
-    // `entity-ops.ts` takes a tenant's own table as an argument; guessing would turn a genuinely
-    // dynamic statement into a confident wrong finding.
+    // `entity-ops.ts` takes its table as an argument; guessing would turn an unresolved statement
+    // into a confident wrong finding. Not "a tenant's own table", which this said until ADR-0401:
+    // the caller passes `${schema}.operate_entity_records`, a catalogued table, so what makes it
+    // unresolvable here is the parameter and not the target.
     expect(bind("function f(table: string) {}").strings.has("table")).toBe(false);
   });
 });

@@ -500,7 +500,10 @@ describe("PLATFORM_WRITE_GRANTS", () => {
   it("is checked only by INSERT- and UPDATE-scoped policies, never by an ALL-scope one", () => {
     // An `ALL`-scope policy's `USING` also serves as its `WITH CHECK`, which is the whole defect:
     // it would let the grant reach a DELETE as well, and nothing in the catalog deletes a platform
-    // row. `DELETE` is reachable by no policy at all.
+    // row. So **no platform write grant reaches a `DELETE`** — not "`DELETE` is reachable by no
+    // policy at all", which this said until ADR-0401 and which ADR-0400 made false by adding
+    // restrictive DELETE arms. Those deny rather than grant, so they carry no GUC and the `continue`
+    // below skips them; the claim this test makes is about grants and stands unchanged.
     const grants: readonly string[] = Object.values(PLATFORM_WRITE_GRANTS);
     for (const { table, policy } of allPolicies()) {
       const text = `${policy.using ?? ""} ${policy.check ?? ""}`;

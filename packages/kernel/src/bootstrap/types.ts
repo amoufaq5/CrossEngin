@@ -125,6 +125,32 @@ export const RLS_POLICY_COMMANDS = ["ALL", "SELECT", "INSERT", "UPDATE", "DELETE
 export type RlsPolicyCommand = (typeof RLS_POLICY_COMMANDS)[number];
 
 /**
+ * Which clauses each policy command can carry, which is **Postgres's rule and not a preference**
+ * (ADR-0401): `CREATE POLICY … FOR INSERT USING (…)` is refused, because an `INSERT` inspects no
+ * existing row, and `FOR SELECT`/`FOR DELETE … WITH CHECK (…)` is refused because neither writes
+ * one. `ALL` and `UPDATE` are the two that take both.
+ *
+ * A total map rather than a pair of predicates so a sixth command is a compile error here, which is
+ * the one place that matters: `emitRlsPolicy` reads it to refuse an incompatible declaration before
+ * building a statement, and the previous arrangement had the rule in a comment and no guard —
+ * leaving `emit.test.ts` free to pin `FOR INSERT USING (true)` as the correct emission, which it
+ * did, in a loop over all five commands.
+ *
+ * The asymmetry worth keeping in mind when reading the fence: a `DELETE` policy carries **only** a
+ * `USING`, which is why a refused `DELETE` is a silent `DELETE 0` where a refused `INSERT` raises
+ * `42501`. The silent zero is a consequence of this table, not of the fence.
+ */
+export const POLICY_CLAUSES_BY_COMMAND: Readonly<
+  Record<RlsPolicyCommand, { readonly using: boolean; readonly check: boolean }>
+> = Object.freeze({
+  ALL: Object.freeze({ using: true, check: true }),
+  SELECT: Object.freeze({ using: true, check: false }),
+  INSERT: Object.freeze({ using: false, check: true }),
+  UPDATE: Object.freeze({ using: true, check: true }),
+  DELETE: Object.freeze({ using: true, check: false }),
+});
+
+/**
  * The grantee `CREATE POLICY` applies a policy to when `TO` is omitted. It is a keyword, not a role
  * name, so it is never quoted and it has no row in `pg_authid` — Postgres records it as oid 0.
  */
