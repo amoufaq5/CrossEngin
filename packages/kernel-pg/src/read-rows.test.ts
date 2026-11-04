@@ -329,7 +329,43 @@ describe("textIdentity", () => {
     for (const raw of ["", null, undefined, 42, 0, true, {}, []]) {
       expect(textIdentity({ id: raw }, "id")).toBeNull();
     }
-    expect(textIdentity({}, "id")).toBeNull();
+    // The cast says which arm this case belongs to rather than weakening anything: a column absent
+    // from the row is reachable only where there is no declared row — a `SELECT` that did not
+    // return it — and is impossible by the type on a declared one, which is the point of
+    // `keyof R & string`. Spelled `{}` it would ask for a key of a type that has none.
+    expect(textIdentity({} as Record<string, unknown>, "id")).toBeNull();
+  });
+
+  it("accepts a row interface that carries no index signature, and refuses a column it lacks", () => {
+    // The symmetry `readRows` always had and these helpers did not: that loop is generic in `R`
+    // *so a store which types its rows can use it*, and a declared interface is not assignable to
+    // `Record<string, unknown>` — contravariance, which `access-reviews-runtime-pg`'s own comment
+    // names. So a typed-row store had to cast or write a fifth spelling of this predicate.
+    interface InvoiceRow {
+      readonly invoice_id: string;
+      readonly amount_paid_cents: number;
+    }
+    const row: InvoiceRow = { invoice_id: "inv_1", amount_paid_cents: 10 };
+    expect(textIdentity(row, "invoice_id")).toBe("inv_1");
+    expect(numericIdentity(row, "amount_paid_cents")).toBe("10");
+
+    // And the typo is a compile error where it used to compile and answer `null` — which
+    // `UnreadableRow.identity` documents as *the row does not name one*, so before this a
+    // mistyped column was indistinguishable from ADR-0331's genuine claim. Checked by
+    // `tsc -p tsconfig.typecheck.json` and not by vitest, which transpiles without checking
+    // (ADR-0307): if the error stops firing, the unused directive is itself the failure.
+    // @ts-expect-error a column the row interface does not declare
+    expect(textIdentity(row, "invioce_id")).toBeNull();
+
+    // The identify callback is the position that mattered: all three of its spellings were
+    // TS2345 before, including through the primitive's own loop.
+    const ids = readRows(
+      [row] as readonly InvoiceRow[],
+      (r) => r.invoice_id,
+      (r) => textIdentity(r, "invoice_id"),
+      () => undefined,
+    );
+    expect(ids).toEqual(["inv_1"]);
   });
 });
 
@@ -351,7 +387,8 @@ describe("numericIdentity", () => {
     for (const raw of [Number.NaN, Infinity, -Infinity, "", "abc", null, undefined, true, {}]) {
       expect(numericIdentity({ seq: raw }, "seq")).toBeNull();
     }
-    expect(numericIdentity({}, "seq")).toBeNull();
+    // Cast for `textIdentity`'s reason one helper over: an absent column belongs to the untyped arm.
+    expect(numericIdentity({} as Record<string, unknown>, "seq")).toBeNull();
   });
 
   it("is why an integer key needs its own helper rather than one `String()` call", () => {

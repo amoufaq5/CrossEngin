@@ -215,8 +215,35 @@ export function readRowsWithUnreadable<R extends object, T>(
   return { records, unreadable };
 }
 
-/** Best-effort handle for a row the contract refused: the column may be the reason it was refused. */
-export function textIdentity(row: Record<string, unknown>, column: string): string | null {
+/**
+ * Best-effort handle for a row the contract refused: the column may be the reason it was refused.
+ *
+ * **Generic in the row for the same reason `readRows` is, and that symmetry was missing.** That
+ * loop takes `R extends object` *so that a store which types its rows can use it* — its own note
+ * says so — while these two took `Record<string, unknown>`, which a declared `interface Row`
+ * carrying no index signature is **not assignable to**. So the loop accepted a typed row and its
+ * identity helpers refused it, including through `readRows`' own `identify` callback, which is the
+ * one position they exist to fill. A typed-row store was left two options: cast (ADR-0362's
+ * annotation standing in for a check), or write a value-taking helper of its own —
+ * `access-reviews-runtime-pg`'s `rowKey`, whose neighbouring comment names the cause outright
+ * (*"contravariant, so no widening gets there"*). It was forced rather than chosen, and an
+ * independent measurement of ADR-0373's migration backlog reached the same forced choice from the
+ * other end, on three `marketplace-runtime-pg` sites.
+ *
+ * `keyof R & string` is what makes both halves true at once. For `Record<string, unknown>` it
+ * collapses to `string`, so every call this repo already makes typechecks unchanged and stays
+ * exactly as permissive as it was — honestly, since a store with no declared row has nothing to
+ * check a column name against. For a declared row it accepts the row **and** requires the column
+ * to be one of its keys, so `textIdentity(row, "invioce_id")` becomes a compile error where it used
+ * to compile and answer `null` — which `UnreadableRow.identity` documents as *the row does not name
+ * one*, making a typo indistinguishable from ADR-0331's genuine claim. Two hazards, one signature.
+ *
+ * What it deliberately does **not** close: a numeric column through the text helper, or the
+ * reverse, still compiles on a typed row and still answers `null` for every row. Filtering the key
+ * by its value type would reach that, and is refused until measured against the 40 declared row
+ * interfaces — one typing a column `unknown` would be refused by it, and that is the common shape.
+ */
+export function textIdentity<R extends object>(row: R, column: keyof R & string): string | null {
   const raw = row[column];
   return typeof raw === "string" && raw.length > 0 ? raw : null;
 }
@@ -226,7 +253,10 @@ export function textIdentity(row: Record<string, unknown>, column: string): stri
  * from node-postgres while an `INTEGER` arrives as a number (ADR-0331), so one predicate over
  * `typeof` would answer for one of the two and not the other.
  */
-export function numericIdentity(row: Record<string, unknown>, column: string): string | null {
+export function numericIdentity<R extends object>(
+  row: R,
+  column: keyof R & string,
+): string | null {
   const raw = row[column];
   if (typeof raw === "number" && Number.isFinite(raw)) return String(raw);
   if (typeof raw === "string" && raw.length > 0 && Number.isFinite(Number(raw))) return raw;

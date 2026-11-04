@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 21,248 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 21,249 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -4135,6 +4135,37 @@ packages exist at only one layer, noted below where that is true.
   property is **enforced** for a `ZodError` and **assumed** for a mapper's own guard, whose message
   passes through — a convention of exactly the kind ADR-0367 found failing in four of six refusal
   strings, and the only honest fence is a text test over the construction sites.
+  **Both identity helpers are generic in the row, and the symmetry was missing for two increments**
+  (ADR-0403). `readRows` takes `R extends object` *so a store which types its rows can use it* — its
+  own note says so — while `textIdentity`/`numericIdentity` took `Record<string, unknown>`, which a
+  declared `interface Row` with no index signature is **not assignable to**. So the loop accepted a
+  typed row and its identity helpers refused it, **including through `readRows`' own `identify`
+  callback**, which is the one position they exist to fill: three `TS2345`s. A typed-row store was
+  left two options, and `access-reviews-runtime-pg` took the second with the cause in its own
+  comment (*"contravariant, so no widening gets there"*) — `rowKey(value)`, this predicate's fifth
+  spelling, **forced rather than chosen**, over four reads that are all `tx.query<XRow>`. Two
+  independent measurements reached that same forced choice from opposite ends: a batch-7 refuter
+  proposed `rowKey(row.id)` for three `marketplace-runtime-pg` sites after refusing the obvious
+  alternative as **harmful** — turning `interface InstallationRow` into a `type` so the helper could
+  reach it silently removes **36 reads** from `pg-record-reads.ts`, the one rule that checks a field
+  is read from the column it names, in the two shapes that migration touches.
+  `column: keyof R & string` dissolves all of it and makes both halves true at once: for
+  `Record<string, unknown>` it collapses to `string`, so every one of the **14** existing call sites
+  typechecks unchanged and stays exactly as permissive (a store with no declared row has nothing to
+  check a column name against); for a declared row it accepts the row **and** requires a real key.
+  So the second hazard closes with the first — `textIdentity(row, "invioce_id")` used to compile and
+  answer `null`, which `UnreadableRow.identity` documents as *the row does not name one*, making a
+  typo **indistinguishable from ADR-0331's genuine claim**. Measured cost: 2 signature lines, 2 test
+  annotations, **0** production call sites. The one real cost is that `textIdentity({}, "id")`
+  becomes inexpressible (`keyof {} & string` is `never`), which is the *absent-column* case and now
+  carries `as Record<string, unknown>` — clarifying rather than weakening, since an absent column is
+  reachable only on the untyped arm. Deliberately **not** closed: a numeric column through the text
+  helper, or the reverse, still compiles on a typed row and answers `null` for every row; filtering
+  the key by its value type would reach it and is refused until measured against the 40 declared row
+  interfaces, one typing a column `unknown` being the common shape it would refuse. The fence is a
+  `@ts-expect-error` in the test, which only `tsconfig.typecheck.json` evaluates (ADR-0307's split,
+  so vitest cannot see it) — mutation-checked: correcting the typo answers `TS2578 Unused
+  '@ts-expect-error' directive` and exit 2.
 - **`types`** — deliberately tiny: branded primitive id types (`TenantId`, `UserId`,
   `RequestId`, `ManifestId`) plus the `meta-schema` record shapes.
   **`classifiedFields(fields)` takes a field list and not an `Entity`** (ADR-0361), and the signature
@@ -14060,9 +14091,19 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 397 records; 318 Accepted, 79 Proposed (the
+title or status change cannot drift. 398 records; 319 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
+
+**Write the header as the template's table, because an unparseable one reads as
+`Proposed` and says nothing** (ADR-0403): `field("Status", "Proposed")` is the
+generator's default, so a bullet-list header — which is what ADR-0403 was
+drafted with, caught by running the generator before the commit — counts as
+Proposed with no warning, and the tell is that `398 records` moved while
+`Accepted` did not. The silent default is register P3.3's
+`pg-record-reads.ts` shape in the index generator (*a fact a parser cannot read
+must come back as unreadable, never as absent*), and it has no other victim:
+measured over all 398, **zero** carry a header this generator cannot parse.
 
 ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never
 written; those milestones landed under other numbers. The gap is permanent.
