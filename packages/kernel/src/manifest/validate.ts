@@ -12,10 +12,7 @@ import { requiresAuditTrail } from "@crossengin/types/meta-schema";
 import type { FileTypeDeclaration } from "@crossengin/files";
 import type { IntegrationDeclaration } from "@crossengin/integrations";
 import type { JobDeclaration } from "@crossengin/jobs";
-import type {
-  DashboardDeclaration,
-  ReportDeclaration,
-} from "@crossengin/reporting";
+import type { DashboardDeclaration, ReportDeclaration } from "@crossengin/reporting";
 import { widgetReferencedReports } from "@crossengin/reporting";
 import type { ViewDeclaration } from "@crossengin/views";
 import {
@@ -31,6 +28,7 @@ import type { SearchManifest } from "@crossengin/search";
 import { BUILT_IN_TRAIT_FIELDS } from "../ddl/built-in-traits.js";
 import {
   RESERVED_ENTITY_FIELD_NAMES,
+  reservedFieldNameReason,
   resolvedFieldNames,
   resolvedFields,
 } from "../ddl/resolution.js";
@@ -200,8 +198,8 @@ function validateEntitiesTraitsRelations(manifest: Manifest): EntityIndex {
       if (RESERVED_ENTITY_FIELD_NAMES.includes(field.name)) {
         throw new ManifestValidationError(
           `entities[${i}].fields[${j}].name`,
-          `field '${entity.name}.${field.name}' is reserved: the store emits that column itself, ` +
-            `so a declaration of it is a duplicate column in the same CREATE TABLE — rename it`,
+          `field '${entity.name}.${field.name}' is reserved: ` +
+            `${reservedFieldNameReason(field.name)} — rename it`,
         );
       }
     }
@@ -225,9 +223,8 @@ function validateEntitiesTraitsRelations(manifest: Manifest): EntityIndex {
       if (RESERVED_ENTITY_FIELD_NAMES.includes(field.name)) {
         throw new ManifestValidationError(
           `traits[${i}].fields[${j}].name`,
-          `trait '${trait.name}' supplies field '${field.name}', which is reserved: the store ` +
-            `emits that column itself, so every entity carrying this trait emits a duplicate ` +
-            `column in the same CREATE TABLE — rename it in the trait, which changes every ` +
+          `trait '${trait.name}' supplies field '${field.name}', which is reserved: ` +
+            `${reservedFieldNameReason(field.name)} — rename it in the trait, which changes every ` +
             `entity carrying it`,
         );
       }
@@ -572,7 +569,8 @@ function validatePermissions(
         }
         for (const arm of FIELD_GRANT_ARMS) {
           const grant = fieldPerm[arm];
-          if (grant) checkGrant(`permissions.${entityName}.fields.${fieldName}.${arm}.roles`, grant);
+          if (grant)
+            checkGrant(`permissions.${entityName}.fields.${fieldName}.${arm}.roles`, grant);
         }
         checkFieldGrantCoherence({
           entityName,

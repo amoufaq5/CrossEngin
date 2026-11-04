@@ -52,9 +52,7 @@ describe("emitColumn", () => {
   });
 
   it("adds NOT NULL", () => {
-    expect(emitColumn({ name: "x", type: "INTEGER", notNull: true })).toBe(
-      `"x" INTEGER NOT NULL`,
-    );
+    expect(emitColumn({ name: "x", type: "INTEGER", notNull: true })).toBe(`"x" INTEGER NOT NULL`);
   });
 
   it("adds DEFAULT verbatim (raw SQL expression)", () => {
@@ -64,9 +62,7 @@ describe("emitColumn", () => {
   });
 
   it("adds inline UNIQUE for boolean unique", () => {
-    expect(emitColumn({ name: "slug", type: "TEXT", unique: true })).toBe(
-      `"slug" TEXT UNIQUE`,
-    );
+    expect(emitColumn({ name: "slug", type: "TEXT", unique: true })).toBe(`"slug" TEXT UNIQUE`);
   });
 
   it("does NOT add inline UNIQUE for object unique (named constraint emits separately)", () => {
@@ -174,9 +170,9 @@ describe("emitCreateTable", () => {
 
 describe("emitIndex", () => {
   it("emits a basic btree index", () => {
-    expect(
-      emitIndex(minimalTable, { name: "idx_x_name", columns: ["name"] }),
-    ).toBe(`CREATE INDEX "idx_x_name" ON "meta"."x" ("name");`);
+    expect(emitIndex(minimalTable, { name: "idx_x_name", columns: ["name"] })).toBe(
+      `CREATE INDEX "idx_x_name" ON "meta"."x" ("name");`,
+    );
   });
 
   it("emits a unique index", () => {
@@ -251,9 +247,7 @@ describe("emitIndex", () => {
 
 describe("emitRlsEnable", () => {
   it("emits ENABLE ROW LEVEL SECURITY", () => {
-    expect(emitRlsEnable(minimalTable)).toBe(
-      `ALTER TABLE "meta"."x" ENABLE ROW LEVEL SECURITY;`,
-    );
+    expect(emitRlsEnable(minimalTable)).toBe(`ALTER TABLE "meta"."x" ENABLE ROW LEVEL SECURITY;`);
   });
 });
 
@@ -288,9 +282,9 @@ describe("emitRlsPolicy", () => {
   });
 
   it("emits FOR <command> when a command is declared", () => {
-    expect(
-      emitRlsPolicy(minimalTable, { name: "p", using: "true", command: "SELECT" }),
-    ).toBe(`CREATE POLICY "p" ON "meta"."x" FOR SELECT USING (true);`);
+    expect(emitRlsPolicy(minimalTable, { name: "p", using: "true", command: "SELECT" })).toBe(
+      `CREATE POLICY "p" ON "meta"."x" FOR SELECT USING (true);`,
+    );
   });
 
   it("emits every command spelling, with the clause that command can carry", () => {
@@ -306,18 +300,18 @@ describe("emitRlsPolicy", () => {
           `CREATE POLICY "p" ON "meta"."x" FOR ${command} USING (true);`,
         );
       } else {
-        expect(() =>
-          emitRlsPolicy(minimalTable, { name: "p", using: "true", command }),
-        ).toThrow(/declares USING with FOR INSERT/);
+        expect(() => emitRlsPolicy(minimalTable, { name: "p", using: "true", command })).toThrow(
+          /declares USING with FOR INSERT/,
+        );
       }
       if (clauses.check) {
         expect(emitRlsPolicy(minimalTable, { name: "p", check: "true", command })).toBe(
           `CREATE POLICY "p" ON "meta"."x" FOR ${command} WITH CHECK (true);`,
         );
       } else {
-        expect(() =>
-          emitRlsPolicy(minimalTable, { name: "p", check: "true", command }),
-        ).toThrow(/declares WITH CHECK with FOR (SELECT|DELETE)/);
+        expect(() => emitRlsPolicy(minimalTable, { name: "p", check: "true", command })).toThrow(
+          /declares WITH CHECK with FOR (SELECT|DELETE)/,
+        );
       }
     }
     // Non-vacuity in both directions: the map really does refuse some pairs and admit others, so a
@@ -328,9 +322,9 @@ describe("emitRlsPolicy", () => {
   });
 
   it("emits TO with quoted role names", () => {
-    expect(
-      emitRlsPolicy(minimalTable, { name: "p", using: "true", roles: ["app_reader"] }),
-    ).toBe(`CREATE POLICY "p" ON "meta"."x" TO "app_reader" USING (true);`);
+    expect(emitRlsPolicy(minimalTable, { name: "p", using: "true", roles: ["app_reader"] })).toBe(
+      `CREATE POLICY "p" ON "meta"."x" TO "app_reader" USING (true);`,
+    );
   });
 
   it("emits a multi-role TO list in declaration order", () => {
@@ -389,9 +383,7 @@ describe("emitRlsPolicy", () => {
         command: "UPDATE",
         roles: ["app_writer"],
       }),
-    ).toBe(
-      `CREATE POLICY "p" ON "meta"."x" FOR UPDATE TO "app_writer" USING (a) WITH CHECK (b);`,
-    );
+    ).toBe(`CREATE POLICY "p" ON "meta"."x" FOR UPDATE TO "app_writer" USING (a) WITH CHECK (b);`);
   });
 
   it("treats an empty role list as absent rather than as a grant to nobody", () => {
@@ -406,15 +398,15 @@ describe("emitRlsPolicy", () => {
   });
 
   it("emits AS RESTRICTIVE for a restrictive policy", () => {
-    expect(
-      emitRlsPolicy(minimalTable, { name: "p", using: "true", permissive: false }),
-    ).toBe(`CREATE POLICY "p" ON "meta"."x" AS RESTRICTIVE USING (true);`);
+    expect(emitRlsPolicy(minimalTable, { name: "p", using: "true", permissive: false })).toBe(
+      `CREATE POLICY "p" ON "meta"."x" AS RESTRICTIVE USING (true);`,
+    );
   });
 
   it("emits AS PERMISSIVE when the default is spelled out", () => {
-    expect(
-      emitRlsPolicy(minimalTable, { name: "p", using: "true", permissive: true }),
-    ).toBe(`CREATE POLICY "p" ON "meta"."x" AS PERMISSIVE USING (true);`);
+    expect(emitRlsPolicy(minimalTable, { name: "p", using: "true", permissive: true })).toBe(
+      `CREATE POLICY "p" ON "meta"."x" AS PERMISSIVE USING (true);`,
+    );
   });
 
   it("orders AS before FOR before TO, which is the order CREATE POLICY accepts", () => {
@@ -471,9 +463,9 @@ describe("emitTableConstraint", () => {
   });
 
   it("emits a composite UNIQUE", () => {
-    expect(
-      emitTableConstraint({ kind: "unique", name: "x_pair_key", columns: ["a", "b"] }),
-    ).toBe(`CONSTRAINT "x_pair_key" UNIQUE ("a", "b")`);
+    expect(emitTableConstraint({ kind: "unique", name: "x_pair_key", columns: ["a", "b"] })).toBe(
+      `CONSTRAINT "x_pair_key" UNIQUE ("a", "b")`,
+    );
   });
 
   it("emits a composite FOREIGN KEY with ON DELETE defaulting to RESTRICT", () => {
@@ -606,7 +598,9 @@ describe("emitCreateTable — table-level constraints", () => {
     const sql = emitCreateTable({
       ...base,
       uniqueConstraints: [{ name: "comms_tenant_id_key", columns: ["tenant_id", "id"] }],
-      constraints: [{ kind: "check", name: "comms_positive_check", expression: "recipient_count > 0" }],
+      constraints: [
+        { kind: "check", name: "comms_positive_check", expression: "recipient_count > 0" },
+      ],
     });
     const lines = sql.split("\n");
     expect(lines.findIndex((l) => l.includes("PRIMARY KEY"))).toBeLessThan(
@@ -650,7 +644,7 @@ describe("guarded table-constraint emitters", () => {
 
   it("re-checks emptiness in the statement, not only when the plan was built", () => {
     const sql = emitAddTableConstraintIfEmpty(table, check);
-    expect(sql).toContain("SELECT count(*) INTO _ce_existing FROM \"meta\".\"comms\"");
+    expect(sql).toContain('SELECT count(*) INTO _ce_existing FROM "meta"."comms"');
     expect(sql).toContain("IF _ce_existing > 0 THEN");
     expect(sql).toContain("RAISE EXCEPTION");
     expect(sql).toContain("refusing to add constraint comms_window_check to meta.comms");
@@ -680,9 +674,7 @@ describe("guarded table-constraint emitters", () => {
   });
 
   it("tolerates the constraint already being gone on a replacement", () => {
-    expect(emitReplaceTableConstraintIfEmpty(table, check)).toContain(
-      "DROP CONSTRAINT IF EXISTS",
-    );
+    expect(emitReplaceTableConstraintIfEmpty(table, check)).toContain("DROP CONSTRAINT IF EXISTS");
   });
 
   it("drops the name the database holds, not the declared one, when told they differ", () => {
@@ -799,9 +791,7 @@ describe("violation-guarded table-constraint emitters", () => {
     // `messageText`'s escaping is reachable only where the act carries something that is not an
     // identifier — see the type-change case below.
     const odd: TableCheckConstraint = { ...check, name };
-    expect(() => emitAddTableConstraintIfUnviolated(table, odd)).toThrow(
-      /unsafe SQL identifier/,
-    );
+    expect(() => emitAddTableConstraintIfUnviolated(table, odd)).toThrow(/unsafe SQL identifier/);
   });
 });
 
@@ -983,18 +973,22 @@ describe("the catalog's own emission is unchanged", () => {
   it("writes a table-level CHECK line only for the table that declares one", () => {
     // A column's own CHECK and inline REFERENCES are written on the column, so a `CONSTRAINT … `
     // line appears only where `constraints` is used — the tables with a genuinely cross-column rule.
-    // Named rather than counted, so a table gaining one by accident still fails here.
+    //
+    // Derived from the declaration rather than restated, because the literal list lives in the
+    // sibling test below and two copies of it is ADR-0288's maintained list: this one asserts that
+    // the **emitter** writes a line for every table that declares one and for no other, which is
+    // the half a second literal could not add.
     const withCheckLine = statements
       .filter((sql) => /CONSTRAINT "[^"]+" CHECK \(/.test(sql))
       .map((sql) => /CREATE TABLE "meta"\."([^"]+)"/.exec(sql)?.[1] ?? "?")
       .sort();
-    expect(withCheckLine).toEqual([
-      "incident_communications",
-      "notification_read_watermarks",
-      "notification_user_quiet_hours",
-      "tenant_tombstones",
-      "workflow_definitions",
-    ]);
+    expect(withCheckLine).toEqual(
+      META_TABLES.filter((t) => t.constraints !== undefined)
+        .map((t) => t.name)
+        .sort(),
+    );
+    // Non-vacuity: a regex that stopped matching would make the equality above hold at `[]`.
+    expect(withCheckLine.length).toBeGreaterThanOrEqual(6);
     for (const sql of statements) {
       expect(sql).not.toMatch(/CONSTRAINT "[^"]+" FOREIGN KEY \(/);
     }
@@ -1004,12 +998,16 @@ describe("the catalog's own emission is unchanged", () => {
     const declaring = META_TABLES.filter((t) => t.constraints !== undefined)
       .map((t) => t.name)
       .sort();
+    // Named rather than counted, so a table gaining one by accident still fails here. The sixth
+    // member is ADR-0402's: `workflow_timers` carried none while `WorkflowTimerSchema` declared
+    // nine cross-field clauses, and `incident_communications` went from two of fifteen to twelve.
     expect(declaring).toEqual([
       "incident_communications",
       "notification_read_watermarks",
       "notification_user_quiet_hours",
       "tenant_tombstones",
       "workflow_definitions",
+      "workflow_timers",
     ]);
     // The pre-ADR-0400 form of this asserted every policy left `permissive` undefined, with the
     // reason that declaring it would change every existing policy's emitted SQL. That reason is
@@ -1057,9 +1055,7 @@ describe("emitTable", () => {
       indexes: [{ name: "idx_x_tenant", columns: ["tenant_id"] }],
       rls: {
         enabled: true,
-        policies: [
-          { name: "x_isolation", using: "tenant_id = current_setting('a')::UUID" },
-        ],
+        policies: [{ name: "x_isolation", using: "tenant_id = current_setting('a')::UUID" }],
       },
     };
     const statements = emitTable(def);
@@ -1087,7 +1083,7 @@ describe("migration emitters", () => {
     // A plan is computed from a live schema and applied a moment later.
     const sql = emitAddColumn(table, table.columns[1] as never);
     expect(sql).toContain('ALTER TABLE "meta"."widgets" ADD COLUMN IF NOT EXISTS');
-    expect(sql).toContain('"kind" TEXT NOT NULL DEFAULT \'basic\'');
+    expect(sql).toContain("\"kind\" TEXT NOT NULL DEFAULT 'basic'");
   });
 
   it("emitAddColumn carries the column's check and reference", () => {
@@ -1179,7 +1175,7 @@ describe("foreign-key and type-change emitters", () => {
     // The plan's row count was taken earlier; this is what stops a row inserted since then from
     // being silently rewritten.
     const sql = emitAlterColumnTypeIfEmpty(table, "owner_id", "text");
-    expect(sql).toContain("SELECT count(*) INTO _ce_existing FROM \"meta\".\"children\"");
+    expect(sql).toContain('SELECT count(*) INTO _ce_existing FROM "meta"."children"');
     expect(sql).toContain("IF _ce_existing > 0 THEN");
     expect(sql).toContain("RAISE EXCEPTION");
     expect(sql).toContain('ALTER COLUMN "owner_id" TYPE text USING "owner_id"::text');
@@ -1206,7 +1202,10 @@ describe("atomic replacement emitters", () => {
   const table: TableDefinition = {
     schema: "meta",
     name: "widgets",
-    columns: [{ name: "id", type: "UUID", notNull: true }, { name: "status", type: "TEXT" }],
+    columns: [
+      { name: "id", type: "UUID", notNull: true },
+      { name: "status", type: "TEXT" },
+    ],
     primaryKey: ["id"],
   };
 
@@ -1271,15 +1270,15 @@ describe("atomic replacement emitters", () => {
   });
 
   it("both refuse an unsafe identifier", () => {
-    expect(() =>
-      emitReplaceIndex(table, { name: "od'd", columns: ["status"] }),
-    ).toThrow(/unsafe SQL identifier/);
-    expect(() =>
-      emitReplaceRlsPolicy(table, { name: "od'd", using: "a" }),
-    ).toThrow(/unsafe SQL identifier/);
-    expect(() =>
-      emitRlsPolicy(table, { name: "p", using: "a", roles: ["od'd"] }),
-    ).toThrow(/unsafe SQL identifier/);
+    expect(() => emitReplaceIndex(table, { name: "od'd", columns: ["status"] })).toThrow(
+      /unsafe SQL identifier/,
+    );
+    expect(() => emitReplaceRlsPolicy(table, { name: "od'd", using: "a" })).toThrow(
+      /unsafe SQL identifier/,
+    );
+    expect(() => emitRlsPolicy(table, { name: "p", using: "a", roles: ["od'd"] })).toThrow(
+      /unsafe SQL identifier/,
+    );
   });
 });
 

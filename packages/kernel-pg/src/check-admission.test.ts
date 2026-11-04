@@ -1,4 +1,4 @@
-import { META_TABLES } from "@crossengin/kernel/bootstrap";
+import { META_TABLES, instantRangeCheck } from "@crossengin/kernel/bootstrap";
 import type { ColumnDefinition, TableDefinition } from "@crossengin/kernel/bootstrap";
 import { describe, expect, it } from "vitest";
 
@@ -203,7 +203,9 @@ describe("classifyDeclaredCheck: ranges, patterns and the rest", () => {
   it("classifies a platform-write grant as a session setting, not a value constraint", () => {
     // It constrains a GUC, so a write it refuses is an authorization refusal. Checked before every
     // other shape, since the expression also contains an equality.
-    const d = classify("tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'");
+    const d = classify(
+      "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
+    );
     expect(d?.shape).toBe("session_setting");
   });
 
@@ -244,8 +246,18 @@ describe("declaredAdmissionChecks over the real catalog", () => {
   it("leaves only a small, bounded tail unclassified", () => {
     // The tail is compound ranges, cross-column comparisons and function-wrapped expressions. A
     // ceiling rather than a floor, because the dangerous direction is the parser quietly giving up.
+    //
+    // ADR-0402 gave 37 columns a **compound** instant range (`col >= A AND col < B`), which this
+    // taxonomy deliberately leaves unclassified — the test above pins
+    // `year_available >= 2024 AND year_available <= 2100` the same way. Raising the ceiling to
+    // absorb them would weaken the fence for everything it was protecting, so the tail is
+    // **explained** instead: the instant-range members are subtracted by equality against the
+    // catalog's own helper (not a regex over the expression), and what is left is held at the
+    // original bound. So a parser that quietly gave up is still caught at 25.
     const unclassified = all.filter((d) => d.shape === "unclassified");
-    expect(unclassified.length).toBeLessThan(25);
+    const instantRanges = unclassified.filter((d) => d.expression === instantRangeCheck(d.column));
+    expect(instantRanges.length).toBe(37);
+    expect(unclassified.length - instantRanges.length).toBeLessThan(25);
   });
 
   it("never derives a candidate it cannot cast", () => {
@@ -297,7 +309,11 @@ function fakeDb(opts: FakeOptions = {}): { conn: PgConnection; sql: string[] } {
   ): Promise<{ rows: Record<string, unknown>[]; rowCount: number }> => {
     sql.push(text.trim());
     const rows = (r: Record<string, unknown>[]) => ({ rows: r, rowCount: r.length });
-    if (/^(SET TRANSACTION READ ONLY|SAVEPOINT|RELEASE SAVEPOINT|ROLLBACK TO SAVEPOINT)/.test(text.trim())) {
+    if (
+      /^(SET TRANSACTION READ ONLY|SAVEPOINT|RELEASE SAVEPOINT|ROLLBACK TO SAVEPOINT)/.test(
+        text.trim(),
+      )
+    ) {
       return rows([]);
     }
     if (text.includes("pg_get_expr(con.conbin")) {
@@ -357,7 +373,12 @@ const table = (check: string, over: Partial<ColumnDefinition> = {}): TableDefini
 describe("surveyCheckAdmission", () => {
   const live = {
     checks: [
-      { table: "t", name: "t_status_check", expression: "(status = ANY (ARRAY['a'::text]))", columns: ["status"] },
+      {
+        table: "t",
+        name: "t_status_check",
+        expression: "(status = ANY (ARRAY['a'::text]))",
+        columns: ["status"],
+      },
     ],
     columns: [{ table: "t", column: "status" }],
   };
@@ -416,7 +437,10 @@ describe("surveyCheckAdmission", () => {
     // A type-drifted column raises 42883; without the savepoint it would abort the batch and every
     // later finding would read `unreadable`.
     const { conn, sql } = fakeDb({ ...live, throwOnEval: "status" });
-    const s = await surveyCheckAdmission(conn, { schema: "meta", tables: [table("status IN ('a')")] });
+    const s = await surveyCheckAdmission(conn, {
+      schema: "meta",
+      tables: [table("status IN ('a')")],
+    });
     expect(sql).toContain("SAVEPOINT admission_probe");
     expect(sql).toContain("ROLLBACK TO SAVEPOINT admission_probe");
     expect(s.findings[0]?.verdict).toBe("unreadable");
@@ -428,7 +452,10 @@ describe("surveyCheckAdmission", () => {
     // Nothing refuses any value, so admission is fine — but the catalog declares a constraint, so
     // this is drift, and calling it `admits` would hide that.
     const { conn } = fakeDb({ checks: [], columns: [{ table: "t", column: "status" }] });
-    const s = await surveyCheckAdmission(conn, { schema: "meta", tables: [table("status IN ('a')")] });
+    const s = await surveyCheckAdmission(conn, {
+      schema: "meta",
+      tables: [table("status IN ('a')")],
+    });
     expect(s.findings[0]?.verdict).toBe("unconstrained");
     expect(s.findings[0]?.detail).toContain("drifted");
   });
@@ -454,13 +481,26 @@ describe("surveyCheckAdmission", () => {
     // about the column — a weaker claim, and the finding says so.
     const { conn } = fakeDb({
       checks: [
-        { table: "t", name: "t_status_check", expression: "(status = ANY (ARRAY['a'::text]))", columns: ["status"] },
-        { table: "t", name: "t_pair_check", expression: "(status < other)", columns: ["status", "other"] },
+        {
+          table: "t",
+          name: "t_status_check",
+          expression: "(status = ANY (ARRAY['a'::text]))",
+          columns: ["status"],
+        },
+        {
+          table: "t",
+          name: "t_pair_check",
+          expression: "(status < other)",
+          columns: ["status", "other"],
+        },
       ],
       columns: [{ table: "t", column: "status" }],
       admits: () => true,
     });
-    const s = await surveyCheckAdmission(conn, { schema: "meta", tables: [table("status IN ('a')")] });
+    const s = await surveyCheckAdmission(conn, {
+      schema: "meta",
+      tables: [table("status IN ('a')")],
+    });
     expect(s.findings[0]?.verdict).toBe("admits");
     expect(s.findings[0]?.unevaluated).toEqual(["t_pair_check"]);
     expect(s.findings[0]?.detail).toContain("could not be asked");
@@ -471,13 +511,26 @@ describe("surveyCheckAdmission", () => {
     // no such pair, but an operator-added constraint produces one, and admission is the conjunction.
     const { conn } = fakeDb({
       checks: [
-        { table: "t", name: "t_status_check", expression: "(status = ANY (ARRAY['a'::text,'b'::text]))", columns: ["status"] },
-        { table: "t", name: "t_status_check1", expression: "(status <> 'b'::text)", columns: ["status"] },
+        {
+          table: "t",
+          name: "t_status_check",
+          expression: "(status = ANY (ARRAY['a'::text,'b'::text]))",
+          columns: ["status"],
+        },
+        {
+          table: "t",
+          name: "t_status_check1",
+          expression: "(status <> 'b'::text)",
+          columns: ["status"],
+        },
       ],
       columns: [{ table: "t", column: "status" }],
       admits: (c, v) => (c.includes("<>") ? v !== "b" : true),
     });
-    const s = await surveyCheckAdmission(conn, { schema: "meta", tables: [table("status IN ('a', 'b')")] });
+    const s = await surveyCheckAdmission(conn, {
+      schema: "meta",
+      tables: [table("status IN ('a', 'b')")],
+    });
     expect(s.findings[0]?.verdict).toBe("refuses");
     expect(s.findings[0]?.refused).toEqual([
       { value: "b", origin: "declared_member", constraintName: "t_status_check1" },
@@ -496,7 +549,10 @@ describe("surveyCheckAdmission", () => {
 
   it("marks every finding unreadable, and the survey incomplete, when the catalog read fails", async () => {
     const { conn } = fakeDb({ throwOnCatalog: true });
-    const s = await surveyCheckAdmission(conn, { schema: "meta", tables: [table("status IN ('a')")] });
+    const s = await surveyCheckAdmission(conn, {
+      schema: "meta",
+      tables: [table("status IN ('a')")],
+    });
     expect(s.findings[0]?.verdict).toBe("unreadable");
     expect(s.complete).toBe(false);
     expect(s.counts.unreadable).toBe(1);
@@ -504,22 +560,29 @@ describe("surveyCheckAdmission", () => {
 
   it("tallies every verdict, with the vocabulary as the keys", async () => {
     const { conn } = fakeDb({ ...live, admits: () => true });
-    const s = await surveyCheckAdmission(conn, { schema: "meta", tables: [table("status IN ('a')")] });
+    const s = await surveyCheckAdmission(conn, {
+      schema: "meta",
+      tables: [table("status IN ('a')")],
+    });
     expect(Object.keys(s.counts).sort()).toEqual([...ADMISSION_VERDICTS].sort());
     expect(Object.values(s.counts).reduce((a, b) => a + b, 0)).toBe(s.findings.length);
   });
 
   it("refuses a schema identifier it will not interpolate", async () => {
     const { conn, sql } = fakeDb();
-    await expect(
-      surveyCheckAdmission(conn, { schema: "me ta", tables: [] }),
-    ).rejects.toThrow(/invalid schema/);
+    await expect(surveyCheckAdmission(conn, { schema: "me ta", tables: [] })).rejects.toThrow(
+      /invalid schema/,
+    );
     expect(sql).toEqual([]);
   });
 
   it("surveys only the tables in the schema it was asked about", async () => {
     const { conn } = fakeDb({ checks: [], columns: [] });
-    const other: TableDefinition = { schema: "public", name: "t", columns: [col({ check: "status IN ('a')" })] };
+    const other: TableDefinition = {
+      schema: "public",
+      name: "t",
+      columns: [col({ check: "status IN ('a')" })],
+    };
     const s = await surveyCheckAdmission(conn, { schema: "meta", tables: [other] });
     expect(s.findings).toEqual([]);
   });
@@ -550,7 +613,7 @@ describe("proveDeclarationWidens", () => {
         if (text.startsWith("EXPLAIN")) return { rows: [{ "QUERY PLAN": plan }], rowCount: 1 };
         return { rows: [], rowCount: 0 };
       },
-      transaction: async <T,>(fn: (tx: unknown) => Promise<T>): Promise<T> => fn(conn),
+      transaction: async <T>(fn: (tx: unknown) => Promise<T>): Promise<T> => fn(conn),
       close: async () => undefined,
     } as unknown as PgConnection;
     return { conn, sql };
@@ -614,12 +677,21 @@ describe("proveDeclarationWidens", () => {
     ["an empty array", []],
     ["a null", null],
     ["a node with no Plan", [{}]],
-    ["a Result with another filter", [{ Plan: { "Node Type": "Result", "One-Time Filter": "true" } }]],
-    ["the filter under a scan", [{ Plan: { "Node Type": "Seq Scan", "One-Time Filter": "false" } }]],
-  ])("reads %s as not proved, because an unrecognised plan must not allow a step", async (_w, plan) => {
-    const { conn } = explainDb(plan);
-    expect(await proveDeclarationWidens(conn, input)).toBe("not_implied");
-  });
+    [
+      "a Result with another filter",
+      [{ Plan: { "Node Type": "Result", "One-Time Filter": "true" } }],
+    ],
+    [
+      "the filter under a scan",
+      [{ Plan: { "Node Type": "Seq Scan", "One-Time Filter": "false" } }],
+    ],
+  ])(
+    "reads %s as not proved, because an unrecognised plan must not allow a step",
+    async (_w, plan) => {
+      const { conn } = explainDb(plan);
+      expect(await proveDeclarationWidens(conn, input)).toBe("not_implied");
+    },
+  );
 
   it("answers unknown_unreadable for a throw and for a bad identifier", async () => {
     const { conn } = explainDb(REFUTED, { throws: true });
@@ -672,7 +744,14 @@ describe("proveWideningSafe", () => {
     const is_owner = over.is_owner ?? false;
     const bypasses_rls = over.bypasses_rls ?? false;
     const exempt = bypasses_rls || (is_owner && !rls_forced);
-    return { role, policies_active: rls_enabled && !exempt, rls_enabled, rls_forced, is_owner, bypasses_rls };
+    return {
+      role,
+      policies_active: rls_enabled && !exempt,
+      rls_enabled,
+      rls_forced,
+      is_owner,
+      bypasses_rls,
+    };
   };
   const owner = facts({ role: "postgres", is_owner: true });
   const nonOwner = facts({ role: "serving" });
@@ -776,7 +855,10 @@ const surveyWith = (refusing: CheckAdmissionSurvey["refusing"]): CheckAdmissionS
   schema: "meta",
   findings: [...refusing],
   refusing,
-  counts: { ...Object.fromEntries(ADMISSION_VERDICTS.map((v) => [v, 0])), refuses: refusing.length } as CheckAdmissionSurvey["counts"],
+  counts: {
+    ...Object.fromEntries(ADMISSION_VERDICTS.map((v) => [v, 0])),
+    refuses: refusing.length,
+  } as CheckAdmissionSurvey["counts"],
   complete: true,
 });
 
@@ -788,7 +870,7 @@ const refusal = (table: string, column: string): CheckAdmissionSurvey["refusing"
   verdict: "refuses",
   refused: [{ value: "v4", origin: "declared_member", constraintName: `${column}_check` }],
   unevaluated: [],
-  detail: "refuses \"v4\"",
+  detail: 'refuses "v4"',
 });
 
 describe("admissionBlocks", () => {
@@ -805,7 +887,9 @@ describe("admissionBlocks", () => {
       ),
     ).toEqual(["proof_version"]);
     expect(admissionBlocks(s, [{ table: "meta.incidents", column: "status" }])).toEqual([]);
-    expect(admissionBlocks(surveyWith([]), [{ table: "meta.tenants", column: "status" }])).toEqual([]);
+    expect(admissionBlocks(surveyWith([]), [{ table: "meta.tenants", column: "status" }])).toEqual(
+      [],
+    );
   });
 });
 
@@ -818,7 +902,11 @@ describe("admissionBlocksValues", () => {
     declaredExpression:
       "status IN ('active', 'suspended', 'archived', 'pending_deletion', 'deleted')",
     refused: [
-      { value: "pending_deletion", origin: "declared_member", constraintName: "tenants_status_check" },
+      {
+        value: "pending_deletion",
+        origin: "declared_member",
+        constraintName: "tenants_status_check",
+      },
       { value: "retired", origin: "declared_member", constraintName: "tenants_status_check" },
     ],
   };
@@ -922,7 +1010,9 @@ describe("admissionRemedy", () => {
 
 describe("formatCheckAdmissionSurvey", () => {
   it("leads with the state, because that is what an operator greps for", () => {
-    expect(formatCheckAdmissionSurvey(surveyWith([])).startsWith("catalog admission: admits")).toBe(true);
+    expect(formatCheckAdmissionSurvey(surveyWith([])).startsWith("catalog admission: admits")).toBe(
+      true,
+    );
     expect(
       formatCheckAdmissionSurvey(surveyWith([refusal("meta.t", "status")])).startsWith(
         "catalog admission: refuses",

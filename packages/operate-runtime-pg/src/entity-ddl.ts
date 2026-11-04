@@ -19,7 +19,8 @@ import { searchFunctionCall } from "./search-function.js";
  * empty result. Both are fail-closed, but only one matches the platform rule that an unresolvable
  * identity yields an empty result set, and only one is debuggable.
  */
-const TENANT_ISOLATION = "tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID";
+const TENANT_ISOLATION =
+  "tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID";
 
 const MAX_IDENTIFIER_LEN = 63;
 
@@ -265,13 +266,52 @@ const SYSTEM_TIMESTAMPS: readonly { readonly name: string; readonly sql: string 
  * It does **not** rewrite rows already stamped at microsecond resolution; those keep paginating
  * wrongly until backfilled. The detection query is exact and cheap:
  * `SELECT count(*) FROM <table> WHERE created_at <> date_trunc('milliseconds', created_at)`.
+ *
+ * **It is skipped for a planned column that cannot take the default** (ADR-0402), which is the
+ * backstop for a manifest stored before `created_at`/`updated_at` became reserved names.
+ * `emitEntityTableDdl` lets a *planned* column of either name win over the system one
+ * (`SYSTEM_TIMESTAMPS.filter(…)`) while this `ALTER` always ran, and the two combine badly in two
+ * measured ways: a declared `created_at: text` **succeeds** and leaves the default a
+ * `DateStyle`-dependent text rendering that the serving contract refuses in all four settings, and a
+ * declared `updated_at: integer` raises `42804 column "updated_at" is of type integer but default
+ * expression is of type timestamptz`. The second is the one that matters:
+ * `applyTenantManifestSchema` runs the whole application in **one** transaction, so the raise aborts
+ * it, every later statement answers `25P02`, and the tenant is served from ADR-0314's JSONB
+ * fallback — a declaration of one field costing that tenant their entire typed schema.
+ *
+ * So the guard is ADR-0360's savepoint reasoning without the savepoint: *report a refusal rather
+ * than turn it into the total failure*. The skipped column keeps the type it declared and gets no
+ * server-written default, which is the state the validation refusal exists to prevent and is
+ * strictly better than losing the schema. `timestampPrecisionSkips` names what was skipped, so a
+ * caller holding a reporting channel can say it rather than discovering it.
  */
 export function emitTimestampPrecisionDdl(plan: EntityTablePlan): string[] {
   const qualified = qualifyTable(plan.schema, plan.table);
-  return SYSTEM_TIMESTAMPS.map(
+  const skipped = new Set(timestampPrecisionSkips(plan).map((s) => s.column));
+  return SYSTEM_TIMESTAMPS.filter((t) => !skipped.has(t.name)).map(
     (t) =>
       `ALTER TABLE ${qualified} ALTER COLUMN ${quoteIdent(t.name)} SET DEFAULT ${MILLISECOND_NOW};`,
   );
+}
+
+/**
+ * The system timestamps a planned column has made unable to take the millisecond default, with the
+ * type that did it.
+ *
+ * The predicate is the **emitted** type and not the field's declared kind, so `encryptAtRest` is
+ * covered by construction: `columnType` renders a classified column as `BYTEA` whatever its field
+ * type, and a `BYTEA` default of `date_trunc('milliseconds', now())` raises exactly as `INTEGER`
+ * does. A `datetime` field is `TIMESTAMPTZ` and so is never skipped, which is why the normal
+ * `auditable` entity — 68 of the 69 in the seven packs — is unaffected.
+ */
+export function timestampPrecisionSkips(
+  plan: EntityTablePlan,
+): readonly { readonly column: string; readonly emittedType: string }[] {
+  const names = new Set(SYSTEM_TIMESTAMPS.map((t) => t.name));
+  return plan.columns
+    .filter((c) => names.has(c.column))
+    .map((c) => ({ column: c.column, emittedType: c.encryptAtRest ? "BYTEA" : c.sqlType }))
+    .filter((s) => s.emittedType !== "TIMESTAMPTZ");
 }
 
 /** The millisecond-truncated clock, for the `updated_at` stamp an UPDATE writes. */
@@ -334,7 +374,9 @@ export function emitEntityTableDdl(plan: EntityTablePlan): string[] {
     if (col.classification === null) continue;
     const directives = [`crossengin.data_class=${col.classification}`];
     if (col.encryptAtRest) directives.push("crossengin.encrypt=at_rest");
-    stmts.push(`COMMENT ON COLUMN ${qualified}.${quoteIdent(col.column)} IS '${directives.join("; ")}';`);
+    stmts.push(
+      `COMMENT ON COLUMN ${qualified}.${quoteIdent(col.column)} IS '${directives.join("; ")}';`,
+    );
   }
 
   // Trigram GIN index per plaintext text column, accelerating the `contains` (ILIKE '%…%')
@@ -433,7 +475,13 @@ export function emitForeignKeyDdl(
     const targetTable = qualifyTable(plan.schema, toTableName(col.referenceTarget));
     const policy = onDeleteFor?.(col.field) ?? "restrict";
     stmts.push(
-      ...compositeFkStmts(qualified, `fk_${plan.table}_${col.column}`, col.column, targetTable, onDeleteClause(policy, col.column)),
+      ...compositeFkStmts(
+        qualified,
+        `fk_${plan.table}_${col.column}`,
+        col.column,
+        targetTable,
+        onDeleteClause(policy, col.column),
+      ),
     );
   }
   return stmts;
@@ -447,7 +495,10 @@ export function emitForeignKeyDdl(
  * FK targets are required to exist (created in the entity-table phase); a side
  * not in `knownEntities` is skipped.
  */
-export function emitJoinTableDdl(plan: JoinTablePlan, knownEntities: ReadonlySet<string>): string[] {
+export function emitJoinTableDdl(
+  plan: JoinTablePlan,
+  knownEntities: ReadonlySet<string>,
+): string[] {
   const qualified = qualifyTable(plan.schema, plan.table);
   const policyName = `${plan.table}_tenant_isolation`;
   const columnLines = [

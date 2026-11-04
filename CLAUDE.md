@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 21,240 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 21,248 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -3478,6 +3478,87 @@ report; `apps/operate-web` has none).
   catalog spells `meta.invoices.currency`, which a `^CHARACTER` prefix test misses. Each was caught
   by the non-vacuity floor rather than by reading, which is the whole argument for having one.
 
+  ADR-0402 applies for the first time a rule two earlier increments wrote down and never ran
+  mechanically, and the class is **a contract refinement with no SQL counterpart** — the catalog
+  enforces what somebody thought to enforce, and nothing asks what the contract declares. ADR-0362
+  established that of the twelve workspace rules **none compares a contract field to a catalog
+  column**; ADR-0373 and ADR-0374 then added seven CHECKs by hand under the rule *a column is owed a
+  CHECK iff a reader parses it against a contract narrower than its type*, choosing each by what the
+  refusal **disabled** rather than by surveying. Run as a measurement the class has two scopes and
+  both are far wider than the register had them.
+  *Per-field*: **1,135** no-CHECK columns of a constrainable type (409 UUID and 76 BOOLEAN excluded,
+  the type constraining those), **583** on a writerless table and **552** on a writer-bearing one
+  across 69 tables, with **302 of 450** bindings resolving to a contract field. Live as the
+  non-owner on PG 16 with a per-candidate cast, a savepoint each and `SET TRANSACTION READ ONLY`:
+  **124 contract-derived candidates, 92 ADMITTED** across **87 columns and 19 tables** — 32 refused
+  by a live CHECK and **0** by the type. The chain through the real store is the harm:
+  `created_by := 'not-a-uuid'` commits and `store.list()` throws `ZodError`, while
+  `created_at := 'infinity'` commits and throws a **bare `RangeError: Invalid time value`** — ADR-0374's
+  own class on a column that ADR named and exempted. **`notification_templates` is the specimen and
+  shows the selection was per-column**: 8 of its 18 columns carry a CHECK and they are exactly the
+  value-set and pattern ones.
+  **The rule cannot be an offline text comparison, and the proof is this increment's own first two
+  answers.** `num_nonneg` read 1 uncovered and is live **25 of 25 fenced** (`>= 1` covers
+  `.positive()`, which `/>=\s*0/` missed); a bounded pattern false-positived as `min_length`, since
+  `^dreq_[A-Za-z0-9_-]{8,40}$` already bounds a length no regex over the expression can see. So the
+  candidate comes from the **contract** and the question goes to a **live database** — ADR-0352's
+  split with the direction reversed — and soundness is a per-candidate floor: *assert the contract
+  refuses the candidate before asking whether the column admits it.*
+  *Cross-field*: the register named one clause on `workflow_timers` and one on
+  `incident_communications`; my own pre-increment notes said four on the first. **Both figures are
+  wrong and the correction runs in both directions**, because the predicate is not *incoherent rows
+  the database admits*. Floor 1 (*the contract refuses it*) removes two shapes outright —
+  `WorkflowTimerSchema` **admits** an `absolute_at` carrying both parameters and a `business_hours`
+  carrying a cron expression, having three *requires* clauses and no *surplus* clause, so a CHECK
+  there would be stricter than the contract (ADR-0373's rule pointing the other way, and my "four
+  shapes" would have shipped two such). Floor 2 (*the live writer satisfies it*, ADR-0360) is
+  answerable offline because `projectTimers` is pure: eleven writer-producible rows across the three
+  statuses it can reach. With both applied it is **21 expressible clauses** — nine and twelve —
+  against the register's two.
+  **The four declared non-defects are a taxonomy rather than excuses**, each costing something
+  checkable: `contract_admits` (above), `writer_cannot_satisfy`, `operand_absent`,
+  `check_forbidden`. The second is the one worth most: `cancelled` requires `cancelled_reason`, and
+  `PostgresTimerStore.upsert` names sixteen columns with that one in neither its list nor its `SET`,
+  `MutableTimer` has no such field, and **the two `timer_cancelled` emitters disagree about whether
+  the log holds the fact at all** (`cancelInstance` writes `payload.cancelledBy` while
+  `applyCancelTimer` writes `{ timerName }` and names no cause) — so a constraint would refuse every
+  cancellation the engine performs, and a default would state a reason nobody gave. And
+  `timer-provenance.ts` states this whole class in its own doc — *"writing the kind and omitting its
+  parameter produces a row the contract forbids and the CHECK permits, which is the very class this
+  fix is closing"* — having closed it at the **writer**, so a second writer or a hand-run `UPDATE`
+  reopens it, which is what the measurement found.
+  **P2.12c's stated reasons do not survive, three of four.** The collision is *not* already refused
+  where it matters (`checkEntityFieldNames` has two callers, both in `computeEntityDiff` — the
+  reviewer's path — while `validateManifest` tests only the reserved set, so `auditable` plus an own
+  `created_at: text` is **accepted**); adding the two names does *not* refuse the built-in trait (the
+  set is evaluated in three places and none sees a built-in trait's fields; verified by adding them,
+  all 69 pack entities still validate); and **the type is not the whole of what is wrong**, which is
+  why the register's prescribed type check was refused — an own `created_at: datetime` yields a
+  **nullable** TIMESTAMPTZ where the system column is NOT NULL, an own `created_at: text` makes the
+  default a **`DateStyle`-dependent text rendering** the serving contract refuses in all four
+  settings, and an own `updated_at: integer` raises `42804` and aborts the one transaction
+  `applyTenantManifestSchema` runs, costing that tenant their whole typed schema.
+  **The live apply found what nothing offline would**: four of the seventeen table constraints were
+  named `<table>_<column>_check`, the family Postgres derives for an inline column CHECK (ADR-0330),
+  and the bootstrap failed at statement 1,563 with `check constraint "…" already exists`. **Only two
+  of the four collided at the time** — the other two named columns carrying no CHECK, so they would
+  have applied cleanly and broken the apply the day somebody added one — which is why the fence is
+  the **shape** and not the present collision: a present-tense check passes on exactly the latent
+  half. Verified in 35 probes with **0 mismatches**, mutation-checked four ways with the catalog
+  byte-identical afterwards, and the re-plan over 983 emitted statements is **0 steps / 0
+  unreconciled**. A test that had pinned the defect as the specification is rewritten rather than
+  deleted (ADR-0372's class, seventh instance in this run).
+  **And auditing its own diff found an eighth blind spot it had itself made reachable**:
+  `parseCatalogSource` reads `check:` only as a string literal, so running it either side of this
+  change reports `checkAdded: 0` for 40 new CHECKs and `checkRemoved: 2` for the two inline literals
+  converted to the helper. Harmless and measured so — `pg-value-set-domains.ts`' population is
+  **288 before and after**, every helper-expressed CHECK being a range or a pattern — and what is
+  now reachable is a **value-set** CHECK written through a helper, which would leave the 288
+  *silently*, in the rule whose whole purpose is that every value set declares its domain. A fact a
+  parser cannot read must come back as **unreadable** and never as **absent**, which is
+  `pg-record-reads.ts`' silent skip one file in; the fix is a scanner change, because nine rules
+  read that parser.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -3745,11 +3826,40 @@ packages exist at only one layer, noted below where that is true.
   no such refusal exists — driven through `validateManifest` rather than the emitter, `tenant_id`
   was accepted and its `CREATE TABLE` carried the column twice (`ERROR: column "tenant_id"
   specified more than once`, live on PG 16.13). The refusal is driven by `it.each` over the
-  constant now, so a third member cannot arrive the same way; and **`created_at`/`updated_at` are
-  asserted *not* reserved**, because `BUILT_IN_TRAIT_FIELDS`' `auditable` supplies exactly those
-  names and the emitter therefore **overrides** rather than duplicating them — which is its own,
-  quieter defect (the stamp becomes a caller-supplied column) and is register P2.12c, where what is
-  wrong is the type rather than the name.
+  constant now, so a third member cannot arrive the same way.
+  **`created_at` and `updated_at` are the third and fourth members since ADR-0402, and the argument
+  that had kept them out was refuted by measuring it.** It ran: *a name refusal is the wrong
+  instrument, because `auditable` supplies exactly those names and an own field colliding with a
+  trait-supplied one is already refused, so the uncovered case is an entity without `auditable`
+  where what is wrong is the **type**.* Three of its four clauses do not survive.
+  The collision is **not** already refused where it matters — `checkEntityFieldNames` has two
+  callers, both in `computeEntityDiff`, the *reviewer's* path, while `validateManifest` tests only
+  this set, so `auditable` plus an own `created_at: text` is **accepted** and on a deployment not
+  passing `--require-design-review` it reaches the schema. Adding them **does not** refuse the
+  built-in trait: the set is evaluated in exactly three places and none sees a built-in trait's
+  fields (`validate.ts` over `entity.fields` and over *custom* `manifest.traits[].fields`;
+  `checkEntityFieldNames` over `entity.fields`, testing trait fields for *collision* rather than
+  reservation) — verified by adding them, all 69 pack entities, 68 of them `auditable`, still
+  validate. And **the type is not the whole of what is wrong**, which is why the register's
+  prescribed type check was refused: measured live, each case its own entity, an own
+  `created_at: datetime` yields a **nullable** `TIMESTAMPTZ` where the system column is NOT NULL, an
+  own `created_at: text` makes `emitTimestampPrecisionDdl` coerce the default to a
+  **`DateStyle`-dependent text rendering** (`"04.11.2026 08:53:15.311 UTC"` under German/DMY) that
+  `z.string().datetime({offset: true})` refuses in **all four** settings including the default, and
+  an own `updated_at: integer` makes that `ALTER` raise **`42804`**, which aborts the one transaction
+  `applyTenantManifestSchema` runs and sends the tenant to ADR-0314's JSONB fallback.
+  So `IMPLICIT_COLUMN_CONSEQUENCE` is a **total map** over the four to the two mechanisms —
+  `duplicated` for `id`/`tenant_id`, `overridden` for the timestamps — and
+  `RESERVED_ENTITY_FIELD_NAMES` is derived from it, because **one shared message was false for half
+  the set the moment the set grew past two**: "a declaration of it is a duplicate column" is right
+  about `id` and wrong about `created_at`, where the emitter writes the system column *instead*.
+  `reservedFieldNameReason` is keyed on the consequence, so a fifth member picks up a true sentence
+  by declaring which mechanism it is subject to. Measured cost of the addition: **zero** — 0 of 556
+  own fields and 0 trait fields across the seven packs and the four compliance packs.
+  The test that had asserted the opposite is **rewritten rather than deleted**: its title was *"and
+  not the ones it overrides"* and its body required `validateManifest` to accept an own
+  `created_at: text`, which is ADR-0372's class — the defect written down as a specification — for
+  the seventh time in this run.
   `resolvedClassifiedFields(entity, customTraits)` joins `resolvedFields` and `resolvedFieldNames` in
   `ddl/resolution.ts` as **the one answer to "which of this entity's fields are classified, as the
   served table has them"** (ADR-0361) — the reason `resolvedFields` is the one answer to "which fields
@@ -4462,6 +4572,22 @@ packages exist at only one layer, noted below where that is true.
   the refusal and not in the list an operator pastes. `applied: true` **with** a non-empty refusal
   list is deliberate: the application genuinely succeeded minus one guarantee, and `applied: false`
   would send the tenant to the fallback over duplicate rows.
+  **`emitTimestampPrecisionDdl` skips a system timestamp whose planned column cannot take the
+  default** (ADR-0402), which is the backstop for a manifest stored before `created_at`/`updated_at`
+  became reserved names. `emitEntityTableDdl` lets a *planned* column of either name win over the
+  system one (`SYSTEM_TIMESTAMPS.filter(…)`) while that `ALTER` ran unconditionally, and the two
+  combine badly in two measured ways: a declared `created_at: text` **succeeds** and leaves the
+  default a `DateStyle`-dependent text rendering the serving contract refuses, while a declared
+  `updated_at: integer` raises `42804` — and since this function runs inside the one transaction
+  above, that raise costs the tenant their entire typed schema for the declaration of one field. So
+  the guard is that savepoint reasoning without the savepoint: *report a refusal rather than turn it
+  into the total failure*. The predicate is the **emitted** type, so `encryptAtRest` is covered by
+  construction (`columnType` renders a classified column `BYTEA` whatever its field type, and a
+  `BYTEA` default raises exactly as `INTEGER` does), and a `datetime` field is `TIMESTAMPTZ` and
+  never skipped, which is why the ordinary `auditable` entity — 68 of the 69 in the seven packs — is
+  unaffected. `timestampPrecisionSkips` names what was skipped; the skip is **silent at the
+  emitter**, because that function returns `string[]` and has one caller, so threading it into
+  `TenantSchemaApplication` beside `uniqueIndexRefusals` is the stated follow-up.
   **And erases it** (ADR-0316), because ADR-0314's schema was never removed and `tenant-lifecycle` then
   signed a GDPR Article 17 tombstone over data that survived. `surveyTenantSchema` measures with
   `count(*)`, not `reltuples`, since a cryptographic proof commits to the figure; `probeCascadeCollateral`
@@ -8250,7 +8376,71 @@ contract that refuses infinity, 49 of them in 11 detector-subsystem files of whi
 `meta.audit_integrity_verdicts.verified_at`, whose `isoOf` helper is
 `new Date(String(value)).toISOString()`, so the same tamper is a bare `RangeError: Invalid time
 value` rather than a `ZodError`, in a `record_throwing` conversion with no wrapper, in the store that
-holds the verdicts.
+holds the verdicts. **ADR-0402 ran that rule as a measurement and did not close that remainder, and
+why is the finding**: `verifiedAt` *is* declared `z.string().datetime({offset: true})` — twice, in
+that very file — so the column is squarely in the class, and the census could not ask about it
+because `meta.audit_integrity_verdicts` resolves **zero** bindings (`integrity-verdict-store.ts`
+passes a `params` **variable** rather than an array literal, `params_not_an_array` ×14). See the
+helpers below for the bound.
+
+**Two shared helpers carry the contract-refinement CHECKs, and 40 columns were given one**
+(ADR-0402, which is ADR-0374's rule applied mechanically for the first time rather than per found
+defect). `instantRangeCheck(column)` and `uuidShapeCheck(column)` are exported from the catalog;
+ADR-0374's two inline instant expressions are converted to the helper rather than left as a second
+spelling, so the figures are **37** instant and **5** uuid and the catalog's column CHECKs went
+**788 → 828**. Every one of ADR-0374's three measured decisions lives in `instantRangeCheck`'s body
+and is pinned by a test that asserts the *rendering* (1 BC not 1 AD, the explicit `+00`, no
+`isfinite()`, no `extract`); `uuidShapeCheck` is a **pattern and not a cast**, because `col::uuid`
+in a CHECK raises `22P02` rather than violating, which aborts a batch where a `23514` is an answer.
+The `uuid` class is the consequence of two earlier increments' **own** fixes: ADR-0335's rule is
+*drop the reference*, not *change the type*, and `meta.feature_flags.created_by` is the existence
+proof in this same catalog (`UUID` with `references: null`), while ADR-0370 converted
+`notification_templates.approved_by` for an unrelated `uuid <> text` reason. Of 109 actor-ish
+columns, 74 are still UUID, 35 TEXT, **31 TEXT with no CHECK and no reference**; 6 of the 31 resolve
+to a contract field and **5 of those declare `.uuid()`**.
+The columns are a **declared list compared in both directions** in `meta-schema.test.ts`
+(`INSTANT_RANGE_CHECKED_COLUMNS`, `UUID_SHAPE_CHECKED_COLUMNS`), with equality against the
+**helper's own output** rather than a second spelling written in the test — ADR-0362's retired-test
+distinction — so a hand-edited expression fails while a deliberate change to the helper moves both
+sides together. The list also separates this constraint from ADR-0302's two structured-actor checks,
+which a regex counting `[0-9a-f]{8}-` matches: **7 columns look uuid-ish and exactly 5 carry this
+one**.
+**The bound on that census is the binding index's reach**: **19 of the 69 writer-bearing catalogued
+tables resolve ZERO bindings**, so none of their columns can be asked about, and 247 unresolved
+entries explain it across four writer idioms (`parameter_not_a_property` 93,
+`value_not_a_parameter` 73, `params_after_spread` 29, `params_not_an_array` 26, plus
+`set_clause_unresolved` 11, `values_clause_unresolved` 10, `values_clause_absent` 3,
+`column_list_unresolved` 2). Both columns ADR-0402 found **by hand** are on that list, and so is
+the `verified_at` remainder above — so raising the class's coverage is a *scanner* increment and not
+more CHECKs.
+
+**Seventeen table-level constraints joined the eight, taking the catalog to 25 across six tables**
+(ADR-0402): seven on `meta.workflow_timers`, which carried **none** while `WorkflowTimerSchema`
+declared nine cross-field clauses, and ten on `meta.incident_communications`, which had two of
+fifteen. Two floors decided the set and both removed candidates: *the contract refuses it*
+(`safeParse`, not a reading of the source — `WorkflowTimerSchema` **admits** an `absolute_at`
+carrying both parameters and a `business_hours` carrying a cron expression, so a CHECK there would
+be stricter than the contract) and *the live writer satisfies it* (ADR-0360; `projectTimers` is
+pure, so eleven writer-producible rows across the three statuses it can reach answer it offline).
+Four clauses are declared non-defects with their tier — `contract_admits`,
+`writer_cannot_satisfy` (`cancelled` needs a reason the log does not carry from one of its two
+emitters), `operand_absent` (`absolute_timestamp_variable` has no column) and `check_forbidden`
+(set distinctness needs a subquery, which a CHECK may not contain). Clauses sharing a discriminator
+and a remedy are combined under one name following `workflow_definitions_published_fields_check`,
+and the status-page pair is a **biconditional** following
+`notification_user_quiet_hours_window_pair_check`, because the contract states it in both
+directions. A JSONB array is fenced `jsonb_typeof(x) = 'array' AND jsonb_array_length(x) >= 1` with
+`jsonb_typeof` **first**, because the bare length form raises `22023` on a non-array and would turn
+a malformed row into an error rather than a violation.
+
+**A table-level constraint may not be named `<table>_<column>_check`**, which is the family Postgres
+derives for an inline column CHECK over one column (ADR-0330, the family `column-check.ts` exists to
+predict). Four of ADR-0402's seventeen were, and **only the live apply found it** — the bootstrap
+failed at statement 1,563 with `check constraint "…" already exists`. The fence
+(`tableConstraintNamesAvoidColumnFamily()`, a function over the catalog rather than a list) tests the
+**shape** and not the present collision, because only two of the four collided at the time: the
+other two named columns carrying no CHECK, so they applied cleanly and would have broken the apply
+the day somebody added one, and a present-tense check would have passed on exactly the latent half.
 
 **`meta.gdpr_deletion_requests` carries Article 12(3)'s extension as a trace beside the deadline it
 moved** (ADR-0387). `deadline_extended_at` and `deadline_extension_reason` are nullable with no
@@ -9021,6 +9211,23 @@ isolated copy of the package instead, which is the better answer when more than 
   it is why the 115-table `DELETE` exposure ADR-0400 closed had to be found by reading `pg_policy`
   rather than by any of the twelve rules. Adding the member is a scanner change with a census behind
   it, because every rule reading `scanWorkspaceSql().statements` would start seeing a new kind.
+  **And a fake connection never evaluates a CHECK, which is a third shared blind spot and the only
+  one with no rule even in prospect** (ADR-0402). A fake answers every statement, so a column whose
+  constraint is *narrower than its contract* and one whose constraint is *wider* are both invisible:
+  the SQL is well-formed, the columns exist, the `INSERT` is complete, the bound symbol matches and
+  the property names its column. ADR-0352 closed the narrow direction at **boot** by asking a live
+  database (the catalog refusing what this binary emits), and the wide direction — a row the
+  deployment's own reader refuses, stored — is answerable only against a live database too, because
+  a text comparison over deparsed CHECK text was already measured unsound. Which is why ADR-0402's
+  per-field half is a **measurement with live probes** rather than a thirteenth rule, and why its
+  own first two answers were wrong offline (`num_nonneg` read 1 uncovered and is live 25 of 25
+  fenced, since `>= 1` covers `.positive()`; a bounded pattern false-positived as `min_length`,
+  since `^dreq_[A-Za-z0-9_-]{8,40}$` already bounds a length no regex over the expression can see).
+  What *is* fenced in the tree is narrower and sits in `meta-schema.test.ts` rather than under
+  `strategy/`: two declared column lists compared **against the helper's own output** in both
+  directions, and `tableConstraintNamesAvoidColumnFamily()` over the **shape** of a constraint name
+  — which is the one of the two that could have been found offline and was not, because only the
+  live apply raised `check constraint … already exists`.
   **And a store can opt itself out of all of them by how it names its table** (ADR-0358). The
   scanner resolves `this.x = `${ident}.tbl`` by chasing `ident` back to a literal, and it reads
   `options.schema ?? "meta"` and a `const` but **not a parameter default** — so
@@ -13118,7 +13325,60 @@ land with or before it.
     beside the 505 TEXT and 159 JSONB, and the one where the type is *furthest* from the contract —
     `TIMESTAMPTZ` admits two infinities and years to 294276 against `Iso8601`'s four digits, so the
     gap is not a refinement anybody chose but the full width of the type.
-12c. **A declared `created_at` or `updated_at` silently replaces the server's stamp**, found while
+    **ADR-0402 ran the rule as a measurement for the first time and closed 40 columns of it, which
+    is where the entry's own framing stops holding.** *"The general rule is still unwritten"* was
+    the whole of this item, and what it asked for turns out to be **two** rules that cannot share an
+    instrument: a per-field CHECK is answerable from the **contract** (`safeParse` the candidate,
+    then ask a live database whether the column admits it), while the cross-field half is
+    answerable only after a **writer** check, because a clause the live writer violates turns a
+    working write into a `23514` inside a transaction (ADR-0360). Per-field, measured: **1,135**
+    no-CHECK columns of a constrainable type across 69 tables (409 UUID and 76 BOOLEAN excluded,
+    the type constraining those), **583** on a writerless table and **552** on a writer-bearing one,
+    with **302 of 450** bindings resolving to a contract field — and live as the non-owner on PG 16,
+    **124 contract-derived candidates, 92 ADMITTED** across **87 columns and 19 tables**, 32 refused
+    by a live CHECK and **0** by the type. The 40 fenced are 37 instant ranges and 5 uuid shapes
+    through two shared helpers, so the column CHECKs went **788 → 828**. Three denominators moved
+    and the diagnosis is *drifted* rather than wrong-when-written, so **re-derive them** rather than
+    re-quoting: the catalog answers **506** TEXT-ish, **158** JSONB and **408** TIMESTAMPTZ with no
+    CHECK now, against the 505/159/444 above, which has moved in **both** directions (columns added
+    since, 40 fenced by this increment).
+    **The remainder is a *scanner* increment and not more CHECKs**, which is the one thing this
+    entry could not have known: **19 of the 69 writer-bearing tables resolve ZERO bindings**, so
+    none of their columns can be asked about at all, with 247 unresolved entries explaining it
+    across four writer idioms (`parameter_not_a_property` 93, `value_not_a_parameter` 73,
+    `params_after_spread` 29, `params_not_an_array` 26, plus `set_clause_unresolved` 11,
+    `values_clause_unresolved` 10, `values_clause_absent` 3, `column_list_unresolved` 2). Both
+    columns ADR-0402 found **by hand** are on that list, and so is ADR-0374's named *"sharpest
+    remainder"* — see the `verified_at` correction in the meta-schema section, where the column is
+    squarely in the class and the census simply could not reach it.
+12c. ~~**A declared `created_at` or `updated_at` silently replaces the server's stamp.**~~ —
+    **closed by ADR-0402, which refuted three of this entry's four clauses and its prescribed
+    remedy.** The mechanism held exactly as described. What did not: *"these two **cannot** be
+    [refused at validation], because `BUILT_IN_TRAIT_FIELDS`' `auditable` supplies exactly those two
+    names … and an own field colliding with a trait-supplied one is already refused"* is wrong in
+    **both** halves — the collision is **not** already refused where it matters
+    (`checkEntityFieldNames` has two callers, both in `computeEntityDiff`, the *reviewer's* path,
+    while `validateManifest` tests only the reserved set, so `auditable` plus an own
+    `created_at: text` is **accepted** and on a deployment not passing `--require-design-review` it
+    reaches the schema), and adding the names **does not** refuse the built-in trait (the set is
+    evaluated in exactly three places and none sees a built-in trait's fields; verified by adding
+    them, all 69 pack entities still validate). And *"the fix is probably a **type** check rather
+    than a name refusal"* is **refused on measurement**: the type is not the whole of what is
+    wrong — an own `created_at: datetime` yields a **nullable** `TIMESTAMPTZ` where the system
+    column is NOT NULL, an own `created_at: text` makes the default a **`DateStyle`-dependent text
+    rendering** the serving contract refuses in all four settings including the default, and an own
+    `updated_at: integer` raises **`42804`**, which aborts the one transaction
+    `applyTenantManifestSchema` runs and sends the tenant to ADR-0314's JSONB fallback. So all four
+    names are reserved, through `IMPLICIT_COLUMN_CONSEQUENCE` — a **total map** to the two
+    mechanisms, with `RESERVED_ENTITY_FIELD_NAMES` derived from it, because **one shared message was
+    false for half the set the moment the set grew past two**. Measured cost of the addition:
+    **zero** (0 of 556 own fields and 0 trait fields across the seven packs and the four compliance
+    packs). `emitTimestampPrecisionDdl` gained the backstop for a manifest stored *before* the rule,
+    since that `ALTER` ran unconditionally. The test that had asserted the opposite is **rewritten
+    rather than deleted** — its title was *"and not the ones it overrides"* and its body required
+    `validateManifest` to accept an own `created_at: text`, which is ADR-0372's class for the
+    **seventh** time in this run. The original entry, whose mechanism is what the fix rests on:
+    found while
     closing the `id` collision in ADR-0388's addendum and measured rather than reasoned. The
     implicit-column class has **four** members and `emitEntityTableDdl` handles them in **two** ways:
     `id` and `tenant_id` are **duplicated** (`"id" TEXT NOT NULL` beside `"id" TEXT`, three `"id"`
@@ -13143,9 +13403,22 @@ land with or before it.
     both cannot answer `false` for a stored record *and* is read by nothing); a forensic checkpoint
     may claim `sha512` or `blake3` over
     a `rootHash` pinned to sha256's shape, neither computable anywhere, in the sole witness for
-    truncation detection; `meta.workflow_timers` accepts a `cron_schedule` row with a NULL
-    expression; and `meta.job_runs.status` admission is reported and never refused, so a fleet that
-    cannot dead-letter boots quietly.
+    truncation detection; ~~`meta.workflow_timers` accepts a `cron_schedule` row with a NULL
+    expression~~ — **closed by ADR-0402**, where it turned out to be **1 of 9** expressible clauses
+    on a table that carried **none** while `WorkflowTimerSchema` declared nine, so the item named
+    one member of a nine-member hole; and `meta.job_runs.status` admission is reported and never
+    refused, so a fleet that cannot dead-letter boots quietly.
+    **The GDPR clause is deliberately *not* deepened by that increment, and the reason is now
+    written at the site.** `incident_communications_breach_window_check` is exactly the refusal this
+    entry describes, and Article 33(1) requires a late notification to be reportable **with its
+    reasons for the delay** — a field no record here carries — so the remedy is a **relaxation plus
+    a new field**, which is the opposite direction from everything ADR-0402 added. Its ten new
+    clauses on that table are the ones that make it agree with the contract it already has (the
+    table went 2 → 12), and none of them makes the relaxation harder. What that leaves is sharper
+    than the entry states, and both halves are already on file as **ADR-0372's open question 3**:
+    the predicate has **two** `false` arms and the refinement refuses both, so
+    `isBreachNotificationTimely` is **constant `true`** for any parsed record *and* has zero
+    non-test callers.
 14. ~~**Three authorization defects reachable only from an authored manifest.**~~ — **closed by
     ADR-0361**, which corrected every one of the three and found two omissions that outranked them
     all. The asymmetry was real and reproduced live on both stores: a trait-contributed `pii` field
@@ -13588,6 +13861,38 @@ method is that a stale figure misleads.
    reading, which is the whole argument for having one — and reproducing a predecessor's measurement
    defects while auditing that predecessor is the clearest evidence that **a defect class is a
    property of the method, not of the increment.**
+
+   **ADR-0402 adds four members, and the first is this entry's own clause about remedies landing on
+   a register item's *own* prescription in both of that item's halves.** P2.12c said the fix was
+   *"probably a **type** check rather than a name refusal"* and that the two names *"cannot"* be
+   refused at validation — **both refuted by measurement**, the second in both of its halves (the
+   collision is not already refused where it matters, and adding the names does not refuse the
+   built-in trait), and the first because the type is not the whole of what is wrong: three
+   declared types fail in three *different* ways, one of them aborting the tenant's whole schema
+   application. P2.13 named **one** member of a nine-member hole. And P2.12b's *"the general rule
+   is still unwritten"* asked for one rule where there are **two**, answerable by different
+   instruments. The lesson is narrower than "check the remedy": **a prescription written beside a
+   defect inherits the defect's own aperture**, so an entry naming one member tends to prescribe a
+   fix sized for one.
+   The second member is **my own findings file, refuted twice before any code was written**, which
+   is the cheapest possible place for it: I had recorded four expressible shapes on
+   `WorkflowTimerSchema` and the contract **admits two of them** (an `absolute_at` carrying both
+   parameters, a `business_hours` carrying a cron expression — that schema has three *requires*
+   clauses and no *surplus* clause), so two of my four would have shipped a constraint **stricter
+   than the contract**, which is ADR-0373's rule pointing the other way. The floor that catches it
+   is mechanical and is now the first step of the method: **`safeParse` the candidate row before
+   asserting the contract refuses it**, never a reading of the source.
+   The third is a **figure carried from a sibling increment rather than measured** — the ADR's first
+   draft claimed *"964 statements, clean re-plan"*, which is ADR-0355's number; the real bootstrap
+   is **983**. *Drifted*, so the remedy is to re-derive it, and that is what the live run did (983
+   statements, 0 steps / 0 unreconciled).
+   The fourth is **a test whose ceiling I nearly raised instead of explaining**: `check-admission`'s
+   `unclassified` ceiling of 25 failed at 56 because my instant range is a **compound** range that
+   taxonomy deliberately leaves unclassified (its own test pins
+   `year_available >= 2024 AND year_available <= 2100` the same way). Raising the number would have
+   weakened a fence by 31 for every shape it protects; subtracting the 37 instant ranges **by
+   equality against the helper that generates them** keeps it at 25 exactly. **A fence that fails
+   because you added a known member wants the member explained, not the number moved.**
 2. **Six concepts are modelled several times over, two with non-nesting member sets.** Data
    classification has five declarations — four identical and one, in `data-lineage`, **disjoint past
    two members**, so the moment anything bridges the kernel's classification into the lineage graph
@@ -13598,7 +13903,8 @@ method is that a stale figure misleads.
    such a field must not survive under its old name**. Plus two flag vocabularies sharing six
    names, two runbook contracts joined by a thrice-duplicated regex, and two `Accept-Language`
    parsers.
-3. **The twelve rules have seven self-blind spots, including a silent skip and a structural anchor.**
+3. **The twelve rules have eight self-blind spots, including two silent skips and a structural
+   anchor** (seven until ADR-0402 added one and said so).
     (This item was written against ten and was already stale at eleven when `manifest-event-names.ts`
     landed in ADR-0362; `pg-unreadable-rows.ts` is the twelfth. Its own limits are declared in it and
     add nothing here, with one exception worth knowing: two inline conversions in one scope share a
@@ -13613,6 +13919,17 @@ method is that a stale figure misleads.
    tenth rule's anchor is an `Entity`-typed binding, so a reader that receives its fields through a
    **structural local type** is invisible to it — which is exactly what `EntityLike` was in
    `list-query.ts` until ADR-0361 deleted it, and is the same shape as this entry's other members.
+   **An eighth joined them in ADR-0402 and that increment is what made it reachable**:
+   `parseCatalogSource` reads `check:` only as a **string literal**, so a CHECK the catalog expresses
+   through a helper is `undefined` to it rather than unreadable — measured by running the parser over
+   that increment's own pre- and post-change source, which reports `checkAdded: 0` for 40 new CHECKs
+   and `checkRemoved: 2` for the two inline literals it converted. Harmless today and measured so
+   (`pg-value-set-domains.ts`' population is **288 before and after**, every helper-expressed CHECK
+   being a range or a pattern), and the reachable case is the next **value-set** CHECK written
+   through a helper, which drops out of the 288 silently — in the rule whose whole purpose is that
+   every value set declares its domain. It is the `pg-record-reads.ts` **silent skip** above, one
+   file in: a fact the parser cannot read must come back as *unreadable* and never as *absent*, and
+   the fix is a scanner change with a census behind it because nine rules read that parser.
 4. **Three job record contracts, a scope constant and four fields are constructed or read by
    nothing.** `JobRunRecordSchema`, `DeadLetterRecordSchema` and `JobCostRecordSchema` have no
    construction site anywhere, yet three catalogued CHECKs are adjudicated against them — so
@@ -13674,7 +13991,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 396 records; 317 Accepted, 79 Proposed (the
+title or status change cannot drift. 397 records; 318 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

@@ -127,16 +127,74 @@ export function resolvedClassifiedFields(
  * through `validateManifest` itself, `tenant_id` was accepted and emitted the same duplicate, so
  * the sentence justifying a one-member set was the only thing keeping it at one.
  *
- * `created_at` and `updated_at` are **not** here and must not be, because `BUILT_IN_TRAIT_FIELDS`'
- * `auditable` supplies exactly those two names — which is *why* the emitter **overrides** rather
- * than duplicating them. That override is its own defect and a quieter one (a declared
- * `created_at: text` replaces `TIMESTAMPTZ NOT NULL DEFAULT …`, so the table serves and the audit
- * stamp becomes a caller-supplied column), and a name refusal is the wrong instrument for it: an
- * own field colliding with a trait-supplied one is already refused, so the uncovered case is an own
- * `created_at` on an entity *without* `auditable`, where what is wrong is the **type**. Register
- * P2.12c.
+ * `created_at` and `updated_at` are the **other two**, and the argument for leaving them out was
+ * refuted by measuring it (ADR-0402). It ran: *a name refusal is the wrong instrument, because
+ * `BUILT_IN_TRAIT_FIELDS`' `auditable` supplies exactly those two names and an own field colliding
+ * with a trait-supplied one is already refused, so the uncovered case is an own `created_at` on an
+ * entity without `auditable`, where what is wrong is the type.* Three of its four clauses do not
+ * survive.
+ *
+ * **The collision is not already refused where it matters.** `checkEntityFieldNames` refuses it and
+ * has two callers, both in `computeEntityDiff` — the *reviewer's* path — while `validateManifest`
+ * tests only this set. Measured: `auditable` plus an own `created_at: text` is **accepted** by
+ * `validateManifest`, so on a deployment that does not pass `--require-design-review` the collision
+ * reaches the schema.
+ *
+ * **Adding them here does not refuse the built-in trait.** This set is evaluated in exactly three
+ * places and none of them sees a built-in trait's fields: `validate.ts` runs it over `entity.fields`
+ * and over `manifest.traits[].fields` (custom traits only — a built-in name is refused separately as
+ * shadowing), and `checkEntityFieldNames` runs it over `entity.fields` alone, testing trait fields
+ * for *collision* rather than for reservation. Verified by adding them: all 69 pack entities, 68 of
+ * them `auditable`, still validate.
+ *
+ * **And the type is not the whole of what is wrong**, which is why a type check was refused as the
+ * remedy. Measured live, each case its own entity: an own `created_at: datetime` yields
+ * `TIMESTAMPTZ` **nullable** where the system column is `NOT NULL`, so a type check alone loses the
+ * stamp's guarantee; an own `created_at: text` makes `emitTimestampPrecisionDdl` coerce the default
+ * to a **`DateStyle`-dependent text rendering** that `z.string().datetime({offset: true})` refuses
+ * in all four settings including the default; and an own `updated_at: integer` makes that same
+ * `ALTER` raise `42804`, which aborts the one transaction `applyTenantManifestSchema` runs and sends
+ * the tenant to ADR-0314's JSONB fallback.
+ *
+ * So the set is four, and `IMPLICIT_COLUMN_CONSEQUENCE` is what keeps the error honest: the two
+ * mechanisms are different and the message for an override must not say "duplicate column".
+ * Measured cost of the addition: **zero** — 0 of 556 own fields and 0 trait fields across the seven
+ * packs and the four compliance packs name either.
  */
-export const RESERVED_ENTITY_FIELD_NAMES: readonly string[] = ["id", "tenant_id"];
+export const IMPLICIT_COLUMN_CONSEQUENCE = {
+  /** `emitEntityTableDdl` writes it **as well**, so the statement carries the column twice. */
+  id: "duplicated",
+  tenant_id: "duplicated",
+  /** `SYSTEM_TIMESTAMPS.filter(…)` writes it **instead**, so the declaration replaces the stamp. */
+  created_at: "overridden",
+  updated_at: "overridden",
+} as const satisfies Record<string, "duplicated" | "overridden">;
+
+export type ImplicitColumnConsequence =
+  (typeof IMPLICIT_COLUMN_CONSEQUENCE)[keyof typeof IMPLICIT_COLUMN_CONSEQUENCE];
+
+export const RESERVED_ENTITY_FIELD_NAMES: readonly string[] = Object.keys(
+  IMPLICIT_COLUMN_CONSEQUENCE,
+);
+
+/**
+ * Why a reserved name is refused, keyed on the **consequence** and not on the name — so a fifth
+ * member picks up a true sentence by declaring which of the two mechanisms it is subject to, where
+ * one shared message was false for half the set the moment the set grew past two.
+ */
+export function reservedFieldNameConsequence(name: string): ImplicitColumnConsequence | null {
+  return name in IMPLICIT_COLUMN_CONSEQUENCE
+    ? IMPLICIT_COLUMN_CONSEQUENCE[name as keyof typeof IMPLICIT_COLUMN_CONSEQUENCE]
+    : null;
+}
+
+export function reservedFieldNameReason(name: string): string {
+  return reservedFieldNameConsequence(name) === "duplicated"
+    ? "the store emits that column itself as well, so a declaration of it is a duplicate column " +
+        "in the same CREATE TABLE and Postgres refuses the statement"
+    : "the store emits that column itself instead, so a declaration of it silently replaces the " +
+        "server-written timestamp with a caller-supplied column";
+}
 
 /**
  * Refuses an **own** field that is reserved or collides with one a trait supplies.

@@ -125,6 +125,9 @@ import {
   META_WORKFLOW_EVENTS,
   META_WORKFLOW_SIGNALS,
   META_WORKFLOW_TIMERS,
+  instantRangeCheck,
+  tableConstraintNamesAvoidColumnFamily,
+  uuidShapeCheck,
 } from "./meta-schema.js";
 
 /**
@@ -136,7 +139,6 @@ function uniqueConstraintName(column: ColumnDefinition | undefined): string | un
   const unique = column?.unique;
   return typeof unique === "object" ? unique.constraintName : undefined;
 }
-
 
 /**
  * The isolation predicate every tenant-scoped policy carries. Spelled here rather than exported
@@ -218,7 +220,12 @@ function policyClauses(): readonly PolicyClause[] {
     (t.rls?.policies ?? []).flatMap((pol) =>
       [pol.using, pol.check]
         .filter((c): c is string => c !== undefined)
-        .map((clause) => ({ table: t.name, name: pol.name, command: pol.command ?? "ALL", clause })),
+        .map((clause) => ({
+          table: t.name,
+          name: pol.name,
+          command: pol.command ?? "ALL",
+          clause,
+        })),
     ),
   );
 }
@@ -310,7 +317,9 @@ describe("no table carries the permissive platform arm any more", () => {
     for (const t of META_TABLES) {
       if (platformReadOf(t) === undefined) continue;
       const inserts = (t.rls?.policies ?? []).filter((pol) => pol.command === "INSERT");
-      expect(`${t.name}: ${inserts.length.toString()} INSERT arm(s)`).toBe(`${t.name}: 1 INSERT arm(s)`);
+      expect(`${t.name}: ${inserts.length.toString()} INSERT arm(s)`).toBe(
+        `${t.name}: 1 INSERT arm(s)`,
+      );
     }
   });
 });
@@ -486,9 +495,7 @@ describe("META_TABLES", () => {
       for (const col of table.columns) {
         if (col.references && col.references.schema === "meta") {
           const isSelfReference = col.references.table === table.name;
-          expect(
-            isSelfReference || seen.has(col.references.table),
-          ).toBe(true);
+          expect(isSelfReference || seen.has(col.references.table)).toBe(true);
         }
       }
       seen.add(table.name);
@@ -560,13 +567,7 @@ describe("table column shapes", () => {
     // contracts package that depends on it; `tenant-lifecycle`'s own test asserts the same list
     // from its side, so the pair of them is what keeps one vocabulary from drifting into two again.
     const status = META_TENANTS.columns.find((c) => c.name === "status");
-    for (const state of [
-      "active",
-      "suspended",
-      "archived",
-      "pending_deletion",
-      "deleted",
-    ]) {
+    for (const state of ["active", "suspended", "archived", "pending_deletion", "deleted"]) {
       expect([state, status?.check?.includes(`'${state}'`)]).toEqual([state, true]);
     }
     // And not the two that were billing facts duplicated onto the tenant: `past_due` is a
@@ -626,8 +627,8 @@ describe("table column shapes", () => {
 
   it("META_MANIFESTS enforces (tenant_id, hash) uniqueness", () => {
     expect(
-      META_MANIFESTS.uniqueConstraints?.some((u) =>
-        u.columns.includes("tenant_id") && u.columns.includes("hash"),
+      META_MANIFESTS.uniqueConstraints?.some(
+        (u) => u.columns.includes("tenant_id") && u.columns.includes("hash"),
       ),
     ).toBe(true);
   });
@@ -667,9 +668,7 @@ describe("table column shapes", () => {
   });
 
   it("META_AUDIT_LOG indexes the chain anchor for per-row verification lookups", () => {
-    const idx = META_AUDIT_LOG.indexes?.find((i) =>
-      i.columns.includes("chain_sequence_number"),
-    );
+    const idx = META_AUDIT_LOG.indexes?.find((i) => i.columns.includes("chain_sequence_number"));
     expect(idx?.columns).toEqual(["tenant_id", "chain_sequence_number"]);
   });
 
@@ -686,9 +685,12 @@ describe("table column shapes", () => {
   });
 
   it("META_COMPLIANCE_ATTESTATIONS uses (tenant_id, pack_id, pack_version, attestation_id) uniqueness", () => {
-    expect(
-      META_COMPLIANCE_ATTESTATIONS.uniqueConstraints?.[0]?.columns,
-    ).toEqual(["tenant_id", "pack_id", "pack_version", "attestation_id"]);
+    expect(META_COMPLIANCE_ATTESTATIONS.uniqueConstraints?.[0]?.columns).toEqual([
+      "tenant_id",
+      "pack_id",
+      "pack_version",
+      "attestation_id",
+    ]);
   });
 
   it("META_EVENTS indexes (tenant_id, occurred_at) and event_name separately", () => {
@@ -724,10 +726,7 @@ describe("table column shapes", () => {
     const status = META_FILES.columns.find((c) => c.name === "status");
     expect(status?.check).toContain("uploading");
     expect(status?.check).toContain("quarantined");
-    expect(META_FILES.uniqueConstraints?.[0]?.columns).toEqual([
-      "tenant_id",
-      "storage_key",
-    ]);
+    expect(META_FILES.uniqueConstraints?.[0]?.columns).toEqual(["tenant_id", "storage_key"]);
   });
 
   it("META_FILES check-constrains data_class to the DATA_CLASSES enum", () => {
@@ -771,10 +770,7 @@ describe("table column shapes", () => {
   });
 
   it("META_REPORT_RUNS enforces (tenant_id, run_id) uniqueness + status + engine enums", () => {
-    expect(META_REPORT_RUNS.uniqueConstraints?.[0]?.columns).toEqual([
-      "tenant_id",
-      "run_id",
-    ]);
+    expect(META_REPORT_RUNS.uniqueConstraints?.[0]?.columns).toEqual(["tenant_id", "run_id"]);
     const status = META_REPORT_RUNS.columns.find((c) => c.name === "status");
     expect(status?.check).toContain("throttled");
     const engine = META_REPORT_RUNS.columns.find((c) => c.name === "engine");
@@ -810,8 +806,8 @@ describe("table column shapes", () => {
 
   it("META_INVOICES enforces (tenant_id, number) uniqueness + status enum", () => {
     expect(
-      META_INVOICES.uniqueConstraints?.some((u) =>
-        u.columns.includes("tenant_id") && u.columns.includes("number"),
+      META_INVOICES.uniqueConstraints?.some(
+        (u) => u.columns.includes("tenant_id") && u.columns.includes("number"),
       ),
     ).toBe(true);
     const status = META_INVOICES.columns.find((c) => c.name === "status");
@@ -899,9 +895,7 @@ describe("table column shapes", () => {
   });
 
   it("META_DEPLOYMENTS triggered_by FK-references META_USERS with RESTRICT", () => {
-    const triggeredBy = META_DEPLOYMENTS.columns.find(
-      (c) => c.name === "triggered_by",
-    );
+    const triggeredBy = META_DEPLOYMENTS.columns.find((c) => c.name === "triggered_by");
     expect(triggeredBy?.references?.table).toBe("users");
     expect(triggeredBy?.references?.onDelete).toBe("RESTRICT");
   });
@@ -999,10 +993,7 @@ describe("table column shapes", () => {
   });
 
   it("META_IDEMPOTENCY_RECORDS enforces (tenant_id, key) uniqueness", () => {
-    expect(META_IDEMPOTENCY_RECORDS.uniqueConstraints?.[0]?.columns).toEqual([
-      "tenant_id",
-      "key",
-    ]);
+    expect(META_IDEMPOTENCY_RECORDS.uniqueConstraints?.[0]?.columns).toEqual(["tenant_id", "key"]);
   });
 
   it("META_IDEMPOTENCY_RECORDS check-constrains key pattern (8..64 chars)", () => {
@@ -1025,10 +1016,7 @@ describe("table column shapes", () => {
   });
 
   it("META_PACK_VERSIONS enforces (pack_id, version) uniqueness + status enum", () => {
-    expect(META_PACK_VERSIONS.uniqueConstraints?.[0]?.columns).toEqual([
-      "pack_id",
-      "version",
-    ]);
+    expect(META_PACK_VERSIONS.uniqueConstraints?.[0]?.columns).toEqual(["pack_id", "version"]);
     const status = META_PACK_VERSIONS.columns.find((c) => c.name === "status");
     expect(status?.check).toContain("'published'");
     expect(status?.check).toContain("'withdrawn'");
@@ -1077,10 +1065,7 @@ describe("table column shapes", () => {
   });
 
   it("META_IMPORT_SOURCES enforces (tenant_id, source_id) uniqueness", () => {
-    expect(META_IMPORT_SOURCES.uniqueConstraints?.[0]?.columns).toEqual([
-      "tenant_id",
-      "source_id",
-    ]);
+    expect(META_IMPORT_SOURCES.uniqueConstraints?.[0]?.columns).toEqual(["tenant_id", "source_id"]);
   });
 
   it("META_BACKFILL_JOBS check-constrains status to the seven lifecycle states", () => {
@@ -1110,9 +1095,7 @@ describe("table column shapes", () => {
   });
 
   it("META_ONBOARDING_RUNS enforces one active run per tenant", () => {
-    expect(META_ONBOARDING_RUNS.uniqueConstraints?.[0]?.columns).toEqual([
-      "tenant_id",
-    ]);
+    expect(META_ONBOARDING_RUNS.uniqueConstraints?.[0]?.columns).toEqual(["tenant_id"]);
   });
 
   it("META_ONBOARDING_RUNS check-constrains current_stage to the seven stages", () => {
@@ -1178,10 +1161,7 @@ describe("table column shapes", () => {
   });
 
   it("META_ML_MODELS enforces (family, version) uniqueness", () => {
-    expect(META_ML_MODELS.uniqueConstraints?.[0]?.columns).toEqual([
-      "family",
-      "version",
-    ]);
+    expect(META_ML_MODELS.uniqueConstraints?.[0]?.columns).toEqual(["family", "version"]);
   });
 
   it("META_ML_MODELS check-constrains status to the eight lifecycle states", () => {
@@ -1207,10 +1187,7 @@ describe("table column shapes", () => {
   });
 
   it("META_COST_BUDGETS enforces (tenant_id, budget_id) uniqueness", () => {
-    expect(META_COST_BUDGETS.uniqueConstraints?.[0]?.columns).toEqual([
-      "tenant_id",
-      "budget_id",
-    ]);
+    expect(META_COST_BUDGETS.uniqueConstraints?.[0]?.columns).toEqual(["tenant_id", "budget_id"]);
   });
 
   it("META_COST_BUDGETS check-constrains period to five values", () => {
@@ -1362,9 +1339,7 @@ describe("table column shapes", () => {
     const open = META_INCIDENTS.indexes?.find((i) => i.name === "idx_incidents_open");
     expect(open?.where).toContain("closed");
     expect(open?.where).toContain("cancelled");
-    const tenants = META_INCIDENTS.indexes?.find((i) =>
-      i.columns.includes("affected_tenant_ids"),
-    );
+    const tenants = META_INCIDENTS.indexes?.find((i) => i.columns.includes("affected_tenant_ids"));
     expect(tenants?.kind).toBe("gin");
   });
 
@@ -1377,9 +1352,7 @@ describe("table column shapes", () => {
 
   it("META_INCIDENTS makes two open incidents for one signal impossible", () => {
     // The duplicate hydration prevents, refused by the database rather than left to the declarer.
-    const idx = META_INCIDENTS.indexes?.find(
-      (i) => i.name === "idx_incidents_auto_declared_open",
-    );
+    const idx = META_INCIDENTS.indexes?.find((i) => i.name === "idx_incidents_auto_declared_open");
     expect(idx?.unique).toBe(true);
     expect(idx?.columns).toEqual(["auto_declared_for"]);
     // Partial, so a closed episode can be declared again and a keyless incident is not covered.
@@ -1484,7 +1457,10 @@ describe("table column shapes", () => {
       expect(rev?.type, table.name).toBe("INTEGER");
       expect(rev?.notNull, table.name).toBe(true);
       expect(rev?.default, table.name).toBe("1");
-      expect(table.columns.some((c) => c.name === "updated_at"), table.name).toBe(true);
+      expect(
+        table.columns.some((c) => c.name === "updated_at"),
+        table.name,
+      ).toBe(true);
     }
   });
 
@@ -1666,8 +1642,7 @@ describe("table column shapes", () => {
   });
 
   it("META_ARCHITECT_ESTIMATE_INFLATION cannot hold a factor that deflates an estimate", () => {
-    const col = (n: string) =>
-      META_ARCHITECT_ESTIMATE_INFLATION.columns.find((c) => c.name === n);
+    const col = (n: string) => META_ARCHITECT_ESTIMATE_INFLATION.columns.find((c) => c.name === n);
     // The estimate feeds a ceiling, so a factor below 1 would admit a request that should have
     // been delayed. Refused at the column, not only in the resolver (ADR-0330).
     expect(col("inflation")?.check).toBe("inflation >= 1");
@@ -1942,7 +1917,9 @@ describe("table column shapes", () => {
   });
 
   it("META_GDPR_DELETION_REQUESTS indexes the scheduler's claim partially", () => {
-    const due = META_GDPR_DELETION_REQUESTS.indexes?.find((i) => i.name === "idx_gdpr_deletion_due");
+    const due = META_GDPR_DELETION_REQUESTS.indexes?.find(
+      (i) => i.name === "idx_gdpr_deletion_due",
+    );
     // Partial, because the predicate is false for almost every row once requests accumulate.
     expect(due?.where).toBe("status = 'verified'");
     expect(due?.columns).toEqual(["status", "deadline_at"]);
@@ -2333,9 +2310,7 @@ describe("table column shapes", () => {
   });
 
   it("META_SDK_CLIENT_INSTALLATIONS check-constrains upgrade_nag_status to four values", () => {
-    const nag = META_SDK_CLIENT_INSTALLATIONS.columns.find(
-      (c) => c.name === "upgrade_nag_status",
-    );
+    const nag = META_SDK_CLIENT_INSTALLATIONS.columns.find((c) => c.name === "upgrade_nag_status");
     expect(nag?.check).toContain("'none'");
     expect(nag?.check).toContain("'soft_warning'");
     expect(nag?.check).toContain("'forced_upgrade_required'");
@@ -2374,17 +2349,13 @@ describe("table column shapes", () => {
   });
 
   it("META_SCIM_CLIENTS bearer_token_sha256 is CHAR(64) with hex check", () => {
-    const tok = META_SCIM_CLIENTS.columns.find(
-      (c) => c.name === "bearer_token_sha256",
-    );
+    const tok = META_SCIM_CLIENTS.columns.find((c) => c.name === "bearer_token_sha256");
     expect(tok?.type).toBe("CHAR(64)");
     expect(tok?.check).toContain("[0-9a-f]{64}");
   });
 
   it("META_SCIM_PROVISIONING resource_type enum has the 5 SCIM resource types", () => {
-    const rt = META_SCIM_PROVISIONING.columns.find(
-      (c) => c.name === "resource_type",
-    );
+    const rt = META_SCIM_PROVISIONING.columns.find((c) => c.name === "resource_type");
     expect(rt?.check).toContain("'User'");
     expect(rt?.check).toContain("'Group'");
     expect(rt?.check).toContain("'EnterpriseUser'");
@@ -2393,9 +2364,7 @@ describe("table column shapes", () => {
   });
 
   it("META_NOTIFICATION_TEMPLATES enforces (tenant, template, channel, locale, version) uniqueness", () => {
-    expect(
-      META_NOTIFICATION_TEMPLATES.uniqueConstraints?.[0]?.columns,
-    ).toEqual([
+    expect(META_NOTIFICATION_TEMPLATES.uniqueConstraints?.[0]?.columns).toEqual([
       "tenant_id",
       "template_id",
       "channel",
@@ -2405,9 +2374,7 @@ describe("table column shapes", () => {
   });
 
   it("META_NOTIFICATION_TEMPLATES allows NULL tenant_id (platform templates)", () => {
-    const tenantId = META_NOTIFICATION_TEMPLATES.columns.find(
-      (c) => c.name === "tenant_id",
-    );
+    const tenantId = META_NOTIFICATION_TEMPLATES.columns.find((c) => c.name === "tenant_id");
     expect(tenantId?.notNull).not.toBe(true);
     // ADR-0332: a SELECT-scoped platform arm of its own, not an `OR` inside isolation.
     expect(META_NOTIFICATION_TEMPLATES.rls?.policies?.[0]?.using).toBe(TENANT_ISOLATION_USING);
@@ -2415,9 +2382,12 @@ describe("table column shapes", () => {
   });
 
   it("META_NOTIFICATION_PREFERENCES enforces (tenant, user, category, channel) uniqueness", () => {
-    expect(
-      META_NOTIFICATION_PREFERENCES.uniqueConstraints?.[0]?.columns,
-    ).toEqual(["tenant_id", "user_id", "category", "channel"]);
+    expect(META_NOTIFICATION_PREFERENCES.uniqueConstraints?.[0]?.columns).toEqual([
+      "tenant_id",
+      "user_id",
+      "category",
+      "channel",
+    ]);
   });
 
   it("META_NOTIFICATION_SUPPRESSIONS enforces (tenant, channel, address) uniqueness per permanent row", () => {
@@ -2436,9 +2406,7 @@ describe("table column shapes", () => {
   });
 
   it("META_NOTIFICATION_SUPPRESSIONS check-constrains reason to the 7 suppression reasons", () => {
-    const reason = META_NOTIFICATION_SUPPRESSIONS.columns.find(
-      (c) => c.name === "reason",
-    );
+    const reason = META_NOTIFICATION_SUPPRESSIONS.columns.find((c) => c.name === "reason");
     expect(reason?.check).toContain("'hard_bounce'");
     expect(reason?.check).toContain("'spam_complaint'");
     expect(reason?.check).toContain("'unsubscribe'");
@@ -2446,30 +2414,25 @@ describe("table column shapes", () => {
   });
 
   it("META_NOTIFICATION_DISPATCHES enforces (tenant, idempotency_key) uniqueness", () => {
-    expect(
-      META_NOTIFICATION_DISPATCHES.uniqueConstraints?.[0]?.columns,
-    ).toEqual(["tenant_id", "idempotency_key"]);
+    expect(META_NOTIFICATION_DISPATCHES.uniqueConstraints?.[0]?.columns).toEqual([
+      "tenant_id",
+      "idempotency_key",
+    ]);
   });
 
   it("META_NOTIFICATION_DISPATCHES check-constrains priority to 5 levels", () => {
-    const priority = META_NOTIFICATION_DISPATCHES.columns.find(
-      (c) => c.name === "priority",
-    );
+    const priority = META_NOTIFICATION_DISPATCHES.columns.find((c) => c.name === "priority");
     expect(priority?.check).toContain("'critical'");
     expect(priority?.check).toContain("'background'");
   });
 
   it("META_NOTIFICATION_DELIVERIES cascades on dispatch deletion", () => {
-    const fk = META_NOTIFICATION_DELIVERIES.columns.find(
-      (c) => c.name === "dispatch_id",
-    );
+    const fk = META_NOTIFICATION_DELIVERIES.columns.find((c) => c.name === "dispatch_id");
     expect(fk?.references?.onDelete).toBe("CASCADE");
   });
 
   it("META_NOTIFICATION_DIGESTS frequency excludes immediate and never (batches only)", () => {
-    const freq = META_NOTIFICATION_DIGESTS.columns.find(
-      (c) => c.name === "frequency",
-    );
+    const freq = META_NOTIFICATION_DIGESTS.columns.find((c) => c.name === "frequency");
     expect(freq?.check).not.toContain("'immediate'");
     expect(freq?.check).not.toContain("'never'");
     expect(freq?.check).toContain("'hourly'");
@@ -2477,9 +2440,7 @@ describe("table column shapes", () => {
   });
 
   it("META_ACCESS_REVIEW_TEMPLATES allows NULL tenant_id (platform templates)", () => {
-    const tenantId = META_ACCESS_REVIEW_TEMPLATES.columns.find(
-      (c) => c.name === "tenant_id",
-    );
+    const tenantId = META_ACCESS_REVIEW_TEMPLATES.columns.find((c) => c.name === "tenant_id");
     expect(tenantId?.notNull).not.toBe(true);
     // ADR-0332: a SELECT-scoped platform arm of its own, not an `OR` inside isolation.
     expect(META_ACCESS_REVIEW_TEMPLATES.rls?.policies?.[0]?.using).toBe(TENANT_ISOLATION_USING);
@@ -2487,9 +2448,7 @@ describe("table column shapes", () => {
   });
 
   it("META_ACCESS_REVIEW_TEMPLATES framework enum covers SOC 2, ISO 27001, HIPAA, PCI, GDPR, CFR 21", () => {
-    const framework = META_ACCESS_REVIEW_TEMPLATES.columns.find(
-      (c) => c.name === "framework",
-    );
+    const framework = META_ACCESS_REVIEW_TEMPLATES.columns.find((c) => c.name === "framework");
     expect(framework?.check).toContain("'soc2_type2'");
     expect(framework?.check).toContain("'iso27001'");
     expect(framework?.check).toContain("'hipaa_security_rule'");
@@ -2498,9 +2457,7 @@ describe("table column shapes", () => {
   });
 
   it("META_ACCESS_REVIEW_CAMPAIGNS status enum has the 7 lifecycle states", () => {
-    const status = META_ACCESS_REVIEW_CAMPAIGNS.columns.find(
-      (c) => c.name === "status",
-    );
+    const status = META_ACCESS_REVIEW_CAMPAIGNS.columns.find((c) => c.name === "status");
     expect(status?.check).toContain("'draft'");
     expect(status?.check).toContain("'scheduled'");
     expect(status?.check).toContain("'in_progress'");
@@ -2511,44 +2468,32 @@ describe("table column shapes", () => {
   });
 
   it("META_ACCESS_REVIEW_ITEMS cascades on campaign deletion", () => {
-    const fk = META_ACCESS_REVIEW_ITEMS.columns.find(
-      (c) => c.name === "campaign_id",
-    );
+    const fk = META_ACCESS_REVIEW_ITEMS.columns.find((c) => c.name === "campaign_id");
     expect(fk?.references?.onDelete).toBe("CASCADE");
   });
 
   it("META_ACCESS_REVIEW_ITEMS risk_level enum has 4 levels", () => {
-    const risk = META_ACCESS_REVIEW_ITEMS.columns.find(
-      (c) => c.name === "risk_level",
-    );
+    const risk = META_ACCESS_REVIEW_ITEMS.columns.find((c) => c.name === "risk_level");
     expect(risk?.check).toContain("'low'");
     expect(risk?.check).toContain("'critical'");
   });
 
   it("META_ACCESS_REVIEW_DECISIONS attestation enum has the 5 attestation kinds", () => {
-    const att = META_ACCESS_REVIEW_DECISIONS.columns.find(
-      (c) => c.name === "attestation_kind",
-    );
+    const att = META_ACCESS_REVIEW_DECISIONS.columns.find((c) => c.name === "attestation_kind");
     expect(att?.check).toContain("'click_through_acknowledgement'");
     expect(att?.check).toContain("'qualified_e_signature'");
     expect(att?.check).toContain("'two_person_attestation'");
   });
 
   it("META_ACCESS_REVIEW_DECISIONS cascades on item deletion + restricts on campaign", () => {
-    const itemFk = META_ACCESS_REVIEW_DECISIONS.columns.find(
-      (c) => c.name === "item_id",
-    );
-    const campaignFk = META_ACCESS_REVIEW_DECISIONS.columns.find(
-      (c) => c.name === "campaign_id",
-    );
+    const itemFk = META_ACCESS_REVIEW_DECISIONS.columns.find((c) => c.name === "item_id");
+    const campaignFk = META_ACCESS_REVIEW_DECISIONS.columns.find((c) => c.name === "campaign_id");
     expect(itemFk?.references?.onDelete).toBe("CASCADE");
     expect(campaignFk?.references?.onDelete).toBe("RESTRICT");
   });
 
   it("META_ACCESS_REVIEW_EXCEPTIONS reason enum covers emergency + regulatory categories", () => {
-    const reason = META_ACCESS_REVIEW_EXCEPTIONS.columns.find(
-      (c) => c.name === "reason",
-    );
+    const reason = META_ACCESS_REVIEW_EXCEPTIONS.columns.find((c) => c.name === "reason");
     expect(reason?.check).toContain("'emergency_break_glass'");
     expect(reason?.check).toContain("'regulatory_exemption'");
     expect(reason?.check).toContain("'dual_role_business_need'");
@@ -2563,17 +2508,13 @@ describe("table column shapes", () => {
   });
 
   it("META_ACCESS_REVIEW_EVIDENCE sealed_sha256 is CHAR(64) hex", () => {
-    const sha = META_ACCESS_REVIEW_EVIDENCE.columns.find(
-      (c) => c.name === "sealed_sha256",
-    );
+    const sha = META_ACCESS_REVIEW_EVIDENCE.columns.find((c) => c.name === "sealed_sha256");
     expect(sha?.type).toBe("CHAR(64)");
     expect(sha?.check).toContain("[0-9a-f]{64}");
   });
 
   it("META_WORKFLOW_DEFINITIONS allows NULL tenant_id (platform definitions)", () => {
-    const tenantId = META_WORKFLOW_DEFINITIONS.columns.find(
-      (c) => c.name === "tenant_id",
-    );
+    const tenantId = META_WORKFLOW_DEFINITIONS.columns.find((c) => c.name === "tenant_id");
     expect(tenantId?.notNull).not.toBe(true);
     // ADR-0332: a SELECT-scoped platform arm of its own, not an `OR` inside isolation.
     expect(META_WORKFLOW_DEFINITIONS.rls?.policies?.[0]?.using).toBe(TENANT_ISOLATION_USING);
@@ -2581,24 +2522,22 @@ describe("table column shapes", () => {
   });
 
   it("META_WORKFLOW_DEFINITIONS enforces (tenant, key, version) uniqueness", () => {
-    expect(
-      META_WORKFLOW_DEFINITIONS.uniqueConstraints?.[0]?.columns,
-    ).toEqual(["tenant_id", "definition_key", "version"]);
+    expect(META_WORKFLOW_DEFINITIONS.uniqueConstraints?.[0]?.columns).toEqual([
+      "tenant_id",
+      "definition_key",
+      "version",
+    ]);
   });
 
   it("META_WORKFLOW_DEFINITIONS compensation_strategy enum has 4 strategies", () => {
-    const strat = META_WORKFLOW_DEFINITIONS.columns.find(
-      (c) => c.name === "compensation_strategy",
-    );
+    const strat = META_WORKFLOW_DEFINITIONS.columns.find((c) => c.name === "compensation_strategy");
     expect(strat?.check).toContain("'immediate_reverse_order'");
     expect(strat?.check).toContain("'manual_review'");
     expect(strat?.check).toContain("'no_compensation'");
   });
 
   it("META_WORKFLOW_INSTANCES status enum covers 12 lifecycle states", () => {
-    const status = META_WORKFLOW_INSTANCES.columns.find(
-      (c) => c.name === "status",
-    );
+    const status = META_WORKFLOW_INSTANCES.columns.find((c) => c.name === "status");
     expect(status?.check).toContain("'running'");
     expect(status?.check).toContain("'waiting_for_signal'");
     expect(status?.check).toContain("'compensating'");
@@ -2606,23 +2545,17 @@ describe("table column shapes", () => {
   });
 
   it("META_WORKFLOW_INSTANCES has parent FK pointing back to instances (child workflows)", () => {
-    const parent = META_WORKFLOW_INSTANCES.columns.find(
-      (c) => c.name === "parent_instance_id",
-    );
+    const parent = META_WORKFLOW_INSTANCES.columns.find((c) => c.name === "parent_instance_id");
     expect(parent?.references?.table).toBe("workflow_instances");
   });
 
   it("META_WORKFLOW_ACTIVITIES cascades on instance deletion", () => {
-    const fk = META_WORKFLOW_ACTIVITIES.columns.find(
-      (c) => c.name === "instance_id",
-    );
+    const fk = META_WORKFLOW_ACTIVITIES.columns.find((c) => c.name === "instance_id");
     expect(fk?.references?.onDelete).toBe("CASCADE");
   });
 
   it("META_WORKFLOW_ACTIVITIES kind enum covers 10 activity kinds", () => {
-    const kind = META_WORKFLOW_ACTIVITIES.columns.find(
-      (c) => c.name === "kind",
-    );
+    const kind = META_WORKFLOW_ACTIVITIES.columns.find((c) => c.name === "kind");
     expect(kind?.check).toContain("'http_call'");
     expect(kind?.check).toContain("'manual_task'");
     expect(kind?.check).toContain("'child_workflow'");
@@ -2630,9 +2563,7 @@ describe("table column shapes", () => {
   });
 
   it("META_WORKFLOW_SIGNALS delivery_guarantee enum has 3 levels", () => {
-    const delivery = META_WORKFLOW_SIGNALS.columns.find(
-      (c) => c.name === "delivery_guarantee",
-    );
+    const delivery = META_WORKFLOW_SIGNALS.columns.find((c) => c.name === "delivery_guarantee");
     expect(delivery?.check).toContain("'at_most_once'");
     expect(delivery?.check).toContain("'at_least_once'");
     expect(delivery?.check).toContain("'exactly_once_idempotent'");
@@ -2666,22 +2597,19 @@ describe("table column shapes", () => {
   });
 
   it("META_WORKFLOW_EVENTS enforces append-only per-instance ordering via unique (instance, sequence)", () => {
-    expect(
-      META_WORKFLOW_EVENTS.uniqueConstraints?.[0]?.columns,
-    ).toEqual(["instance_id", "sequence_number"]);
+    expect(META_WORKFLOW_EVENTS.uniqueConstraints?.[0]?.columns).toEqual([
+      "instance_id",
+      "sequence_number",
+    ]);
   });
 
   it("META_WORKFLOW_EVENTS cascades on instance deletion", () => {
-    const fk = META_WORKFLOW_EVENTS.columns.find(
-      (c) => c.name === "instance_id",
-    );
+    const fk = META_WORKFLOW_EVENTS.columns.find((c) => c.name === "instance_id");
     expect(fk?.references?.onDelete).toBe("CASCADE");
   });
 
   it("META_LINEAGE_NODES allows NULL tenant_id (platform-wide nodes)", () => {
-    const tenantId = META_LINEAGE_NODES.columns.find(
-      (c) => c.name === "tenant_id",
-    );
+    const tenantId = META_LINEAGE_NODES.columns.find((c) => c.name === "tenant_id");
     expect(tenantId?.notNull).not.toBe(true);
     // ADR-0332: a SELECT-scoped platform arm of its own, not an `OR` inside isolation.
     expect(META_LINEAGE_NODES.rls?.policies?.[0]?.using).toBe(TENANT_ISOLATION_USING);
@@ -2697,21 +2625,15 @@ describe("table column shapes", () => {
   });
 
   it("META_LINEAGE_NODES classification enum has the 6 data classifications", () => {
-    const classification = META_LINEAGE_NODES.columns.find(
-      (c) => c.name === "classification",
-    );
+    const classification = META_LINEAGE_NODES.columns.find((c) => c.name === "classification");
     expect(classification?.check).toContain("'pii_personal'");
     expect(classification?.check).toContain("'phi_protected'");
     expect(classification?.check).toContain("'regulated_financial'");
   });
 
   it("META_LINEAGE_EDGES restricts on source/target node deletion (preserve history)", () => {
-    const source = META_LINEAGE_EDGES.columns.find(
-      (c) => c.name === "source_node_id",
-    );
-    const target = META_LINEAGE_EDGES.columns.find(
-      (c) => c.name === "target_node_id",
-    );
+    const source = META_LINEAGE_EDGES.columns.find((c) => c.name === "source_node_id");
+    const target = META_LINEAGE_EDGES.columns.find((c) => c.name === "target_node_id");
     expect(source?.references?.onDelete).toBe("RESTRICT");
     expect(target?.references?.onDelete).toBe("RESTRICT");
   });
@@ -2724,9 +2646,7 @@ describe("table column shapes", () => {
   });
 
   it("META_PROVENANCE_RECORDS operation_kind enum covers 15 operations", () => {
-    const op = META_PROVENANCE_RECORDS.columns.find(
-      (c) => c.name === "operation_kind",
-    );
+    const op = META_PROVENANCE_RECORDS.columns.find((c) => c.name === "operation_kind");
     expect(op?.check).toContain("'ingest'");
     expect(op?.check).toContain("'anonymize'");
     expect(op?.check).toContain("'ai_inference'");
@@ -2734,9 +2654,7 @@ describe("table column shapes", () => {
   });
 
   it("META_DATA_SUBJECTS enforces (tenant, identifier kind + sha) uniqueness", () => {
-    expect(
-      META_DATA_SUBJECTS.uniqueConstraints?.[0]?.columns,
-    ).toEqual([
+    expect(META_DATA_SUBJECTS.uniqueConstraints?.[0]?.columns).toEqual([
       "tenant_id",
       "primary_identifier_kind",
       "primary_identifier_sha256",
@@ -2744,34 +2662,27 @@ describe("table column shapes", () => {
   });
 
   it("META_DATA_SUBJECTS primary_identifier_sha256 is CHAR(64) hex", () => {
-    const sha = META_DATA_SUBJECTS.columns.find(
-      (c) => c.name === "primary_identifier_sha256",
-    );
+    const sha = META_DATA_SUBJECTS.columns.find((c) => c.name === "primary_identifier_sha256");
     expect(sha?.type).toBe("CHAR(64)");
     expect(sha?.check).toContain("[0-9a-f]{64}");
   });
 
   it("META_SUBJECT_NODE_OCCURRENCES cascades on subject + node deletion", () => {
-    const subjectFk = META_SUBJECT_NODE_OCCURRENCES.columns.find(
-      (c) => c.name === "subject_id",
-    );
-    const nodeFk = META_SUBJECT_NODE_OCCURRENCES.columns.find(
-      (c) => c.name === "node_id",
-    );
+    const subjectFk = META_SUBJECT_NODE_OCCURRENCES.columns.find((c) => c.name === "subject_id");
+    const nodeFk = META_SUBJECT_NODE_OCCURRENCES.columns.find((c) => c.name === "node_id");
     expect(subjectFk?.references?.onDelete).toBe("CASCADE");
     expect(nodeFk?.references?.onDelete).toBe("CASCADE");
   });
 
   it("META_SUBJECT_NODE_OCCURRENCES enforces (subject, node) uniqueness", () => {
-    expect(
-      META_SUBJECT_NODE_OCCURRENCES.uniqueConstraints?.[0]?.columns,
-    ).toEqual(["subject_id", "node_id"]);
+    expect(META_SUBJECT_NODE_OCCURRENCES.uniqueConstraints?.[0]?.columns).toEqual([
+      "subject_id",
+      "node_id",
+    ]);
   });
 
   it("META_SUBJECT_ACCESS_REQUESTS legal_basis enum covers GDPR/CCPA/LGPD/PIPEDA/UAE", () => {
-    const basis = META_SUBJECT_ACCESS_REQUESTS.columns.find(
-      (c) => c.name === "legal_basis",
-    );
+    const basis = META_SUBJECT_ACCESS_REQUESTS.columns.find((c) => c.name === "legal_basis");
     expect(basis?.check).toContain("'gdpr_article_15'");
     expect(basis?.check).toContain("'ccpa_right_to_know'");
     expect(basis?.check).toContain("'lgpd_article_18'");
@@ -2780,9 +2691,7 @@ describe("table column shapes", () => {
   });
 
   it("META_SUBJECT_ACCESS_REQUESTS status enum has the 7 lifecycle states", () => {
-    const status = META_SUBJECT_ACCESS_REQUESTS.columns.find(
-      (c) => c.name === "status",
-    );
+    const status = META_SUBJECT_ACCESS_REQUESTS.columns.find((c) => c.name === "status");
     expect(status?.check).toContain("'submitted'");
     expect(status?.check).toContain("'verified'");
     expect(status?.check).toContain("'partial_complete'");
@@ -2790,9 +2699,7 @@ describe("table column shapes", () => {
   });
 
   it("META_RATE_LIMIT_POLICIES allows NULL tenant_id (platform policies)", () => {
-    const tenantId = META_RATE_LIMIT_POLICIES.columns.find(
-      (c) => c.name === "tenant_id",
-    );
+    const tenantId = META_RATE_LIMIT_POLICIES.columns.find((c) => c.name === "tenant_id");
     expect(tenantId?.notNull).not.toBe(true);
     // ADR-0332: a SELECT-scoped platform arm of its own, not an `OR` inside isolation.
     expect(META_RATE_LIMIT_POLICIES.rls?.policies?.[0]?.using).toBe(TENANT_ISOLATION_USING);
@@ -2800,9 +2707,7 @@ describe("table column shapes", () => {
   });
 
   it("META_RATE_LIMIT_POLICIES algorithm enum has 6 algorithms", () => {
-    const alg = META_RATE_LIMIT_POLICIES.columns.find(
-      (c) => c.name === "algorithm",
-    );
+    const alg = META_RATE_LIMIT_POLICIES.columns.find((c) => c.name === "algorithm");
     expect(alg?.check).toContain("'token_bucket'");
     expect(alg?.check).toContain("'leaky_bucket'");
     expect(alg?.check).toContain("'sliding_window_log'");
@@ -2810,16 +2715,12 @@ describe("table column shapes", () => {
   });
 
   it("META_RATE_LIMIT_POLICIES response_code restricted to 429 or 503", () => {
-    const code = META_RATE_LIMIT_POLICIES.columns.find(
-      (c) => c.name === "response_code",
-    );
+    const code = META_RATE_LIMIT_POLICIES.columns.find((c) => c.name === "response_code");
     expect(code?.check).toContain("(429, 503)");
   });
 
   it("META_QUOTA_DEFINITIONS target enum covers 10 quota targets", () => {
-    const target = META_QUOTA_DEFINITIONS.columns.find(
-      (c) => c.name === "target",
-    );
+    const target = META_QUOTA_DEFINITIONS.columns.find((c) => c.name === "target");
     expect(target?.check).toContain("'api_requests'");
     expect(target?.check).toContain("'ai_tokens'");
     expect(target?.check).toContain("'ml_training_minutes'");
@@ -2827,31 +2728,27 @@ describe("table column shapes", () => {
   });
 
   it("META_QUOTA_DEFINITIONS period enum has 7 periods", () => {
-    const period = META_QUOTA_DEFINITIONS.columns.find(
-      (c) => c.name === "period",
-    );
+    const period = META_QUOTA_DEFINITIONS.columns.find((c) => c.name === "period");
     expect(period?.check).toContain("'minute'");
     expect(period?.check).toContain("'billing_period'");
     expect(period?.check).toContain("'lifetime'");
   });
 
   it("META_QUOTA_USAGE enforces (tenant, quota_def, period_start) uniqueness", () => {
-    expect(
-      META_QUOTA_USAGE.uniqueConstraints?.[0]?.columns,
-    ).toEqual(["tenant_id", "quota_definition_id", "period_start_at"]);
+    expect(META_QUOTA_USAGE.uniqueConstraints?.[0]?.columns).toEqual([
+      "tenant_id",
+      "quota_definition_id",
+      "period_start_at",
+    ]);
   });
 
   it("META_QUOTA_USAGE restricts on quota_definitions deletion", () => {
-    const fk = META_QUOTA_USAGE.columns.find(
-      (c) => c.name === "quota_definition_id",
-    );
+    const fk = META_QUOTA_USAGE.columns.find((c) => c.name === "quota_definition_id");
     expect(fk?.references?.onDelete).toBe("RESTRICT");
   });
 
   it("META_RATE_LIMIT_DECISIONS outcome enum covers 10 decision outcomes", () => {
-    const outcome = META_RATE_LIMIT_DECISIONS.columns.find(
-      (c) => c.name === "outcome",
-    );
+    const outcome = META_RATE_LIMIT_DECISIONS.columns.find((c) => c.name === "outcome");
     expect(outcome?.check).toContain("'allowed'");
     expect(outcome?.check).toContain("'denied_quota_exceeded'");
     expect(outcome?.check).toContain("'bypassed_critical_priority'");
@@ -2859,17 +2756,13 @@ describe("table column shapes", () => {
   });
 
   it("META_RATE_LIMIT_EXCEPTIONS multiplier is NUMERIC(8, 4) bounded 0.1 - 100", () => {
-    const m = META_RATE_LIMIT_EXCEPTIONS.columns.find(
-      (c) => c.name === "multiplier",
-    );
+    const m = META_RATE_LIMIT_EXCEPTIONS.columns.find((c) => c.name === "multiplier");
     expect(m?.type).toBe("NUMERIC(8, 4)");
     expect(m?.check).toContain("BETWEEN 0.1 AND 100");
   });
 
   it("META_RATE_LIMIT_EXCEPTIONS kind enum has 6 exception kinds", () => {
-    const kind = META_RATE_LIMIT_EXCEPTIONS.columns.find(
-      (c) => c.name === "kind",
-    );
+    const kind = META_RATE_LIMIT_EXCEPTIONS.columns.find((c) => c.name === "kind");
     expect(kind?.check).toContain("'principal_overage'");
     expect(kind?.check).toContain("'incident_response_bypass'");
     expect(kind?.check).toContain("'load_test_temporary'");
@@ -2884,9 +2777,11 @@ describe("table column shapes", () => {
   });
 
   it("META_GATEWAY_ROUTES enforces (method, version, operation) uniqueness", () => {
-    expect(
-      META_GATEWAY_ROUTES.uniqueConstraints?.[0]?.columns,
-    ).toEqual(["method", "api_version", "operation_id"]);
+    expect(META_GATEWAY_ROUTES.uniqueConstraints?.[0]?.columns).toEqual([
+      "method",
+      "api_version",
+      "operation_id",
+    ]);
   });
 
   it("META_GATEWAY_ROUTES method enum has 9 HTTP methods", () => {
@@ -2897,15 +2792,15 @@ describe("table column shapes", () => {
   });
 
   it("META_GATEWAY_IDEMPOTENCY_RECORDS enforces (tenant, op, key) uniqueness", () => {
-    expect(
-      META_GATEWAY_IDEMPOTENCY_RECORDS.uniqueConstraints?.[0]?.columns,
-    ).toEqual(["tenant_id", "operation_id", "idempotency_key"]);
+    expect(META_GATEWAY_IDEMPOTENCY_RECORDS.uniqueConstraints?.[0]?.columns).toEqual([
+      "tenant_id",
+      "operation_id",
+      "idempotency_key",
+    ]);
   });
 
   it("META_GATEWAY_IDEMPOTENCY_RECORDS method restricted to non-idempotent HTTP methods", () => {
-    const method = META_GATEWAY_IDEMPOTENCY_RECORDS.columns.find(
-      (c) => c.name === "method",
-    );
+    const method = META_GATEWAY_IDEMPOTENCY_RECORDS.columns.find((c) => c.name === "method");
     expect(method?.check).toContain("'POST'");
     expect(method?.check).toContain("'PUT'");
     expect(method?.check).toContain("'PATCH'");
@@ -2914,9 +2809,7 @@ describe("table column shapes", () => {
   });
 
   it("META_GATEWAY_IDEMPOTENCY_RECORDS status enum has 4 lifecycle states", () => {
-    const status = META_GATEWAY_IDEMPOTENCY_RECORDS.columns.find(
-      (c) => c.name === "status",
-    );
+    const status = META_GATEWAY_IDEMPOTENCY_RECORDS.columns.find((c) => c.name === "status");
     expect(status?.check).toContain("'in_progress'");
     expect(status?.check).toContain("'completed_success'");
     expect(status?.check).toContain("'completed_error'");
@@ -2924,9 +2817,7 @@ describe("table column shapes", () => {
   });
 
   it("META_GATEWAY_PIPELINE_EXECUTIONS allows NULL tenant_id (anonymous traffic)", () => {
-    const tenantId = META_GATEWAY_PIPELINE_EXECUTIONS.columns.find(
-      (c) => c.name === "tenant_id",
-    );
+    const tenantId = META_GATEWAY_PIPELINE_EXECUTIONS.columns.find((c) => c.name === "tenant_id");
     expect(tenantId?.notNull).not.toBe(true);
     // ADR-0332: a SELECT-scoped platform arm of its own, not an `OR` inside isolation.
     expect(META_GATEWAY_PIPELINE_EXECUTIONS.rls?.policies?.[0]?.using).toBe(TENANT_ISOLATION_USING);
@@ -2934,9 +2825,7 @@ describe("table column shapes", () => {
   });
 
   it("META_GATEWAY_PIPELINE_EXECUTIONS final_stage enum covers 17 stages", () => {
-    const stage = META_GATEWAY_PIPELINE_EXECUTIONS.columns.find(
-      (c) => c.name === "final_stage",
-    );
+    const stage = META_GATEWAY_PIPELINE_EXECUTIONS.columns.find((c) => c.name === "final_stage");
     expect(stage?.check).toContain("'receive'");
     expect(stage?.check).toContain("'authenticate'");
     expect(stage?.check).toContain("'check_rate_limit'");
@@ -2954,19 +2843,17 @@ describe("table column shapes", () => {
   });
 
   it("META_FEATURE_FLAG_TARGETING_RULES cascades on flag deletion", () => {
-    const fk = META_FEATURE_FLAG_TARGETING_RULES.columns.find(
-      (c) => c.name === "flag_id",
-    );
+    const fk = META_FEATURE_FLAG_TARGETING_RULES.columns.find((c) => c.name === "flag_id");
     expect(fk?.references?.onDelete).toBe("CASCADE");
   });
 
   it("META_FEATURE_FLAG_TARGETING_RULES allows NULL tenant_id (platform rules)", () => {
-    const tenantId = META_FEATURE_FLAG_TARGETING_RULES.columns.find(
-      (c) => c.name === "tenant_id",
-    );
+    const tenantId = META_FEATURE_FLAG_TARGETING_RULES.columns.find((c) => c.name === "tenant_id");
     expect(tenantId?.notNull).not.toBe(true);
     // ADR-0332: a SELECT-scoped platform arm of its own, not an `OR` inside isolation.
-    expect(META_FEATURE_FLAG_TARGETING_RULES.rls?.policies?.[0]?.using).toBe(TENANT_ISOLATION_USING);
+    expect(META_FEATURE_FLAG_TARGETING_RULES.rls?.policies?.[0]?.using).toBe(
+      TENANT_ISOLATION_USING,
+    );
     expect(platformReadOf(META_FEATURE_FLAG_TARGETING_RULES)?.command).toBe("SELECT");
   });
 
@@ -2986,9 +2873,7 @@ describe("table column shapes", () => {
   });
 
   it("META_FEATURE_FLAG_KILL_SWITCHES status enum has 4 lifecycle states", () => {
-    const status = META_FEATURE_FLAG_KILL_SWITCHES.columns.find(
-      (c) => c.name === "status",
-    );
+    const status = META_FEATURE_FLAG_KILL_SWITCHES.columns.find((c) => c.name === "status");
     expect(status?.check).toContain("'armed'");
     expect(status?.check).toContain("'triggered_active'");
     expect(status?.check).toContain("'released'");
@@ -2996,9 +2881,7 @@ describe("table column shapes", () => {
   });
 
   it("META_FEATURE_FLAG_KILL_SWITCHES trigger_kind covers 8 trigger kinds", () => {
-    const trigger = META_FEATURE_FLAG_KILL_SWITCHES.columns.find(
-      (c) => c.name === "trigger_kind",
-    );
+    const trigger = META_FEATURE_FLAG_KILL_SWITCHES.columns.find((c) => c.name === "trigger_kind");
     expect(trigger?.check).toContain("'manual_admin'");
     expect(trigger?.check).toContain("'incident_response'");
     expect(trigger?.check).toContain("'compliance_directive'");
@@ -3006,9 +2889,7 @@ describe("table column shapes", () => {
   });
 
   it("META_FEATURE_FLAG_EVALUATIONS reason enum covers 17 reasons", () => {
-    const reason = META_FEATURE_FLAG_EVALUATIONS.columns.find(
-      (c) => c.name === "reason",
-    );
+    const reason = META_FEATURE_FLAG_EVALUATIONS.columns.find((c) => c.name === "reason");
     expect(reason?.check).toContain("'default_returned'");
     expect(reason?.check).toContain("'kill_switch_active'");
     expect(reason?.check).toContain("'percentage_bucket_match'");
@@ -3017,9 +2898,7 @@ describe("table column shapes", () => {
   });
 
   it("META_FEATURE_FLAG_EVALUATIONS environment enum restricted to 4 envs", () => {
-    const env = META_FEATURE_FLAG_EVALUATIONS.columns.find(
-      (c) => c.name === "environment",
-    );
+    const env = META_FEATURE_FLAG_EVALUATIONS.columns.find((c) => c.name === "environment");
     expect(env?.check).toContain("'preview'");
     expect(env?.check).toContain("'staging'");
     expect(env?.check).toContain("'production'");
@@ -3027,16 +2906,12 @@ describe("table column shapes", () => {
   });
 
   it("META_FEATURE_FLAG_CHANGES cascades on flag deletion", () => {
-    const fk = META_FEATURE_FLAG_CHANGES.columns.find(
-      (c) => c.name === "flag_id",
-    );
+    const fk = META_FEATURE_FLAG_CHANGES.columns.find((c) => c.name === "flag_id");
     expect(fk?.references?.onDelete).toBe("CASCADE");
   });
 
   it("META_FEATURE_FLAG_CHANGES kind enum covers 23 change kinds", () => {
-    const kind = META_FEATURE_FLAG_CHANGES.columns.find(
-      (c) => c.name === "kind",
-    );
+    const kind = META_FEATURE_FLAG_CHANGES.columns.find((c) => c.name === "kind");
     expect(kind?.check).toContain("'flag_created'");
     expect(kind?.check).toContain("'default_value_changed'");
     expect(kind?.check).toContain("'rollout_stage_advanced'");
@@ -3044,9 +2919,7 @@ describe("table column shapes", () => {
   });
 
   it("META_FEATURE_FLAG_CHANGES outcome enum has 4 outcomes", () => {
-    const outcome = META_FEATURE_FLAG_CHANGES.columns.find(
-      (c) => c.name === "outcome",
-    );
+    const outcome = META_FEATURE_FLAG_CHANGES.columns.find((c) => c.name === "outcome");
     expect(outcome?.check).toContain("'succeeded'");
     expect(outcome?.check).toContain("'blocked_by_four_eyes'");
     expect(outcome?.check).toContain("'blocked_by_policy'");
@@ -3085,9 +2958,7 @@ describe("emitMetaBootstrapSql", () => {
 
   it("includes RLS ENABLE + policy for each tenant-scoped table", () => {
     const sql = emitMetaBootstrapSql();
-    const rlsEnableCount = sql.filter((s) =>
-      s.includes("ENABLE ROW LEVEL SECURITY"),
-    ).length;
+    const rlsEnableCount = sql.filter((s) => s.includes("ENABLE ROW LEVEL SECURITY")).length;
     const tenantScoped = META_TABLES.filter((t) => t.rls?.enabled === true);
     expect(rlsEnableCount).toBe(tenantScoped.length);
   });
@@ -3140,7 +3011,14 @@ function crossColumnComparisons(): readonly {
         // Postgres resolves by the literal's inferred type, which is not this rule's business.
         if (left === undefined || right === undefined) continue;
         if (leftType === undefined || rightType === undefined) continue;
-        found.push({ table: table.name, constraint: constraint.name, left, right, leftType, rightType });
+        found.push({
+          table: table.name,
+          constraint: constraint.name,
+          left,
+          right,
+          leftType,
+          rightType,
+        });
       }
     }
   }
@@ -3152,7 +3030,8 @@ describe("a cross-column CHECK compares two columns of one type", () => {
     const disagreements = crossColumnComparisons().filter((c) => c.leftType !== c.rightType);
     expect(
       disagreements.map(
-        (c) => `${c.table}.${c.constraint}: ${c.left} (${c.leftType}) vs ${c.right} (${c.rightType})`,
+        (c) =>
+          `${c.table}.${c.constraint}: ${c.left} (${c.leftType}) vs ${c.right} (${c.rightType})`,
       ),
     ).toEqual([]);
   });
@@ -3167,7 +3046,10 @@ describe("a cross-column CHECK compares two columns of one type", () => {
     const comparisons = crossColumnComparisons();
     expect(comparisons.length).toBeGreaterThanOrEqual(5);
     const fourEyes = comparisons.filter((c) => c.constraint.includes("four_eyes"));
-    expect(fourEyes.map((c) => c.table).sort()).toEqual(["tenant_tombstones", "workflow_definitions"]);
+    expect(fourEyes.map((c) => c.table).sort()).toEqual([
+      "tenant_tombstones",
+      "workflow_definitions",
+    ]);
     // Both four-eyes pairs are actor columns, and an actor column is TEXT in this catalog because it
     // records who did a thing and must outlive the actor. A UUID here means somebody re-added a
     // `meta.users` reference to one side of a four-eyes rule.
@@ -3244,5 +3126,146 @@ describe("the platform's record of a tenant outlives the tenant", () => {
     });
     expect(cascading.length).toBeGreaterThan(80);
     for (const t of cascading) expect(protectedNames.has(t.name), t.name).toBe(false);
+  });
+});
+
+/**
+ * The columns ADR-0402 gave the two shared CHECK helpers, as a declared set compared in both
+ * directions.
+ *
+ * A **list and not a count**, for the reason this repository has found four times: a count tells
+ * you a figure moved and a list tells you which decision changed, and this set is the output of a
+ * live measurement (124 contract-derived candidates asked of a real PG16 as the non-owner, 92
+ * admitted) rather than a convention anyone can re-derive by reading. The comparison is
+ * prospective: it was generated from the catalog once, so it says nothing about the increment that
+ * created it and everything about the next one.
+ *
+ * The equality is against the **helper's own output** rather than against a second spelling of the
+ * expression written here. That is the distinction ADR-0362 retired a test for — a rule compared
+ * against a derivation of itself written in the test asserts agreement and not correctness — so a
+ * hand-edited expression on one column fails, while a deliberate change to the helper moves both
+ * sides together, which is correct because the helper *is* the definition.
+ */
+const INSTANT_RANGE_CHECKED_COLUMNS: readonly string[] = [
+  "notification_templates.created_at",
+  "notification_templates.approved_at",
+  "notification_templates.deprecated_at",
+  "notification_digests.opened_at",
+  "notification_digests.scheduled_dispatch_at",
+  "notification_digests.assembled_at",
+  "notification_digests.dispatched_at",
+  "access_review_campaigns.scheduled_start_at",
+  "access_review_campaigns.deadline_at",
+  "access_review_campaigns.remediation_deadline_at",
+  "access_review_campaigns.created_at",
+  "access_review_campaigns.started_at",
+  "access_review_campaigns.completed_at",
+  "access_review_campaigns.archived_at",
+  "access_review_campaigns.cancelled_at",
+  "access_review_items.granted_at",
+  "access_review_items.last_used_at",
+  "access_review_items.created_at",
+  "access_review_items.opened_for_review_at",
+  "access_review_items.decided_at",
+  "access_review_items.auto_revoked_at",
+  "access_review_items.due_at",
+  "access_review_decisions.decided_at",
+  "access_review_decisions.time_bound_extend_until",
+  "access_review_decisions.applied_at",
+  "access_review_decisions.application_failed_at",
+  "access_review_evidence.period_start_at",
+  "access_review_evidence.period_end_at",
+  "access_review_evidence.sealed_at",
+  "workflow_events.occurred_at",
+  "gateway_routes.deprecated_since",
+  "gateway_routes.sunset_at",
+  "gateway_pipeline_executions.started_at",
+  "gateway_pipeline_executions.completed_at",
+  "crypto_keys.created_at",
+  // ADR-0374's two, converted to the helper by ADR-0402 rather than left as a second spelling.
+  "forensic_chain_entries.recorded_at",
+  "forensic_chain_checkpoints.checkpointed_at",
+];
+
+const UUID_SHAPE_CHECKED_COLUMNS: readonly string[] = [
+  "notification_templates.created_by",
+  "notification_templates.approved_by",
+  "access_review_campaigns.created_by",
+  "access_review_decisions.decided_by_user_id",
+  "gateway_pipeline_executions.principal_id",
+];
+
+function columnsCarrying(expected: (column: string) => string): readonly string[] {
+  const found: string[] = [];
+  for (const table of META_TABLES) {
+    for (const column of table.columns) {
+      if (column.check === expected(column.name)) found.push(`${table.name}.${column.name}`);
+    }
+  }
+  return found;
+}
+
+describe("the shared contract-refinement CHECK helpers", () => {
+  it("are carried by exactly the declared columns, in both directions", () => {
+    expect(columnsCarrying(instantRangeCheck).slice().sort()).toEqual(
+      INSTANT_RANGE_CHECKED_COLUMNS.slice().sort(),
+    );
+    expect(columnsCarrying(uuidShapeCheck).slice().sort()).toEqual(
+      UUID_SHAPE_CHECKED_COLUMNS.slice().sort(),
+    );
+  });
+
+  it("separates the uuid shape from ADR-0302's structured-actor checks", () => {
+    // `meta.notification_suppressions.applied_by` and its sibling carry
+    // `user:<uuid>` / `system:<slug>` / `provider:<slug>`, which a regex counting `[0-9a-f]{8}-`
+    // also matches — so a count of "columns with a uuid-ish CHECK" is 7 while the number carrying
+    // *this* constraint is 5. The exact equality above is what separates them, and this is the
+    // non-vacuity floor for that: the structured ones must exist and must not be in the set.
+    const structured = META_TABLES.flatMap((table) =>
+      table.columns
+        .filter(
+          (column) =>
+            typeof column.check === "string" &&
+            column.check.includes("[0-9a-f]{8}-") &&
+            column.check !== uuidShapeCheck(column.name),
+        )
+        .map((column) => `${table.name}.${column.name}`),
+    );
+    expect(structured.length).toBeGreaterThanOrEqual(2);
+    for (const name of structured) expect(UUID_SHAPE_CHECKED_COLUMNS).not.toContain(name);
+  });
+
+  it("renders the two decisions the expressions turn on", () => {
+    // 1 BC and not 1 AD: `new Date(0 /* JS year 0 */).toISOString()` is `0000-01-01T00:00:00.000Z`,
+    // which `z.string().datetime({offset: true})` admits and Postgres reads as 1 BC — so an AD
+    // bound would refuse what the reader accepts, which is ADR-0373's no-upper-bound rule pointing
+    // the other way.
+    expect(instantRangeCheck("x")).toContain("'0001-01-01 00:00:00+00 BC'::timestamptz");
+    // The explicit `+00` is load-bearing: a bare literal folds in the applying session's
+    // `TimeZone`, and under `Asia/Tokyo` `'0001-01-01 BC'` crosses the era boundary.
+    expect(instantRangeCheck("x")).not.toMatch(/'0001-01-01 00:00:00 BC'/);
+    // A pattern and not a cast: `col::uuid` raises `22P02` rather than violating, which aborts a
+    // batch where a `23514` is an answer (ADR-0352).
+    expect(uuidShapeCheck("x")).not.toContain("::uuid");
+    expect(uuidShapeCheck("x")).toContain("~ '^[0-9a-f]{8}-");
+  });
+});
+
+describe("a table-level constraint's name avoids the column-check naming family", () => {
+  it("has no offender", () => {
+    // Postgres derives `<table>_<column>_check` for an inline column CHECK over one column, so a
+    // table-level constraint under that name collides at `CREATE TABLE`. Four of ADR-0402's
+    // seventeen did and only the live apply found it.
+    expect(tableConstraintNamesAvoidColumnFamily()).toEqual([]);
+  });
+
+  it("is not vacuous: it catches the shape on a fabricated declaration", () => {
+    // The guard that matters, because two of the four real offenders named columns carrying no
+    // CHECK — so a present-tense "does this collide today" check would have passed on exactly the
+    // latent half. This asserts the predicate is the *shape*.
+    const colliding = `${META_WORKFLOW_TIMERS.name}_${META_WORKFLOW_TIMERS.columns[1]!.name}_check`;
+    expect(colliding).toMatch(/^workflow_timers_.+_check$/);
+    const suffix = colliding.slice(META_WORKFLOW_TIMERS.name.length + 1, -"_check".length);
+    expect(META_WORKFLOW_TIMERS.columns.map((c) => c.name)).toContain(suffix);
   });
 });

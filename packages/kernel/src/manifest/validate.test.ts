@@ -53,7 +53,11 @@ describe("validateManifest — data classification", () => {
         },
       ],
       entities: [
-        { name: "Observation", traits: ["clinical"], fields: [{ name: "label", type: { kind: "text" } }] },
+        {
+          name: "Observation",
+          traits: ["clinical"],
+          fields: [{ name: "label", type: { kind: "text" } }],
+        },
       ],
     };
     expect(() => validateManifest(m)).toThrow(/auditable/);
@@ -66,11 +70,17 @@ describe("validateManifest — data classification", () => {
       traits: [
         {
           name: "clinical",
-          fields: [{ name: "mrn", type: { kind: "text", maxLength: 32 }, classification: "regulated" }],
+          fields: [
+            { name: "mrn", type: { kind: "text", maxLength: 32 }, classification: "regulated" },
+          ],
         },
       ],
       entities: [
-        { name: "Chart", traits: ["clinical"], fields: [{ name: "label", type: { kind: "text" } }] },
+        {
+          name: "Chart",
+          traits: ["clinical"],
+          fields: [{ name: "label", type: { kind: "text" } }],
+        },
       ],
     };
     try {
@@ -119,7 +129,11 @@ describe("validateManifest — data classification", () => {
         },
       ],
       entities: [
-        { name: "Contact", traits: ["contact_bearing"], fields: [{ name: "label", type: { kind: "text" } }] },
+        {
+          name: "Contact",
+          traits: ["contact_bearing"],
+          fields: [{ name: "label", type: { kind: "text" } }],
+        },
       ],
     };
     expect(() => validateManifest(m)).not.toThrow();
@@ -437,17 +451,60 @@ describe("validateManifest — traits", () => {
    * exactly those names — so the emitter overrides them instead of duplicating, which is a real
    * defect (register P2.12c) and not one a name refusal can fix.
    */
-  it("holds the emitted columns a declaration duplicates, and not the ones it overrides", () => {
-    expect([...RESERVED_ENTITY_FIELD_NAMES].sort()).toEqual(["id", "tenant_id"]);
-    for (const overridden of ["created_at", "updated_at"]) {
-      expect(RESERVED_ENTITY_FIELD_NAMES).not.toContain(overridden);
+  /**
+   * This test previously asserted the **defect** — its title was "and not the ones it overrides"
+   * and its body required `validateManifest` to accept an own `created_at: text`, which is the
+   * shape this run keeps finding: the defect written down as a specification (ADR-0372's class).
+   * ADR-0402 measured the three claims behind it and refuted them; what survives, and is pinned
+   * below, is that the two mechanisms are different and the **message** must say which.
+   */
+  it("holds all four emitted columns, with the right reason for each mechanism", () => {
+    expect([...RESERVED_ENTITY_FIELD_NAMES].sort()).toEqual([
+      "created_at",
+      "id",
+      "tenant_id",
+      "updated_at",
+    ]);
+    for (const [name, phrase] of [
+      ["id", "duplicate column"],
+      ["tenant_id", "duplicate column"],
+      ["created_at", "silently replaces"],
+      ["updated_at", "silently replaces"],
+    ] as const) {
       const m: Manifest = {
         manifestVersion: "1.0",
         meta: baseMeta,
-        entities: [{ name: "Patient", fields: [{ name: overridden, type: { kind: "text" } }] }],
+        entities: [{ name: "Patient", fields: [{ name, type: { kind: "text" } }] }],
       };
-      expect(() => validateManifest(m)).not.toThrow();
+      try {
+        validateManifest(m);
+        throw new Error(`expected validateManifest to refuse an own ${name}`);
+      } catch (e) {
+        expect(e, name).toBeInstanceOf(ManifestValidationError);
+        expect((e as ManifestValidationError).message, name).toContain(phrase);
+      }
     }
+  });
+
+  /**
+   * The cost of reserving the two timestamp names, asserted rather than assumed: the argument for
+   * leaving them out was that `auditable` supplies exactly those names, so adding them would refuse
+   * every entity carrying the trait. It does not — this set is never evaluated against a built-in
+   * trait's fields — and 68 of the seven packs' 69 entities are `auditable`.
+   */
+  it("does not refuse an entity that carries `auditable`", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [
+        {
+          name: "Patient",
+          traits: ["auditable"],
+          fields: [{ name: "label", type: { kind: "text" } }],
+        },
+      ],
+    };
+    expect(() => validateManifest(m)).not.toThrow();
   });
 
   /**
@@ -476,7 +533,7 @@ describe("validateManifest — traits", () => {
       expect(e).toBeInstanceOf(ManifestValidationError);
       const err = e as ManifestValidationError;
       expect(err.path).toBe("traits[0].fields[0].name");
-      expect(err.message).toMatch(/reserved.*every entity carrying this trait/s);
+      expect(err.message).toMatch(/reserved.*rename it in the trait.*every entity carrying it/s);
     }
   });
 
@@ -538,9 +595,7 @@ describe("validateManifest — relations", () => {
           ],
         },
       ],
-      relations: [
-        { kind: "many_to_one", from: "Prescription", field: "patient", to: "Patient" },
-      ],
+      relations: [{ kind: "many_to_one", from: "Prescription", field: "patient", to: "Patient" }],
     };
     expect(() => validateManifest(m)).not.toThrow();
   });
@@ -553,9 +608,7 @@ describe("validateManifest — relations", () => {
         { name: "Patient", fields: [{ name: "a", type: { kind: "text" } }] },
         { name: "Prescription", fields: [{ name: "a", type: { kind: "text" } }] },
       ],
-      relations: [
-        { kind: "many_to_one", from: "Prescription", field: "patient", to: "Patient" },
-      ],
+      relations: [{ kind: "many_to_one", from: "Prescription", field: "patient", to: "Patient" }],
     };
     expect(() => validateManifest(m)).toThrow(/unknown field 'patient' on entity 'Prescription'/);
   });
@@ -593,9 +646,7 @@ describe("validateManifest — relations", () => {
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [{ name: "Prescription", fields: [{ name: "a", type: { kind: "text" } }] }],
-      relations: [
-        { kind: "many_to_one", from: "Prescription", field: "patient", to: "Patient" },
-      ],
+      relations: [{ kind: "many_to_one", from: "Prescription", field: "patient", to: "Patient" }],
     };
     expect(() => validateManifest(m)).toThrow(/Patient/);
   });
@@ -1091,9 +1142,7 @@ describe("validateManifest — workflows", () => {
     const m: Manifest = {
       manifestVersion: "1.0",
       meta: baseMeta,
-      entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
-      ],
+      entities: [{ name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] }],
       workflows: {
         lifecycle: {
           kind: "entityLifecycle",
@@ -1115,9 +1164,7 @@ describe("validateManifest — workflows", () => {
     const m: Manifest = {
       manifestVersion: "1.0",
       meta: baseMeta,
-      traits: [
-        { name: "stateful", fields: [{ name: "state", type: { kind: "text" } }] },
-      ],
+      traits: [{ name: "stateful", fields: [{ name: "state", type: { kind: "text" } }] }],
       entities: [
         {
           name: "Prescription",
@@ -1304,9 +1351,7 @@ describe("validateManifest — jobs", () => {
     const m: Manifest = {
       manifestVersion: "1.0",
       meta: baseMeta,
-      entities: [
-        { name: "Prescription", fields: [{ name: "status", type: { kind: "text" } }] },
-      ],
+      entities: [{ name: "Prescription", fields: [{ name: "status", type: { kind: "text" } }] }],
       workflows: {
         prescription_lifecycle: {
           kind: "entityLifecycle",
@@ -1520,9 +1565,7 @@ describe("validateManifest — views", () => {
           entity: "Prescription",
           columns: [{ field: "qty" }],
           rowAction: { kind: "openRecord", view: "prescriptionDetail" },
-          bulkActions: [
-            { kind: "workflow", name: "verify", label: { en: "Verify" } },
-          ],
+          bulkActions: [{ kind: "workflow", name: "verify", label: { en: "Verify" } }],
         },
       },
     });
@@ -1632,9 +1675,7 @@ describe("validateManifest — view field references", () => {
       entity: "Prescription",
       columns: [{ field: "qty" }, { field: "dosage" }],
     });
-    expect(() => validateManifest(m)).toThrow(
-      /unknown field 'dosage' on entity 'Prescription'/,
-    );
+    expect(() => validateManifest(m)).toThrow(/unknown field 'dosage' on entity 'Prescription'/);
   });
 
   it("names the exact location of the offending column", () => {
@@ -1673,9 +1714,7 @@ describe("validateManifest — view field references", () => {
       columns: [{ field: "qty" }],
       columnGroups: [{ label: { en: "More" }, columns: [{ field: "dosage" }] }],
     });
-    expect(() => validateManifest(m)).toThrow(
-      /views\.v\.columnGroups\[0\]\.columns\[0\]\.field/,
-    );
+    expect(() => validateManifest(m)).toThrow(/views\.v\.columnGroups\[0\]\.columns\[0\]\.field/);
   });
 
   it("rejects an unknown field in a record section", () => {
@@ -1703,9 +1742,9 @@ describe("validateManifest — view field references", () => {
       columns: [{ state: "pending", label: { en: "Pending" } }],
       cardFields: ["qty"],
     };
-    expect(() =>
-      validateManifest(withView({ ...base, stateField: "phase" })),
-    ).toThrow(/views\.v\.stateField/);
+    expect(() => validateManifest(withView({ ...base, stateField: "phase" }))).toThrow(
+      /views\.v\.stateField/,
+    );
     expect(() =>
       validateManifest(withView({ ...base, stateField: "status", cardFields: ["dosage"] })),
     ).toThrow(/views\.v\.cardFields\[0\]/);
@@ -2006,9 +2045,7 @@ describe("validateManifest — search", () => {
         defaultDictionary: "simple",
       },
     });
-    expect(() => validateManifest(m)).toThrow(
-      /facet 'unknown_facet' has no matching root field/,
-    );
+    expect(() => validateManifest(m)).toThrow(/facet 'unknown_facet' has no matching root field/);
   });
 });
 
@@ -2119,8 +2156,8 @@ describe("validateManifest — per-field grant coherence", () => {
   });
 
   it("checks all three arms for declared roles, not only read and update", () => {
-    expect(() =>
-      validateManifest(citizen({ note: { create: { roles: ["nobody"] } } })),
-    ).toThrow(/grants role 'nobody' which is not declared in manifest.roles/);
+    expect(() => validateManifest(citizen({ note: { create: { roles: ["nobody"] } } }))).toThrow(
+      /grants role 'nobody' which is not declared in manifest.roles/,
+    );
   });
 });
