@@ -117,7 +117,7 @@ function scanOne(
 /* ------------------------------------------------------------------ the shape */
 
 describe("the declared shape", () => {
-  it("names six verdicts, five reasons, six evidence kinds and three shapes", () => {
+  it("names six verdicts, four reasons, six evidence kinds and three shapes", () => {
     expect([...PAGE_READ_VERDICTS]).toEqual([
       "guarded_by_primitive",
       "guarded_in_place",
@@ -130,7 +130,6 @@ describe("the declared shape", () => {
       "page_refusal_declared",
       "page_is_indivisible",
       "record_asserted_not_parsed",
-      "row_dropped_deliberately",
       "unmigrated",
     ]);
     expect([...THROW_EVIDENCE_KINDS]).toEqual([
@@ -172,7 +171,6 @@ describe("the declared shape", () => {
     // `page_refusal_declared` is the one reason bearing no consequence, because nothing is lost.
     expect([...COST_BEARING_REASONS].sort()).toEqual([
       "record_asserted_not_parsed",
-      "row_dropped_deliberately",
       "unmigrated",
     ]);
   });
@@ -909,10 +907,16 @@ describe("the real workspace", () => {
     // and this file would pass having examined nothing — so the *declaration-needing* count carries
     // the floor. The primitive's own floor is the weaker one by construction: if that matcher broke,
     // a migrated site would reappear as a throwing one and demand a declaration, which fails loudly.
-    expect(needing.length).toBeGreaterThanOrEqual(40);
+    //
+    // ADR-0373's migration moved three of these, which is the one way a floor here legitimately
+    // falls: 37 sites went through the primitive, so `needing` fell 65 → 32 and `record_throwing`
+    // 50 → 19 while `guarded_by_primitive` rose 16 → 50. The floors are re-pinned under the new
+    // figures rather than deleted — a floor that tracks the measurement is still a floor, and the
+    // primitive's is now the *high* one, because 50 of 112 sites depend on that matcher.
+    expect(needing.length).toBeGreaterThanOrEqual(25);
     const counts = countSitesByVerdict(scan.sites);
-    expect(counts.get("guarded_by_primitive")).toBeGreaterThanOrEqual(3);
-    expect(counts.get("record_throwing")).toBeGreaterThanOrEqual(20);
+    expect(counts.get("guarded_by_primitive")).toBeGreaterThanOrEqual(30);
+    expect(counts.get("record_throwing")).toBeGreaterThanOrEqual(12);
     expect(counts.get("projection")).toBeGreaterThanOrEqual(10);
   });
 

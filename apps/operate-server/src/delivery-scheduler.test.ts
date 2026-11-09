@@ -93,7 +93,16 @@ class FakeIntervalScheduler implements IntervalScheduler {
 }
 
 function drainOptions(store: DeliveryStoreLike): DeliveryDrainOptions {
-  return { store, resolver, senders: new SenderRegistry([new InAppSender()]), clock: () => NOW };
+  return {
+    store,
+    resolver,
+    senders: new SenderRegistry([new InAppSender()]),
+    clock: () => NOW,
+    // Discards the finding: this file's `FakeStore` hands back already-parsed records, so no row
+    // here can be refused. Named for `delivery-drain.test.ts`' reason — the parameter is required
+    // so a caller cannot forget it, and a test that discards a report should say so.
+    onUnreadable: () => undefined,
+  };
 }
 
 describe("delivery-scheduler", () => {
@@ -278,6 +287,8 @@ describe("delivery-scheduler", () => {
 describe("delivery-scheduler — assembly", () => {
   function assemblyOptions(calls: string[]): DigestAssemblyOptions {
     return {
+      // Discards the finding: the fake `dueForAssembly` returns `[]`, so no row can be refused.
+      onUnreadable: () => undefined,
       digests: {
         async dueForAssembly() {
           calls.push("due");

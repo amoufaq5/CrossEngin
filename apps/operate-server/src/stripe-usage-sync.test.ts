@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { UsageReporter, UsageReportInput } from "@crossengin/billing-runtime-pg";
-import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
+import type {
+  PgConnection,
+  PgQueryResult,
+  UnreadableRow,
+  UnreadableRowReporter,
+} from "@crossengin/kernel-pg";
 
 import {
   buildStripeUsageSync,
@@ -10,6 +15,16 @@ import {
 const TENANT_A = "11111111-1111-1111-1111-111111111111";
 const TENANT_B = "22222222-2222-2222-2222-222222222222";
 const SUB = "33333333-3333-3333-3333-333333333333";
+/** The row's own primary key, which is how a refused usage row is named. */
+const ROW_ID = "55555555-5555-4555-8555-555555555555";
+
+/**
+ * A reporter for the tests that are not about reporting.
+ *
+ * Named rather than `() => {}` inline: the parameter is required precisely so a caller cannot
+ * forget it, and a test that quietly discards a report should say that is what it is doing.
+ */
+const noUnreadable: UnreadableRowReporter = () => undefined;
 
 function record(id: string) {
   return {
@@ -27,14 +42,23 @@ function record(id: string) {
   };
 }
 
-/** A fake conn whose SELECT returns one un-synced record row, capturing UPDATEs. */
+/**
+ * A fake conn whose SELECT returns one un-synced record row, capturing UPDATEs.
+ *
+ * It matches on the **table** and not on the column list, which is the correction this fake owed:
+ * it keyed on `/SELECT record/i`, so the day `listUnsynced` widened to `SELECT id, record` — to have
+ * a column with which to name a refused row — the fake silently stopped serving anything and three
+ * tests in this file read as "no usage was reported" rather than as "the fake no longer models the
+ * statement". ADR-0370's lesson in a second place: a fake keyed on the exact shape of a statement
+ * stops modelling it the moment the statement legitimately changes.
+ */
 function fakePg(rows: Record<string, unknown>[]): { conn: PgConnection; sql: string[] } {
   const sql: string[] = [];
   let served = false;
   const conn: PgConnection = {
     query: (async (q: string) => {
       sql.push(q);
-      if (/SELECT record/i.test(q) && !served) {
+      if (/^\s*SELECT[\s\S]*FROM\s+meta\.billing_usage_records/i.test(q) && !served) {
         served = true;
         return { rows, rowCount: rows.length } as PgQueryResult;
       }
@@ -75,12 +99,13 @@ describe("parseStripeUsageSyncConfig", () => {
 
 describe("StripeUsageSyncScheduler", () => {
   it("reports each tenant's un-synced usage on a tick", async () => {
-    const { conn } = fakePg([{ record: JSON.stringify(record("44444444-4444-4444-4444-444444444444")) }]);
+    const { conn } = fakePg([{ id: ROW_ID, record: JSON.stringify(record("44444444-4444-4444-4444-444444444444")) }]);
     const reporter = new RecordingReporter();
     const outcomes: string[] = [];
     const { scheduler } = buildStripeUsageSync(conn, reporter, config, {
       now: () => new Date("2026-07-02T00:00:00.000Z"),
       onSync: (o) => outcomes.push(`${o.tenant}:${o.synced.toString()}`),
+      onUnreadable: noUnreadable,
     });
     const results = await scheduler.syncOnce();
     // Both tenants iterated; TENANT_A's one record reported (the fake serves it once).
@@ -89,18 +114,44 @@ describe("StripeUsageSyncScheduler", () => {
     expect(outcomes.some((o) => o.startsWith(TENANT_A))).toBe(true);
   });
 
+  it("reports an unreadable usage row and carries the count into the outcome", async () => {
+    // A usage row the contract refuses is revenue this tick did not bill, so it must reach both
+    // halves: `onUnreadable` names which row, and `TenantSyncOutcome.unreadable` says how much of
+    // the tenant's usage went unreported — without the second the figure the store computes would
+    // reach nobody.
+    const { conn } = fakePg([
+      {
+        id: ROW_ID,
+        record: JSON.stringify({
+          ...record("44444444-4444-4444-4444-444444444444"),
+          meter: "not-a-meter",
+        }),
+      },
+    ]);
+    const seen: UnreadableRow[] = [];
+    const outcomes: number[] = [];
+    const { scheduler } = buildStripeUsageSync(conn, new RecordingReporter(), config, {
+      onSync: (o) => outcomes.push(o.unreadable),
+      onUnreadable: (row) => seen.push(row),
+    });
+    await scheduler.syncOnce();
+    expect(seen).toHaveLength(1);
+    expect(outcomes).toContain(1);
+  });
+
   it("routes a per-tenant error to onError without aborting the batch", async () => {
     const throwingReporter: UsageReporter = {
       createUsageRecord: async () => {
         throw new Error("stripe down");
       },
     };
-    const { conn } = fakePg([{ record: JSON.stringify(record("44444444-4444-4444-4444-444444444444")) }]);
+    const { conn } = fakePg([{ id: ROW_ID, record: JSON.stringify(record("44444444-4444-4444-4444-444444444444")) }]);
     let captured: unknown = null;
     const { scheduler } = buildStripeUsageSync(conn, throwingReporter, config, {
       onError: (err) => {
         captured = err;
       },
+      onUnreadable: noUnreadable,
     });
     const results = await scheduler.syncOnce();
     // TENANT_A throws (routed to onError); TENANT_B has no records ⇒ a clean {synced:0}.
@@ -121,6 +172,7 @@ describe("StripeUsageSyncScheduler", () => {
           live = false;
         },
       },
+      onUnreadable: noUnreadable,
     });
     scheduler.start();
     expect(live).toBe(true);

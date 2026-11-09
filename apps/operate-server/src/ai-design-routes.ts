@@ -282,7 +282,17 @@ function buildListHandler(ctx: AiDesignContext): Handler {
     if (denial !== null) return denial;
     const tenant = tenantOf(input.principal);
     if (tenant === null) return json(400, { error: "tenant_required" });
-    const page = await ctx.store.list(tenant, readListQuery(input));
+    let page: AiManifestListPage;
+    try {
+      page = await ctx.store.list(tenant, readListQuery(input));
+    } catch {
+      // This handler had no catch at all, so a stored manifest row the contract no longer accepts
+      // escaped as an unclassified 500 — and it is the one of these list routes that is live on a
+      // flag the shipped compose passes (`--ai-design`). The declared consequence is that the design
+      // list is unreadable for that tenant. Named, with no detail: a manifest row quotes a tenant's
+      // own design.
+      return json(500, { error: "manifest_page_unreadable" });
+    }
     return json(200, { data: page.data, page: { nextCursor: page.nextCursor } });
   };
 }

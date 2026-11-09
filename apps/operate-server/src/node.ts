@@ -2170,6 +2170,12 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
                   chainEntryHash: event.chainEntryHash,
                   rowCount: event.rowCount,
                   tenantRetired: event.tenantRetired,
+                  // Spread on `!== undefined` and not on `> 0`, unlike `refusals` beside it: a zero
+                  // here is the claim that every stored row was readable, and the absent case is an
+                  // operation that reads none at all (ADR-0331).
+                  ...(event.unreadableCount !== undefined
+                    ? { unreadableCount: event.unreadableCount }
+                    : {}),
                   ...(event.refusals.length > 0 ? { refusals: event.refusals } : {}),
                 },
               }),
@@ -3569,8 +3575,16 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       await loadStripeUsageSyncConfig(options.stripeUsageSyncConfig),
       {
         onSync: (o) =>
-          console.info(`[stripe-usage] tenant=${o.tenant} synced=${o.synced.toString()} skipped=${o.skipped.toString()}`),
+          console.info(
+            `[stripe-usage] tenant=${o.tenant} synced=${o.synced.toString()} skipped=${o.skipped.toString()} unreadable=${o.unreadable.toString()}`,
+          ),
         onError: (err) => console.error("[stripe-usage] sync error", err),
+        // `console.error` and not `console.info` beside `onSync`, matching the sibling `onError`: a
+        // usage record that cannot be read is revenue this tick did not bill.
+        onUnreadable: (row) =>
+          console.error(
+            `[stripe-usage] unreadable usage row id=${row.identity ?? "<unidentified>"}: ${row.detail}`,
+          ),
       },
     );
   }
@@ -4701,6 +4715,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         digests: digestStore,
         deliveries: deliveryStore,
         dispatches: new PostgresNotificationStore(conn, schemaOpt),
+        onUnreadable: (row, tenantId) =>
+          console.error(
+            `[notifications] digest ${row.identity ?? "(unidentified)"} for tenant ${tenantId}` +
+              ` could not be read and was not assembled: ${row.detail}`,
+          ),
         onError: (err, tenantId) =>
           console.error(`[notifications] digest assembly failed for tenant ${tenantId}`, err),
       },
@@ -4718,6 +4737,14 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           parseNotificationPolicy((await settingsStore.get(tenantId)).notifications),
         onError: (err, tenantId) =>
           console.error(`[notifications] drain failed for tenant ${tenantId}`, err),
+        // A dispatch row the contract refuses is a notification nobody will ever send, so it is an
+        // error and not an info: before this it ended the tenant's whole tick, and now it is skipped
+        // and this line is the only trace of it. It recurs every tick until the row is repaired,
+        // which is the honest signal for a standing condition.
+        onUnreadable: (row, tenantId) =>
+          console.error(
+            `[notifications] unreadable dispatch row tenant=${tenantId} id=${row.identity ?? "<unidentified>"}: ${row.detail}`,
+          ),
       },
       tenantSource: new PostgresTenantSource(conn, schemaOpt),
       intervalMs: options.notificationDrainMs,

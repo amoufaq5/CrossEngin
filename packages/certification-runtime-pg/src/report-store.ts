@@ -1,4 +1,9 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  readRowsWithUnreadable,
+  textIdentity,
+  type PgConnection,
+  type RowRead,
+} from "@crossengin/kernel-pg";
 import type { ComplianceFramework } from "@crossengin/certification-runtime";
 import {
   CertificationReportRecordSchema,
@@ -70,10 +75,22 @@ export class PostgresCertificationReportStore {
     return rowToRecord(row);
   }
 
+  /**
+   * The newest reports in one scope, with a report for every row the contract refused.
+   *
+   * Returns the pair rather than forwarding a reporter, and the reason is the consumer
+   * classification rather than taste: this method has **no non-test caller anywhere in the
+   * workspace** — no route in `apps/operate-server` reads a certification report, and
+   * `PersistingCertificationEngine` only ever `record`s — so there is nobody to forward a reporter
+   * to, and a required parameter would be one no deployment passes. The pair is also the
+   * non-breaking shape for the day a consumer arrives: a verifier gets the refusals as part of its
+   * answer, and a route writes `.records`, which is visible in a grep where a discarded callback is
+   * not (`read-rows.ts`' own note).
+   */
   async listRecent(
     limit = 100,
     tenantId: string | null = null,
-  ): Promise<readonly CertificationReportRecord[]> {
+  ): Promise<RowRead<CertificationReportRecord>> {
     if (limit <= 0) throw new Error("limit must be positive");
     const scope = scopeFilter(tenantId, 1);
     const result = await scopedRead(this.conn, tenantId, (tx) =>
@@ -85,14 +102,15 @@ export class PostgresCertificationReportStore {
         [...scope.params, limit],
       ),
     );
-    return result.rows.map((row) => rowToRecord(row));
+    return readRowsWithUnreadable(result.rows, rowToRecord, reportIdentity);
   }
 
+  /** One framework's history in one scope, in `listRecent`'s shape and for its reason. */
   async listByFramework(
     framework: ComplianceFramework,
     limit = 100,
     tenantId: string | null = null,
-  ): Promise<readonly CertificationReportRecord[]> {
+  ): Promise<RowRead<CertificationReportRecord>> {
     if (limit <= 0) throw new Error("limit must be positive");
     const scope = scopeFilter(tenantId, 2);
     const result = await scopedRead(this.conn, tenantId, (tx) =>
@@ -104,7 +122,7 @@ export class PostgresCertificationReportStore {
         [framework, ...scope.params, limit],
       ),
     );
-    return result.rows.map((row) => rowToRecord(row));
+    return readRowsWithUnreadable(result.rows, rowToRecord, reportIdentity);
   }
 
   /**
@@ -151,8 +169,36 @@ function asIso(value: unknown): string {
   return value instanceof Date ? value.toISOString() : asString(value);
 }
 
+/**
+ * The best handle a refused report row names: its `report_id`.
+ *
+ * TEXT, `NOT NULL`, uniquely constrained table-wide and bounded by a CHECK
+ * (`report_id ~ '^cert_[a-z0-9]{8,40}$'`), and the first column of the shared `COLUMNS` list, so
+ * every read here returns it. `textIdentity` answers `null` when the column is itself what is
+ * wrong, which is ADR-0331's distinction rather than an invented handle.
+ */
+function reportIdentity(row: Record<string, unknown>): string | null {
+  return textIdentity(row, "report_id");
+}
+
+/**
+ * `report` as the driver hands it back, as a value rather than as text.
+ *
+ * The `JSON.parse` is guarded because `unreadableDetail` passes a non-`ZodError` message through
+ * **verbatim**, on the stated premise that such a message is a mapper's own guard "written in this
+ * repo" and so names no row value — and a `SyntaxError` from `JSON.parse` is V8's, quoting its
+ * input. The column is `jsonb`, so node-postgres parses it and this branch is unreachable against a
+ * real database; it is reachable through a fake and through a `text` column, which is exactly the
+ * population a disclosure would hide in. So the throw carries a repo-written sentence and the
+ * premise holds (ADR-0373's rule, applied to the one throw in this mapper that is not ours).
+ */
 function asReport(value: unknown): unknown {
-  return typeof value === "string" ? JSON.parse(value) : value;
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    throw new Error("report: column is not valid JSON");
+  }
 }
 
 function rowToRecord(row: Record<string, unknown>): CertificationReportRecord {

@@ -1,5 +1,10 @@
 import { InvoiceSchema, type Invoice } from "@crossengin/billing";
-import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  readRowsWithUnreadable,
+  textIdentity,
+  type PgConnection,
+  type RowRead,
+} from "@crossengin/kernel-pg";
 
 import { withTenantContext } from "./tenant-context.js";
 
@@ -135,13 +140,38 @@ export class PostgresInvoiceStore {
     });
   }
 
-  async listByTenant(tenantId: string, limit = 100): Promise<readonly Invoice[]> {
+  /**
+   * A tenant's invoices, newest first, **with a report for every row the contract refuses**.
+   *
+   * `.map(rowToInvoice)` threw one unrepresentable row out of the whole page, so a single invoice
+   * edited into a shape `InvoiceSchema` forbids and no CHECK refuses made the tenant's *entire*
+   * billing history unreadable — and `meta.invoices` is one of the two
+   * `STATUTORY_RETENTION_TABLES`, kept for seven years precisely so it can be read after the
+   * tenant is gone. Two live refusal paths neither the column types nor a CHECK fence:
+   * `lineItems` is `z.array(…).min(1)` against a `JSONB NOT NULL` column that admits `'[]'`, and
+   * `currency` is `CHAR(3)`, which **pads**, so a two-letter value stores as `'US '` and is
+   * refused on read.
+   *
+   * Returns the pair rather than forwarding a reporter because this read has **no consumer at
+   * all** — measured, zero callers including its own test — so there is nobody to forward to, and
+   * a required `UnreadableRowReporter` whose only supplier would be a test is the
+   * validated-branch-reached-only-from-its-own-tests shape (ADR-0336). `.records` is what a caller
+   * wanting only the invoices writes, which is visible in a grep where a discarded callback is not.
+   *
+   * `getByNumber` above is a **single**-row read and deliberately still throws: its caller asked
+   * for that invoice by name and must not be served past it (ADR-0289).
+   */
+  async listByTenant(tenantId: string, limit = 100): Promise<RowRead<Invoice>> {
     return withTenantContext(this.conn, tenantId, async (tx) => {
       const result = await tx.query<InvoiceRow>(
         `SELECT * FROM ${SCHEMA}.${TABLE} ORDER BY issued_at DESC LIMIT $1`,
         [limit],
       );
-      return result.rows.map(rowToInvoice);
+      // `id` is the identity rather than `number` because it is the table's primary key and so the
+      // one handle a manual remedy can name unambiguously; `(tenant_id, number)` is unique only
+      // within a tenant. It is read straight off the raw row, so it still answers for a row
+      // `rowToInvoice` refused.
+      return readRowsWithUnreadable(result.rows, rowToInvoice, (row) => textIdentity(row, "id"));
     });
   }
 }

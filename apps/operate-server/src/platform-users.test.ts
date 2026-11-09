@@ -32,6 +32,7 @@ import {
 const TENANT = "11111111-1111-4111-8111-111111111111";
 const OTHER_TENANT = "22222222-2222-4222-8222-222222222222";
 const USER = "00000000-0000-4000-8000-0000000000aa";
+const OTHER_USER = "00000000-0000-4000-8000-0000000000bb";
 const AT = "2026-09-01T12:00:00.000Z";
 
 type Row = Record<string, unknown>;
@@ -1591,5 +1592,63 @@ describe("the user stats route", () => {
     const { ctx } = ctxFor(new PostgresUserStore(db.conn));
     const ops = buildPlatformUserRoutes(ctx).map((r) => r.route.operationId);
     expect(ops.indexOf("platform.users.stats")).toBeLessThan(ops.indexOf("platform.users.get"));
+  });
+});
+
+describe("a stored identity row the contract refuses (ADR-0373)", () => {
+  it("refuses the user page rather than shortening it", async () => {
+    // Two rows, one of them corrupt: `status` is an enum on `UserRecordSchema`, so the real
+    // `rowToUser` is what refuses it. A throwing fake would prove only that the handler catches
+    // something; corrupting the row proves it catches the refusal the contract itself raises.
+    const db = fakeDb([[userRow(), userRow({ id: OTHER_USER, status: "not_a_status" })]]);
+    const { ctx } = ctxFor(new PostgresUserStore(db.conn));
+    const list = handlerFor(buildPlatformUserRoutes(ctx), "platform.users.list");
+    const out = await list({ principal: principal(), params: {}, request: { query: {} } });
+
+    expect(out.status).toBe(500);
+    expect((out.body as Record<string, unknown>)["error"]).toBe("user_page_unreadable");
+    // The refused row's own values do not travel back: an error about a row must not quote it.
+    expect(JSON.stringify(out.body)).not.toContain("not_a_status");
+    expect(JSON.stringify(out.body)).not.toContain(OTHER_USER);
+  });
+
+  it("refuses the membership page rather than shortening it", async () => {
+    const db = fakeDb([
+      [membershipRow(), membershipRow({ id: OTHER_USER, status: "not_a_status" })],
+    ]);
+    const { ctx } = ctxFor(new PostgresUserStore(db.conn));
+    const list = handlerFor(buildPlatformUserRoutes(ctx), "platform.tenants.members.list");
+    const out = await list({
+      principal: principal(),
+      params: { tenantId: TENANT },
+      request: { query: {} },
+    });
+
+    expect(out.status).toBe(500);
+    expect((out.body as Record<string, unknown>)["error"]).toBe("membership_page_unreadable");
+    expect(JSON.stringify(out.body)).not.toContain("not_a_status");
+  });
+
+  it("serves the same two pages when neither row is corrupt", async () => {
+    // The non-vacuity control: the refusals above are about the corrupt row and not about the
+    // fixture, the route id, or the principal.
+    const users = fakeDb([[userRow(), userRow({ id: OTHER_USER })]]);
+    const u = ctxFor(new PostgresUserStore(users.conn));
+    const listUsers = handlerFor(buildPlatformUserRoutes(u.ctx), "platform.users.list");
+    const userOut = await listUsers({ principal: principal(), params: {}, request: { query: {} } });
+    expect(userOut.status).toBe(200);
+
+    const members = fakeDb([[membershipRow(), membershipRow({ id: OTHER_USER })]]);
+    const m = ctxFor(new PostgresUserStore(members.conn));
+    const listMembers = handlerFor(
+      buildPlatformUserRoutes(m.ctx),
+      "platform.tenants.members.list",
+    );
+    const memberOut = await listMembers({
+      principal: principal(),
+      params: { tenantId: TENANT },
+      request: { query: {} },
+    });
+    expect(memberOut.status).toBe(200);
   });
 });

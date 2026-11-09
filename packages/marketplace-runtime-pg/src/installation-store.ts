@@ -1,5 +1,10 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
-import type { PackInstallation, PackInstallationSet } from "@crossengin/marketplace";
+import {
+  readRowsWithUnreadable,
+  textIdentity,
+  type PgConnection,
+  type RowRead,
+} from "@crossengin/kernel-pg";
+import type { PackInstallation } from "@crossengin/marketplace";
 
 import { installationParams, rowToInstallation, type InstallationRow } from "./records.js";
 import { withTenantContext } from "./tenant-context.js";
@@ -97,19 +102,38 @@ export class PostgresInstallationStore {
     });
   }
 
-  /** All installations for a tenant, oldest first — the engine's `existing` set. */
-  async listForTenant(tenantId: string): Promise<PackInstallationSet> {
+  /**
+   * All installations for a tenant, oldest first — the engine's `existing` set, with a report for
+   * every row the contract refused.
+   *
+   * Returns the pair because the deciding consumer is a **verifier**:
+   * `PersistentMarketplaceInstallEngine.install` hands this straight to `engine.admit` as
+   * `existing`, whose first gate is *does this tenant already have an active installation of this
+   * pack*. A row silently dropped there is not a shorter list — it is an **admitted second
+   * installation of a pack the tenant already has**, which is the one thing
+   * `PackInstallationSetSchema`'s own refinement exists to forbid. So the refusals have to reach
+   * the function that decides, and that function is two layers up (`read-rows.ts`' rule). The other
+   * consumer is a route, which writes `.records` and may report the count.
+   */
+  async listForTenant(tenantId: string): Promise<RowRead<PackInstallation>> {
     return withTenantContext(this.conn, tenantId, async (tx) => {
       const res = await tx.query<InstallationRow>(
         `SELECT * FROM ${this.table} WHERE tenant_id = $1 ORDER BY requested_at, id`,
         [tenantId],
       );
-      return res.rows.map(rowToInstallation);
+      return readRowsWithUnreadable(res.rows, rowToInstallation, installationIdentity);
     });
   }
 
-  /** The active (non-uninstalled, non-failed) installations of one pack for a tenant. */
-  async activeForPack(tenantId: string, packId: string): Promise<PackInstallationSet> {
+  /**
+   * The active (non-uninstalled, non-failed) installations of one pack for a tenant, in
+   * `listForTenant`'s shape.
+   *
+   * This method has **no non-test caller**, so the pair is chosen by store-level consistency rather
+   * than by a consumer — one idiom per store, so a caller that arrives meets the same shape as its
+   * sibling and cannot discard a refusal by writing the call the other way round.
+   */
+  async activeForPack(tenantId: string, packId: string): Promise<RowRead<PackInstallation>> {
     return withTenantContext(this.conn, tenantId, async (tx) => {
       const res = await tx.query<InstallationRow>(
         `SELECT * FROM ${this.table}
@@ -117,7 +141,22 @@ export class PostgresInstallationStore {
           ORDER BY requested_at, id`,
         [tenantId, packId],
       );
-      return res.rows.map(rowToInstallation);
+      return readRowsWithUnreadable(res.rows, rowToInstallation, installationIdentity);
     });
   }
+}
+
+/**
+ * The best handle a refused installation row names: its `id`.
+ *
+ * `meta.pack_installations.id` is the UUID primary key, `SELECT *` returns it, and it is declared
+ * on `InstallationRow`. `textIdentity` reads it off the **raw** row, so it still answers for a row
+ * `rowToInstallation` refused — and since ADR-0403 that helper is generic in the row, so a store
+ * whose query is typed `tx.query<InstallationRow>` passes the typed row directly: no cast
+ * (ADR-0362's annotation standing in for a check), no second copy of the predicate, and no
+ * `interface` → `type` change, which would have silently removed 18 reads from
+ * `pg-record-reads.ts`' population.
+ */
+function installationIdentity(row: InstallationRow): string | null {
+  return textIdentity(row, "id");
 }

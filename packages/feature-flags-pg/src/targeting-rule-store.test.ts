@@ -24,6 +24,7 @@ import {
   TARGETING_RULE_SET_DEFECTS,
   TargetingRuleSetTooLargeError,
   TargetingRulesUnresolvedError,
+  UNIDENTIFIED_RULE_ID,
   loadFlagWithTargeting,
   rowToTargetingRule,
   targetingRulePlaceholders,
@@ -398,20 +399,37 @@ describe("rulesFor", () => {
 });
 
 describe("TARGETING_RULE_SET_DEFECTS", () => {
-  it("has the three ways a flag and its rows can disagree", () => {
+  it("has the four ways a flag and its rows can disagree", () => {
     expect([...TARGETING_RULE_SET_DEFECTS]).toEqual([
       "rule_missing",
       "rule_wrong_flag",
       "rule_unreferenced",
+      "rule_unreadable",
     ]);
   });
 
-  it("blocks on the two that make a flag unevaluable and not on the third", () => {
+  it("blocks on the three that make a flag unevaluable and not on the fourth", () => {
     expect([...BLOCKING_TARGETING_RULE_SET_DEFECTS].sort()).toEqual([
       "rule_missing",
+      "rule_unreadable",
       "rule_wrong_flag",
     ]);
+    // The one member that is a finding rather than a refusal: the flag's own list decides, so a row
+    // the list does not name is by that authority not part of the targeting, and refusing would
+    // take the flag off the air for the duration of any non-transactional write.
     expect(BLOCKING_TARGETING_RULE_SET_DEFECTS.has("rule_unreferenced")).toBe(false);
+  });
+
+  // The partition, asserted rather than left to the two literals above agreeing by accident: a
+  // fifth defect added to neither set would otherwise be silently non-blocking.
+  it("partitions the vocabulary, so a new defect must choose a side", () => {
+    const nonBlocking = TARGETING_RULE_SET_DEFECTS.filter(
+      (d) => !BLOCKING_TARGETING_RULE_SET_DEFECTS.has(d),
+    );
+    expect(nonBlocking).toEqual(["rule_unreferenced"]);
+    expect(BLOCKING_TARGETING_RULE_SET_DEFECTS.size + nonBlocking.length).toBe(
+      TARGETING_RULE_SET_DEFECTS.length,
+    );
   });
 });
 
@@ -429,7 +447,7 @@ describe("surveyFor", () => {
     const store = new PostgresTargetingRuleStore(mockConnection(undefined, () => EMPTY));
     const survey = await store.surveyFor(flag());
     expect(survey.findings).toEqual([
-      { defect: "rule_missing", ruleId: RULE_ID, storedFlagId: null },
+      { defect: "rule_missing", ruleId: RULE_ID, storedFlagId: null, detail: null },
     ]);
     expect(survey.rules).toEqual([]);
   });
@@ -441,7 +459,7 @@ describe("surveyFor", () => {
     );
     const survey = await store.surveyFor(flag());
     expect(survey.findings).toEqual([
-      { defect: "rule_wrong_flag", ruleId: RULE_ID, storedFlagId: "ff_otherflag" },
+      { defect: "rule_wrong_flag", ruleId: RULE_ID, storedFlagId: "ff_otherflag", detail: null },
     ]);
     expect(survey.rules).toEqual([]);
   });
@@ -454,7 +472,75 @@ describe("surveyFor", () => {
     const survey = await store.surveyFor(flag());
     expect(survey.rules.map((r) => r.id)).toEqual([RULE_ID]);
     expect(survey.findings).toEqual([
-      { defect: "rule_unreferenced", ruleId: "ftr_orphan01", storedFlagId: FLAG_ID },
+      { defect: "rule_unreferenced", ruleId: "ftr_orphan01", storedFlagId: FLAG_ID, detail: null },
+    ]);
+  });
+
+  /**
+   * **The defect a naive migration creates**, and the reason `rule_unreadable` exists.
+   *
+   * The declared rule's row is *present* and the contract refused it, so it is absent from `byId`
+   * and the declared-id walk would reach `row === undefined` and report `rule_missing` — whose own
+   * doc says *no row carries that id*. That is a wrong diagnosis sending an operator to insert a
+   * row that is already there, and it is reported once rather than twice.
+   */
+  it("reports a declared rule whose row the contract refuses as unreadable, not as missing", async () => {
+    const store = new PostgresTargetingRuleStore(
+      mockConnection(undefined, () => ({
+        rows: [{ ...ruleRow(rule()), priority: 5000 }],
+        rowCount: 1,
+      })),
+    );
+    const survey = await store.surveyFor(flag());
+    expect(survey.findings.map((f) => f.defect)).toEqual(["rule_unreadable"]);
+    expect(survey.findings[0]?.ruleId).toBe(RULE_ID);
+    expect(survey.findings[0]?.storedFlagId).toBeNull();
+    // The detail names the column and the issue code and never the stored value.
+    expect(survey.findings[0]?.detail).toContain("priority");
+    expect(survey.findings[0]?.detail).not.toContain("5000");
+    expect(survey.rules).toEqual([]);
+  });
+
+  it("keeps the readable rules when another row is refused", async () => {
+    const extra = rule({ id: "ftr_second01", priority: 20 });
+    const store = new PostgresTargetingRuleStore(
+      mockConnection(undefined, () => ({
+        rows: [
+          { ...ruleRow(extra), rule_id: "ftr_broken01", priority: 5000 },
+          ruleRow(rule()),
+        ],
+        rowCount: 2,
+      })),
+    );
+    const survey = await store.surveyFor(flag());
+    expect(survey.rules.map((r) => r.id)).toEqual([RULE_ID]);
+    expect(survey.findings.map((f) => [f.defect, f.ruleId])).toEqual([
+      ["rule_unreadable", "ftr_broken01"],
+    ]);
+  });
+
+  /**
+   * `UnreadableRow.identity` is `string | null` because the identifying column may itself be the
+   * reason the row was refused, and the finding's `ruleId` is a string every consumer reads — so a
+   * sentinel is what keeps a human-read message from rendering `"null"`.
+   *
+   * **Two findings here and that is not a double-report**, which is the one case the de-duplication
+   * above deliberately does not cover: with no usable `rule_id` the row cannot be placed against
+   * the declared list, so *this row is corrupt* and *the declared rule did not resolve* are two
+   * separate facts and both are true. Suppressing the second would be claiming the unidentifiable
+   * row is the declared one, which is the inference the sentinel exists to admit cannot be made.
+   */
+  it("names a refused row whose own rule_id is unusable with the sentinel", async () => {
+    const store = new PostgresTargetingRuleStore(
+      mockConnection(undefined, () => ({
+        rows: [{ ...ruleRow(rule()), rule_id: "", priority: 5000 }],
+        rowCount: 1,
+      })),
+    );
+    const survey = await store.surveyFor(flag());
+    expect(survey.findings.map((f) => [f.defect, f.ruleId])).toEqual([
+      ["rule_unreadable", UNIDENTIFIED_RULE_ID],
+      ["rule_missing", RULE_ID],
     ]);
   });
 

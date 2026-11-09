@@ -1,4 +1,9 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  readRows,
+  textIdentity,
+  type PgConnection,
+  type UnreadableRowReporter,
+} from "@crossengin/kernel-pg";
 import {
   RunbookExecutionSchema,
   type RunbookExecution,
@@ -167,6 +172,19 @@ export function rowToRunbookExecution(
   };
 }
 
+/**
+ * The handle a refused execution row is reported under, for both list reads.
+ *
+ * `execution_id` is TEXT NOT NULL UNIQUE with **no pattern CHECK** (the catalog says so in as many
+ * words), so unlike `incident_id` and `postmortem_id` a blanked or whitespace key is genuinely
+ * storable here — `textIdentity`'s `raw.length > 0` test is what keeps `''` from travelling into a
+ * finding as a handle that resolves nothing, and `null` then reads as ADR-0331's *the row does not
+ * name one*.
+ */
+function runbookExecutionIdentity(row: Record<string, unknown>): string | null {
+  return textIdentity(row, "execution_id");
+}
+
 export class RunbookExecutionRevisionConflictError extends Error {
   constructor(
     readonly executionId: string,
@@ -259,6 +277,7 @@ export class PostgresRunbookExecutionStore {
   /** An incident's executions oldest-first, the order they were invoked in. */
   async listForIncident(
     incidentId: string,
+    onUnreadable: UnreadableRowReporter,
     limit = 100,
   ): Promise<readonly StoredRunbookExecution[]> {
     if (limit <= 0) throw new Error("limit must be positive");
@@ -269,7 +288,7 @@ export class PostgresRunbookExecutionStore {
        LIMIT $2`,
       [incidentId, limit],
     );
-    return result.rows.map((row) => rowToRunbookExecution(row));
+    return readRows(result.rows, rowToRunbookExecution, runbookExecutionIdentity, onUnreadable);
   }
 
   /**
@@ -278,9 +297,20 @@ export class PostgresRunbookExecutionStore {
    * The predicate is written to match `idx_incident_runbook_executions_unfinished` exactly, which is
    * partial on the same three statuses and ordered by `invoked_at`. Spelling it any other way (a
    * `NOT IN` over the terminal three, say) leaves the index unusable for this query, which is the
-   * one query it exists for.
+   * one query it exists for — so `onUnreadable` is the only thing this migration adds, and the
+   * `WHERE` is untouched by design.
+   *
+   * **This is the strongest case in the package for the reporter being required rather than
+   * optional.** The consumer the method's own sentence names is a resuming worker, so a dropped row
+   * is an execution nobody resumes — and before this change nothing said so in either direction:
+   * `.map` took the whole resume list down on one refused row, and a silent drop would have left
+   * the worker resuming a short list it believed was complete. A reporter rather than the pair for
+   * exactly that reason: a scheduler is `read-rows.ts`' forward-the-reporter consumer.
    */
-  async listUnfinished(limit = 100): Promise<readonly StoredRunbookExecution[]> {
+  async listUnfinished(
+    onUnreadable: UnreadableRowReporter,
+    limit = 100,
+  ): Promise<readonly StoredRunbookExecution[]> {
     if (limit <= 0) throw new Error("limit must be positive");
     const result = await this.conn.query<Record<string, unknown>>(
       `SELECT ${RUNBOOK_EXECUTION_COLUMNS} FROM ${SCHEMA}.${TABLE}
@@ -289,6 +319,6 @@ export class PostgresRunbookExecutionStore {
        LIMIT $1`,
       [limit],
     );
-    return result.rows.map((row) => rowToRunbookExecution(row));
+    return readRows(result.rows, rowToRunbookExecution, runbookExecutionIdentity, onUnreadable);
   }
 }

@@ -306,10 +306,29 @@ function buildListHandler(ctx: NotificationRoutesContext): Handler {
       }
     }
     const hashes = await recipientFilterFor(ctx, input.principal, tenant, effectiveScope);
-    const page = await ctx.source.listForTenant(tenant, {
-      ...query,
-      ...(hashes !== null ? { recipientAddressSha256: hashes } : {}),
-    });
+    let page: { readonly data: readonly TenantNotificationLike[]; readonly nextCursor: string | null };
+    try {
+      page = await ctx.source.listForTenant(tenant, {
+        ...query,
+        ...(hashes !== null ? { recipientAddressSha256: hashes } : {}),
+      });
+    } catch {
+      // `rowToRecord` parses every row, and the declared consequence is the sharp one: a refused
+      // notification row **empties the inbox** rather than hiding one notice. Named rather than
+      // dropped, because an empty inbox is the answer a recipient cannot tell from having no
+      // notices.
+      //
+      // 500 and not 503, deliberately: the condition is permanent and a 503 is retryable — this app
+      // already made the inverse mistake once, with `gatewayTimeout`'s 504 on a permanent fault
+      // (ADR-0359). The one of these routes with a non-privileged caller, so no detail.
+      //
+      // Scoped to the store call: `proposalFragment` and `digestFragment` below issue their own
+      // store reads inside the `Promise.all`, and those are a different condition — each catches
+      // its own throw and answers `null`, on the standing decision that a notice missing its
+      // joined copy beats no inbox. So a wider `try` here would convert their *recovered*
+      // failure into this refusal, taking the whole page away over copy the inbox can do without.
+      return json(500, { error: "inbox_page_unreadable" });
+    }
     const data = await Promise.all(
       page.data.map(async (notification) => ({
         ...notification,

@@ -208,7 +208,17 @@ function buildListHandler(ctx: MarketplaceAuthoringContext): Handler {
     const g = guard(ctx, principal, ctx.authorRoles);
     if (isDenial(g)) return g;
     const packId = params["packId"] ?? "";
-    return json(200, { data: await ctx.store.listByPack(packId) });
+    // The reporter is required, so a version row the contract refuses is named rather than dropped
+    // from the page. It is a log line and not a body field: this is the author's view of their own
+    // pack's versions and the remedy is the platform's, so the figure belongs where an operator
+    // reads findings (ADR-0371's rule about where a diagnostic goes).
+    return json(200, {
+      data: await ctx.store.listByPack(packId, (row) =>
+        console.error(
+          `[marketplace] unreadable pack version pack=${packId} id=${row.identity ?? "<unidentified>"}: ${row.detail}`,
+        ),
+      ),
+    });
   };
 }
 

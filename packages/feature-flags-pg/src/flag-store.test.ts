@@ -490,9 +490,46 @@ describe("listForEnvironment", () => {
     const store = new PostgresFeatureFlagStore(
       mockConnection(undefined, respondTo([["environments @>", rows(a, b)]])),
     );
-    await expect(store.listForEnvironment("production")).resolves.toEqual([a, b]);
+    await expect(store.listForEnvironment("production")).resolves.toEqual({
+      records: [a, b],
+      unreadable: [],
+    });
     const empty = new PostgresFeatureFlagStore(mockConnection(undefined, () => EMPTY));
-    await expect(empty.listForEnvironment("production")).resolves.toEqual([]);
+    await expect(empty.listForEnvironment("production")).resolves.toEqual({
+      records: [],
+      unreadable: [],
+    });
+  });
+
+  /**
+   * The defect ADR-0373 closes: one flag row the contract refuses used to throw out of `.map` and
+   * take every *other* flag in the environment with it, which for an evaluator is a missing flag
+   * set rather than a missing flag.
+   */
+  it("reports an unreadable row and keeps the rest of the environment's flags", async () => {
+    const good = flag();
+    const store = new PostgresFeatureFlagStore(
+      mockConnection(
+        undefined,
+        respondTo([
+          [
+            "environments @>",
+            {
+              rows: [
+                { ...flagRow(good), flag_id: "ff_broken01", status: "not_a_status" },
+                flagRow(good),
+              ],
+              rowCount: 2,
+            },
+          ],
+        ]),
+      ),
+    );
+    const read = await store.listForEnvironment("production");
+    expect(read.records.map((f) => f.id)).toEqual([good.id]);
+    expect(read.unreadable.map((r) => r.identity)).toEqual(["ff_broken01"]);
+    // The detail names the field and the issue code and never the stored value.
+    expect(read.unreadable[0]?.detail).not.toContain("not_a_status");
   });
 });
 

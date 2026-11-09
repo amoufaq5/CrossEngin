@@ -8,6 +8,7 @@ import {
   type SuppressionRecord,
   type UserPreferenceMatrix,
 } from "@crossengin/notifications";
+import type { UnreadableRow } from "@crossengin/kernel-pg";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -40,6 +41,17 @@ const TENANT = "11111111-1111-4111-8111-111111111111";
 const USER_A = "22222222-2222-4222-8222-222222222222";
 const USER_B = "33333333-3333-4333-8333-333333333333";
 const NOW = new Date("2026-08-23T12:00:00.000Z");
+
+/**
+ * Discards the reporter's findings, which these tests are entitled to do: none of them exercises
+ * a store that can refuse a row, since every `FakeStore` hands back already-parsed records.
+ *
+ * Named rather than `() => {}` inline, copying `delivery-store.test.ts`: the parameter is required
+ * precisely so a caller cannot forget it, and a test that quietly discards a report should say
+ * that is what it is doing. Two arguments and not one — the drain's reporter carries the tenant,
+ * because a drain sweeps every tenant and a finding naming none would be unactionable.
+ */
+const noUnreadable = (_row: UnreadableRow, _tenantId: string): void => undefined;
 
 function dispatch(overrides: Partial<NotificationDispatch> = {}): NotificationDispatch {
   return {
@@ -133,7 +145,7 @@ function opts(
   resolver: FakeResolver,
   senders: SenderRegistry = new SenderRegistry([new InAppSender()]),
 ): DeliveryDrainOptions {
-  return { store, resolver, senders, clock: () => NOW };
+  return { store, resolver, senders, clock: () => NOW, onUnreadable: noUnreadable };
 }
 
 function suppression(address: string, channel: NotificationChannel = "in_app"): SuppressionRecord {
@@ -535,7 +547,7 @@ describe("delivery-drain — drainTenants", () => {
     };
 
     const report = await drainTenants(
-      { store: failing, resolver, senders: new SenderRegistry([new InAppSender()]), clock: () => NOW, onError: (_e, t) => errors.push(t) },
+      { store: failing, resolver, senders: new SenderRegistry([new InAppSender()]), clock: () => NOW, onUnreadable: noUnreadable, onError: (_e, t) => errors.push(t) },
       ["bad", TENANT],
     );
 
@@ -576,6 +588,7 @@ describe("delivery-drain — quiet hours", () => {
       resolver,
       senders: new SenderRegistry([new InAppSender()]),
       clock: () => NIGHT,
+      onUnreadable: noUnreadable,
       policySource: async () => policy,
       ...(digests !== undefined ? { digests } : {}),
     };
@@ -742,6 +755,7 @@ describe("delivery-drain — digest batching", () => {
       resolver,
       senders: new SenderRegistry([new InAppSender()]),
       clock: () => NIGHT,
+      onUnreadable: noUnreadable,
       policySource: async () => BATCH,
       digests,
     };
@@ -805,6 +819,7 @@ describe("delivery-drain — digest batching", () => {
         resolver,
         senders: new SenderRegistry([new InAppSender()]),
         clock: () => NIGHT,
+        onUnreadable: noUnreadable,
         policySource: async () => BATCH,
       },
       TENANT,
@@ -869,6 +884,7 @@ describe("delivery-drain — a digest summary is never re-pooled", () => {
       resolver,
       senders: new SenderRegistry([new InAppSender()]),
       clock: () => NIGHT,
+      onUnreadable: noUnreadable,
       policySource: async () => BATCH_ALL,
     };
   }

@@ -9,7 +9,9 @@ import {
 import { INCIDENT_COLUMN_NAMES, incidentRowValues } from "./records.js";
 import {
   EMPTY,
+  EXPECT_ALL_READABLE,
   T0,
+  collectUnreadable,
   declaredIncident,
   incidentRow,
   mockConnection,
@@ -274,7 +276,7 @@ describe("listOpen", () => {
   it("excludes the terminal statuses and orders oldest first", async () => {
     const capture: Captured[] = [];
     const conn = mockConnection(capture, () => EMPTY);
-    await new PostgresIncidentStore(conn).listOpen(25);
+    await new PostgresIncidentStore(conn).listOpen(EXPECT_ALL_READABLE, 25);
     expect(capture[0]?.sql).toContain("status NOT IN ('closed', 'cancelled')");
     expect(capture[0]?.sql).toContain("ORDER BY declared_at ASC");
     expect(capture[0]?.params).toEqual([25]);
@@ -282,13 +284,13 @@ describe("listOpen", () => {
 
   it("defaults to 100", async () => {
     const capture: Captured[] = [];
-    await new PostgresIncidentStore(mockConnection(capture, () => EMPTY)).listOpen();
+    await new PostgresIncidentStore(mockConnection(capture, () => EMPTY)).listOpen(EXPECT_ALL_READABLE);
     expect(capture[0]?.params).toEqual([100]);
   });
 
   it("rejects a non-positive limit", async () => {
     const conn = mockConnection(undefined, () => EMPTY);
-    await expect(new PostgresIncidentStore(conn).listOpen(0)).rejects.toThrow(/limit/);
+    await expect(new PostgresIncidentStore(conn).listOpen(EXPECT_ALL_READABLE, 0)).rejects.toThrow(/limit/);
   });
 
   it("parses every returned row", async () => {
@@ -297,7 +299,25 @@ describe("listOpen", () => {
       rows: [incidentRow(record), incidentRow(record, 2)],
       rowCount: 2,
     }));
-    expect(await new PostgresIncidentStore(conn).listOpen()).toHaveLength(2);
+    expect(await new PostgresIncidentStore(conn).listOpen(EXPECT_ALL_READABLE)).toHaveLength(2);
+  });
+
+  it("reports a row the contract refuses and keeps every other open incident", async () => {
+    // `closed` with no `closedAt` is the shape `replayer.test.ts` uses for the same reason: a
+    // status-to-field pairing the contract enforces and no CHECK does, so the row stores and only
+    // the re-parse refuses it.
+    const bad = incidentRow(declaredIncident({ id: "INC-2026-0001" }));
+    bad["status"] = "closed";
+    const good = incidentRow(declaredIncident({ id: "INC-2026-0002" }));
+    const conn = mockConnection(undefined, () => ({ rows: [bad, good], rowCount: 2 }));
+    const seen = collectUnreadable();
+
+    const loaded = await new PostgresIncidentStore(conn).listOpen(seen.report);
+
+    expect(loaded.map((i) => i.record.id)).toEqual(["INC-2026-0002"]);
+    expect(seen.rows).toHaveLength(1);
+    // Reported under `incident_id` and not the surrogate `id`: the handle an operator can name.
+    expect(seen.rows[0]?.identity).toBe("INC-2026-0001");
   });
 });
 
@@ -305,34 +325,34 @@ describe("listForTenant", () => {
   it("matches the tenant inside the JSONB array", async () => {
     const capture: Captured[] = [];
     const conn = mockConnection(capture, () => EMPTY);
-    await new PostgresIncidentStore(conn).listForTenant("t1", 10);
+    await new PostgresIncidentStore(conn).listForTenant("t1", EXPECT_ALL_READABLE, 10);
     expect(capture[0]?.sql).toContain("affected_tenant_ids @> to_jsonb($1::text)");
     expect(capture[0]?.params).toEqual(["t1", 10]);
   });
 
   it("orders newest first", async () => {
     const capture: Captured[] = [];
-    await new PostgresIncidentStore(mockConnection(capture, () => EMPTY)).listForTenant("t1");
+    await new PostgresIncidentStore(mockConnection(capture, () => EMPTY)).listForTenant("t1", EXPECT_ALL_READABLE);
     expect(capture[0]?.sql).toContain("ORDER BY declared_at DESC");
   });
 
   it("rejects a non-positive limit", async () => {
     const conn = mockConnection(undefined, () => EMPTY);
-    await expect(new PostgresIncidentStore(conn).listForTenant("t1", -1)).rejects.toThrow(/limit/);
+    await expect(new PostgresIncidentStore(conn).listForTenant("t1", EXPECT_ALL_READABLE, -1)).rejects.toThrow(/limit/);
   });
 });
 
 describe("listRecent", () => {
   it("orders newest first with a bound limit", async () => {
     const capture: Captured[] = [];
-    await new PostgresIncidentStore(mockConnection(capture, () => EMPTY)).listRecent(5);
+    await new PostgresIncidentStore(mockConnection(capture, () => EMPTY)).listRecent(EXPECT_ALL_READABLE, 5);
     expect(capture[0]?.sql).toContain("ORDER BY declared_at DESC");
     expect(capture[0]?.params).toEqual([5]);
   });
 
   it("rejects a non-positive limit", async () => {
     const conn = mockConnection(undefined, () => EMPTY);
-    await expect(new PostgresIncidentStore(conn).listRecent(0)).rejects.toThrow(/limit/);
+    await expect(new PostgresIncidentStore(conn).listRecent(EXPECT_ALL_READABLE, 0)).rejects.toThrow(/limit/);
   });
 });
 

@@ -104,7 +104,8 @@ describe("upsert semantics", () => {
     await registry.register(rec);
     await registry.register(rec);
     const all = await registry.listKeys();
-    expect(all).toHaveLength(1);
+    expect(all.records).toHaveLength(1);
+    expect(all.unreadable).toEqual([]);
   });
 
   it("upserts the status/version on conflict", async () => {
@@ -152,7 +153,7 @@ describe("listActive + filters", () => {
     await registry.register(a);
     await registry.register({ ...b, status: "revoked" });
     const active = await registry.listActive();
-    expect(active.map((r) => r.keyId)).toEqual([a.keyId]);
+    expect(active.records.map((r) => r.keyId)).toEqual([a.keyId]);
   });
 
   it("filters by algorithm", async () => {
@@ -162,7 +163,7 @@ describe("listActive + filters", () => {
     await registry.register(ed);
     await registry.register(hmac);
     const hmacKeys = await registry.listActive({ algorithm: "hmac-sha256" });
-    expect(hmacKeys.map((r) => r.keyId)).toEqual([hmac.keyId]);
+    expect(hmacKeys.records.map((r) => r.keyId)).toEqual([hmac.keyId]);
   });
 
   it("filters by purpose", async () => {
@@ -172,7 +173,84 @@ describe("listActive + filters", () => {
     await registry.register(packKey);
     await registry.register(sealKey);
     const seals = await registry.listActive({ purpose: "evidence_sealing" });
-    expect(seals.map((r) => r.keyId)).toEqual([sealKey.keyId]);
+    expect(seals.records.map((r) => r.keyId)).toEqual([sealKey.keyId]);
+  });
+});
+
+describe("a key row the contract refuses", () => {
+  /** A connection that answers one SELECT with the rows given and every write with one row. */
+  function readingPg(rows: readonly Record<string, unknown>[]): PgConnection {
+    const client: PgConnection = {
+      query: (async (sql: string) =>
+        sql.trimStart().toUpperCase().startsWith("SELECT")
+          ? { rows: [...rows], rowCount: rows.length }
+          : { rows: [], rowCount: 1 }) as PgConnection["query"],
+      transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) =>
+        fn(client)) as PgConnection["transaction"],
+      withAdvisoryLock: (async <T>(_k: bigint, fn: () => Promise<T>) =>
+        fn()) as PgConnection["withAdvisoryLock"],
+      close: (async () => undefined) as PgConnection["close"],
+    };
+    return client;
+  }
+
+  const storedRow = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    key_id: "key_ed25519_0123456789ABCDEFGHJKMNP123",
+    tenant_id: null,
+    algorithm: "ed25519",
+    purpose: "pack_signing",
+    public_key_base64: "AAAA",
+    fingerprint_sha256: "a".repeat(64),
+    key_version: 1,
+    status: "active",
+    created_at: new Date("2026-01-02T03:04:05.000Z"),
+    ...over,
+  });
+
+  it("reports the refused key and keeps every other registered key", async () => {
+    // It used to `.map`, and the read is unbounded — `ORDER BY created_at DESC, key_id ASC` with no
+    // `LIMIT` — so one refused row made *every* registered key unreadable. This is the directory a
+    // chain entry's `signingKeyFingerprint` resolves against (ADR-0332), so what that took away is
+    // the ability to say which key signed what.
+    const good = storedRow();
+    const broken = storedRow({
+      key_id: "key_ed25519_BAD00000000000000000000000",
+      status: "not-a-status",
+    });
+    const read = await new PostgresKeyRegistry(readingPg([broken, good])).listKeys();
+    expect(read.records.map((r) => r.keyId)).toEqual([good["key_id"]]);
+    expect(read.unreadable).toEqual([
+      {
+        identity: "key_ed25519_BAD00000000000000000000000",
+        detail: "status: invalid_enum_value",
+      },
+    ]);
+  });
+
+  it("discloses no value from a refused key beyond its key id", async () => {
+    // The detail is a field path and an issue code and never the stored value, which matters more
+    // here than at most sites: a public key, a fingerprint and a tenant id are all on this row.
+    const broken = storedRow({
+      key_id: "key_ed25519_BAD00000000000000000000001",
+      tenant_id: TENANT,
+      public_key_base64: "MCowBQYDK2VwAyEAsecretpublickeymaterial",
+      algorithm: "rot13",
+    });
+    const read = await new PostgresKeyRegistry(readingPg([broken])).listKeys();
+    const rendered = JSON.stringify(read.unreadable);
+    expect(rendered).toContain("key_ed25519_BAD00000000000000000000001");
+    expect(rendered).not.toContain("secretpublickeymaterial");
+    expect(rendered).not.toContain(TENANT);
+    expect(rendered).not.toContain("rot13");
+  });
+
+  it("still throws from the point lookups, because a named key must not be answered past", async () => {
+    // ADR-0289: `getByKeyId` and `getByFingerprint` are deliberately outside this class — one row
+    // is the whole answer there, so there is no rest of the page to protect.
+    const broken = storedRow({ status: "not-a-status" });
+    const registry = new PostgresKeyRegistry(readingPg([broken]));
+    await expect(registry.getByKeyId(String(broken["key_id"]))).rejects.toThrow();
+    await expect(registry.getByFingerprint("a".repeat(64))).rejects.toThrow();
   });
 });
 
@@ -193,7 +271,7 @@ describe("tenant scoping under RLS", () => {
     await registry.register(tenantKey);
     await registry.register(platformKey);
     const tenantList = await registry.listActive({ tenantId: TENANT });
-    expect(tenantList.map((r) => r.keyId)).toEqual([tenantKey.keyId]);
+    expect(tenantList.records.map((r) => r.keyId)).toEqual([tenantKey.keyId]);
   });
 });
 

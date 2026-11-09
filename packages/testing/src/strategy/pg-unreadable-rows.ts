@@ -210,8 +210,16 @@ export const PAGE_READ_VERDICTS = [
    *
    * The page survives and the finding does not. That is the *mirror* of the defect this rule is
    * named for rather than a fix for it, and it is ranked beside it rather than under it: one refused
-   * row loses every other row's finding, and this loses its own. A declaration here states who is
-   * served the shortened page.
+   * row loses every other row's finding, and this loses its own.
+   *
+   * **A detector with no current member, deliberately kept.** ADR-0405 migrated both sites it had
+   * (`digest-store.ts`' and `template-store.ts`' `parseRows`), and `row_dropped_deliberately` — the
+   * reason that *endorsed* the silence — was deleted with them, on ADR-0375's rule that a judgement
+   * with no case left is not a judgement. The verdict is the opposite shape and stays: the scanner
+   * can still find a silently dropping conversion, and the next one written needs to read as *this*
+   * rather than as `record_total` or as nothing. What changed is what it may be declared as — only
+   * `unmigrated`, which demands its consequence — so a new dropper can be parked with its cost
+   * stated and can no longer be blessed.
    */
   "record_dropping",
   /**
@@ -274,12 +282,6 @@ export const UNREADABLE_ROW_REASONS = [
    */
   "record_asserted_not_parsed",
   /**
-   * The conversion catches its own refusal and answers `null`, and the page filters it out. The
-   * declaration must name who is served the shortened page, because that is the party the silence is
-   * about.
-   */
-  "row_dropped_deliberately",
-  /**
    * **Backlog.** This read should go through the primitive and does not yet. The consequence states
    * what a refused row costs today, so the entry cannot be parked without saying what is lost.
    */
@@ -296,10 +298,7 @@ export const REFUSAL_BEARING_REASONS: readonly UnreadableRowReason[] = ["page_re
  * `pg-unreachable-stores.ts`' `substitutedBy` precedent: the field is what makes the reason cost
  * something a later reader can check, rather than prose nobody can refute.
  */
-export const CONSUMER_BEARING_REASONS: readonly UnreadableRowReason[] = [
-  "page_is_indivisible",
-  "row_dropped_deliberately",
-];
+export const CONSUMER_BEARING_REASONS: readonly UnreadableRowReason[] = ["page_is_indivisible"];
 
 /**
  * Only an asserted record may name the fence that stands in for the parse, and it must name one.
@@ -318,7 +317,6 @@ export const FENCE_BEARING_REASONS: readonly UnreadableRowReason[] = ["record_as
  */
 export const COST_BEARING_REASONS: readonly UnreadableRowReason[] = [
   "record_asserted_not_parsed",
-  "row_dropped_deliberately",
   "unmigrated",
 ];
 
@@ -382,7 +380,7 @@ export const UnreadableRowDeclarationSchema = z
     };
     pair("refusalCode", REFUSAL_BEARING_REASONS, "only a declared page refusal may name a refusal code, and it must name one");
     pair("refusedIn", REFUSAL_BEARING_REASONS, "a declared page refusal must name the file that answers it");
-    pair("consumedBy", CONSUMER_BEARING_REASONS, "only an indivisible or row-dropping page may name its consumer, and it must name one");
+    pair("consumedBy", CONSUMER_BEARING_REASONS, "only an indivisible page may name its consumer, and it must name one");
     pair("fencedBy", FENCE_BEARING_REASONS, "only an asserted record may name the fence that stands in for the parse, and it must name one");
     pair("consequence", COST_BEARING_REASONS, "only a gap may state a consequence, and a gap must state one");
     if (value.fencedBy !== undefined && value.fencedBy !== "nothing" && !SYMBOL.test(value.fencedBy)) {
@@ -509,7 +507,7 @@ export const REASONS_FOR_VERDICT: Record<PageReadVerdict, readonly UnreadableRow
     guarded_in_place: ["unmigrated"],
     record_throwing: ["page_refusal_declared", "page_is_indivisible", "unmigrated"],
     record_total: ["record_asserted_not_parsed"],
-    record_dropping: ["row_dropped_deliberately", "unmigrated"],
+    record_dropping: ["unmigrated"],
     projection: [],
   });
 
@@ -2008,109 +2006,68 @@ export const UNREADABLE_ROW_SITES: readonly UnreadableRowDeclaration[] = Object.
       "ClaimedTimer is built inline from the RETURNING row of the claim's own UPDATE, so every field is asserted from the column type. A worker acts on it immediately, which is why nothing between the two would be read.",
   },
   /* --------------------------- the row is dropped and nobody is told (2) */
-  {
-    file: "apps/operate-server/src/digest-store.ts",
-    scope: "parseRows",
-    conversion: "tryDigestFromRow",
-    reason: "row_dropped_deliberately",
-    consumedBy: "deliveryDrain",
-    consequence:
-      "a refused digest batch is never sent and never reported, so its recipients are silently skipped",
-    note:
-      "tryDigestFromRow is four lines of try/catch returning null, and parseRows filters it out: the page survives and the finding does not, so a digest batch the contract refuses leaves no trace at all.",
-  },
-  {
-    file: "apps/operate-server/src/template-store.ts",
-    scope: "parseRows",
-    conversion: "tryTemplateFromRow",
-    reason: "row_dropped_deliberately",
-    consumedBy: "templateResolution",
-    consequence:
-      "a refused template is treated as absent, which is indistinguishable from one that was never authored",
-    note:
-      "The same shape one store over: a template row the contract refuses disappears from the page, so the notification that needed it falls back or fails with nothing naming the row.",
-  },
   /* ------------------ the backlog: these should go through the primitive */
-  {
-    file: "apps/operate-server/src/delivery-store.ts",
-    scope: "claimQueued",
-    conversion: "<inline>",
-    reason: "unmigrated",
-    consequence:
-      "a refused dispatch row costs every other recipient in the same claimed batch its delivery for that tick",
-    note:
-      "The notification drain's claim: one dispatch row the contract refuses ends the whole claimed batch, so the drain makes no progress on the other recipients it had just locked.",
-  },
-  {
-    file: "apps/operate-server/src/delivery-store.ts",
-    scope: "dueRetries",
-    conversion: "<inline>",
-    reason: "unmigrated",
-    consequence: "a refused dispatch row stops every other due retry in the batch",
-    note:
-      "The retry half of the same drain, under the same cost: the batch is already claimed when the conversion runs.",
-  },
   {
     file: "apps/operate-server/src/design-review-store.ts",
     scope: "list",
     conversion: "rowToRecord",
-    reason: "unmigrated",
-    consequence:
-      "a refused review row makes the whole review queue unreadable, so no design can be approved",
+    reason: "page_refusal_declared",
+    refusalCode: "design_review_page_unreadable",
+    refusedIn: "apps/operate-server/src/design-review-routes.ts",
     note:
-      "The reviewer's queue (ADR-0368's approval gate): one unreadable proposal hides every other tenant's pending design from the console.",
+      "The reviewer's queue (ADR-0368's approval gate). A named 500 and deliberately not a 400 like template_page_unreadable: that row was authored through its own surface by its caller, while a proposal's author is the tenant's Architect and its reader is the platform reviewer, so 'your request is wrong' is false for them. A short page here would be worse than the refusal, because it hides a pending design from the only queue that approves one.",
   },
   {
     file: "apps/operate-server/src/notification-store.ts",
     scope: "listForTenant",
     conversion: "rowToRecord",
-    reason: "unmigrated",
-    consequence: "a refused notification row empties the inbox rather than hiding one notice",
-    note: "The tenant's own inbox page.",
+    reason: "page_refusal_declared",
+    refusalCode: "inbox_page_unreadable",
+    refusedIn: "apps/operate-server/src/notification-routes.ts",
+    note:
+      "The tenant's own inbox page, and the one of these routes with a non-privileged caller, so the refusal carries no detail at all. 500 and not 503: the condition is permanent and a 503 invites a retry that cannot help, which is the inverse mistake this app already made once with gatewayTimeout's 504 (ADR-0359).",
   },
   {
     file: "apps/operate-server/src/platform-admin.ts",
     scope: "list",
     conversion: "rowToTenant",
-    reason: "unmigrated",
-    consequence:
-      "a refused tenant row makes the tenant list unreadable, so no tenant can be administered from the console",
+    reason: "page_refusal_declared",
+    refusalCode: "tenant_page_unreadable",
+    refusedIn: "apps/operate-server/src/platform-admin.ts",
     note:
-      "The platform console's tenant list, which is the surface an operator reaches every other platform act from.",
+      "The platform console's tenant list, which is the surface an operator reaches every other platform act from — so a short page reads as a tenant that was never provisioned, which is the one wrong answer this list must not give. The refusal is also MORE useful than a short page here, because ?status= and the cursor let an operator narrow around the bad row where a short page gives them nothing to narrow on. Refused in the same file, which is where the handler lives.",
   },
   {
     file: "apps/operate-server/src/platform-users.ts",
     scope: "list",
     conversion: "rowToUser",
-    reason: "unmigrated",
-    consequence:
-      "a refused user row makes the user list unreadable, so no credential can be set from the console",
-    note: "ADR-0364's user registry page: the surface the first password is set from.",
+    reason: "page_refusal_declared",
+    refusalCode: "user_page_unreadable",
+    refusedIn: "apps/operate-server/src/platform-users.ts",
+    note:
+      "ADR-0364's user registry page, the surface the first password is set from. The console's own client refuses a prefix for the same reason (operate-web/lib/users.ts), so a short page would be a lie the UI could not detect; the stats tile beside it counts every row, so the two would disagree silently.",
   },
   {
     file: "apps/operate-server/src/platform-users.ts",
     scope: "membershipsForTenant",
     conversion: "rowToMembership",
-    reason: "unmigrated",
-    consequence: "a refused membership row hides every other member of that tenant",
-    note: "The membership half of the same registry, which ADR-0365's role fence reads.",
+    reason: "page_refusal_declared",
+    refusalCode: "membership_page_unreadable",
+    refusedIn: "apps/operate-server/src/platform-users.ts",
+    note:
+      "The membership half of the same registry, which ADR-0365's role fence reads. A membership row is an authorization fact — the grant an operator revokes from — and it is the one of these pages with no sibling count tile to cross-check against, so a short page is undetectable from the console. Read through withTenantContext, so the refusal is also the honest answer where RLS and a malformed row are indistinguishable from here.",
   },
   {
     file: "apps/operate-server/src/tenant-manifests.ts",
     scope: "list",
     conversion: "rowToRecord",
-    reason: "unmigrated",
-    consequence: "a refused manifest row makes the design list unreadable for that tenant",
-    note: "The activated-manifest list a tenant's own designs are read from (ADR-0314).",
+    reason: "page_refusal_declared",
+    refusalCode: "manifest_page_unreadable",
+    refusedIn: "apps/operate-server/src/ai-design-routes.ts",
+    note:
+      "The activated-manifest list a tenant's own designs are read from (ADR-0314). This handler had NO catch at all before ADR-0373, so the throw escaped as an unclassified 500 — and it is the one of these list routes live on a flag the shipped compose passes (--ai-design). Named with no detail, because a manifest row quotes the tenant's own design.",
   },
-  {
-    file: "packages/access-reviews-runtime-pg/src/evidence-store.ts",
-    scope: "listByTenant",
-    conversion: "rowToEvidence",
-    reason: "unmigrated",
-    consequence: "a refused evidence row makes a tenant's whole sealed-evidence history unreadable",
-    note: "ADR-0335's evidence store, which is what makes a certification report certifiable at all.",
-  },
+  
   {
     file: "packages/ai-architect-pg/src/tool-invocation-store.ts",
     scope: "listForSession",
@@ -2129,159 +2086,11 @@ export const UNREADABLE_ROW_SITES: readonly UnreadableRowDeclaration[] = Object.
     note:
       "PostgresRouteRegistry is declared callerless in pg-unreachable-stores.ts: ADR-0336 records it as a different serving model rather than a queue position, so the cost is latent.",
   },
-  {
-    file: "packages/billing-runtime-pg/src/invoice-store.ts",
-    scope: "listByTenant",
-    conversion: "rowToInvoice",
-    reason: "unmigrated",
-    consequence: "a refused invoice row makes a tenant's whole billing history unreadable",
-    note:
-      "The platform's own invoices to the tenant, which STATUTORY_RETENTION_TABLES keeps for seven years. rowToInvoice also calls JSON.parse on line_items, so a malformed JSONB column throws here as well as a contract refusal.",
-  },
-  {
-    file: "packages/billing-runtime-pg/src/usage-store.ts",
-    scope: "listBySubscription",
-    conversion: "rowToRecord",
-    reason: "unmigrated",
-    consequence:
-      "a refused usage row makes a subscription's usage unreadable, so a period cannot be rated",
-    note: "Metered usage for one subscription, which is what a rating run reads.",
-  },
-  {
-    file: "packages/billing-runtime-pg/src/usage-store.ts",
-    scope: "listUnsynced",
-    conversion: "rowToRecord",
-    reason: "unmigrated",
-    consequence: "a refused usage row stops every other unsynced record reaching Stripe",
-    note: "The unsynced read the Stripe usage sync drains.",
-  },
-  {
-    file: "packages/certification-runtime-pg/src/report-store.ts",
-    scope: "listRecent",
-    conversion: "rowToRecord",
-    reason: "unmigrated",
-    consequence: "a refused report row makes the whole certification history unreadable",
-    note: "The certification report history an auditor is shown.",
-  },
-  {
-    file: "packages/certification-runtime-pg/src/report-store.ts",
-    scope: "listByFramework",
-    conversion: "rowToRecord",
-    reason: "unmigrated",
-    consequence:
-      "a refused report row makes a framework's history unreadable, and that is the read a certification claim is built from",
-    note: "The per-framework read behind a SOC 2 or HIPAA answer.",
-  },
-  {
-    file: "packages/crypto-pg/src/key-registry.ts",
-    scope: "listKeys",
-    conversion: "rowToKeyRegistryRecord",
-    reason: "unmigrated",
-    consequence:
-      "a refused key row makes every other registered key unreadable, so a chain signature cannot be resolved at all",
-    note:
-      "The public-key directory a chain entry's signingKeyFingerprint resolves against (ADR-0332 gave it its own write grant for that reason).",
-  },
-  {
-    file: "packages/feature-flags-pg/src/flag-store.ts",
-    scope: "listWhere",
-    conversion: "rowToFeatureFlag",
-    reason: "unmigrated",
-    consequence:
-      "latent while nothing constructs the store; if one lands, a refused flag row hides every other flag",
-    note:
-      "PostgresFeatureFlagStore is declared callerless (ADR-0336: nothing in the workspace evaluates a flag), so the cost is latent.",
-  },
-  {
-    file: "packages/feature-flags-pg/src/kill-switch-store.ts",
-    scope: "listActiveForFlag",
-    conversion: "rowToKillSwitch",
-    reason: "unmigrated",
-    consequence:
-      "a refused switch row makes an active kill switch unreadable, so a rolled-back flag reads as live",
-    note: "The switch the SLO loop reads back when a restart adopts an incident (ADR-0296).",
-  },
-  {
-    file: "packages/feature-flags-pg/src/targeting-rule-store.ts",
-    scope: "read",
-    conversion: "rowToTargetingRule",
-    reason: "unmigrated",
-    consequence:
-      "latent while nothing constructs the store; if one lands, a refused rule row makes a flag unresolvable against its own targeting",
-    note:
-      "PostgresTargetingRuleStore is declared callerless (ADR-0335 moved the defect rather than closing it), so the cost is latent.",
-  },
-  {
-    file: "packages/incident-response-runtime-pg/src/comms-store.ts",
-    scope: "listForIncident",
-    conversion: "rowToComms",
-    reason: "unmigrated",
-    consequence:
-      "latent while nothing constructs the store; if one lands, a refused comms row hides every other notification for that incident",
-    note:
-      "PostgresCustomerCommsStore is declared callerless, and the table additionally cannot hold a late GDPR notification at all (register P2.13), so the cost is latent.",
-  },
-  {
-    file: "packages/incident-response-runtime-pg/src/comms-store.ts",
-    scope: "listPublishedForIncident",
-    conversion: "rowToComms",
-    reason: "unmigrated",
-    consequence:
-      "latent while nothing constructs the store; if one lands, a refused row hides every published notification",
-    note: "The published-only read of the same callerless store.",
-  },
-  {
-    file: "packages/incident-response-runtime-pg/src/comms-store.ts",
-    scope: "listBreachNotifications",
-    conversion: "rowToComms",
-    reason: "unmigrated",
-    consequence:
-      "latent while nothing constructs the store; if one lands, a refused row hides every other breach notification",
-    note: "The breach-notification read, which is the one a regulator asks for.",
-  },
-  {
-    file: "packages/incident-response-runtime-pg/src/incident-store.ts",
-    scope: "listOpen",
-    conversion: "rowToIncident",
-    reason: "unmigrated",
-    consequence:
-      "a refused incident row hides every other open incident, so a restart re-declares rather than adopting",
-    note: "The open-incident read the SLO and integrity escalators adopt an episode from (ADR-0294).",
-  },
-  {
-    file: "packages/incident-response-runtime-pg/src/incident-store.ts",
-    scope: "listForTenant",
-    conversion: "rowToIncident",
-    reason: "unmigrated",
-    consequence: "a refused incident row makes a tenant's incident history unreadable",
-    note: "The per-tenant incident read.",
-  },
-  {
-    file: "packages/incident-response-runtime-pg/src/incident-store.ts",
-    scope: "listRecent",
-    conversion: "rowToIncident",
-    reason: "unmigrated",
-    consequence: "a refused incident row makes the recent-incident view unreadable",
-    note: "The recent-incident read.",
-  },
-  {
-    file: "packages/incident-response-runtime-pg/src/postmortem-store.ts",
-    scope: "listForIncident",
-    conversion: "rowToPostmortem",
-    reason: "unmigrated",
-    consequence:
-      "latent while nothing constructs the store; if one lands, a refused postmortem row hides every other one for that incident",
-    note: "PostgresPostmortemStore is declared callerless (ADR-0296, ADR-0336), so the cost is latent.",
-  },
-  {
-    file: "packages/incident-response-runtime-pg/src/postmortem-store.ts",
-    scope: "listUnpublished",
-    conversion: "rowToPostmortem",
-    reason: "unmigrated",
-    consequence:
-      "latent while nothing constructs the store; if one lands, a refused row hides every unpublished postmortem",
-    note: "The unpublished read of the same callerless store.",
-  },
+  
+  
+  
+  
+  
   {
     file: "packages/incident-response-runtime-pg/src/replayer.ts",
     scope: "replayIncidents",
@@ -2292,50 +2101,7 @@ export const UNREADABLE_ROW_SITES: readonly UnreadableRowDeclaration[] = Object.
     note:
       "The replayer already does the right thing in its own words — a parse failure is pushed as a drift finding and the sweep continues (ADR-0289) — through a per-row try/catch of its own rather than through readRows.",
   },
-  {
-    file: "packages/incident-response-runtime-pg/src/runbook-store.ts",
-    scope: "listForIncident",
-    conversion: "rowToRunbookExecution",
-    reason: "unmigrated",
-    consequence:
-      "latent while nothing constructs the store; if one lands, a refused execution row hides every other step of that incident's runbook",
-    note:
-      "PostgresRunbookExecutionStore is declared callerless, and ADR-0336 records that there is no Runbook contract at all, so the cost is latent.",
-  },
-  {
-    file: "packages/incident-response-runtime-pg/src/runbook-store.ts",
-    scope: "listUnfinished",
-    conversion: "rowToRunbookExecution",
-    reason: "unmigrated",
-    consequence:
-      "latent while nothing constructs the store; if one lands, a refused row hides every unfinished execution",
-    note: "The unfinished read of the same callerless store.",
-  },
-  {
-    file: "packages/marketplace-runtime-pg/src/installation-store.ts",
-    scope: "listForTenant",
-    conversion: "rowToInstallation",
-    reason: "unmigrated",
-    consequence: "a refused installation row makes every other installation for that tenant unreadable",
-    note: "A tenant's installed packs.",
-  },
-  {
-    file: "packages/marketplace-runtime-pg/src/installation-store.ts",
-    scope: "activeForPack",
-    conversion: "rowToInstallation",
-    reason: "unmigrated",
-    consequence:
-      "a refused installation row hides every other active install, so a pack can be retired under tenants still using it",
-    note: "The active installations of one pack, read before a retire decision.",
-  },
-  {
-    file: "packages/marketplace-runtime-pg/src/version-store.ts",
-    scope: "listByPack",
-    conversion: "rowToRecord",
-    reason: "unmigrated",
-    consequence: "a refused version row makes a pack's version history unreadable",
-    note: "A pack's published versions, which a compatibility answer is built from.",
-  },
+  
   {
     file: "packages/operate-runtime-pg/src/column-store.ts",
     scope: "listPageOn",
@@ -2346,52 +2112,7 @@ export const UNREADABLE_ROW_SITES: readonly UnreadableRowDeclaration[] = Object.
     note:
       "Every list request a tenant makes against the typed column store, so this is the most-travelled conversion in the product.",
   },
-  {
-    file: "packages/tenant-lifecycle-pg/src/lifecycle-event-store.ts",
-    scope: "listForTenant",
-    conversion: "rowToLifecycleEvent",
-    reason: "unmigrated",
-    consequence: "a refused trail row makes the whole trail for that tenant unreadable",
-    note:
-      "ADR-0335's lifecycle trail: without it nothing in the database distinguishes a tenant that was deleted from one that never existed.",
-  },
-  {
-    file: "packages/tenant-lifecycle-pg/src/lifecycle-event-store.ts",
-    scope: "readTrailAsPlatform",
-    conversion: "rowToLifecycleEvent",
-    reason: "unmigrated",
-    consequence: "a refused trail row makes the platform's own view of the trail unreadable",
-    note:
-      "The platform-elevated read of the same trail, which is the one an operator uses after the tenant is gone.",
-  },
-  {
-    file: "packages/tenant-lifecycle-pg/src/lifecycle-event-store.ts",
-    scope: "deletedTenants",
-    conversion: "rowToLifecycleEvent",
-    reason: "unmigrated",
-    consequence:
-      "a refused trail row makes the deleted-tenant list unreadable, so a deletion cannot be evidenced",
-    note:
-      "The read that answers which tenants were deleted, over a trail whose rows outlive their tenant.",
-  },
-  {
-    file: "packages/tenant-lifecycle-pg/src/tombstone-store.ts",
-    scope: "listForTenant",
-    conversion: "rowToStoredTombstone",
-    reason: "unmigrated",
-    consequence: "a refused tombstone row makes every other proof for that tenant unreadable",
-    note: "A tenant's Article 17 proofs.",
-  },
-  {
-    file: "packages/tenant-lifecycle-pg/src/tombstone-store.ts",
-    scope: "findForRequest",
-    conversion: "rowToStoredTombstone",
-    reason: "unmigrated",
-    consequence:
-      "a refused tombstone row makes the evidence for a stranded request unreadable, which the reconciler cannot tell from absent",
-    note:
-      "ADR-0322's one conclusive question — does a tombstone name this request — which the reconciler's whole asymmetry rests on.",
-  },
+  
   {
     file: "packages/workflow-runtime-pg/src/definition-store.ts",
     scope: "loadEngineDefinitions",
@@ -2402,16 +2123,7 @@ export const UNREADABLE_ROW_SITES: readonly UnreadableRowDeclaration[] = Object.
     note:
       "Reports through the primitive's own textIdentity and unreadableDetail helpers and keeps the loop, because the loop also enforces one definition id per page, which readRows has no place to put.",
   },
-  {
-    file: "packages/workflow-runtime-pg/src/definition-store.ts",
-    scope: "summariesForKey",
-    conversion: "rowToWorkflowDefinition",
-    reason: "unmigrated",
-    consequence:
-      "a refused definition row makes a key's version history unreadable, so a publication is decided against less than the table holds",
-    note:
-      "The published-version summaries for one workflow key, read before a publication decision (ADR-0331).",
-  },
+  
 ]);
 
 /* ------------------------------------------------------------ refused anchors */

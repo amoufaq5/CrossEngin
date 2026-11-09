@@ -561,6 +561,27 @@ describe("read and listForTenant", () => {
     );
     expect(sql()).toEqual([]);
   });
+
+  it("listForTenant answers the refused rows beside the records rather than throwing", async () => {
+    // ADR-0373. `.map(rowToStoredTombstone)` threw, and the single consumer caught the throw and
+    // answered a 503 so that a short list of a tenant's proofs could not read as the whole list.
+    // The pair is what that 503 was standing in for: the honest proofs are served and the refused
+    // row is named, where refusing the page withheld every other proof the tenant has.
+    const good = recordOf();
+    const bad = assembledAt("tomb_listbad000001");
+    const { conn, anchorer } = fakePg([rowOf(good), refusedRowOf(bad)]);
+    const page = await new PostgresTombstoneStore(conn, anchorer).listForTenant(TENANT);
+    expect(page.records.map((s) => s.record.id)).toEqual([good.id]);
+    expect(page.unreadable).toHaveLength(1);
+    expect(page.unreadable[0]?.identity).toBe(bad.id);
+  });
+
+  it("listForTenant answers an empty unreadable list for a page it read whole", async () => {
+    const { conn, anchorer } = fakePg([rowOf(recordOf())]);
+    const page = await new PostgresTombstoneStore(conn, anchorer).listForTenant(TENANT);
+    expect(page.records).toHaveLength(1);
+    expect(page.unreadable).toEqual([]);
+  });
 });
 
 describe("findForRequest", () => {
@@ -571,7 +592,8 @@ describe("findForRequest", () => {
     const select = calls.find((c) => c.sql.includes("related_deletion_request_id"));
     expect(select?.sql).toContain("WHERE related_deletion_request_id = $1");
     expect(select?.params).toEqual(["dreq_abcdefgh1234"]);
-    expect(found).toHaveLength(1);
+    expect(found.records).toHaveLength(1);
+    expect(found.unreadable).toEqual([]);
   });
 
   it("elevates with app.platform_audit, since the evidence outlives its tenant", async () => {
@@ -587,6 +609,21 @@ describe("findForRequest", () => {
     // A LIMIT 1 would hide the one case that means the premise is broken (ADR-0322).
     const select = calls.find((c) => c.sql.includes("related_deletion_request_id"));
     expect(select?.sql).not.toContain("LIMIT");
+  });
+
+  it("answers the refused rows beside the records, because the verdict counts them", async () => {
+    // ADR-0373, and the sharpest site in this store: `DeletionReconciler.assessWith` branches on
+    // how many tombstones name the request, so a refused row dropped from the count does not lose
+    // a finding, it *changes the verdict* — a request whose deletion committed and whose only
+    // tombstone is unreadable would count as zero and read `never_committed`.
+    const bad = assembledAt("tomb_findbad000001");
+    const { conn, anchorer } = fakePg([refusedRowOf(bad)]);
+    const found = await new PostgresTombstoneStore(conn, anchorer).findForRequest(
+      "dreq_abcdefgh1234",
+    );
+    expect(found.records).toEqual([]);
+    expect(found.unreadable).toHaveLength(1);
+    expect(found.unreadable[0]?.identity).toBe(bad.id);
   });
 });
 
@@ -912,10 +949,15 @@ describe("reading the attestations column", () => {
       return new PostgresTombstoneStore(f.conn, f.anchorer);
     };
     expect((await store([broken]).read(record.id))?.attestationsRead).toBe("unreadable");
-    expect((await store([broken]).listForTenant(TENANT))[0]?.attestationsRead).toBe("unreadable");
-    expect((await store([broken]).findForRequest("dreq_abcdefgh1234"))[0]?.attestationsRead).toBe(
+    // `.records[0]` since ADR-0373: the two list reads answer the pair. The row is *readable* — an
+    // unreadable evidence column is a field on a record that parsed — so it is a record on both,
+    // which is the line between this reading and `unreadable`.
+    expect((await store([broken]).listForTenant(TENANT)).records[0]?.attestationsRead).toBe(
       "unreadable",
     );
+    expect(
+      (await store([broken]).findForRequest("dreq_abcdefgh1234")).records[0]?.attestationsRead,
+    ).toBe("unreadable");
     // `scanAll` is the one that matters most: it is the only reader that does not start from
     // something already naming a tombstone (ADR-0327). The row is *readable* — an unreadable
     // evidence column is a field on a record that parsed — so it is a record here and not a

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { Handler, HandlerInput } from "@crossengin/api-gateway-runtime";
+import type { RowRead } from "@crossengin/kernel-pg";
 
 import {
   tenantWideErasureHonours,
@@ -138,6 +139,7 @@ function harness(
     readonly retireThrows?: boolean;
     readonly retires?: boolean;
     readonly listThrows?: boolean;
+    readonly listUnreadable?: readonly { readonly identity: string | null; readonly detail: string }[];
     readonly recordThrows?: boolean;
   } = {},
 ): Harness {
@@ -156,9 +158,11 @@ function harness(
         if (behaviour.retireThrows === true) throw new Error("retire exploded");
         return behaviour.retires ?? true;
       },
-      tombstonesFor: async (): Promise<readonly StoredTombstoneLike[]> => {
-        if (behaviour.listThrows === true) throw new Error("a stored row no longer parses");
-        return [storedOf()];
+      tombstonesFor: async (): Promise<RowRead<StoredTombstoneLike>> => {
+        // Still throws when asked to: the 503 arm survives as the backstop for a failure of the
+        // read itself, which is a different condition from a row the contract refuses.
+        if (behaviour.listThrows === true) throw new Error("the read itself failed");
+        return { records: [storedOf()], unreadable: behaviour.listUnreadable ?? [] };
       },
     },
     principalRoles: (p) => ({
@@ -374,7 +378,10 @@ describe("the delete route", () => {
           order.push("retire");
           return true;
         },
-        tombstonesFor: async (): Promise<readonly StoredTombstoneLike[]> => [],
+        tombstonesFor: async (): Promise<RowRead<StoredTombstoneLike>> => ({
+          records: [],
+          unreadable: [],
+        }),
       },
     });
     await call(h.ctx, DELETE, { parsedBody: BODY });
@@ -576,13 +583,35 @@ describe("the tombstones route", () => {
     expect(h.events[0]?.operation).toBe(TENANT_TOMBSTONES_READ_OPERATION);
   });
 
-  it("503s an unreadable stored row rather than returning an empty list", async () => {
+  it("503s a failure of the read itself rather than returning an empty list", async () => {
     const h = harness({}, { listThrows: true });
     const res = await call(h.ctx, LIST);
-    // The store re-parses every row, so a throw can mean a record no longer satisfies its contract.
-    // An empty list would read as "this tenant was never deleted", which is the opposite of true.
+    // Reachable now only for the connection, the policy or the elevation — a single row the
+    // contract refuses no longer escapes the store's mapping. An empty list would read as "this
+    // tenant was never deleted", which is the opposite of true.
     expect(res.status).toBe(503);
     expect(String(res.body["detail"])).toContain("do not treat this as an absence");
+  });
+
+  it("answers 200 with the readable receipts and names every refused row", async () => {
+    // The change this read is about: the old 503 withheld the *readable* receipts too and wrote no
+    // audit row at all, so the one read whose subject is a stored proof answered a tamper by
+    // telling the operator nothing and recording nothing.
+    const h = harness({}, { listUnreadable: [{ identity: "tmb_bad1", detail: "scope: invalid_type" }] });
+    const res = await call(h.ctx, LIST);
+    expect(res.status).toBe(200);
+    expect(res.body["data"]).toHaveLength(1);
+    expect(res.body["unreadable"]).toEqual([{ identity: "tmb_bad1", detail: "scope: invalid_type" }]);
+    // And it is recorded, with the two figures apart rather than summed.
+    expect(h.events[0]?.rowCount).toBe(1);
+    expect(h.events[0]?.unreadableCount).toBe(1);
+  });
+
+  it("always carries `unreadable`, because an absent field reads as none", async () => {
+    const h = harness();
+    const res = await call(h.ctx, LIST);
+    expect(res.body["unreadable"]).toEqual([]);
+    expect(h.events[0]?.unreadableCount).toBe(0);
   });
 
   it("falls back to the delete grant when no read grant is configured", async () => {

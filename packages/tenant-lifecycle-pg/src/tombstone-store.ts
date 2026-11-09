@@ -2,6 +2,7 @@ import {
   readRowsWithUnreadable,
   textIdentity,
   type PgConnection,
+  type RowRead,
   type UnreadableRow,
 } from "@crossengin/kernel-pg";
 import {
@@ -268,6 +269,19 @@ export function tombstoneChainPayload(record: TombstoneRecord): string {
   });
 }
 
+/**
+ * The handle a refused row is reported under, and the one `scanAll`'s cursor is taken from.
+ *
+ * `tombstone_id` and not the `id` surrogate: it is the record's own identity, it is uniquely
+ * constrained, it is what every other reader of this table takes as its argument, and it is the
+ * first member of `TOMBSTONE_COLUMNS` so all three reads return it. One spelling across the three,
+ * because a finding that named a different column depending on which read produced it would not be
+ * a handle a remedy could use.
+ */
+function tombstoneIdentity(row: Record<string, unknown>): string | null {
+  return textIdentity(row, "tombstone_id");
+}
+
 export class PostgresTombstoneStore {
   private readonly conn: PgConnection;
   private readonly schema: string;
@@ -498,8 +512,23 @@ export class PostgresTombstoneStore {
     });
   }
 
-  /** Every tombstone for one tenant, newest first. Re-parsed, so a corrupted row throws. */
-  async listForTenant(tenantId: string): Promise<readonly StoredTombstone[]> {
+  /**
+   * Every tombstone for one tenant, newest first — a tenant's Article 17 proofs.
+   *
+   * **A row the contract refuses comes back beside the records rather than out of the method**
+   * (ADR-0373). `.map(rowToStoredTombstone)` threw, and the one consumer catches that throw
+   * deliberately and answers a documented 503 on the stated ground that a short list of a tenant's
+   * proofs must not read as the whole list — so the throw was not an oversight and the fix is not to
+   * swallow it. What the pair buys is that the *honest* rows are served and the refused ones are
+   * named, which is the answer that 503 was standing in for: an unreadable proof is a finding about
+   * one row, and refusing the page for it withholds every other proof the tenant has.
+   *
+   * Not a forwarded reporter even though the consumer is a route, and the reason is that the pair is
+   * what that route needs to answer honestly: it reports `rowCount` in an audit row and renders a
+   * list, so it has to say which figure is which. A reporter would hand it the facts at a point
+   * where it has already decided the body's shape.
+   */
+  async listForTenant(tenantId: string): Promise<RowRead<StoredTombstone>> {
     if (!UUID_RE.test(tenantId)) {
       throw new Error(`invalid tenant id: ${JSON.stringify(tenantId)}`);
     }
@@ -510,7 +539,7 @@ export class PostgresTombstoneStore {
           " WHERE tenant_id = $1::uuid ORDER BY deleted_at DESC, tombstone_id",
         [tenantId],
       );
-      return result.rows.map((row) => rowToStoredTombstone(row));
+      return readRowsWithUnreadable(result.rows, rowToStoredTombstone, tombstoneIdentity);
     });
   }
 
@@ -522,8 +551,18 @@ export class PostgresTombstoneStore {
    * request's id on it, so a tombstone naming a request exists if and only if that request's
    * deletion committed. Returning every match rather than the first is the point: two would mean the
    * premise is broken, and a `LIMIT 1` would hide that instead of reporting it.
+   *
+   * **The sharpest read in this store for ADR-0373's rule, because the verdict is a function of the
+   * row count.** `DeletionReconciler.assessWith` branches on how many tombstones name the request:
+   * more than one is `ambiguous_evidence`, exactly one is verified, and **none** is
+   * `never_committed` — which `/reconcile` will *write* as `rejected` when an operator authorises
+   * it. So a `.map()` that threw took every branch away, and a `.map()` that had dropped the refused
+   * row would have been worse than the throw: a request whose deletion committed, whose only
+   * tombstone is unreadable, would count as zero and be rejected as never having committed, with the
+   * tenant's data already gone. A count over the readable rows is not a count over the rows on disk,
+   * so both are returned and the caller is handed the pair.
    */
-  async findForRequest(requestId: string): Promise<readonly StoredTombstone[]> {
+  async findForRequest(requestId: string): Promise<RowRead<StoredTombstone>> {
     return this.conn.transaction(async (tx) => {
       await tx.query("SELECT set_config('app.platform_audit', 'on', true)");
       const result = await tx.query<Record<string, unknown>>(
@@ -531,7 +570,7 @@ export class PostgresTombstoneStore {
           " WHERE related_deletion_request_id = $1 ORDER BY deleted_at, tombstone_id",
         [requestId],
       );
-      return result.rows.map((row) => rowToStoredTombstone(row));
+      return readRowsWithUnreadable(result.rows, rowToStoredTombstone, tombstoneIdentity);
     });
   }
 
@@ -577,9 +616,7 @@ export class PostgresTombstoneStore {
           ` ORDER BY tombstone_id LIMIT ${limitPlaceholder}`,
         params,
       );
-      const read = readRowsWithUnreadable(result.rows, rowToStoredTombstone, (row) =>
-        textIdentity(row, "tombstone_id"),
-      );
+      const read = readRowsWithUnreadable(result.rows, rowToStoredTombstone, tombstoneIdentity);
       // The cursor is read off the **last row of the page**, readable or not, and that is why this
       // page carries it rather than letting the caller take it from the last record. A refused row
       // at the end of a page leaves the records' last id *earlier* in the ordering, so a caller
@@ -591,7 +628,7 @@ export class PostgresTombstoneStore {
       return {
         records: read.records,
         unreadable: read.unreadable,
-        lastTombstoneId: last === undefined ? null : textIdentity(last, "tombstone_id"),
+        lastTombstoneId: last === undefined ? null : tombstoneIdentity(last),
         rowsRead: result.rows.length,
       };
     });

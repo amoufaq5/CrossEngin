@@ -10,6 +10,7 @@ import {
   SET_TENANT_CONTEXT_SQL,
   certificationReportRecordFrom,
   scopedWrite,
+  type CertificationReportRecord,
 } from "./records.js";
 import { compliantEvidence, fakeCertificationPg } from "./test-fakes.js";
 
@@ -48,7 +49,7 @@ describe("PostgresCertificationReportStore", () => {
     );
     await store.record(rec);
     await store.record(rec);
-    expect(await store.listRecent(100, TENANT)).toHaveLength(1);
+    expect((await store.listRecent(100, TENANT)).records).toHaveLength(1);
   });
 
   it("lists recent newest-first and filters by framework", async () => {
@@ -66,12 +67,14 @@ describe("PostgresCertificationReportStore", () => {
     );
 
     const recent = await store.listRecent(100, TENANT);
-    expect(recent).toHaveLength(3);
-    expect(recent[0]?.generatedAt).toBe("2026-08-01T00:00:00.000Z");
+    expect(recent.unreadable).toEqual([]);
+    expect(recent.records).toHaveLength(3);
+    expect(recent.records[0]?.generatedAt).toBe("2026-08-01T00:00:00.000Z");
 
     const soc2 = await store.listByFramework("soc2_type2", 100, TENANT);
-    expect(soc2).toHaveLength(2);
-    expect(soc2.every((r) => r.framework === "soc2_type2")).toBe(true);
+    expect(soc2.unreadable).toEqual([]);
+    expect(soc2.records).toHaveLength(2);
+    expect(soc2.records.every((r) => r.framework === "soc2_type2")).toBe(true);
 
     const latestHipaa = await store.latestForFramework("hipaa_security_rule", TENANT);
     expect(latestHipaa?.generatedAt).toBe("2026-07-01T00:00:00.000Z");
@@ -82,6 +85,84 @@ describe("PostgresCertificationReportStore", () => {
     const store = new PostgresCertificationReportStore(fakeCertificationPg());
     await expect(store.listRecent(0)).rejects.toThrow(/positive/);
     await expect(store.listByFramework("soc2_type2", -1)).rejects.toThrow(/positive/);
+  });
+});
+
+describe("a report row the contract refuses", () => {
+  /** A fake whose SELECT answers a fixed row list, so a drifted row is expressible. */
+  function answeringPg(rows: readonly Record<string, unknown>[]): PgConnection {
+    const client: PgConnection = {
+      query: (async (sql: string) =>
+        sql.includes("SELECT") && sql.includes("FROM meta.certification_reports")
+          ? { rows, rowCount: rows.length }
+          : { rows: [], rowCount: 0 }) as PgConnection["query"],
+      transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) =>
+        fn(client)) as PgConnection["transaction"],
+      withAdvisoryLock: (async <T>(_k: bigint, fn: () => Promise<T>) =>
+        fn()) as PgConnection["withAdvisoryLock"],
+      close: (async () => undefined) as PgConnection["close"],
+    };
+    return client;
+  }
+
+  function rowFrom(rec: CertificationReportRecord): Record<string, unknown> {
+    return {
+      report_id: rec.reportId,
+      tenant_id: rec.tenantId,
+      framework: rec.framework,
+      certifiable: rec.certifiable,
+      controls_total: rec.controlsTotal,
+      controls_satisfied: rec.controlsSatisfied,
+      controls_deficient: rec.controlsDeficient,
+      controls_not_assessed: rec.controlsNotAssessed,
+      sealed_sha256: rec.sealedSha256,
+      report: rec.report,
+      generated_at: rec.generatedAt,
+    };
+  }
+
+  const good = certificationReportRecordFrom(
+    reportAt("2026-06-01T00:00:00.000Z", "soc2_type2"),
+  );
+  const other = certificationReportRecordFrom(
+    reportAt("2026-07-01T00:00:00.000Z", "hipaa_security_rule"),
+  );
+
+  it("is reported beside the readable rows rather than taking them with it", async () => {
+    const bad = { ...rowFrom(other), framework: "not_a_framework" };
+    const store = new PostgresCertificationReportStore(answeringPg([rowFrom(good), bad]));
+    const read = await store.listRecent(100, TENANT);
+    expect(read.records.map((r) => r.reportId)).toEqual([good.reportId]);
+    expect(read.unreadable).toHaveLength(1);
+    expect(read.unreadable[0]?.identity).toBe(other.reportId);
+    expect(read.unreadable[0]?.detail).toBe("framework: invalid_enum_value");
+  });
+
+  it("names the column and never the stored value, on both lists", async () => {
+    const bad = { ...rowFrom(other), framework: "not_a_framework" };
+    const store = new PostgresCertificationReportStore(answeringPg([rowFrom(good), bad]));
+    for (const read of [
+      await store.listRecent(100, TENANT),
+      await store.listByFramework("soc2_type2", 100, TENANT),
+    ]) {
+      expect(read.records).toHaveLength(1);
+      expect(read.unreadable[0]?.detail).not.toContain("not_a_framework");
+    }
+  });
+
+  it("withholds a malformed report column's text, where JSON.parse would have quoted it", async () => {
+    // `unreadableDetail` passes a non-`ZodError` message through verbatim, so the one throw in this
+    // mapper that is not ours — `JSON.parse` on the `report` column — is wrapped. The column is
+    // `jsonb` so this is unreachable against a real database and reachable through a `text` column.
+    // The fixture is the **disclosing** shape: V8 quotes the input only when the first token is the
+    // unexpected one, so `JSON.parse("MRNSECRET1")` says `Unexpected token 'M', "MRNSECRET1" is not
+    // valid JSON` while a truncation mid-object yields a positional message and leaks nothing.
+    const bad = { ...rowFrom(other), report: "MRNSECRET1" };
+    const store = new PostgresCertificationReportStore(answeringPg([bad]));
+    const read = await store.listRecent(100, TENANT);
+    expect(read.records).toEqual([]);
+    expect(read.unreadable[0]?.detail).toBe("report: column is not valid JSON");
+    expect(read.unreadable[0]?.detail).not.toContain("MRNSECRET1");
   });
 });
 

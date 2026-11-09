@@ -1,4 +1,9 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  readRows,
+  textIdentity,
+  type PgConnection,
+  type UnreadableRowReporter,
+} from "@crossengin/kernel-pg";
 import {
   formatIncidentId,
   type IncidentRecord,
@@ -22,6 +27,20 @@ const TABLE = "incidents";
 
 /** Serializes id allocation so two declarers cannot compute the same next sequence. */
 const INCIDENT_SEQUENCE_LOCK = 8_675_311n;
+
+/**
+ * The handle a refused incident row is reported under, for all three list reads.
+ *
+ * `incident_id` and not the surrogate `id`: it is what `formatIncidentId` produces, what every
+ * other finding in this package names an incident by, and what a `WHERE` clause an operator writes
+ * by hand would use. It carries `check: incident_id ~ '^INC-[0-9]{4}-[0-9]{4,8}$'`, so unlike the
+ * comms and runbook keys a blank handle is not storable and `textIdentity`'s `null` arm is
+ * unreachable here through the database — it stays because the helper's contract, not this table's
+ * CHECK, is what the reader of a finding relies on.
+ */
+function incidentIdentity(row: Record<string, unknown>): string | null {
+  return textIdentity(row, "incident_id");
+}
 
 export class IncidentRevisionConflictError extends Error {
   constructor(
@@ -291,7 +310,25 @@ export class PostgresIncidentStore {
     return row === undefined ? null : rowToIncident(row);
   }
 
-  async listOpen(limit = 100): Promise<readonly StoredIncident[]> {
+  /**
+   * Every incident that is still open, oldest first.
+   *
+   * `onUnreadable` is required and precedes `limit` — a required parameter cannot follow a
+   * defaulted one, and `limit` keeps its default. A reporter and not the pair: the consumer is an
+   * operator surface (two doc comments in other packages, `integrity-escalation.ts` and
+   * `enforcement.ts`, name this as what keeps showing a human an un-triaged incident), which is
+   * `read-rows.ts`' route case.
+   *
+   * **What a refused row here does not cost, because the obvious reading is wrong.** It does *not*
+   * make a restarting declarer re-declare: adoption goes through `findOpenFor`, a `LIMIT 2`
+   * single-row read whose refusal correctly throws and is a different site. What it costs is that
+   * one unreadable incident used to take every *other* open incident off the operator's list — the
+   * class, not the escalation path.
+   */
+  async listOpen(
+    onUnreadable: UnreadableRowReporter,
+    limit = 100,
+  ): Promise<readonly StoredIncident[]> {
     if (limit <= 0) throw new Error("limit must be positive");
     const result = await this.conn.query<Record<string, unknown>>(
       `SELECT ${INCIDENT_COLUMNS} FROM ${SCHEMA}.${TABLE}
@@ -300,10 +337,14 @@ export class PostgresIncidentStore {
        LIMIT $1`,
       [limit],
     );
-    return result.rows.map((row) => rowToIncident(row));
+    return readRows(result.rows, rowToIncident, incidentIdentity, onUnreadable);
   }
 
-  async listForTenant(tenantId: string, limit = 100): Promise<readonly StoredIncident[]> {
+  async listForTenant(
+    tenantId: string,
+    onUnreadable: UnreadableRowReporter,
+    limit = 100,
+  ): Promise<readonly StoredIncident[]> {
     if (limit <= 0) throw new Error("limit must be positive");
     const result = await this.conn.query<Record<string, unknown>>(
       `SELECT ${INCIDENT_COLUMNS} FROM ${SCHEMA}.${TABLE}
@@ -312,10 +353,13 @@ export class PostgresIncidentStore {
        LIMIT $2`,
       [tenantId, limit],
     );
-    return result.rows.map((row) => rowToIncident(row));
+    return readRows(result.rows, rowToIncident, incidentIdentity, onUnreadable);
   }
 
-  async listRecent(limit = 100): Promise<readonly StoredIncident[]> {
+  async listRecent(
+    onUnreadable: UnreadableRowReporter,
+    limit = 100,
+  ): Promise<readonly StoredIncident[]> {
     if (limit <= 0) throw new Error("limit must be positive");
     const result = await this.conn.query<Record<string, unknown>>(
       `SELECT ${INCIDENT_COLUMNS} FROM ${SCHEMA}.${TABLE}
@@ -323,7 +367,7 @@ export class PostgresIncidentStore {
        LIMIT $1`,
       [limit],
     );
-    return result.rows.map((row) => rowToIncident(row));
+    return readRows(result.rows, rowToIncident, incidentIdentity, onUnreadable);
   }
 
   async countSince(since: Date): Promise<number> {

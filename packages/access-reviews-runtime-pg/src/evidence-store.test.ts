@@ -408,4 +408,39 @@ describe("PostgresAccessReviewEvidenceStore reads", () => {
     const conn = new FakeConn(responder());
     await expect(store(conn).listByTenant("not a uuid")).rejects.toThrow(/invalid tenantId/);
   });
+
+  it("reports an unreadable pack and keeps every other pack the tenant holds", async () => {
+    // It used to `.map`, so `rowToEvidence`'s parse threw out of the read and one row the contract
+    // refuses cost the tenant *every other* sealed pack — and this is the table ADR-0335 found
+    // readable-and-unwritten, whose absence made `certifiable` false in every certification report
+    // ever produced. A read that answers nothing at all reads the same way.
+    const good = evidenceRowFor(makeSealedEvidence());
+    const broken = {
+      ...evidenceRowFor(makeSealedEvidence()),
+      evidence_id: "arv_0000bad1",
+      framework: "not-a-framework",
+    };
+    const read = await store(new FakeConn(responder([broken, good]))).listByTenant(UUIDS.tenant);
+    expect(read.records.map((e) => e.id)).toEqual([good.evidence_id]);
+    expect(read.unreadable).toEqual([
+      { identity: "arv_0000bad1", detail: "framework: invalid_enum_value" },
+    ]);
+  });
+
+  it("discloses no value from a refused pack beyond its business key", async () => {
+    // The detail is a field path and an issue code, never the stored value: an
+    // `invalid_enum_value` issue carries `received`, and a `ZodError`'s own message is the JSON of
+    // its issues, so `err.message` would put the column's content into a log line (ADR-0373).
+    const broken = {
+      ...evidenceRowFor(makeSealedEvidence()),
+      evidence_id: "arv_0000bad2",
+      framework: "payroll-admins-q1-offboarding",
+      storage_uri: "s3://audit-packs/acme/2026-q1-soc2.zip",
+    };
+    const read = await store(new FakeConn(responder([broken]))).listByTenant(UUIDS.tenant);
+    const rendered = JSON.stringify(read.unreadable);
+    expect(rendered).toContain("arv_0000bad2");
+    expect(rendered).not.toContain("payroll-admins");
+    expect(rendered).not.toContain("audit-packs");
+  });
 });

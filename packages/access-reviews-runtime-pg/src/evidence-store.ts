@@ -8,11 +8,17 @@ import {
 } from "@crossengin/access-reviews-runtime";
 import {
   assertScopedWriteLanded,
+  readRowsWithUnreadable,
   scopeFilter,
   type PgConnection,
 } from "@crossengin/kernel-pg";
 
-import { rowToEvidence, type EvidenceRow } from "./records.js";
+import {
+  rowKey,
+  rowToEvidence,
+  type EvidenceRow,
+  type TypedRowRead,
+} from "./records.js";
 import { withTenantContext } from "./tenant-context.js";
 
 const SCHEMA = "meta";
@@ -351,9 +357,26 @@ ${rateChecks}`,
     });
   }
 
+  /**
+   * Every sealed pack this tenant holds, with a report for every row the contract refuses.
+   *
+   * It returns the pair rather than forwarding a reporter, and the reason is the one thing that
+   * separates it from `PostgresAccessReviewCampaignStore.listByTenant` beside it: that read has a
+   * verifier for a consumer, and this one has **no consumer at all** — zero non-test callers, so
+   * there is no reporter to forward to and nobody to refuse on behalf of. The pair is also the
+   * non-breaking answer, since no call site has to be edited to take it.
+   *
+   * It is deliberately not `recordsOrRefuse`: a refusal is what a read owes a *consumer* that
+   * would otherwise count a short list, and this read has none. Whoever gives it one decides which
+   * arm it takes, and the pair is what lets them choose; a refusal already baked in would not be.
+   *
+   * What throws here is `rowToEvidence`, whose `AccessReviewEvidenceSchema.parse` covers every
+   * field — so unlike the campaign read beside it, a refusal here is the whole contract and not
+   * three timestamps.
+   */
   async listByTenant(
     tenantId: string,
-  ): Promise<readonly AccessReviewEvidence[]> {
+  ): Promise<TypedRowRead<AccessReviewEvidence>> {
     const scope = scopeFilter(tenantId, 1);
     return withTenantContext(this.conn, tenantId, async (tx) => {
       const result = await tx.query<EvidenceRow>(
@@ -363,7 +386,9 @@ ${rateChecks}`,
           ORDER BY period_end_at ASC, evidence_id ASC`,
         [...scope.params],
       );
-      return result.rows.map(rowToEvidence);
+      return readRowsWithUnreadable(result.rows, rowToEvidence, (row) =>
+        rowKey(row.evidence_id),
+      );
     });
   }
 }

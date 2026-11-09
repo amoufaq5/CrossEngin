@@ -1,4 +1,4 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import type { PgConnection, UnreadableRow, UnreadableRowReporter } from "@crossengin/kernel-pg";
 import { DigestBatchSchema, type DigestBatch } from "@crossengin/notifications";
 import { beforeEach, describe, expect, it } from "vitest";
 
@@ -9,6 +9,15 @@ import {
   digestMaxItems,
   type DigestItemMember,
 } from "./digest-store.js";
+
+/**
+ * Discards the reporter's findings where this file is asserting on the SQL rather than on what a
+ * refused row costs; the reporting tests below supply their own collector.
+ *
+ * Named rather than `() => {}` inline: the parameter is required precisely so a caller cannot
+ * forget it, and a test that quietly discards a report should say that is what it is doing.
+ */
+const noUnreadable: UnreadableRowReporter = () => undefined;
 
 const TENANT_A = "00000000-0000-4000-8000-000000000001";
 const TENANT_B = "00000000-0000-4000-8000-000000000002";
@@ -970,7 +979,7 @@ describe("digest-store — listOpen", () => {
       digestRow({ status: "dispatched", dispatched_at: "2026-08-02T07:00:05.000Z" }),
     );
     const store = new PostgresDigestStore(conn);
-    const open = await store.listOpen(TENANT_A);
+    const open = await store.listOpen(TENANT_A, noUnreadable);
     expect(open.map((d) => d.scheduledDispatchAt)).toEqual([
       "2026-08-02T07:00:00.000Z",
       "2026-08-02T09:00:00.000Z",
@@ -984,31 +993,54 @@ describe("digest-store — listOpen", () => {
     const { conn, captured, digests } = fakeDigestDb();
     digests.push(digestRow());
     const store = new PostgresDigestStore(conn);
-    await store.listOpen(TENANT_A);
-    await store.listOpen(TENANT_A, 5000);
-    await store.listOpen(TENANT_A, 0);
-    await store.listOpen(TENANT_A, 3.9);
+    await store.listOpen(TENANT_A, noUnreadable);
+    await store.listOpen(TENANT_A, noUnreadable, 5000);
+    await store.listOpen(TENANT_A, noUnreadable, 0);
+    await store.listOpen(TENANT_A, noUnreadable, 3.9);
     expect(captured.filter((c) => isSelect(c)).map((s) => s.params[1])).toEqual([25, 200, 1, 3]);
   });
 
-  it("drops a row that fails the schema instead of failing the whole query", async () => {
+  // Retitled by ADR-0373. It read "drops a row that fails the schema instead of failing the whole
+  // query", which was half right and asserted the other half as the intended behaviour: keeping the
+  // page is correct, and the *silence* was the defect — a refused batch's pooled recipients were
+  // skipped with nothing naming the row.
+  it("reports a row that fails the schema rather than dropping it silently", async () => {
     const { conn, digests } = fakeDigestDb();
     digests.push(
-      digestRow({ frequency: "immediate" }),
+      digestRow({ digest_id: "dgst_refused_000001", frequency: "immediate" }),
       digestRow({ scheduled_dispatch_at: "2026-08-02T09:00:00.000Z" }),
     );
+    const seen: UnreadableRow[] = [];
     const store = new PostgresDigestStore(conn);
-    const open = await store.listOpen(TENANT_A);
+    const open = await store.listOpen(TENANT_A, (row) => seen.push(row));
+
+    // The readable pool is still served: one refused batch must not cost the others their window.
     expect(open).toHaveLength(1);
     expect(open[0]?.scheduledDispatchAt).toBe("2026-08-02T09:00:00.000Z");
+    // And the refused one is named, by its business key and with no stored value in the detail.
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.identity).toBe("dgst_refused_000001");
+    expect(seen[0]?.detail).toContain("frequency");
+    expect(seen[0]?.detail).not.toContain("immediate");
+  });
+
+  it("reports nothing when every pool parses", async () => {
+    // The non-vacuity control: the reporter above fires because of the refused row and not
+    // because `listOpen` reports on every page.
+    const { conn, digests } = fakeDigestDb();
+    digests.push(digestRow(), digestRow({ scheduled_dispatch_at: "2026-08-02T09:00:00.000Z" }));
+    const seen: UnreadableRow[] = [];
+    const store = new PostgresDigestStore(conn);
+    expect(await store.listOpen(TENANT_A, (row) => seen.push(row))).toHaveLength(2);
+    expect(seen).toEqual([]);
   });
 
   it("never lists another tenant's open pools", async () => {
     const { conn, digests } = fakeDigestDb();
     digests.push(digestRow({ tenant_id: TENANT_B }));
     const store = new PostgresDigestStore(conn);
-    expect(await store.listOpen(TENANT_A)).toEqual([]);
-    expect(await store.listOpen(TENANT_B)).toHaveLength(1);
+    expect(await store.listOpen(TENANT_A, noUnreadable)).toEqual([]);
+    expect(await store.listOpen(TENANT_B, noUnreadable)).toHaveLength(1);
   });
 });
 
@@ -1020,7 +1052,7 @@ describe("digest-store — dueForAssembly", () => {
       digestRow({ status: "queued_for_assembly", item_count: 50 }),
     );
     const store = new PostgresDigestStore(conn);
-    const due = await store.dueForAssembly(TENANT_A, new Date("2026-08-02T07:30:00.000Z"));
+    const due = await store.dueForAssembly(TENANT_A, new Date("2026-08-02T07:30:00.000Z"), noUnreadable);
     expect(due.map((d) => d.status)).toEqual(["open", "queued_for_assembly"]);
   });
 
@@ -1032,7 +1064,7 @@ describe("digest-store — dueForAssembly", () => {
       digestRow({ status: "dispatched", dispatched_at: "2026-08-02T07:00:05.000Z" }),
     );
     const store = new PostgresDigestStore(conn);
-    expect(await store.dueForAssembly(TENANT_A, new Date("2026-08-02T07:30:00.000Z"))).toEqual([]);
+    expect(await store.dueForAssembly(TENANT_A, new Date("2026-08-02T07:30:00.000Z"), noUnreadable)).toEqual([]);
   });
 
   it("binds now as a parameter, never formatting it into the SQL, and orders by the window", async () => {
@@ -1040,7 +1072,7 @@ describe("digest-store — dueForAssembly", () => {
     digests.push(digestRow());
     const store = new PostgresDigestStore(conn);
     const now = new Date("2026-08-02T07:30:00.000Z");
-    await store.dueForAssembly(TENANT_A, now, 9);
+    await store.dueForAssembly(TENANT_A, now, noUnreadable, 9);
     const select = captured.find((c) => isSelect(c));
     expect(select?.sql).toContain(
       "WHERE tenant_id = $1 AND status IN ('open', 'queued_for_assembly')" +
@@ -1055,9 +1087,9 @@ describe("digest-store — dueForAssembly", () => {
     const { conn, digests } = fakeDigestDb();
     digests.push(digestRow({ tenant_id: TENANT_B }));
     const store = new PostgresDigestStore(conn);
-    expect(await store.dueForAssembly(TENANT_A, new Date("2026-08-02T07:30:00.000Z"))).toEqual([]);
+    expect(await store.dueForAssembly(TENANT_A, new Date("2026-08-02T07:30:00.000Z"), noUnreadable)).toEqual([]);
     expect(
-      await store.dueForAssembly(TENANT_B, new Date("2026-08-02T07:30:00.000Z")),
+      await store.dueForAssembly(TENANT_B, new Date("2026-08-02T07:30:00.000Z"), noUnreadable),
     ).toHaveLength(1);
   });
 });
@@ -1172,7 +1204,7 @@ describe("digest-store — identifier + parameter discipline", () => {
     const { conn, captured, digests } = fakeDigestDb();
     digests.push(digestRow());
     const store = new PostgresDigestStore(conn, { schema: "ops" });
-    await store.listOpen(TENANT_A);
+    await store.listOpen(TENANT_A, noUnreadable);
     await store.addItem(TENANT_A, "dgst_quiet_00000001", memberOf());
     expect(captured.find((c) => isSelect(c))?.sql).toContain("FROM ops.notification_digests");
     expect(captured.find((c) => c.sql.startsWith("UPDATE"))?.sql).toContain(
@@ -1191,8 +1223,8 @@ describe("digest-store — identifier + parameter discipline", () => {
     await expect(store.getByDigestId(evil, "dgst_quiet_00000001")).rejects.toThrow(
       /invalid tenantId/,
     );
-    await expect(store.listOpen(evil)).rejects.toThrow(/invalid tenantId/);
-    await expect(store.dueForAssembly(evil, new Date())).rejects.toThrow(/invalid tenantId/);
+    await expect(store.listOpen(evil, noUnreadable)).rejects.toThrow(/invalid tenantId/);
+    await expect(store.dueForAssembly(evil, new Date(), noUnreadable)).rejects.toThrow(/invalid tenantId/);
     await expect(store.markAssembled(evil, "dgst_quiet_00000001", new Date())).rejects.toThrow(
       /invalid tenantId/,
     );
@@ -1207,8 +1239,8 @@ describe("digest-store — identifier + parameter discipline", () => {
     await store.openOrReuse(TENANT_A, batchOf());
     await store.addItem(TENANT_A, "dgst_quiet_00000001", memberOf());
     await store.getByDigestId(TENANT_A, "dgst_quiet_00000001");
-    await store.listOpen(TENANT_A);
-    await store.dueForAssembly(TENANT_A, new Date("2026-08-02T07:30:00.000Z"));
+    await store.listOpen(TENANT_A, noUnreadable);
+    await store.dueForAssembly(TENANT_A, new Date("2026-08-02T07:30:00.000Z"), noUnreadable);
     await store.markAssembled(TENANT_A, "dgst_quiet_00000001", new Date());
     await store.itemsFor(TENANT_A, "dgst_quiet_00000001");
     await store.countItems(TENANT_A, "dgst_quiet_00000001");
@@ -1232,8 +1264,8 @@ describe("digest-store — identifier + parameter discipline", () => {
     await store.openOrReuse(TENANT_A, batchOf());
     await store.addItem(TENANT_A, "dgst_quiet_00000001", memberOf());
     await store.getByDigestId(TENANT_A, "dgst_quiet_00000001");
-    await store.listOpen(TENANT_A);
-    await store.dueForAssembly(TENANT_A, new Date());
+    await store.listOpen(TENANT_A, noUnreadable);
+    await store.dueForAssembly(TENANT_A, new Date(), noUnreadable);
     await store.markAssembled(TENANT_A, "dgst_quiet_00000001", new Date());
     await store.itemsFor(TENANT_A, "dgst_quiet_00000001");
     await store.countItems(TENANT_A, "dgst_quiet_00000001");

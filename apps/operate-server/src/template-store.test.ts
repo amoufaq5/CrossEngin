@@ -1,4 +1,4 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import type { PgConnection, UnreadableRow, UnreadableRowReporter } from "@crossengin/kernel-pg";
 import { NotificationTemplateSchema, type NotificationTemplate } from "@crossengin/notifications";
 import { beforeEach, describe, expect, it } from "vitest";
 
@@ -9,6 +9,15 @@ import {
   tryTemplateFromRow,
   type TemplateQuery,
 } from "./template-store.js";
+
+/**
+ * Discards the reporter's findings where this file is asserting on the SQL rather than on what a
+ * refused row costs; the reporting tests below supply their own collector.
+ *
+ * Named rather than `() => {}` inline: the parameter is required precisely so a caller cannot
+ * forget it, and a test that quietly discards a report should say that is what it is doing.
+ */
+const noUnreadable: UnreadableRowReporter = () => undefined;
 
 const TENANT_A = "00000000-0000-4000-8000-000000000001";
 const TENANT_B = "00000000-0000-4000-8000-000000000002";
@@ -598,7 +607,7 @@ describe("template-store — listForTenant", () => {
       templateRow({ ntpl_id: "ntpl_tenantown01" }),
     );
     const store = new PostgresTemplateStore(conn);
-    const listed = await store.listForTenant(TENANT_A);
+    const listed = await store.listForTenant(TENANT_A, noUnreadable);
     expect(listed.map((t) => t.id)).toEqual(["ntpl_tenantown01"]);
     const select = captured.find((c) => isSelect(c));
     expect(select?.sql).toContain("WHERE tenant_id = $1");
@@ -614,7 +623,7 @@ describe("template-store — listForTenant", () => {
       templateRow({ ntpl_id: "ntpl_middle0001", created_at: "2026-08-02T09:00:00.000Z" }),
     );
     const store = new PostgresTemplateStore(conn);
-    expect((await store.listForTenant(TENANT_A)).map((t) => t.id)).toEqual([
+    expect((await store.listForTenant(TENANT_A, noUnreadable)).map((t) => t.id)).toEqual([
       "ntpl_newer00001",
       "ntpl_middle0001",
       "ntpl_older00001",
@@ -625,33 +634,59 @@ describe("template-store — listForTenant", () => {
     const { conn, captured, templates } = fakeTemplateDb();
     templates.push(templateRow());
     const store = new PostgresTemplateStore(conn);
-    await store.listForTenant(TENANT_A);
-    await store.listForTenant(TENANT_A, 5000);
-    await store.listForTenant(TENANT_A, 0);
-    await store.listForTenant(TENANT_A, 3.9);
-    await store.listForTenant(TENANT_A, Number.NaN);
+    await store.listForTenant(TENANT_A, noUnreadable);
+    await store.listForTenant(TENANT_A, noUnreadable, 5000);
+    await store.listForTenant(TENANT_A, noUnreadable, 0);
+    await store.listForTenant(TENANT_A, noUnreadable, 3.9);
+    await store.listForTenant(TENANT_A, noUnreadable, Number.NaN);
     expect(captured.filter((c) => isSelect(c)).map((s) => s.params[1])).toEqual([
       50, 200, 1, 3, 50,
     ]);
   });
 
-  it("drops a row that fails the schema instead of failing the whole listing", async () => {
+  // Retitled by ADR-0373, for the same reason as `digest-store.test.ts`' sibling: keeping the page
+  // is correct and the *silence* was the defect. For an override store it was the sharper of the
+  // two — a refused template reads as one that was never authored, so the dispatch falls back to
+  // the built-in default and the authoring surface ADR-0313 built says nothing.
+  it("reports a row that fails the schema rather than dropping it silently", async () => {
     const { conn, templates } = fakeTemplateDb();
     templates.push(
       templateRow({ ntpl_id: "ntpl_broken0001", channel: "sms" }),
       templateRow({ ntpl_id: "ntpl_intact0001" }),
     );
+    const seen: UnreadableRow[] = [];
     const store = new PostgresTemplateStore(conn);
-    const listed = await store.listForTenant(TENANT_A);
+    const listed = await store.listForTenant(TENANT_A, (row) => seen.push(row));
+
     expect(listed.map((t) => t.id)).toEqual(["ntpl_intact0001"]);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.identity).toBe("ntpl_broken0001");
+    // `sms` is a *valid* channel — what this fixture breaks is a cross-field refinement, an SMS
+    // template carrying an email-shaped body — so the detail names the fields the refinement
+    // flagged rather than the discriminator that is fine.
+    expect(seen[0]?.detail).toBe("bodySizeBytes: custom, content.<withheld>: custom");
+    // The field path and the issue code, never the stored value: the subject line does not travel
+    // and the path stops at its first component, so a key inside `content` is `<withheld>`.
+    expect(seen[0]?.detail).not.toContain(SUBJECT);
+    expect(seen[0]?.detail).not.toContain("sms");
+  });
+
+  it("reports nothing when every override parses", async () => {
+    // The non-vacuity control for the test above.
+    const { conn, templates } = fakeTemplateDb();
+    templates.push(templateRow(), templateRow());
+    const seen: UnreadableRow[] = [];
+    const store = new PostgresTemplateStore(conn);
+    expect(await store.listForTenant(TENANT_A, (row) => seen.push(row))).toHaveLength(2);
+    expect(seen).toEqual([]);
   });
 
   it("never lists another tenant's overrides", async () => {
     const { conn, templates } = fakeTemplateDb();
     templates.push(templateRow({ tenant_id: TENANT_B }));
     const store = new PostgresTemplateStore(conn);
-    expect(await store.listForTenant(TENANT_A)).toEqual([]);
-    expect(await store.listForTenant(TENANT_B)).toHaveLength(1);
+    expect(await store.listForTenant(TENANT_A, noUnreadable)).toEqual([]);
+    expect(await store.listForTenant(TENANT_B, noUnreadable)).toHaveLength(1);
   });
 });
 
@@ -710,7 +745,7 @@ describe("template-store — identifier + parameter discipline", () => {
     const store = new PostgresTemplateStore(conn, { schema: "ops" });
     await store.find(TENANT_A, queryOf());
     await store.upsert(TENANT_A, templateOf());
-    await store.listForTenant(TENANT_A);
+    await store.listForTenant(TENANT_A, noUnreadable);
     for (const c of captured.filter((s) => !s.sql.includes("set_config"))) {
       expect(c.sql).toContain("ops.notification_templates");
       expect(c.sql).not.toContain("meta.notification_templates");
@@ -725,7 +760,7 @@ describe("template-store — identifier + parameter discipline", () => {
     await expect(
       store.upsert(evil, templateOf({ tenantId: evil })),
     ).rejects.toThrow(/invalid tenantId/);
-    await expect(store.listForTenant(evil)).rejects.toThrow(/invalid tenantId/);
+    await expect(store.listForTenant(evil, noUnreadable)).rejects.toThrow(/invalid tenantId/);
     expect(captured).toHaveLength(0);
   });
 
@@ -734,7 +769,7 @@ describe("template-store — identifier + parameter discipline", () => {
     const store = new PostgresTemplateStore(conn);
     await store.find(TENANT_A, queryOf({ locale: "en-GB" }));
     await store.upsert(TENANT_A, templateOf());
-    await store.listForTenant(TENANT_A);
+    await store.listForTenant(TENANT_A, noUnreadable);
     expect(captured.length).toBeGreaterThan(4);
     for (const c of captured) {
       expect(c.sql).not.toContain(TENANT_A);
@@ -755,7 +790,7 @@ describe("template-store — identifier + parameter discipline", () => {
     const store = new PostgresTemplateStore(conn);
     await store.find(TENANT_A, queryOf());
     await store.upsert(TENANT_A, templateOf({ id: "ntpl_billing0009" }));
-    await store.listForTenant(TENANT_A);
+    await store.listForTenant(TENANT_A, noUnreadable);
     const setConfigs = captured.filter((c) => c.sql.includes("set_config"));
     expect(setConfigs).toHaveLength(3);
     for (const c of setConfigs) {

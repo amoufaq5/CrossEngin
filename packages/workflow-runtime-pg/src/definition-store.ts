@@ -1,14 +1,17 @@
 import {
   assertScopeTenantId,
   classifyScopedWriteRefusal,
+  readRowsWithUnreadable,
   scopeFilter,
   scopeFilterWithPlatform,
   setPlatformWriteSql,
   textIdentity,
   unreadableDetail,
   type PgConnection,
+  type RowRead,
   type ScopeFilter,
   type ScopedWriteRefusal,
+  type UnreadableRow,
   type UnreadableRowReporter,
 } from "@crossengin/kernel-pg";
 import {
@@ -30,6 +33,42 @@ import type { WorkflowDefinitionIdResolver } from "./id-mapping.js";
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 const TABLE = "workflow_definitions";
+
+/**
+ * The refusal a publication takes when any stored version of its key cannot be represented.
+ *
+ * Modelled on `UnreadableEventRowsError` in `event-log.ts`, which made the same split in this
+ * package for the same reason: a read whose consumer *folds* the list may not be handed a short
+ * one, and `planDefinitionPublication` is a fold — it computes `definition_id_reused`,
+ * `version_not_monotonic`, `version_id_differs`, `version_content_differs` and
+ * `key_shadows_platform_definition` over every row sharing the key, so a dropped row admits a
+ * publication the full set would have refused. A non-monotonic version published is a stored
+ * history that reads as monotonic.
+ *
+ * It names **every** unreadable row rather than the first the mapper reached, so an operator
+ * repairing them needs one pass rather than one per row; and `listByKey` hands the pair on instead,
+ * for a consumer whose question is which rows are unreadable.
+ *
+ * It is deliberately not a `DefinitionWriteResult` with `decision: "refused"`. That channel is for
+ * answers about the **proposal** — "this version is already published with different content" is
+ * something the caller fixes by sending different content — and this cause is another row the
+ * caller neither authored nor can reach.
+ */
+export class UnreadableDefinitionRowsError extends Error {
+  readonly definitionKey: string;
+  readonly unreadable: readonly UnreadableRow[];
+
+  constructor(definitionKey: string, unreadable: readonly UnreadableRow[]) {
+    super(
+      `workflow definition key ${definitionKey}: ${String(unreadable.length)} stored row(s) ` +
+        "could not be represented, so a publication cannot be planned against them — " +
+        unreadable.map((u) => `${u.identity ?? "<unidentified>"} (${u.detail})`).join("; "),
+    );
+    this.name = "UnreadableDefinitionRowsError";
+    this.definitionKey = definitionKey;
+    this.unreadable = unreadable;
+  }
+}
 
 /**
  * One spelling per package, and this is no longer it: the constant moved to `tenant-context.ts`
@@ -531,7 +570,7 @@ export class PostgresWorkflowDefinitionStore {
   async listByKey(
     definitionKey: string,
     tenantId: string | null = null,
-  ): Promise<readonly StoredDefinitionSummary[]> {
+  ): Promise<RowRead<StoredDefinitionSummary>> {
     return this.scoped(tenantId, (tx, scopeOf) =>
       this.summariesForKey(tx, definitionKey, scopeOf),
     );
@@ -617,11 +656,23 @@ export class PostgresWorkflowDefinitionStore {
     return definition;
   }
 
+  /**
+   * Every stored version of one key, with a report for every row the contract refuses.
+   *
+   * It returns the pair rather than forwarding a reporter or refusing here, because its two
+   * consumers want opposite things and only one of them is a reporter's caller: `listByKey` hands
+   * the pair on, and `gatherForPublication` **discharges** it by refusing (see
+   * `UnreadableDefinitionRowsError`). Deciding here would make one of the two wrong.
+   *
+   * It used to `.map`, so `rowToWorkflowDefinition`'s parse threw out of the read and took every
+   * other version of the key with it — which on the publication path is the dangerous direction,
+   * since the planner's whole input is this list.
+   */
   private async summariesForKey(
     tx: PgConnection,
     definitionKey: string,
     scopeOf: ScopeFactory,
-  ): Promise<readonly StoredDefinitionSummary[]> {
+  ): Promise<RowRead<StoredDefinitionSummary>> {
     const scope = scopeOf(2);
     const result = await tx.query<Record<string, unknown>>(
       `SELECT id, ${WORKFLOW_DEFINITION_COLUMNS} FROM ${this.schema}.${TABLE}
@@ -629,7 +680,11 @@ export class PostgresWorkflowDefinitionStore {
        ORDER BY tenant_id NULLS LAST, version`,
       [definitionKey, ...scope.params],
     );
-    return result.rows.map((row) => summarizeDefinition(rowToWorkflowDefinition(row)));
+    return readRowsWithUnreadable(
+      result.rows,
+      (row) => summarizeDefinition(rowToWorkflowDefinition(row)),
+      (row) => textIdentity(row, "definition_id"),
+    );
   }
 
   /**
@@ -646,7 +701,20 @@ export class PostgresWorkflowDefinitionStore {
     proposed: WorkflowDefinition,
     scopeOf: ScopeFactory,
   ): Promise<readonly StoredDefinitionSummary[]> {
-    const byKey = await this.summariesForKey(tx, proposed.definitionKey, scopeOf);
+    const read = await this.summariesForKey(tx, proposed.definitionKey, scopeOf);
+    // The pair is **discharged** here rather than carried, and the refusal is a throw rather than a
+    // `decision: "refused"`, which is this method's own documented line one case further out:
+    // `publish` reports a planned refusal because that is an answer about the *proposal* a caller
+    // acts on, and raises on a broken premise. An unreadable stored row is a broken premise — the
+    // planner's five findings (`definition_id_reused`, `version_not_monotonic`, `version_id_differs`,
+    // `version_content_differs`, `key_shadows_platform_definition`) are each computed over this
+    // list, so a short one admits a publication the full one would have refused, and the cause is
+    // another version's row that the caller neither authored nor can repair by sending different
+    // content. The throw leaves the transaction rolled back, so nothing is written.
+    if (read.unreadable.length > 0) {
+      throw new UnreadableDefinitionRowsError(proposed.definitionKey, read.unreadable);
+    }
+    const byKey = read.records;
     if (byKey.some((s) => s.id === proposed.id)) return byKey;
     // Scoped like every other read, and that narrows `definition_id_reused` to the scope doing the
     // publishing. It is the right narrowing: the rule reproduces what a non-owner would see, and a

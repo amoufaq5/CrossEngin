@@ -8,6 +8,7 @@ import {
 } from "@crossengin/marketplace-runtime";
 
 import type { PostgresInstallationStore } from "./installation-store.js";
+import { UnreadableInstallationRowsError } from "./records.js";
 
 /**
  * Installation ids as bare UUIDs — `meta.pack_installations.id` is a `UUID`
@@ -50,9 +51,31 @@ export class PersistentMarketplaceInstallEngine {
     });
   }
 
-  /** Admits a request against the tenant's persisted installs, persisting the outcome (if not rejected). */
+  /**
+   * Admits a request against the tenant's persisted installs, persisting the outcome (if not
+   * rejected).
+   *
+   * **A refused row refuses the admission, and that is not a style choice.** `engine.admit`'s first
+   * gate reads `existing` to decide whether this tenant already has an active installation of this
+   * pack, so an unreadable row dropped from the set does not shorten a list — it **admits a second
+   * installation of a pack the tenant already has**, which `PackInstallationSetSchema`'s own
+   * refinement is the only thing in the workspace that forbids, and which nothing downstream can
+   * detect because the admitted record is individually valid. Not knowing whether something is
+   * there must not admit that it is not (ADR-0336's `IdempotencyStore.get` rule), so this throws
+   * and the route answers 500 — which is what `.map(rowToInstallation)` did before the migration,
+   * preserved deliberately rather than relaxed into a quiet wrong answer.
+   */
   async install(request: PersistentInstallRequest): Promise<InstallDecision> {
-    const existing = await this.store.listForTenant(request.tenantId);
+    const read = await this.store.listForTenant(request.tenantId);
+    if (read.unreadable.length > 0) {
+      throw new UnreadableInstallationRowsError(
+        `cannot admit an install for tenant ${request.tenantId}`,
+        read.unreadable,
+      );
+    }
+    // Copied rather than passed: `RowRead.records` is `readonly` and `InstallRequest.existing` is
+    // the mutable array `z.infer` of a refined `z.array` produces, so the assignment is TS4104.
+    const existing = [...read.records];
     const decision = this.engine.admit({ ...request, existing });
     if (decision.outcome !== "rejected") {
       await this.store.upsert(decision.installation);

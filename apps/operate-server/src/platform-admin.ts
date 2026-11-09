@@ -405,7 +405,21 @@ function buildListHandler(ctx: PlatformAdminContext): Handler {
   return async (input) => {
     const denial = guard(ctx, input.principal);
     if (denial !== null) return denial;
-    const page = await ctx.store.list(readListQuery(input));
+    let page: TenantListPage;
+    try {
+      page = await ctx.store.list(readListQuery(input));
+    } catch {
+      // `rowToTenant` parses every row, so a tenant row the contract no longer accepts throws out
+      // of the read and used to escape as an unclassified 500. Named rather than dropped: the
+      // declared consequence is that no tenant can be administered from the console, and a silently
+      // short page would make that look like a tenant that was never provisioned. No detail,
+      // following `audit_page_unreadable`: an error message about a row can quote the row.
+      //
+      // A named refusal is also *more* useful than a short page here, because `?status=` and the
+      // cursor let an operator narrow around the bad row — where a short page gives them nothing to
+      // narrow on.
+      return json(500, { error: "tenant_page_unreadable" });
+    }
     return json(200, { data: page.data, page: { nextCursor: page.nextCursor } });
   };
 }

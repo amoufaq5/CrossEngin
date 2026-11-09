@@ -1,7 +1,10 @@
 import {
   classifyScopedWriteRefusal,
+  readRowsWithUnreadable,
   scopeFilter,
+  textIdentity,
   type PgConnection,
+  type RowRead,
   type ScopedWriteRefusal,
 } from "@crossengin/kernel-pg";
 import {
@@ -426,7 +429,7 @@ export class PostgresFeatureFlagStore {
     environment: FlagEnvironment,
     limit = 100,
     tenantId: string | null = null,
-  ): Promise<readonly FlagDefinition[]> {
+  ): Promise<RowRead<FlagDefinition>> {
     return this.listWhere("", environment, limit, tenantId);
   }
 
@@ -435,16 +438,33 @@ export class PostgresFeatureFlagStore {
     environment: FlagEnvironment,
     limit = 100,
     tenantId: string | null = null,
-  ): Promise<readonly FlagDefinition[]> {
+  ): Promise<RowRead<FlagDefinition>> {
     return this.listWhere(` AND ${ACTIVE_PREDICATE}`, environment, limit, tenantId);
   }
 
+  /**
+   * The one read both public lists go through, **with a report for every row the contract refuses**.
+   *
+   * `.map(rowToFeatureFlag)` threw one unrepresentable row out of the whole page, so a single flag
+   * edited into a shape `FlagDefinitionSchema` forbids hid **every other flag in the environment**
+   * — which for an evaluator is not a missing flag but a missing flag *set*, and the evaluation
+   * reason for a flag nobody could read is indistinguishable from the reason for one that did not
+   * match.
+   *
+   * Returns the pair rather than forwarding a reporter because the consumer is `none` at every
+   * level: `listWhere` is private, and both public wrappers are measured callerless outside their
+   * own test, so there is no scheduler or route to hand the decision to. It also costs the two
+   * wrappers no new argument, which is what keeps their zero external call sites at zero.
+   *
+   * `load` and `loadByKey` above are **single**-row reads and deliberately still throw: each
+   * caller asked for one named flag and must not be served past it (ADR-0289).
+   */
   private async listWhere(
     extra: string,
     environment: FlagEnvironment,
     limit: number,
     tenantId: string | null,
-  ): Promise<readonly FlagDefinition[]> {
+  ): Promise<RowRead<FlagDefinition>> {
     if (limit <= 0) throw new Error("limit must be positive");
     const scope = scopeFilterWithPlatform(tenantId, 2);
     return this.scoped(tenantId, async (tx) => {
@@ -455,7 +475,13 @@ export class PostgresFeatureFlagStore {
          LIMIT $${String(2 + scope.params.length)}`,
         [JSON.stringify([environment]), ...scope.params, limit],
       );
-      return result.rows.map((row) => rowToFeatureFlag(row));
+      // `flag_id` and not the `id` surrogate: it is the contract's own `ff_…` id, the first entry
+      // in `FEATURE_FLAG_COLUMN_NAMES` so it is always selected, and the one value an UPDATE
+      // matches on — so it is the handle a manual remedy can name. Read off the raw row, so it
+      // still answers for a row the mapper refused.
+      return readRowsWithUnreadable(result.rows, rowToFeatureFlag, (row) =>
+        textIdentity(row, "flag_id"),
+      );
     });
   }
 

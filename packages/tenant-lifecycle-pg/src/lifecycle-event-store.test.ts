@@ -1,4 +1,4 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import type { PgConnection, UnreadableRow, UnreadableRowReporter } from "@crossengin/kernel-pg";
 import { LIFECYCLE_ACTIONS, type LifecycleEvent } from "@crossengin/tenant-lifecycle";
 import { describe, expect, it } from "vitest";
 
@@ -108,6 +108,34 @@ function rowOf(over: Record<string, unknown> = {}): Record<string, unknown> {
     notes: null,
     ...over,
   };
+}
+
+/**
+ * A reporter that keeps what it was handed.
+ *
+ * The two reads that forward one are required to, so every call site has to pass something; passing
+ * a collector rather than a no-op is what makes a test about the SQL *also* a test that the page
+ * reported nothing, which is the assertion a `() => undefined` throws away.
+ */
+function sink(): { readonly seen: UnreadableRow[]; readonly report: UnreadableRowReporter } {
+  const seen: UnreadableRow[] = [];
+  return {
+    seen,
+    report: (row) => {
+      seen.push(row);
+    },
+  };
+}
+
+/**
+ * A row the column admits and the contract refuses.
+ *
+ * `to_state` is the cheapest honest one: its CHECK still lists the **seven** states ADR-0334
+ * narrowed to five, so `trial` round-trips through the database and `TenantLifecycleStateSchema`
+ * refuses it. Nothing can have produced such a row legitimately, which is why it is a finding.
+ */
+function refusedRow(): Record<string, unknown> {
+  return rowOf({ to_state: "trial" });
 }
 
 describe("constants", () => {
@@ -424,7 +452,7 @@ describe("append", () => {
 describe("reads", () => {
   it("carries a strict tenant_id predicate beside RLS", async () => {
     const fake = fakePg([rowOf()]);
-    await new PostgresLifecycleEventStore(fake.conn).listForTenant(TENANT);
+    await new PostgresLifecycleEventStore(fake.conn).listForTenant(TENANT, sink().report);
     const select = fake.calls.find((c) => c.sql.startsWith("SELECT"));
     expect(select?.sql).toContain("tenant_id = $1");
     // Strict, not inclusive: `tenant_id` is NOT NULL here, so a platform arm would match no row.
@@ -434,19 +462,47 @@ describe("reads", () => {
 
   it("orders on (occurred_at, id) so a shared timestamp cannot reorder the trail", async () => {
     const fake = fakePg([rowOf()]);
-    await new PostgresLifecycleEventStore(fake.conn).listForTenant(TENANT);
+    await new PostgresLifecycleEventStore(fake.conn).listForTenant(TENANT, sink().report);
     expect(fake.calls[0]?.sql).toContain("ORDER BY occurred_at, id");
   });
 
   it("clamps the page size rather than passing it through", async () => {
     const fake = fakePg([rowOf()]);
-    await new PostgresLifecycleEventStore(fake.conn).listForTenant(TENANT, 10_000);
+    // The reporter precedes the limit, which is what required-ness costs: a required parameter
+    // cannot follow an optional one, and `limit` keeps its default.
+    await new PostgresLifecycleEventStore(fake.conn).listForTenant(TENANT, sink().report, 10_000);
     expect(fake.calls[0]?.params[1]).toBe(LIFECYCLE_EVENT_MAX_LIMIT);
   });
 
   it("refuses a tenant id that could not be one", async () => {
     const store = new PostgresLifecycleEventStore(fakePg().conn);
-    await expect(store.listForTenant("'; drop table --")).rejects.toThrow(/invalid tenantId/);
+    await expect(store.listForTenant("'; drop table --", sink().report)).rejects.toThrow(
+      /invalid tenantId/,
+    );
+  });
+
+  it("listForTenant reports a row the contract refuses and serves the rest of the page", async () => {
+    // ADR-0373. The defect was `.map(rowToLifecycleEvent)`: one refused row threw out of the whole
+    // page, so a single row the catalog admits and the contract does not cost every *other* row —
+    // and this table's rows are the only thing that distinguishes a tenant that was deleted from
+    // one that never existed.
+    const fake = fakePg([refusedRow(), rowOf()]);
+    const s = sink();
+    const out = await new PostgresLifecycleEventStore(fake.conn).listForTenant(TENANT, s.report);
+    expect(out.map((e) => e.id)).toEqual([EVENT_ID]);
+    expect(s.seen).toHaveLength(1);
+    // The identity is the row's business key, which is what a `WHERE` clause needs, and the detail
+    // names the column and the issue code and no stored value.
+    expect(s.seen[0]?.identity).toBe(EVENT_ID);
+    expect(s.seen[0]?.detail).toBe("toState: invalid_enum_value");
+    expect(s.seen[0]?.detail).not.toContain("trial");
+  });
+
+  it("listForTenant reports nothing for a page it could read whole", async () => {
+    const fake = fakePg([rowOf()]);
+    const s = sink();
+    await new PostgresLifecycleEventStore(fake.conn).listForTenant(TENANT, s.report);
+    expect(s.seen).toEqual([]);
   });
 
   it("latestForTenant asks for one row, newest first", async () => {
@@ -463,7 +519,7 @@ describe("reads", () => {
 
   it("readTrailAsPlatform claims the SELECT-only grant and still names the scope", async () => {
     const fake = fakePg([rowOf()]);
-    await new PostgresLifecycleEventStore(fake.conn).readTrailAsPlatform(TENANT);
+    await new PostgresLifecycleEventStore(fake.conn).readTrailAsPlatform(TENANT, sink().report);
     expect(fake.sql().some((s) => s.includes("app.platform_audit"))).toBe(true);
     const select = fake.calls.find((c) => c.sql.includes("FROM meta.tenant_lifecycle_events"));
     // The elevation answers "may this session see other scopes", not "which scope was asked for".
@@ -472,9 +528,20 @@ describe("reads", () => {
 
   it("claims the grant transaction-locally, so a pooled connection cannot carry it", async () => {
     const fake = fakePg([rowOf()]);
-    await new PostgresLifecycleEventStore(fake.conn).readTrailAsPlatform(TENANT);
+    await new PostgresLifecycleEventStore(fake.conn).readTrailAsPlatform(TENANT, sink().report);
     const grant = fake.calls.find((c) => c.sql.includes("app.platform_audit"));
     expect(grant?.sql).toContain("true)");
+  });
+
+  it("readTrailAsPlatform reports a refused row too, since the audience is an operator", async () => {
+    const fake = fakePg([refusedRow(), rowOf()]);
+    const s = sink();
+    const out = await new PostgresLifecycleEventStore(fake.conn).readTrailAsPlatform(
+      TENANT,
+      s.report,
+    );
+    expect(out).toHaveLength(1);
+    expect(s.seen.map((u) => u.identity)).toEqual([EVENT_ID]);
   });
 
   it("deletedTenants is deliberately cross-tenant and says so in its SQL", async () => {
@@ -486,6 +553,24 @@ describe("reads", () => {
     const select = fake.calls.find((c) => c.sql.includes("FROM meta.tenant_lifecycle_events"));
     expect(select?.sql).toContain("to_state = 'deleted'");
     expect(fake.sql().some((s) => s.includes("app.platform_audit"))).toBe(true);
+  });
+
+  it("deletedTenants returns the refused rows beside the records, because it is the verifier", async () => {
+    // ADR-0373's other arm, and the only one of this store's three reads where it applies: the two
+    // siblings serve a page to a reader, and this one answers a question whose answer is a *set*.
+    // A dropped row here is a tenant this read is about and cannot name — indistinguishable from a
+    // tenant that never existed, which is the exact conflation the table exists to end.
+    const fake = fakePg([refusedRow(), rowOf()], { allowUnscoped: true });
+    const page = await new PostgresLifecycleEventStore(fake.conn).deletedTenants();
+    expect(page.records.map((e) => e.id)).toEqual([EVENT_ID]);
+    expect(page.unreadable).toEqual([{ identity: EVENT_ID, detail: "toState: invalid_enum_value" }]);
+  });
+
+  it("deletedTenants answers an empty unreadable list for a page it read whole", async () => {
+    const fake = fakePg([rowOf()], { allowUnscoped: true });
+    const page = await new PostgresLifecycleEventStore(fake.conn).deletedTenants();
+    expect(page.records).toHaveLength(1);
+    expect(page.unreadable).toEqual([]);
   });
 });
 

@@ -50,7 +50,34 @@ describe("PostgresInstallationStore — round-trips", () => {
     await store.upsert(installation({ id: "11111111-1111-4111-8111-111111111111", packId: "com.crossengin.a" }));
     await store.upsert(installation({ id: "22222222-2222-4222-8222-222222222222", packId: "com.crossengin.b", requestedAt: "2026-05-16T12:05:00.000Z" }));
     const list = await store.listForTenant(TENANT);
-    expect(list.map((i) => i.packId)).toEqual(["com.crossengin.a", "com.crossengin.b"]);
+    expect(list.unreadable).toEqual([]);
+    expect(list.records.map((i) => i.packId)).toEqual(["com.crossengin.a", "com.crossengin.b"]);
+  });
+
+  it("reports a row the contract refuses beside the readable ones, on both lists", async () => {
+    const { conn, rows } = fakePg();
+    const store = new PostgresInstallationStore(conn);
+    await store.upsert(installation({ id: "11111111-1111-4111-8111-111111111111" }));
+    await store.upsert(
+      installation({ id: "22222222-2222-4222-8222-222222222222", requestedAt: "2026-05-16T12:05:00.000Z" }),
+    );
+    const stored = rows.get("22222222-2222-4222-8222-222222222222");
+    if (stored === undefined) throw new Error("expected the row to be persisted");
+    // `InstallationRow.status` is a bare `string`, so a value the column's CHECK admits and the
+    // contract refuses needs no cast to express (ADR-0289's shape).
+    rows.set(stored.id, { ...stored, status: "not_a_status" });
+
+    for (const read of [
+      await store.listForTenant(TENANT),
+      await store.activeForPack(TENANT, "com.crossengin.example"),
+    ]) {
+      expect(read.records.map((i) => i.id)).toEqual(["11111111-1111-4111-8111-111111111111"]);
+      expect(read.unreadable).toHaveLength(1);
+      expect(read.unreadable[0]?.identity).toBe("22222222-2222-4222-8222-222222222222");
+      expect(read.unreadable[0]?.detail).toBe("status: invalid_enum_value");
+      // The detail names the column and never the stored value.
+      expect(read.unreadable[0]?.detail).not.toContain("not_a_status");
+    }
   });
 
   it("activeForPack excludes uninstalled/failed", async () => {
@@ -59,8 +86,9 @@ describe("PostgresInstallationStore — round-trips", () => {
     await store.upsert(installation({ id: "11111111-1111-4111-8111-111111111111", status: "installed", installedVersion: "1.0.0", installedAt: "2026-05-16T12:00:00.000Z", installedBy: USER }));
     await store.upsert(installation({ id: "22222222-2222-4222-8222-222222222222", status: "failed", failureReason: "boom" }));
     const active = await store.activeForPack(TENANT, "com.crossengin.example");
-    expect(active).toHaveLength(1);
-    expect(active[0]?.status).toBe("installed");
+    expect(active.unreadable).toEqual([]);
+    expect(active.records).toHaveLength(1);
+    expect(active.records[0]?.status).toBe("installed");
   });
 });
 
@@ -70,7 +98,7 @@ describe("PostgresInstallationStore — tenant isolation + config", () => {
     const store = new PostgresInstallationStore(conn);
     await store.upsert(installation());
     expect(await store.get(OTHER, "11111111-1111-4111-8111-111111111111")).toBeNull();
-    expect(await store.listForTenant(OTHER)).toEqual([]);
+    expect(await store.listForTenant(OTHER)).toEqual({ records: [], unreadable: [] });
   });
 
   it("targets meta.pack_installations by default and honors a custom schema", async () => {

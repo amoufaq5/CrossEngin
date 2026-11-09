@@ -7,7 +7,7 @@ import {
   staticSubscriptionItemResolver,
   type UsageReporter,
 } from "@crossengin/billing-runtime-pg";
-import type { PgConnection } from "@crossengin/kernel-pg";
+import type { PgConnection, UnreadableRowReporter } from "@crossengin/kernel-pg";
 
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
 
@@ -49,6 +49,15 @@ export interface TenantSyncOutcome {
   readonly tenant: string;
   readonly synced: number;
   readonly skipped: number;
+  /**
+   * Usage rows this tick could not represent, and therefore did not report to Stripe.
+   *
+   * Carried here and not only into `onUnreadable` because the two answer different questions: the
+   * reporter names *which* row, once per row, and this says how much of the tenant's usage went
+   * unbilled on this pass. Without it the figure `UsageStripeSync` computes would reach nobody,
+   * which is this repo's most-found shape.
+   */
+  readonly unreadable: number;
 }
 
 const DEFAULT_SCHEDULER: IntervalScheduler = {
@@ -97,7 +106,12 @@ export class StripeUsageSyncScheduler {
     for (const tenant of this.opts.tenants) {
       try {
         const result = await this.opts.sync.syncTenant(tenant);
-        const outcome: TenantSyncOutcome = { tenant, synced: result.synced, skipped: result.skipped };
+        const outcome: TenantSyncOutcome = {
+          tenant,
+          synced: result.synced,
+          skipped: result.skipped,
+          unreadable: result.unreadable,
+        };
         outcomes.push(outcome);
         this.opts.onSync?.(outcome);
       } catch (err) {
@@ -126,12 +140,22 @@ export function buildStripeUsageSync(
     readonly now?: () => Date;
     readonly onSync?: (outcome: TenantSyncOutcome) => void;
     readonly onError?: (err: unknown) => void;
-  } = {},
+    /**
+     * Where a usage row the contract refuses is reported.
+     *
+     * **Required**, and deliberately not optional beside `onSync`/`onError`: a reporter defaulting
+     * to *drop it silently* is the defect restated as a default (ADR-0364's addendum). Requiring it
+     * is also what made the `= {}` default on this parameter go, which is safe because the one call
+     * site in the workspace already passes an object literal.
+     */
+    readonly onUnreadable: UnreadableRowReporter;
+  },
 ): StripeUsageSync {
   const sync = new UsageStripeSync({
     store: new PostgresUsageRecordStore(conn),
     reporter,
     resolver: staticSubscriptionItemResolver(config.subscriptionItems),
+    onUnreadable: opts.onUnreadable,
     ...(opts.now !== undefined ? { now: opts.now } : {}),
   });
   const scheduler = new StripeUsageSyncScheduler({

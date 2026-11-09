@@ -135,7 +135,19 @@ export function buildPackListHandler(ctx: MarketplaceAdminContext): Handler {
     const tenantId = authorize(ctx, principal);
     if (tenantId === null) return json(401, { error: "tenant_required" });
     if (tenantId === "") return json(403, { error: "forbidden", detail: "admin role required" });
-    return json(200, { data: await ctx.store.listForTenant(tenantId) });
+    // `listForTenant` answers the pair, so the body carries the records and the refused rows are
+    // reported rather than silently shortening the page. Not put in the body: this route has no
+    // `page` object to hang a count on — `{ data }` is the whole shape — so an added key would be a
+    // second response shape for one route, and `UnreadableRow`'s own contents are for an operator.
+    const read = await ctx.store.listForTenant(tenantId);
+    if (read.unreadable.length > 0) {
+      console.error(
+        `[marketplace] ${read.unreadable.length.toString()} unreadable installation row(s) ` +
+          `for tenant ${tenantId}: ` +
+          read.unreadable.map((u) => `${u.identity ?? "<unidentified>"} (${u.detail})`).join("; "),
+      );
+    }
+    return json(200, { data: read.records });
   };
 }
 

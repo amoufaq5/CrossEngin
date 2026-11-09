@@ -91,12 +91,20 @@ class FakeDispatches implements AssemblyDispatchSink {
   }
 }
 
+/**
+ * Discards the finding: every `FakeDigests` here hands back already-built `DigestBatch` values, so
+ * no row in this file can be refused. Named for `delivery-drain.test.ts`' reason — the parameter is
+ * required so a caller cannot forget it, and a test that discards a report should say so. Two
+ * arguments, because an assembly pass sweeps every tenant and a finding naming none is unactionable.
+ */
+const noUnreadable = (): void => undefined;
+
 function opts(
   digests: FakeDigests,
   deliveries: FakeDeliveries,
   dispatches: FakeDispatches,
 ): DigestAssemblyOptions {
-  return { digests, deliveries, dispatches, clock: () => NOW };
+  return { digests, deliveries, dispatches, clock: () => NOW, onUnreadable: noUnreadable };
 }
 
 describe("digest-assembler — memberFromItem", () => {
@@ -205,7 +213,10 @@ describe("digest-assembler — assembleDueDigests", () => {
       },
     };
 
-    await assembleDueDigests({ digests, deliveries, dispatches, clock: () => NOW }, TENANT);
+    await assembleDueDigests(
+      { digests, deliveries, dispatches, clock: () => NOW, onUnreadable: noUnreadable },
+      TENANT,
+    );
 
     expect(order).toEqual(["record", "supersede", "reconcile"]);
   });
@@ -352,6 +363,7 @@ describe("digest-assembler — assembleForTenants", () => {
         deliveries: new FakeDeliveries(),
         dispatches: new FakeDispatches(),
         clock: () => NOW,
+        onUnreadable: noUnreadable,
         onError: (_e, t) => errors.push(t),
       },
       ["bad", TENANT],

@@ -3,7 +3,12 @@ import {
   type PackVersionRecord,
   type PackVersionStatus,
 } from "@crossengin/marketplace";
-import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  readRows,
+  textIdentity,
+  type PgConnection,
+  type UnreadableRowReporter,
+} from "@crossengin/kernel-pg";
 
 const SCHEMA = "meta";
 const TABLE = "pack_versions";
@@ -35,8 +40,41 @@ function iso(value: string | Date | null): string | null {
   return value instanceof Date ? value.toISOString() : value;
 }
 
+/**
+ * The best handle a refused version row names: its business key.
+ *
+ * `(pack_id, version)` is the table's own unique constraint (`pack_versions_pack_version_key`) and
+ * is what a `WHERE` clause repairing the row would carry; `id` is a UUID surrogate `PackVersionRow`
+ * does not declare, so it is not reachable here without widening the row type. Either component
+ * missing answers `null` rather than a half key, because a half key names no row and
+ * `UnreadableRow.identity`'s `null` says *the row does not name one* (ADR-0331).
+ */
+function packVersionIdentity(row: PackVersionRow): string | null {
+  const packId = textIdentity(row, "pack_id");
+  const version = textIdentity(row, "version");
+  return packId === null || version === null ? null : `${packId}@${version}`;
+}
+
+/**
+ * `signature` as the driver hands it back, as a value rather than as text.
+ *
+ * Guarded for the reason `unreadableDetail` states: a non-`ZodError` message passes through
+ * **verbatim** on the premise that it is a mapper's own guard written in this repo, and a
+ * `SyntaxError` from `JSON.parse` is V8's and quotes its input. The column is `jsonb`, so
+ * node-postgres parses it and this branch is unreachable against a real database — reachable
+ * through a fake and through a `text` column, which is the population a disclosure hides in.
+ */
+function asSignature(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    throw new Error("signature: column is not valid JSON");
+  }
+}
+
 function rowToRecord(row: PackVersionRow): PackVersionRecord {
-  const signature = typeof row.signature === "string" ? (JSON.parse(row.signature) as unknown) : row.signature;
+  const signature = asSignature(row.signature);
   return PackVersionRecordSchema.parse({
     packId: row.pack_id,
     version: row.version,
@@ -130,7 +168,24 @@ export class PostgresPackVersionStore {
     return row === undefined ? null : rowToRecord(row);
   }
 
-  async listByPack(packId: string, status?: PackVersionStatus): Promise<readonly PackVersionRecord[]> {
+  /**
+   * One pack's versions, reporting every row the contract refused rather than losing the page.
+   *
+   * It **forwards** a reporter rather than returning the pair, because its one consumer is a
+   * route — `GET /v1/authoring/packs/{packId}/versions` — and a route is where the deployment
+   * decides what a finding is worth (`read-rows.ts`' split).
+   *
+   * `onUnreadable` precedes `status`, which is the house ordering across every migrated `readRows`
+   * store (`dr-runtime-pg`'s drill, failover and readiness stores each put it before a defaulted
+   * `limit`). Putting it last would mean promoting `status?:` to `status: PackVersionStatus |
+   * undefined`, because a required parameter cannot follow an optional one — so this ordering keeps
+   * `status` optional and costs the two existing callers nothing beyond the reporter.
+   */
+  async listByPack(
+    packId: string,
+    onUnreadable: UnreadableRowReporter,
+    status?: PackVersionStatus,
+  ): Promise<readonly PackVersionRecord[]> {
     const result =
       status === undefined
         ? await this.conn.query<PackVersionRow>(
@@ -141,6 +196,6 @@ export class PostgresPackVersionStore {
             `SELECT * FROM ${SCHEMA}.${TABLE} WHERE pack_id = $1 AND status = $2 ORDER BY version ASC`,
             [packId, status],
           );
-    return result.rows.map(rowToRecord);
+    return readRows(result.rows, rowToRecord, packVersionIdentity, onUnreadable);
   }
 }

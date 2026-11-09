@@ -1,10 +1,13 @@
 import {
   assertScopeTenantId,
   classifyScopedWriteRefusal,
+  readRowsWithUnreadable,
   scopeFilter,
   scopeFilterWithPlatform,
   setPlatformWriteSql,
+  textIdentity,
   type PgConnection,
+  type RowRead,
   type ScopedWriteRefusal,
 } from "@crossengin/kernel-pg";
 import {
@@ -214,11 +217,32 @@ export class PostgresKillSwitchStore {
     });
   }
 
+  /**
+   * Every active switch over one flag, **with a report for every row the contract refuses**.
+   *
+   * `.map(rowToKillSwitch)` threw one unrepresentable row out of the whole page, so a single switch
+   * row edited into a shape `KillSwitchSchema` forbids made *every* active switch over that flag
+   * unreadable — and a rolled-back flag whose switches cannot be read reads as live. The refusal
+   * path is live rather than hypothetical: `META_FEATURE_FLAG_KILL_SWITCHES` carries no
+   * `instantRangeCheck`, so `'infinity'` is storable in each of its six TIMESTAMPTZ columns and
+   * `asIso`/`asNullableIso` hand it to the contract to refuse (register P2.12b).
+   *
+   * Returns the pair rather than forwarding a reporter because **this method** is callerless —
+   * measured, only its own test — which is a narrower claim than the one the backlog's note made:
+   * the store itself *is* constructed, so "the store has no caller" is false here and only the
+   * method's own emptiness earns the verifier form. `loadForIncident` is the live reader and is a
+   * different method.
+   *
+   * `loadForIncident` and `load` above deliberately still throw. `load` is a single-row read
+   * (ADR-0289), and `loadForIncident` reads `LIMIT 2` to refuse two active switches on one incident
+   * as *this needs a human* — routing a refused row there into a reporter would turn that
+   * deliberate fault into a quiet one.
+   */
   async listActiveForFlag(
     flagId: string,
     limit = 100,
     tenantId: string | null = null,
-  ): Promise<readonly KillSwitch[]> {
+  ): Promise<RowRead<KillSwitch>> {
     if (limit <= 0) throw new Error("limit must be positive");
     // The scope goes before the LIMIT's parameter, not after it: a `LIMIT` over an unscoped read is
     // the sharper half of this defect, since another scope's rows do not merely join the answer —
@@ -232,7 +256,12 @@ export class PostgresKillSwitchStore {
          LIMIT $${String(2 + scope.params.length)}`,
         [flagId, ...scope.params, limit],
       );
-      return result.rows.map((row) => rowToKillSwitch(row));
+      // `kill_switch_id` and not the `id` surrogate: it carries the `fks_…` contract id, is the
+      // first entry in `KILL_SWITCH_COLUMN_NAMES` so it is always selected, and is what `load` and
+      // every UPDATE match on — the handle a manual remedy can name.
+      return readRowsWithUnreadable(result.rows, rowToKillSwitch, (row) =>
+        textIdentity(row, "kill_switch_id"),
+      );
     });
   }
 

@@ -195,7 +195,7 @@ describe("registerAuditChainKey", () => {
     expect(second.keyId).toBe(first.keyId);
 
     const rows = await registry.listKeys();
-    const matching = rows.filter((r) => r.fingerprint === first.fingerprint);
+    const matching = rows.records.filter((r) => r.fingerprint === first.fingerprint);
     expect(matching).toHaveLength(1);
     const byId = await registry.getByKeyId(first.keyId);
     expect(byId).not.toBeNull();

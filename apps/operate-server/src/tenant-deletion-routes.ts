@@ -1,5 +1,6 @@
 import type { PathSegment, ResolvedPrincipal, RouteDefinition } from "@crossengin/api-gateway";
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
+import type { RowRead } from "@crossengin/kernel-pg";
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
 import { z } from "zod";
 import {
@@ -219,7 +220,17 @@ export interface TenantDeleterLike {
   }): Promise<DeletionOutcomeLike>;
   /** Retires the tenant row. Called only after the pipeline has committed. */
   retire(tenantId: string): Promise<boolean>;
-  tombstonesFor(tenantId: string): Promise<readonly StoredTombstoneLike[]>;
+  /**
+   * The tenant's stored tombstones, and every row the contract refused.
+   *
+   * The pair and not an array, because this is the read whose whole subject is a stored proof: a
+   * row that no longer parses is a *finding* (ADR-0323's `scope_tampered` is invisible to the
+   * chain), so it must reach the reader rather than shortening the page or costing them the
+   * receipts that are readable. `StoredTombstoneLike` is unchanged — only the envelope moved, and
+   * `RowRead<T>` is covariant in `T`, so the store's `RowRead<StoredTombstone>` satisfies this with
+   * no adapter.
+   */
+  tombstonesFor(tenantId: string): Promise<RowRead<StoredTombstoneLike>>;
 }
 
 export const TENANT_DELETED_OPERATION = "platform.tenant_deleted";
@@ -236,6 +247,16 @@ export interface TenantDeletionEvent {
   readonly rowCount: number;
   readonly refusals: readonly string[];
   readonly tenantRetired: boolean;
+  /**
+   * Stored rows this act read and could not represent.
+   *
+   * Optional, and that is the one place optional is right here: the two delete paths read no rows,
+   * so a required field would make them write `0` — *we looked and found none* — about a read they
+   * never performed (ADR-0331). Present-and-zero therefore means asked and clean, and absent means
+   * this operation does not read stored rows. Separate from `refusals`, which are the deletion's
+   * own named refusals and say nothing about whether a row could be parsed.
+   */
+  readonly unreadableCount?: number;
   readonly at: string;
 }
 
@@ -571,16 +592,20 @@ function buildListHandler(ctx: TenantDeletionRoutesContext): Handler {
     if (!UUID_RE.test(tenantId)) {
       return json(400, { error: "invalid_request", detail: "tenant id must be a uuid" });
     }
-    let tombstones: readonly StoredTombstoneLike[];
+    let read: RowRead<StoredTombstoneLike>;
     try {
-      tombstones = await ctx.deleter.tombstonesFor(tenantId);
+      read = await ctx.deleter.tombstonesFor(tenantId);
     } catch {
-      // The store re-parses every row, so a throw here can mean a stored record no longer satisfies
-      // its contract (ADR-0289). That is a finding, and reporting it as "unavailable" rather than as
-      // an empty list is what stops it reading as "this tenant was never deleted".
+      // Now reachable only for a failure of the read ITSELF — the connection, the policy, the
+      // `app.platform_audit` elevation — because a single unrepresentable row no longer escapes the
+      // store's own mapping. The sentence changed with the cause: it used to say "a stored
+      // tombstone could not be read", which was true when one bad row threw out of `.map()` and is
+      // the wrong diagnosis for what reaches this catch today. "Do not treat this as an absence" is
+      // the half that survives and is the half that matters, since the caller is deciding whether
+      // this tenant was ever deleted. (`buildStrandedHandler`'s own catch, same correction.)
       return json(503, {
         error: "tombstones_unreadable",
-        detail: "a stored tombstone could not be read; do not treat this as an absence",
+        detail: "the tombstone listing could not be read; do not treat this as an absence",
       });
     }
     const at = (ctx.clock ?? ((): Date => new Date()))().toISOString();
@@ -591,12 +616,30 @@ function buildListHandler(ctx: TenantDeletionRoutesContext): Handler {
       operation: TENANT_TOMBSTONES_READ_OPERATION,
       tombstoneId: null,
       chainEntryHash: null,
-      rowCount: tombstones.length,
+      // The receipts this answer carried, and the refused rows beside it rather than folded into
+      // one figure: `rowCount` used to be `tombstones.length` over a list that could not be short,
+      // and a sum would make a page of 3 receipts and 1 unreadable row indistinguishable from 4
+      // receipts.
+      rowCount: read.records.length,
+      unreadableCount: read.unreadable.length,
       refusals: [],
       tenantRetired: false,
       at,
     });
-    return json(200, { tenantId, data: tombstones.map((t) => tombstoneReceipt(t)) });
+    // 200 with both halves and not a 503, which is the change this read is really about. The old
+    // 503 withheld the *readable* receipts too and wrote no audit row at all, so the one read whose
+    // subject is a stored proof answered a tamper by telling the operator nothing and recording
+    // nothing. A named list is not an absence, so the sentence the 503 was defending is satisfied
+    // by saying which rows were refused.
+    //
+    // `unreadable` is always present and `[]` is the claim that every stored tombstone could be
+    // represented — never omitted, because an absent field reads as "none" and is indistinguishable
+    // from "nobody looked" (ADR-0331).
+    return json(200, {
+      tenantId,
+      data: read.records.map((t) => tombstoneReceipt(t)),
+      unreadable: read.unreadable,
+    });
   };
 }
 

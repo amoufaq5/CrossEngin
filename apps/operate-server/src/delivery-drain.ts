@@ -1,3 +1,4 @@
+import type { UnreadableRow, UnreadableRowReporter } from "@crossengin/kernel-pg";
 import {
   RETRYABLE_DELIVERY_OUTCOMES,
   type DeliveryAttempt,
@@ -39,10 +40,19 @@ import { isDigestSummary } from "./digest-assembly.js";
 import type { ResolvedRecipient } from "./recipient-resolver.js";
 
 export interface DeliveryStoreLike {
-  claimQueued(tenantId: string, limit?: number): Promise<readonly ClaimedDispatch[]>;
+  claimQueued(
+    tenantId: string,
+    onUnreadable: UnreadableRowReporter,
+    limit?: number,
+  ): Promise<readonly ClaimedDispatch[]>;
   recordAttempt(tenantId: string, rowId: string, attempt: DeliveryAttempt): Promise<boolean>;
   advance(tenantId: string, rowId: string, update: DispatchAdvanceUpdate): Promise<boolean>;
-  dueRetries(tenantId: string, now: Date, limit?: number): Promise<readonly DueRetry[]>;
+  dueRetries(
+    tenantId: string,
+    now: Date,
+    onUnreadable: UnreadableRowReporter,
+    limit?: number,
+  ): Promise<readonly DueRetry[]>;
 }
 
 export interface RecipientResolverLike {
@@ -82,6 +92,16 @@ export interface DeliveryDrainOptions {
   readonly maxAttempts?: number;
   readonly timer?: SendTimer;
   readonly onError?: (err: unknown, tenantId: string) => void;
+  /**
+   * Where a dispatch row the contract refuses is reported.
+   *
+   * **Required**, unlike `onError` beside it, and the asymmetry is the decision: an error already
+   * reaches a human through `drainTenants`' per-tenant catch and stops that tenant's tick, while a
+   * refused row is now *skipped* — so with no reporter it is a notification that will never be sent
+   * and nothing in the deployment says so. A reporter defaulting to "drop it silently" is the defect
+   * restated as a default (ADR-0364's addendum).
+   */
+  readonly onUnreadable: (row: UnreadableRow, tenantId: string) => void;
 }
 
 export interface DrainReport {
@@ -543,7 +563,11 @@ export async function drainTenant(
   let batched = 0;
   let dropped = 0;
 
-  const claimed = await opts.store.claimQueued(tenantId, batch);
+  const claimed = await opts.store.claimQueued(
+    tenantId,
+    (row) => opts.onUnreadable(row, tenantId),
+    batch,
+  );
   for (const one of claimed) {
     const result = await drainDispatch(opts, tenantId, one);
     for (const a of result.attempts) {
@@ -557,7 +581,12 @@ export async function drainTenant(
     dropped += result.dropped;
   }
 
-  const due = await opts.store.dueRetries(tenantId, now(), batch);
+  const due = await opts.store.dueRetries(
+    tenantId,
+    now(),
+    (row) => opts.onUnreadable(row, tenantId),
+    batch,
+  );
   for (const one of due) {
     const attempt = await drainRetry(opts, tenantId, one);
     if (attempt === null) continue;

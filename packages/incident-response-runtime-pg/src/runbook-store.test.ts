@@ -14,7 +14,14 @@ import {
   runbookExecutionRowValues,
   runbookExecutionUpdateAssignments,
 } from "./runbook-store.js";
-import { EMPTY, mockConnection, respondTo, type Captured } from "./test-fakes.js";
+import {
+  EMPTY,
+  EXPECT_ALL_READABLE,
+  collectUnreadable,
+  mockConnection,
+  respondTo,
+  type Captured,
+} from "./test-fakes.js";
 
 const T0 = "2026-09-30T10:00:00.000Z";
 const T1 = "2026-09-30T10:05:00.000Z";
@@ -201,7 +208,11 @@ describe("listForIncident", () => {
   it("filters by incident and orders by invocation time", async () => {
     const capture: Captured[] = [];
     const conn = mockConnection(capture, respondTo([["SELECT", EMPTY]]));
-    await new PostgresRunbookExecutionStore(conn).listForIncident("INC-2026-0007", 5);
+    await new PostgresRunbookExecutionStore(conn).listForIncident(
+      "INC-2026-0007",
+      EXPECT_ALL_READABLE,
+      5,
+    );
     expect(capture[0]?.sql).toContain("WHERE incident_id = $1");
     expect(capture[0]?.sql).toContain("ORDER BY invoked_at ASC");
     expect(capture[0]?.params).toEqual(["INC-2026-0007", 5]);
@@ -210,14 +221,19 @@ describe("listForIncident", () => {
   it("defaults the limit to 100", async () => {
     const capture: Captured[] = [];
     const conn = mockConnection(capture, respondTo([["SELECT", EMPTY]]));
-    await new PostgresRunbookExecutionStore(conn).listForIncident("INC-2026-0007");
+    await new PostgresRunbookExecutionStore(conn).listForIncident(
+      "INC-2026-0007",
+      EXPECT_ALL_READABLE,
+    );
     expect(capture[0]?.params?.[1]).toBe(100);
   });
 
   it("rejects a non-positive limit before querying", async () => {
     const capture: Captured[] = [];
     const store = new PostgresRunbookExecutionStore(mockConnection(capture));
-    await expect(store.listForIncident("INC-2026-0007", 0)).rejects.toThrow(/positive/);
+    await expect(
+      store.listForIncident("INC-2026-0007", EXPECT_ALL_READABLE, 0),
+    ).rejects.toThrow(/positive/);
     expect(capture).toHaveLength(0);
   });
 
@@ -227,7 +243,10 @@ describe("listForIncident", () => {
       undefined,
       respondTo([["SELECT", { rows: [executionRow(record), executionRow(execution())], rowCount: 2 }]]),
     );
-    const rows = await new PostgresRunbookExecutionStore(conn).listForIncident("INC-2026-0007");
+    const rows = await new PostgresRunbookExecutionStore(conn).listForIncident(
+      "INC-2026-0007",
+      EXPECT_ALL_READABLE,
+    );
     expect(rows.map((r) => r.record.status)).toEqual(["succeeded", "queued"]);
   });
 });
@@ -236,11 +255,52 @@ describe("listUnfinished", () => {
   it("spells the predicate exactly as idx_incident_runbook_executions_unfinished does", async () => {
     const capture: Captured[] = [];
     const conn = mockConnection(capture, respondTo([["SELECT", EMPTY]]));
-    await new PostgresRunbookExecutionStore(conn).listUnfinished();
+    await new PostgresRunbookExecutionStore(conn).listUnfinished(EXPECT_ALL_READABLE);
     // Verbatim from the index's `where` in meta-schema.ts, plus its `invoked_at` ordering — a
     // differently spelled equivalent (NOT IN over the terminal three) cannot use the index.
     expect(capture[0]?.sql).toContain("WHERE status IN ('queued', 'running', 'paused')");
     expect(capture[0]?.sql).toContain("ORDER BY invoked_at ASC");
+  });
+
+  it("reports the execution it cannot read rather than resuming a short list in silence", async () => {
+    // `running` with no `startedAt` is a superRefine rule no CHECK holds, so the row stores and
+    // only the re-parse refuses it. This is the strongest case in the package for the reporter
+    // being required: the consumer is a resuming worker, so before this change one refused row
+    // either took the whole resume list down or — had the row been dropped — left the worker
+    // resuming a list it believed was complete.
+    // Mutated on the *row* and not through the fixture: the fixture parses, which is the point —
+    // only a hand-edited row can reach this state.
+    const bad = executionRow(execution({ id: "rbx-0001" }));
+    bad["status"] = "running";
+    const good = executionRow(execution({ id: "rbx-0002" }));
+    const conn = mockConnection(
+      undefined,
+      respondTo([["SELECT", { rows: [bad, good], rowCount: 2 }]]),
+    );
+    const seen = collectUnreadable();
+
+    const rows = await new PostgresRunbookExecutionStore(conn).listUnfinished(seen.report);
+
+    expect(rows.map((r) => r.record.id)).toEqual(["rbx-0002"]);
+    expect(seen.rows).toEqual([{ identity: "rbx-0001", detail: "startedAt: custom" }]);
+  });
+
+  it("reports a blank execution_id as an unidentified row", async () => {
+    // Unlike `incident_id` and `postmortem_id`, this column carries no pattern CHECK, so `''` is
+    // storable — the one identity column in the package where `textIdentity`'s length test is
+    // load-bearing against a real database rather than defensive.
+    const bad = executionRow(execution());
+    bad["execution_id"] = "";
+    const conn = mockConnection(
+      undefined,
+      respondTo([["SELECT", { rows: [bad], rowCount: 1 }]]),
+    );
+    const seen = collectUnreadable();
+
+    const rows = await new PostgresRunbookExecutionStore(conn).listUnfinished(seen.report);
+
+    expect(rows).toEqual([]);
+    expect(seen.rows).toEqual([{ identity: null, detail: "id: too_small" }]);
   });
 });
 

@@ -1,6 +1,11 @@
 import { assertBindArity } from "@crossengin/testing";
 import { vi } from "vitest";
-import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
+import type {
+  PgConnection,
+  PgQueryResult,
+  UnreadableRow,
+  UnreadableRowReporter,
+} from "@crossengin/kernel-pg";
 import {
   IncidentRecordSchema,
   type IncidentRecord,
@@ -54,6 +59,29 @@ export function respondTo(
     }
     return { rows: [], rowCount: 1 };
   };
+}
+
+/**
+ * The reporter a test passes when it means every row on the page to be readable.
+ *
+ * It **throws** rather than ignoring, copied from `dr-runtime-pg`'s so the two packages meet one
+ * idiom: an answer for a case the test did not mean is how an assertion passes vacuously, and a
+ * silently-dropped report would let a fixture drift into a shape the contract refuses while the
+ * test still read green — in a migration whose whole subject is that a dropped row goes unnoticed.
+ */
+export const EXPECT_ALL_READABLE: UnreadableRowReporter = (row) => {
+  throw new Error(
+    `a row was unexpectedly unreadable (identity ${row.identity ?? "<none>"}): ${row.detail}`,
+  );
+};
+
+/** A reporter that keeps what it was told, for the tests that mean to produce an unreadable row. */
+export function collectUnreadable(): {
+  readonly rows: readonly UnreadableRow[];
+  readonly report: UnreadableRowReporter;
+} {
+  const rows: UnreadableRow[] = [];
+  return { rows, report: (row) => rows.push(row) };
 }
 
 export const T0 = "2026-09-30T10:00:00.000Z";

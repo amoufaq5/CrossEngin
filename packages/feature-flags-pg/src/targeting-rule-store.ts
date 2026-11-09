@@ -1,7 +1,10 @@
 import {
+  readRowsWithUnreadable,
   requireIsoInstant,
   scopeFilterWithPlatform,
+  textIdentity,
   type PgConnection,
+  type RowRead,
 } from "@crossengin/kernel-pg";
 import {
   TargetingRuleSchema,
@@ -195,6 +198,28 @@ export function rowToTargetingRule(row: Record<string, unknown>): TargetingRule 
  *   for the duration of any non-transactional write, which is an outage on the request path in
  *   exchange for an inference — ADR-0322's split between evidence and absence, on a third surface.
  *
+ * - **`rule_unreadable`** is the fourth, and it exists because **none of the three above can be
+ *   decided for a row the contract refused.** All three are read off the *parsed* record —
+ *   `rule_missing` from its absence from the result, `rule_wrong_flag` and `rule_unreferenced` by
+ *   comparing `row.flagId` against the flag — so a page that reports a refused row instead of
+ *   throwing it away (ADR-0373) has a row in hand that belongs in none of them. Leaving it out of
+ *   the vocabulary is the defect a naive migration creates: the declared rule's row is *present*
+ *   and `byId.get(id)` answers `undefined`, so it would be reported `rule_missing`, whose own doc
+ *   says *no row carries that id* — a wrong diagnosis sending an operator to insert a row that is
+ *   already there.
+ *
+ *   It **blocks**, for `rule_missing`'s reason read one step out: the harm that refusal exists to
+ *   stop is a fail-open on an `isExclusion` rule, and an unreadable row cannot be shown not to be
+ *   one, because the only column a refusal may report is the identity (`read-rows.ts`' rule) and
+ *   even that is `string | null`. **The cost is stated rather than discovered later**: an
+ *   unreadable row whose identity is a *non-declared* id is, by this read's own predicate
+ *   (`flag_id = $1 OR rule_id = ANY(declared)`), a row naming this flag that the list does not name
+ *   — the `rule_unreferenced` direction, which is a finding and not a refusal — so for that subset
+ *   this refuses where reading the row would not have. That is taken deliberately: the inference
+ *   rests on a column the mapper refused to read, an identity of `null` leaves no inference at all,
+ *   and the laxer direction's cost is `rule_missing`'s fail-open while the stricter one's is a flag
+ *   off the air until somebody fixes a corrupt row.
+ *
  * The finding is carried in **the data and not in a log line**: `TargetingRuleSet.unreferenced` is a
  * required field, so a caller holding a resolved set holds the finding too and cannot not have it.
  */
@@ -205,6 +230,8 @@ export const TARGETING_RULE_SET_DEFECTS = [
   "rule_wrong_flag",
   /** A stored rule names this flag and the flag's list does not name it. */
   "rule_unreferenced",
+  /** A row in this flag's scope that `TargetingRuleSchema` refused, so none of the three applies. */
+  "rule_unreadable",
 ] as const;
 export type TargetingRuleSetDefect = (typeof TARGETING_RULE_SET_DEFECTS)[number];
 
@@ -212,13 +239,35 @@ export type TargetingRuleSetDefect = (typeof TARGETING_RULE_SET_DEFECTS)[number]
 export const BLOCKING_TARGETING_RULE_SET_DEFECTS: ReadonlySet<TargetingRuleSetDefect> = new Set([
   "rule_missing",
   "rule_wrong_flag",
+  "rule_unreadable",
 ]);
+
+/**
+ * What a refused row is called when its own `rule_id` is what is wrong with it.
+ *
+ * `UnreadableRow.identity` is `string | null` because the identifying column may itself be the
+ * reason the row was refused, and `TargetingRuleSetFinding.ruleId` is the handle every consumer
+ * reads — so a sentinel keeps the field a string rather than widening it and making
+ * `${f.ruleId}` render `"null"` at the one place a human reads it. Shaped like
+ * `read-rows.ts`' `<withheld>` on purpose: both are the code saying *this position has no value I
+ * can name*.
+ */
+export const UNIDENTIFIED_RULE_ID = "<unidentified>";
 
 export interface TargetingRuleSetFinding {
   readonly defect: TargetingRuleSetDefect;
   readonly ruleId: string;
   /** The flag the stored row names, where one was found and it is not the flag asked about. */
   readonly storedFlagId: string | null;
+  /**
+   * Why the contract refused the row — the field path and the issue code, never a stored value.
+   *
+   * **Required and `null` for the other three defects**, rather than optional: the three decided by
+   * reading the record have no cause beyond their own name, and an optional field is one a fifth
+   * defect could be added without. `rule_unreadable` is the only member that carries one, and
+   * without it an operator learns which rule is corrupt and not which column to look at.
+   */
+  readonly detail: string | null;
 }
 
 /** Everything the two reads found, with nothing refused — the survey an operator asks for. */
@@ -253,11 +302,19 @@ export class TargetingRulesUnresolvedError extends Error {
     super(
       `feature flag '${flagId}' cannot be evaluated: ` +
         findings
-          .map((f) =>
-            f.defect === "rule_wrong_flag"
-              ? `${f.ruleId} belongs to flag ${String(f.storedFlagId)}`
-              : `${f.ruleId} (${f.defect})`,
-          )
+          .map((f) => {
+            if (f.defect === "rule_wrong_flag") {
+              return `${f.ruleId} belongs to flag ${String(f.storedFlagId)}`;
+            }
+            // The detail is the field path and the issue code and names no stored value
+            // (`unreadableDetail`'s rule), so it is safe in a message that reaches a caller — and
+            // it is the whole reason the finding carries one: `rule_unreadable` alone is not
+            // actionable without the column.
+            if (f.defect === "rule_unreadable" && f.detail !== null) {
+              return `${f.ruleId} (${f.defect}: ${f.detail})`;
+            }
+            return `${f.ruleId} (${f.defect})`;
+          })
           .join(", "),
     );
     this.name = "TargetingRulesUnresolvedError";
@@ -437,7 +494,7 @@ export class PostgresTargetingRuleStore {
     flagId: string,
     tenantId: string | null = null,
     limit = MAX_TARGETING_RULES_PER_FLAG,
-  ): Promise<readonly TargetingRule[]> {
+  ): Promise<RowRead<TargetingRule>> {
     return this.read(flagId, [], tenantId, limit);
   }
 
@@ -450,20 +507,49 @@ export class PostgresTargetingRuleStore {
    * `rule_id = ANY($2)` finds the rows the flag names (the `rule_missing` and `rule_wrong_flag`
    * directions). An empty declared list is harmless — `= ANY('{}')` is false — so the disjunction
    * degrades to the first arm rather than to a scan.
+   *
+   * The fourth direction is `rule_unreadable`, and it is answered from the rows the *contract*
+   * refused rather than from the predicate. It is reported before the other three are computed; see
+   * `TARGETING_RULE_SET_DEFECTS` and the comment at the loop for why the ordering is load-bearing.
    */
   async surveyFor(
     flag: FlagDefinition,
     tenantId: string | null = null,
   ): Promise<TargetingRuleSetSurvey> {
     const declared = flag.targetingRuleIds;
-    const stored = await this.read(flag.id, declared, tenantId, MAX_TARGETING_RULES_PER_FLAG);
+    const read = await this.read(flag.id, declared, tenantId, MAX_TARGETING_RULES_PER_FLAG);
+    const stored = read.records;
     const byId = new Map(stored.map((r) => [r.id, r]));
     const findings: TargetingRuleSetFinding[] = [];
     const rules: TargetingRule[] = [];
+    /**
+     * The refused rows go in **first**, and the ordering is the whole correction.
+     *
+     * A row the contract refused is absent from `byId`, so the declared-id walk below would reach
+     * `row === undefined` and report `rule_missing` — *no row carries that id* — about a row that is
+     * present and corrupt. `unreadableIds` is what the walk tests against so the right defect is
+     * reported and the wrong one is not reported twice.
+     */
+    const unreadableIds = new Set<string>();
+    for (const row of read.unreadable) {
+      if (row.identity !== null) unreadableIds.add(row.identity);
+      findings.push({
+        defect: "rule_unreadable",
+        ruleId: row.identity ?? UNIDENTIFIED_RULE_ID,
+        // No stored flag id: the column that would answer it is one the mapper refused to read,
+        // and the predicate's inference is not a reading (ADR-0331 — a claim and a gap are
+        // different facts).
+        storedFlagId: null,
+        detail: row.detail,
+      });
+    }
     for (const id of declared) {
+      // A declared rule whose row is unreadable has already been reported above. Without this the
+      // same row yields two findings with two different diagnoses, one of them false.
+      if (unreadableIds.has(id)) continue;
       const row = byId.get(id);
       if (row === undefined) {
-        findings.push({ defect: "rule_missing", ruleId: id, storedFlagId: null });
+        findings.push({ defect: "rule_missing", ruleId: id, storedFlagId: null, detail: null });
         continue;
       }
       if (row.flagId !== flag.id) {
@@ -471,6 +557,7 @@ export class PostgresTargetingRuleStore {
           defect: "rule_wrong_flag",
           ruleId: id,
           storedFlagId: row.flagId,
+          detail: null,
         });
         continue;
       }
@@ -479,7 +566,12 @@ export class PostgresTargetingRuleStore {
     const declaredIds = new Set(declared);
     for (const row of stored) {
       if (row.flagId !== flag.id || declaredIds.has(row.id)) continue;
-      findings.push({ defect: "rule_unreferenced", ruleId: row.id, storedFlagId: row.flagId });
+      findings.push({
+        defect: "rule_unreferenced",
+        ruleId: row.id,
+        storedFlagId: row.flagId,
+        detail: null,
+      });
     }
     // The resolved rules are re-sorted rather than trusted in arrival order: `declared` is the
     // flag's JSONB array and its order is the author's, not the evaluator's. The database already
@@ -497,8 +589,8 @@ export class PostgresTargetingRuleStore {
   /**
    * The flag's targeting, or a refusal naming what is wrong with it.
    *
-   * Refuses `rule_missing` and `rule_wrong_flag`, carries `rule_unreferenced` through in the set —
-   * see `TARGETING_RULE_SET_DEFECTS` for why the three are not treated alike.
+   * Refuses `rule_missing`, `rule_wrong_flag` and `rule_unreadable`, carries `rule_unreferenced`
+   * through in the set — see `TARGETING_RULE_SET_DEFECTS` for why the four are not treated alike.
    */
   async loadFor(
     flag: FlagDefinition,
@@ -518,12 +610,29 @@ export class PostgresTargetingRuleStore {
     };
   }
 
+  /**
+   * The one read both `rulesFor` and `surveyFor` go through, **with a report for every row the
+   * contract refuses**.
+   *
+   * Returns the pair rather than forwarding a reporter, and here that is chosen on the consumer's
+   * *shape* rather than for want of one: `surveyFor`'s entire output is a finding list, so a
+   * refused row is not a note on the side — it is part of the answer, and a survey computed over
+   * the readable rows alone is a survey about a different set of rows than the one on disk
+   * (`read-rows.ts`' verifier arm). A callback would hand the fact to `read`'s caller, which is
+   * `surveyFor` itself, and then it would still have to put it somewhere.
+   *
+   * The ceiling refusal stays **ahead** of the conversion: the read fetches `limit + 1` and a
+   * truncated rule set would silently drop whichever rule fell off the end, including an exclusion,
+   * so that is a page-level fault and not a per-row one.
+   *
+   * `load` above is a **single**-row read and deliberately still throws (ADR-0289).
+   */
   private async read(
     flagId: string,
     declared: readonly string[],
     tenantId: string | null,
     limit: number,
-  ): Promise<readonly TargetingRule[]> {
+  ): Promise<RowRead<TargetingRule>> {
     if (limit <= 0) throw new Error("limit must be positive");
     const scope = scopeFilterWithPlatform(tenantId, 3);
     return this.scoped(tenantId, async (tx) => {
@@ -535,7 +644,13 @@ export class PostgresTargetingRuleStore {
         [flagId, [...declared], ...scope.params, limit + 1],
       );
       if (result.rows.length > limit) throw new TargetingRuleSetTooLargeError(flagId, limit);
-      return result.rows.map((row) => rowToTargetingRule(row));
+      // `rule_id` and not the `id` surrogate: it carries the `ftr_…` contract id, is the first
+      // entry in `TARGETING_RULE_COLUMN_NAMES` so it is always selected, and is the id the flag's
+      // own `targetingRuleIds` list names — so it is what places a refused row against the
+      // declared list. Read off the raw row, so it still answers for a row the mapper refused.
+      return readRowsWithUnreadable(result.rows, rowToTargetingRule, (row) =>
+        textIdentity(row, "rule_id"),
+      );
     });
   }
 

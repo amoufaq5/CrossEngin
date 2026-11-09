@@ -1,4 +1,4 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import type { PgConnection, UnreadableRowReporter } from "@crossengin/kernel-pg";
 import type { IncidentRecord } from "@crossengin/incident-response";
 import {
   IncidentExecutor,
@@ -159,8 +159,24 @@ export class PersistentIncidentEngine {
     return this.store.update(next, loaded.revision, this.clock.nowIso());
   }
 
-  async listOpen(limit = 100): Promise<readonly StoredIncident[]> {
-    return this.store.listOpen(limit);
+  /**
+   * Forwards the store's open-incident read, reporter and all.
+   *
+   * The reporter is required here because it is required there and this method forwards rather than
+   * decides: a wrapper that supplied its own would be choosing what a finding is worth on behalf of
+   * a caller it cannot see, which is the defect `UnreadableRowReporter` is required against
+   * (ADR-0364's addendum — a reporter defaulting to "drop it silently" is the defect restated as a
+   * default). Odd-looking in review for one reason worth stating: this wrapper has **no caller**,
+   * so the parameter is a requirement on nobody yet. Deleting it instead is available and is a
+   * separate question — ADR-0337's rule is that a callerless symbol is a question rather than a
+   * verdict, and answering it means deciding whether `PersistentIncidentEngine` is the surface an
+   * incident route will be built on.
+   */
+  async listOpen(
+    onUnreadable: UnreadableRowReporter,
+    limit = 100,
+  ): Promise<readonly StoredIncident[]> {
+    return this.store.listOpen(onUnreadable, limit);
   }
 }
 

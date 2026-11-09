@@ -1,4 +1,12 @@
-import { scopeFilter, type PgConnection } from "@crossengin/kernel-pg";
+import {
+  readRows,
+  readRowsWithUnreadable,
+  scopeFilter,
+  textIdentity,
+  type PgConnection,
+  type RowRead,
+  type UnreadableRowReporter,
+} from "@crossengin/kernel-pg";
 import {
   ACTION_TARGET_STATE,
   LIFECYCLE_ACTIONS,
@@ -75,7 +83,14 @@ import { SET_TENANT_CONTEXT_SQL } from "./tenant-context.js";
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
-/** The most rows one `listForTenant` or `scanAll` page may hold. */
+/**
+ * The most rows one page of this store may hold.
+ *
+ * Read by the three bounded reads — `listForTenant`, `readTrailAsPlatform` and `deletedTenants`.
+ * It named `scanAll` until ADR-0373's migration touched all three, and **there is no `scanAll` on
+ * this store**: one grep hit, the comment itself. The sibling tombstone store has one, which is
+ * where the name came from.
+ */
 export const LIFECYCLE_EVENT_MAX_LIMIT = 500;
 
 export const LIFECYCLE_EVENT_COLUMNS = [
@@ -221,6 +236,20 @@ export function rowToLifecycleEvent(row: Record<string, unknown>): LifecycleEven
   const notes = textOrNull(row["notes"]);
   if (notes !== null) candidate["notes"] = notes;
   return LifecycleEventSchema.parse(candidate);
+}
+
+/**
+ * The handle a refused row is reported under.
+ *
+ * `id` and not `tenant_id`, which is the more useful column for `deletedTenants` — that read's
+ * question is about tenants — and is not the row's business key. The key is what a `WHERE` clause
+ * needs in order to name exactly the offending row, and three reads sharing one identity is what
+ * keeps a finding from meaning two things depending on which read produced it. `id` is
+ * `UUID NOT NULL` and the first member of `LIFECYCLE_EVENT_COLUMNS`, so every one of the three
+ * SELECTs returns it.
+ */
+function lifecycleEventIdentity(row: Record<string, unknown>): string | null {
+  return textIdentity(row, "id");
 }
 
 export interface LifecycleEventInput {
@@ -447,8 +476,26 @@ export class PostgresLifecycleEventStore {
    * Ordered on `(occurred_at, id)` and not `occurred_at` alone: two transitions can share a
    * timestamp — the deletion pipeline's own event and whatever else the same transaction wrote — and
    * a trail ordered on a key with ties reads back in an order the database is free to change.
+   *
+   * **A row the contract refuses is reported and the rest of the page is served** (ADR-0373).
+   * `rowToLifecycleEvent` ends in `LifecycleEventSchema.parse` and that parse is not decorative
+   * here: the catalog's `from_state`/`to_state` CHECKs are wider than the five-state contract, and
+   * `LifecycleEventSchema`'s `superRefine` carries ten cross-field clauses the table holds none of —
+   * so a refusable row is a finding rather than a hypothetical, and `.map()` threw one such row out
+   * of every *other* row's finding.
+   *
+   * It **forwards** rather than returning the pair, because this read's shape is a route's: one
+   * tenant by a strict scope predicate, oldest first, `LIMIT`-bounded — a trail page for display,
+   * not an input to a verdict (`deletedTenants` is the verdict, and it collects). `onUnreadable`
+   * precedes `limit`, which is what the requirement costs: a required parameter cannot follow an
+   * optional one, and `limit` keeps its default. Required and never defaulted, because a reporter
+   * defaulting to "drop it silently" is the defect restated as a default.
    */
-  async listForTenant(tenantId: string, limit = 100): Promise<readonly LifecycleEvent[]> {
+  async listForTenant(
+    tenantId: string,
+    onUnreadable: UnreadableRowReporter,
+    limit = 100,
+  ): Promise<readonly LifecycleEvent[]> {
     const scope = scopeFilter(tenantId);
     const bound = Math.max(1, Math.min(LIFECYCLE_EVENT_MAX_LIMIT, Math.trunc(limit)));
     const result = await this.conn.query<Record<string, unknown>>(
@@ -456,7 +503,7 @@ export class PostgresLifecycleEventStore {
         ` WHERE ${scope.sql} ORDER BY occurred_at, id LIMIT $${(scope.params.length + 1).toString()}`,
       [...scope.params, bound],
     );
-    return result.rows.map((row) => rowToLifecycleEvent(row));
+    return readRows(result.rows, rowToLifecycleEvent, lifecycleEventIdentity, onUnreadable);
   }
 
   /** The most recent event for one tenant, or null. `lastEvent`'s question, asked of the index. */
@@ -483,8 +530,18 @@ export class PostgresLifecycleEventStore {
    *
    * `app.platform_audit` and not a write grant: the policy is `SELECT`-scoped, so the elevation
    * cannot become the ability to forge a transition (ADR-0313).
+   *
+   * Reports a refused row for `listForTenant`'s reason and in its shape — identical SQL but for the
+   * elevation, so the same identity column is in hand and the same consumer argument applies. The
+   * one thing worth naming that the sibling does not have: this is the read whose *audience* is an
+   * operator looking at a trail after the tenant is gone, which is the moment a row the contract
+   * refuses is most worth hearing about and the moment a dropped one is least recoverable.
    */
-  async readTrailAsPlatform(tenantId: string, limit = 100): Promise<readonly LifecycleEvent[]> {
+  async readTrailAsPlatform(
+    tenantId: string,
+    onUnreadable: UnreadableRowReporter,
+    limit = 100,
+  ): Promise<readonly LifecycleEvent[]> {
     const scope = scopeFilter(tenantId);
     const bound = Math.max(1, Math.min(LIFECYCLE_EVENT_MAX_LIMIT, Math.trunc(limit)));
     return this.conn.transaction(async (tx) => {
@@ -494,7 +551,7 @@ export class PostgresLifecycleEventStore {
           ` WHERE ${scope.sql} ORDER BY occurred_at, id LIMIT $${(scope.params.length + 1).toString()}`,
         [...scope.params, bound],
       );
-      return result.rows.map((row) => rowToLifecycleEvent(row));
+      return readRows(result.rows, rowToLifecycleEvent, lifecycleEventIdentity, onUnreadable);
     });
   }
 
@@ -506,8 +563,19 @@ export class PostgresLifecycleEventStore {
    * This is the read that makes the table's purpose true: a tenant with a trail ending in
    * `execute_deletion` and no `meta.tenants` row **is** a tenant that was deleted, and one with no
    * row and no trail is one that never existed. Nothing else in the database answers that.
+   *
+   * **The verifier arm, and the only one of the three reads where that is true of a lifecycle
+   * event** (ADR-0373). The two siblings serve a page to a reader; this one answers a question whose
+   * answer is a *set* — which tenants were deleted — so a refused row is not a note on the side, it
+   * is a tenant this read is about and cannot name. Dropping it answers the question about a
+   * different set of rows than the one on disk, and in the direction that reports fewer deletions
+   * than happened: a refused row is indistinguishable from a tenant that never existed, which is
+   * the exact conflation the table exists to end. So the unreadable rows come back beside the
+   * records and the caller computing the verdict is handed both.
+   *
+   * It takes no reporter and so breaks no caller positionally: the change is the return type.
    */
-  async deletedTenants(limit = 100): Promise<readonly LifecycleEvent[]> {
+  async deletedTenants(limit = 100): Promise<RowRead<LifecycleEvent>> {
     const bound = Math.max(1, Math.min(LIFECYCLE_EVENT_MAX_LIMIT, Math.trunc(limit)));
     return this.conn.transaction(async (tx) => {
       await tx.query("SELECT set_config('app.platform_audit', 'on', true)");
@@ -516,7 +584,7 @@ export class PostgresLifecycleEventStore {
           " WHERE to_state = 'deleted' ORDER BY occurred_at DESC, id DESC LIMIT $1",
         [bound],
       );
-      return result.rows.map((row) => rowToLifecycleEvent(row));
+      return readRowsWithUnreadable(result.rows, rowToLifecycleEvent, lifecycleEventIdentity);
     });
   }
 }

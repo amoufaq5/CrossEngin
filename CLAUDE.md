@@ -1713,12 +1713,14 @@ report; `apps/operate-web` has none).
   ADR-0374 migrated `listRecent` and `getBySequence`: both figures move with every slice that
   migrates a store, which is why this entry says to **re-derive them by calling the module** —
   `scanWorkspacePageReads(readWorkspaceSources().files)` over `VERDICT_NEEDS_DECLARATION` — rather
-  than reading them here. As of ADR-0375 the module answers 907 files, 111 sites, 65 needing a
-  declaration, 65 declared, 42 of them `unmigrated`, and `{guarded_by_primitive: 16,
-  guarded_in_place: 2, record_throwing: 50, record_total: 11, record_dropping: 2, projection: 30}` —
-  `scanCheckpoints` is the new `guarded_by_primitive` member, so it needs no declaration.
-  ADR-0374's `906 files, 110 sites` was **right when it was written** and moved by exactly one of
-  each; ADR-0375's first draft of this sentence recorded **943**, which is
+  than reading them here. As of **ADR-0405** the module answers 925 files, 112 sites, **32** needing
+  a declaration, 32 declared, **5** of them `unmigrated`, and `{guarded_by_primitive: 50,
+  guarded_in_place: 2, record_throwing: 19, record_total: 11, projection: 30}` — `record_dropping`
+  has **no members at all** now, which is why the reason `row_dropped_deliberately` is **deleted**
+  rather than kept (ADR-0375's rule: a judgement with no case left is not a judgement), so a silent
+  dropper written tomorrow can only be `unmigrated` — which demands its consequence — or migrated.
+  ADR-0374's `906 files, 110 sites` and ADR-0375's `907 / 111 / 65 / 42` were each **right when
+  written**; ADR-0375's first draft of this sentence recorded **943**, which is
   `readWorkspaceSources().files.length` — the *input* including tests, where `scan.files` is the
   module's answer — and then "corrected" the earlier figure by comparing input against answer. So
   the paragraph whose whole content is *re-derive* argued from a quantity nothing produces, and
@@ -3558,6 +3560,74 @@ report; `apps/operate-web` has none).
   parser cannot read must come back as **unreadable** and never as **absent**, which is
   `pg-record-reads.ts`' silent skip one file in; the fix is a scanner change, because nine rules
   read that parser.
+
+  ADR-0405 is the migration ADR-0373 made necessary, and the class is the one that ADR named: **a
+  page one bad row takes with it**. That increment built the primitive, wrote the rule and closed 17
+  sites; what it left was a backlog of **42** reads parked `unmigrated`, each declaration naming what
+  a refused row costs today, plus **2** parked `row_dropped_deliberately` — the reason that
+  *endorsed* the silence. **37 of the 44 are migrated** and the backlog is **5 of 32 declared sites**;
+  re-derive those figures by calling the module rather than reading them here, because every slice
+  that touches a store moves them and they have now gone stale twice.
+  **The scope was 44 and the plan said 42**, which is the correction that mattered: the two
+  `row_dropped_deliberately` members are the same class by a different route, and they are the
+  *sharper* pair — a throwing read loses the page loudly where those two lost the row and reported
+  success. And **`readRows`' identity helpers refused a typed row**, which ADR-0403 had to close
+  first or four of these sites would have spelled a local `rowKey` by hand, as one package had
+  already been forced into.
+  **Six of the 44 are deliberately not migrated, and that is the decision rather than the work
+  undone.** For six `operate-server` list routes a *short* page is the wrong answer: on the platform
+  console's tenant list a missing row reads as a tenant that was never provisioned, and a membership
+  list has no sibling count tile to cross-check against, so a short page is undetectable from the
+  console. The store keeps throwing and the handler catches the **store call alone** and answers a
+  named code — which is the shape ADR-0313 already chose for five sites and the vocabulary already
+  had a reason for (`page_refusal_declared`); what was missing was the catch, and on
+  `ai.manifests.list` — the one of them live on a flag the shipped compose passes — there was **no
+  catch at all**, so a stored proposal the contract no longer accepts escaped as an unclassified 500.
+  The scoping is the half a wider `try` would lose, and writing the test for it **refuted a comment
+  written minutes earlier**: `notification-routes`' proposal join catches its *own* throw and answers
+  `proposal: null`, so the two conditions are distinguished in **both** directions and the comment
+  claiming the throw propagates was false — this file's most-found documentation shape, caught by the
+  test rather than by the author.
+  **`row_dropped_deliberately` is deleted**, on ADR-0375's rule that a judgement with no case left is
+  not a judgement — and the rule's own test already encoded it, by asserting that no reason is a dead
+  branch of the vocabulary. The **verdict** `record_dropping` stays, because it is the opposite shape:
+  the scanner can still find a silently dropping conversion and the next one written must read as
+  *that* rather than as `record_total` or as nothing. What changed is what such a site may be
+  declared as — only `unmigrated`, which demands its consequence — so a new dropper can be parked
+  with its cost stated and can no longer be blessed. That is this file's refusal-versus-judgement
+  distinction applied: a hatch is justified where the degraded state is coherent (ADR-0338's
+  plaintext PHI) and not where it **is** the defect (ADR-0340's unevaluated obligation).
+  Three things were sharper than the migration. **A mechanical `readRows` in `claimQueued` would have
+  been worse than the throw it replaced**: the `.map` sat *after* the claiming `UPDATE`, so a dropped
+  row would be left in `sending` with nobody to deliver it and no retry selecting it — permanently
+  stuck, where the throw at least rolled the claim back. The mapping runs first now and the `UPDATE`
+  claims only the rows that read, with two tests pinning it (the `UPDATE`'s parameters exclude the
+  refused row, and the row is still `queued`). **A mutation that substitutes another invalid value is
+  not a mutation**: flipping a membership fixture's `status` from `not_a_status` to `suspended` left
+  the refusal test passing and read as vacuity, because `suspended` is a *user* status and
+  `MEMBERSHIP_STATUSES` is `["active","invited","revoked"]` — the mutation had tested nothing, and
+  the wrong conclusion was the alarming one. And **two existing tests pinned the silence as the
+  intended behaviour**, both titled *"drops a row that fails the schema…"*, which is ADR-0372's class
+  for the **eighth** time in this run; both are rewritten rather than deleted, because keeping the
+  page is correct and only the silence was the defect.
+  **Verified live on PG 16.15 as the non-owner `serving` role**, one arm per disposition with its own
+  non-vacuity control, 19 assertions — and the run taught two things no offline test could, both
+  about the *control* rather than the subject. **An arm that reads 0 rows is vacuous, not failing**:
+  arm 1 first read through `listForTenant`, which is a bare `this.conn.query`, so with no tenant
+  context the isolation policy answered 0 rows and `records=0 reported=0` was byte-identical to the
+  reporter never having been called; `readTrailAsPlatform` claims `app.platform_audit` in its own
+  transaction and is the read that exercises the forwarding *and* returns rows to a least-privilege
+  session (ADR-0318's reason for it). And **both controls originally deleted the corrupted row and
+  matched nothing**: these two tables are `PLATFORM_RECORD_TABLES` members, so since ADR-0400 each
+  carries a restrictive `FOR DELETE USING (false)` policy and a tenant-context `DELETE` answers
+  `DELETE 0` with no error code — that ADR's own open question 3, met head-on. Repairing in place is
+  the better control regardless, because the clean read is then over the **same** population as the
+  dirty one rather than a smaller one. One measurement rode along: `public_key_base64 := ''` is the
+  **only** catalog-admitted / contract-refused value on `meta.crypto_keys` (the other six columns all
+  carry a CHECK), and the first corruption — `'not base64 at all !!!'` — is one the contract
+  **admits**, since nothing in the record asserts base64-ness, so the arm reported `unreadable=0` and
+  read as the pair being broken. **A corruption the contract accepts is not a corruption**, which is
+  register P2.12b's population measured from the inside on one table.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -9572,14 +9642,19 @@ opened them.
   type, with two shapes the store's contract picks between (**forward** a reporter, or return the
   refused rows **beside** the records when the consumer is a verifier), and
   `packages/testing/src/strategy/pg-unreadable-rows.ts` is the twelfth rule over the whole class.
-  What remains, in order: **(1)** **42 of the 65 declared sites are `unmigrated`** (re-derived from
-  the module after ADR-0374, which closed `forensics-pg::checkpoint-store::listRecent` — the figure
-  this entry carried, 44 of 67, was right when written and wrong one increment later, which is the
-  entry above's own warning landing on this one) — the backlog,
-  each naming what a refused row costs today, and the sharpest are `column-store::listPageOn` (every
-  tenant list request), `crypto-pg::listKeys` and
-  `access-reviews-runtime-pg::evidence-store::listByTenant`; nine are latent on declared-callerless
-  stores and say so. **(2)** **nothing fences a consumer that reads `.records` and drops
+  What remains, in order: **(1)** **5 of the 32 declared sites are `unmigrated`** — the backlog, and
+  **ADR-0405 closed 37 of the 42**, so the three sharpest members this entry named are gone
+  (`crypto-pg::listKeys` and `evidence-store::listByTenant` migrated; `column-store::listPageOn`,
+  *every tenant list request*, is the one of the three still open and is now the sharpest thing left
+  in the class). The five that remain are declared with their reasons rather than parked: two are
+  **not losses at all** (`incident-response::replayer` and
+  `definition-store::loadEngineDefinitions` already report through the primitive's own helpers, so
+  the cost is a second spelling rather than a dropped row), one is **latent** on a
+  declared-callerless store (`route-registry::loadCompiled`), and two are real —
+  `column-store::listPageOn` and `ai-architect-pg::tool-invocation-store::listForSession`. Every
+  figure in this item has now gone stale twice (44 of 67 → 42 of 65 → 5 of 32), which is the entry
+  above's own warning landing on this one for the second time: **call the module.**
+  **(2)** **nothing fences a consumer that reads `.records` and drops
   `.unreadable`** — the direction is right and the figures are not reproducible with a plain grep
   (one pass gets 50 against 45, another 57 against 50, depending on an unstated filter), so what is
   established is the shape and not a count. `audit-log-store::listForTenant` is the live instance,
@@ -14091,7 +14166,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 398 records; 319 Accepted, 79 Proposed (the
+title or status change cannot drift. 399 records; 320 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

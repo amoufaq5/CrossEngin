@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 
 import { fakePg } from "./test-fakes.js";
 import { PostgresInstallationStore } from "./installation-store.js";
+import { UnreadableInstallationRowsError, type InstallationRow } from "./records.js";
 import { PersistentMarketplaceInstallEngine, type PersistentInstallRequest } from "./persistent-engine.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
@@ -66,11 +67,15 @@ function persistentRequest(overrides: Partial<PackManifest> = {}): PersistentIns
   };
 }
 
-function makeEngine(): { engine: PersistentMarketplaceInstallEngine; store: PostgresInstallationStore } {
-  const { conn } = fakePg();
+function makeEngine(): {
+  engine: PersistentMarketplaceInstallEngine;
+  store: PostgresInstallationStore;
+  rows: Map<string, InstallationRow>;
+} {
+  const { conn, rows } = fakePg();
   const store = new PostgresInstallationStore(conn);
   const eng = new PersistentMarketplaceInstallEngine(store, { clock: new FixedClock("2026-05-16T12:00:00.000Z") });
-  return { engine: eng, store };
+  return { engine: eng, store, rows };
 }
 
 describe("PersistentMarketplaceInstallEngine", () => {
@@ -94,7 +99,7 @@ describe("PersistentMarketplaceInstallEngine", () => {
     expect(second.outcome).toBe("rejected");
     if (second.outcome !== "rejected") return;
     expect(second.reason).toBe("already_installed");
-    expect((await store.listForTenant(TENANT))).toHaveLength(1);
+    expect((await store.listForTenant(TENANT)).records).toHaveLength(1);
   });
 
   it("persists the full grant → install → uninstall lifecycle", async () => {
@@ -114,11 +119,39 @@ describe("PersistentMarketplaceInstallEngine", () => {
     expect((await store.get(TENANT, gone.id))?.status).toBe("uninstalled");
   });
 
+  it("refuses the admission when the tenant's existing set holds a row the contract refuses", async () => {
+    // The sharpest hazard the migration could have created. `engine.admit`'s first gate reads
+    // `existing` for an active installation of this pack, so a dropped row does not shorten a list,
+    // it admits a **second** installation of a pack the tenant already has. `.map(rowToInstallation)`
+    // threw here before, and the refusal preserves that rather than relaxing it into a wrong answer.
+    const { engine, rows } = makeEngine();
+    const first = await engine.install(persistentRequest());
+    if (first.outcome !== "admitted") throw new Error("expected admitted");
+    await engine.complete(first.installation, "1.0.0", USER);
+    const stored = rows.get(first.installation.id);
+    if (stored === undefined) throw new Error("expected the row to be persisted");
+    // `InstallationRow.status` is a bare `string`, so this is a drift the column's own CHECK admits
+    // and the contract refuses — ADR-0289's shape, with no cast needed to express it.
+    rows.set(stored.id, { ...stored, status: "not_a_status" });
+
+    await expect(engine.install(persistentRequest())).rejects.toThrow(
+      UnreadableInstallationRowsError,
+    );
+    await expect(engine.install(persistentRequest())).rejects.toThrow(
+      /1 installation row\(s\) could not be represented/,
+    );
+    // The refusal names the row's id and its cause, and never the value that caused it.
+    await expect(engine.install(persistentRequest())).rejects.toThrow(
+      /status: invalid_enum_value/,
+    );
+    await expect(engine.install(persistentRequest())).rejects.not.toThrow(/not_a_status/);
+  });
+
   it("writes nothing when admission is rejected", async () => {
     const { engine, store } = makeEngine();
     const other = generateEd25519Keypair();
     const decision = await engine.install({ ...persistentRequest(), publisherPublicKeyBase64: other.publicKeyBase64 });
     expect(decision.outcome).toBe("rejected");
-    expect(await store.listForTenant(TENANT)).toEqual([]);
+    expect((await store.listForTenant(TENANT)).records).toEqual([]);
   });
 });

@@ -1,4 +1,9 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  readRows,
+  textIdentity,
+  type PgConnection,
+  type UnreadableRowReporter,
+} from "@crossengin/kernel-pg";
 import {
   IncidentCommunicationSchema,
   type IncidentCommunication,
@@ -186,6 +191,21 @@ export function rowToComms(row: Record<string, unknown>): StoredComms {
   };
 }
 
+/**
+ * The handle a refused comms row is reported under, for all three list reads.
+ *
+ * One helper rather than three inline arrows, following `drill-store.ts`: the three reads project
+ * the same `COMMS_COLUMNS` and so share one business key, and three spellings of one column name is
+ * where two of them eventually disagree (`read-rows.ts`' own argument for not copying the loop).
+ *
+ * `communication_id` is TEXT NOT NULL UNIQUE **with no pattern CHECK**, so `''` is storable and
+ * `textIdentity`'s length test is load-bearing here rather than defensive — a blanked key answers
+ * `null`, which is ADR-0331's *the row does not name one* and not a typo.
+ */
+function commsIdentity(row: Record<string, unknown>): string | null {
+  return textIdentity(row, "communication_id");
+}
+
 export class CommsRevisionConflictError extends Error {
   constructor(
     readonly communicationId: string,
@@ -285,9 +305,25 @@ export class PostgresCustomerCommsStore {
     return row === undefined ? null : rowToComms(row);
   }
 
-  /** Every communication for an incident, retracted ones included, in publication order. */
+  /**
+   * Every communication for an incident, retracted ones included, in publication order.
+   *
+   * `onUnreadable` is required and precedes `limit`, which is what the requirement costs: a
+   * required parameter cannot follow a defaulted one, and `limit` keeps its default. It reports
+   * rather than returning the pair because the consumer this read is for is a **route** — the
+   * incident's public notice history, which a human reads — and `read-rows.ts` names the reporter
+   * as the shape for a scheduler or a route, with the pair reserved for a verifier whose verdict is
+   * about the whole set. The verifier for this table does not exist and would not read through this
+   * store if it did (`replayIncidents` reads `meta.incidents` directly).
+   *
+   * What it buys is latent and says so: nothing constructs this store (see the class doc), so
+   * before this change the `.map` could take a page down and no deployment could reach it. The
+   * reason to migrate anyway is that the required parameter is what makes the next caller decide,
+   * where a `.map` would have let the first route inherit the defect.
+   */
   async listForIncident(
     incidentId: string,
+    onUnreadable: UnreadableRowReporter,
     limit = 100,
   ): Promise<readonly StoredComms[]> {
     if (limit <= 0) throw new Error("limit must be positive");
@@ -298,7 +334,7 @@ export class PostgresCustomerCommsStore {
        LIMIT $2`,
       [incidentId, limit],
     );
-    return result.rows.map((row) => rowToComms(row));
+    return readRows(result.rows, rowToComms, commsIdentity, onUnreadable);
   }
 
   /**
@@ -308,6 +344,7 @@ export class PostgresCustomerCommsStore {
    */
   async listPublishedForIncident(
     incidentId: string,
+    onUnreadable: UnreadableRowReporter,
     limit = 100,
   ): Promise<readonly StoredComms[]> {
     if (limit <= 0) throw new Error("limit must be positive");
@@ -318,15 +355,26 @@ export class PostgresCustomerCommsStore {
        LIMIT $2`,
       [incidentId, limit],
     );
-    return result.rows.map((row) => rowToComms(row));
+    return readRows(result.rows, rowToComms, commsIdentity, onUnreadable);
   }
 
   /**
    * Breach notifications for an incident. Separate from `listForIncident` because this is the set a
    * regulator asks about, and the deadline each one was measured against is on the row.
+   *
+   * **A reporter and not the pair, and this is the one read in the store where that was a
+   * judgement.** "The set a regulator asks about" is verifier-shaped language, and
+   * `readRowsWithUnreadable` is what a verifier wants — but the thing a verifier here would need to
+   * verify is *timeliness*, and `IncidentCommunicationSchema` refuses a `publishedAt` later than
+   * `breachNotificationDeadlineAt` outright (see the class doc), so the late notification is not a
+   * row this read refuses, it is a row the table cannot hold. A pair would hand a caller a list of
+   * refused rows and invite the reading that the absent ones are the late ones, which is false in
+   * the direction that matters. So the refusal is reported and the Article 33 question stays open
+   * where register P2.13 records it.
    */
   async listBreachNotifications(
     incidentId: string,
+    onUnreadable: UnreadableRowReporter,
     limit = 100,
   ): Promise<readonly StoredComms[]> {
     if (limit <= 0) throw new Error("limit must be positive");
@@ -337,6 +385,6 @@ export class PostgresCustomerCommsStore {
        LIMIT $2`,
       [incidentId, limit],
     );
-    return result.rows.map((row) => rowToComms(row));
+    return readRows(result.rows, rowToComms, commsIdentity, onUnreadable);
   }
 }

@@ -1,4 +1,9 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  readRows,
+  textIdentity,
+  type PgConnection,
+  type UnreadableRowReporter,
+} from "@crossengin/kernel-pg";
 import { PostmortemSchema, type Postmortem } from "@crossengin/incident-response";
 
 const SCHEMA = "meta";
@@ -186,6 +191,19 @@ export function rowToPostmortem(row: Record<string, unknown>): StoredPostmortem 
   };
 }
 
+/**
+ * The handle a refused postmortem row is reported under, for both list reads.
+ *
+ * `postmortem_id` is TEXT NOT NULL UNIQUE with `check: postmortem_id ~ '^PM-[0-9]{4}-[0-9]{4,8}$'`,
+ * so the handle a finding names is always well-formed and always resolves to one row. What the rows
+ * this identifies have in common is worth knowing before reading a finding: `rowToPostmortem`
+ * parses the four-eyes rule, so a refused row is frequently a *tampered attestation* rather than a
+ * mangled field — which is exactly the row a sweep must report rather than drop.
+ */
+function postmortemIdentity(row: Record<string, unknown>): string | null {
+  return textIdentity(row, "postmortem_id");
+}
+
 export class PostmortemRevisionConflictError extends Error {
   constructor(
     readonly postmortemId: string,
@@ -289,6 +307,7 @@ export class PostgresPostmortemStore {
    */
   async listForIncident(
     incidentId: string,
+    onUnreadable: UnreadableRowReporter,
     limit = 100,
   ): Promise<readonly StoredPostmortem[]> {
     if (limit <= 0) throw new Error("limit must be positive");
@@ -299,7 +318,7 @@ export class PostgresPostmortemStore {
        LIMIT $2`,
       [incidentId, limit],
     );
-    return result.rows.map((row) => rowToPostmortem(row));
+    return readRows(result.rows, rowToPostmortem, postmortemIdentity, onUnreadable);
   }
 
   /**
@@ -307,9 +326,15 @@ export class PostgresPostmortemStore {
    *
    * The predicate matches `idx_incident_postmortems_unpublished` exactly, which is partial on these
    * two statuses and ordered by `created_at`. Spelling it any other way leaves the index unusable
-   * for the one query it exists for.
+   * for the one query it exists for — so `onUnreadable` is the only thing this migration adds here,
+   * and the `WHERE` is untouched by design.
+   *
+   * A reporter rather than the pair: a review queue is worked by a human, which is the route case.
    */
-  async listUnpublished(limit = 100): Promise<readonly StoredPostmortem[]> {
+  async listUnpublished(
+    onUnreadable: UnreadableRowReporter,
+    limit = 100,
+  ): Promise<readonly StoredPostmortem[]> {
     if (limit <= 0) throw new Error("limit must be positive");
     const result = await this.conn.query<Record<string, unknown>>(
       `SELECT ${POSTMORTEM_COLUMNS} FROM ${SCHEMA}.${TABLE}
@@ -318,6 +343,6 @@ export class PostgresPostmortemStore {
        LIMIT $1`,
       [limit],
     );
-    return result.rows.map((row) => rowToPostmortem(row));
+    return readRows(result.rows, rowToPostmortem, postmortemIdentity, onUnreadable);
   }
 }

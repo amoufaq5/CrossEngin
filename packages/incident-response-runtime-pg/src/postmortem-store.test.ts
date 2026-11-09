@@ -11,7 +11,14 @@ import {
   postmortemUpdateAssignments,
   rowToPostmortem,
 } from "./postmortem-store.js";
-import { EMPTY, mockConnection, respondTo, type Captured } from "./test-fakes.js";
+import {
+  EMPTY,
+  EXPECT_ALL_READABLE,
+  collectUnreadable,
+  mockConnection,
+  respondTo,
+  type Captured,
+} from "./test-fakes.js";
 
 const T0 = "2026-09-30T10:00:00.000Z";
 const T1 = "2026-10-02T10:00:00.000Z";
@@ -206,7 +213,11 @@ describe("listForIncident", () => {
   it("filters by incident, newest first", async () => {
     const capture: Captured[] = [];
     const conn = mockConnection(capture, respondTo([["SELECT", EMPTY]]));
-    await new PostgresPostmortemStore(conn).listForIncident("INC-2026-0007", 5);
+    await new PostgresPostmortemStore(conn).listForIncident(
+      "INC-2026-0007",
+      EXPECT_ALL_READABLE,
+      5,
+    );
     expect(capture[0]?.sql).toContain("WHERE incident_id = $1");
     expect(capture[0]?.sql).toContain("ORDER BY created_at DESC");
     expect(capture[0]?.params).toEqual(["INC-2026-0007", 5]);
@@ -215,22 +226,53 @@ describe("listForIncident", () => {
   it("defaults the limit to 100", async () => {
     const capture: Captured[] = [];
     const conn = mockConnection(capture, respondTo([["SELECT", EMPTY]]));
-    await new PostgresPostmortemStore(conn).listForIncident("INC-2026-0007");
+    await new PostgresPostmortemStore(conn).listForIncident(
+      "INC-2026-0007",
+      EXPECT_ALL_READABLE,
+    );
     expect(capture[0]?.params?.[1]).toBe(100);
   });
 
   it("rejects a non-positive limit before querying", async () => {
     const capture: Captured[] = [];
     const store = new PostgresPostmortemStore(mockConnection(capture));
-    await expect(store.listForIncident("INC-2026-0007", 0)).rejects.toThrow(/positive/);
+    await expect(
+      store.listForIncident("INC-2026-0007", EXPECT_ALL_READABLE, 0),
+    ).rejects.toThrow(/positive/);
     expect(capture).toHaveLength(0);
   });
 
   it("re-validates every row it returns", async () => {
     const rows = [postmortemRow(published()), postmortemRow(postmortem())];
     const conn = mockConnection(undefined, respondTo([["SELECT", { rows, rowCount: 2 }]]));
-    const loaded = await new PostgresPostmortemStore(conn).listForIncident("INC-2026-0007");
+    const loaded = await new PostgresPostmortemStore(conn).listForIncident(
+      "INC-2026-0007",
+      EXPECT_ALL_READABLE,
+    );
     expect(loaded.map((p) => p.record.status)).toEqual(["published", "drafting"]);
+  });
+
+  it("reports a row whose four-eyes attestation no longer holds, and keeps the rest", async () => {
+    // A published postmortem needs two reviewers, neither of them the author. No CHECK holds that,
+    // so a row edited to name the author as a reviewer stores and only the re-parse refuses it —
+    // which makes a refused row here evidence of a tampered attestation rather than a mangled
+    // field, and precisely the row a sweep must report rather than drop.
+    const bad = postmortemRow(published({ id: "PM-2026-0001" }));
+    bad["reviewers"] = JSON.stringify(["author-1", "reviewer-2"]);
+    const rows = [bad, postmortemRow(published({ id: "PM-2026-0002" }))];
+    const conn = mockConnection(undefined, respondTo([["SELECT", { rows, rowCount: 2 }]]));
+    const seen = collectUnreadable();
+
+    const loaded = await new PostgresPostmortemStore(conn).listForIncident(
+      "INC-2026-0007",
+      seen.report,
+    );
+
+    expect(loaded.map((p) => p.record.id)).toEqual(["PM-2026-0002"]);
+    expect(seen.rows).toHaveLength(1);
+    expect(seen.rows[0]?.identity).toBe("PM-2026-0001");
+    // No reviewer name reaches the detail: it is the path and the issue code (ADR-0403).
+    expect(seen.rows[0]?.detail).not.toContain("author-1");
   });
 });
 
@@ -238,7 +280,7 @@ describe("listUnpublished", () => {
   it("spells the predicate exactly as idx_incident_postmortems_unpublished does", async () => {
     const capture: Captured[] = [];
     const conn = mockConnection(capture, respondTo([["SELECT", EMPTY]]));
-    await new PostgresPostmortemStore(conn).listUnpublished();
+    await new PostgresPostmortemStore(conn).listUnpublished(EXPECT_ALL_READABLE);
     // Verbatim from the index's `where` in meta-schema.ts, plus its `created_at` ordering.
     expect(capture[0]?.sql).toContain("WHERE status IN ('drafting', 'review')");
     expect(capture[0]?.sql).toContain("ORDER BY created_at ASC");

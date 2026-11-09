@@ -286,6 +286,43 @@ describe("design-review-routes — list", () => {
     expect((data[1]?.["risk"] as RiskReportLike).level).toBe("high");
   });
 
+  it("refuses the page rather than shortening it when a stored proposal no longer parses", async () => {
+    const { ctx, store } = makeCtx();
+    store.seed();
+    const failing: DesignReviewStoreLike = {
+      ...store,
+      list: async (): Promise<DesignReviewListPageLike> => {
+        throw new Error("stored design review invalid");
+      },
+      getById: (id) => store.getById(id),
+      counts: () => store.counts(),
+      approve: (id, input) => store.approve(id, input),
+      reject: (id, input) => store.reject(id, input),
+    };
+    const out = await call({ ...ctx, store: failing }, "platform.designReviews.list");
+    expect(out.status).toBe(500);
+    expect(out.body["error"]).toBe("design_review_page_unreadable");
+    // No store text reaches the caller, and no partial page either.
+    expect(JSON.stringify(out.body)).not.toContain("stored design review invalid");
+    expect(out.body["data"]).toBeUndefined();
+  });
+
+  it("does not launder a risk-assessor throw into the page refusal", async () => {
+    // The `try` is scoped to the store call alone, which is the half a wider `try` would lose:
+    // a throw from `assessRisk` is a different condition and must not read as an unreadable row.
+    const { ctx, store } = makeCtx();
+    store.seed();
+    const exploding = {
+      ...ctx,
+      assessRisk: (): RiskReportLike => {
+        throw new Error("risk assessor down");
+      },
+    };
+    await expect(call(exploding, "platform.designReviews.list")).rejects.toThrow(
+      /risk assessor down/,
+    );
+  });
+
   it("keeps the review fields the queue UI needs on each stripped item", async () => {
     const { ctx, store } = makeCtx();
     const seeded = store.seed({ reviewStatus: "approved", reviewedBy: REVIEWER, reviewNotes: "ok" });

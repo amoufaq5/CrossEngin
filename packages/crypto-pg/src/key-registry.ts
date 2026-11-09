@@ -1,4 +1,10 @@
-import { assertScopedWriteLanded, type PgConnection } from "@crossengin/kernel-pg";
+import {
+  assertScopedWriteLanded,
+  readRowsWithUnreadable,
+  textIdentity,
+  type PgConnection,
+  type RowRead,
+} from "@crossengin/kernel-pg";
 import type { KeyAlgorithm, KeyPurpose } from "@crossengin/crypto";
 
 import {
@@ -160,13 +166,32 @@ export class PostgresKeyRegistry {
 
   async listActive(
     filter: ListKeyRegistryFilter = {},
-  ): Promise<readonly KeyRegistryRecord[]> {
+  ): Promise<RowRead<KeyRegistryRecord>> {
     return this.listKeys({ ...filter, status: "active" });
   }
 
+  /**
+   * Every registered key the filter admits, with a report for every row the contract refuses.
+   *
+   * It returns the pair rather than forwarding a reporter, and the read is unbounded — `ORDER BY
+   * created_at DESC, key_id ASC` with no `LIMIT` — so the declared consequence held exactly: one
+   * refused row made **every other registered key** unreadable, and this is the directory a chain
+   * entry's `signingKeyFingerprint` resolves against (ADR-0332), so the thing it took away is the
+   * ability to say which key signed what.
+   *
+   * The pair and not a forwarded reporter, for a reason about today and not about the shape: both
+   * arms are mechanically expressible with zero callers — `listKeys(filter, onUnreadable)` plus
+   * `listActive` threading it is two signatures and one delegation — so this is a judgement about
+   * the consumer that will arrive rather than an impossibility. A key registry read is the input to
+   * a *verdict* (which fingerprint resolves, whether a key is active), and a verdict computed over
+   * the readable rows alone is a verdict about a different set of keys than the one on disk.
+   *
+   * The point lookups `getByKeyId` and `getByFingerprint` are deliberately **not** swept in: a
+   * caller that named one key must not be served past its refusal (ADR-0289).
+   */
   async listKeys(
     filter: ListKeyRegistryFilter & { readonly status?: KeyRegistryStatus } = {},
-  ): Promise<readonly KeyRegistryRecord[]> {
+  ): Promise<RowRead<KeyRegistryRecord>> {
     const conditions: string[] = [];
     const params: unknown[] = [];
     // An absent `tenantId` already meant the platform scope — `scoped(filter.tenantId ?? null)`
@@ -200,7 +225,9 @@ export class PostgresKeyRegistry {
          ORDER BY created_at DESC, key_id ASC`,
         params,
       );
-      return result.rows.map((row) => rowToKeyRegistryRecord(row));
+      return readRowsWithUnreadable(result.rows, rowToKeyRegistryRecord, (row) =>
+        textIdentity(row, "key_id"),
+      );
     });
   }
 

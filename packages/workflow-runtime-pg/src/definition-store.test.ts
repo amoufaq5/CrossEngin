@@ -13,6 +13,7 @@ import {
   WORKFLOW_DEFINITION_JSONB_COLUMNS,
   WORKFLOW_DEFINITION_PARAM_COUNT,
   SET_PLATFORM_CONFIG_WRITE_SQL,
+  UnreadableDefinitionRowsError,
   WorkflowDefinitionConflictError,
   assertTenantId,
   definitionPlaceholders,
@@ -613,12 +614,90 @@ describe("PostgresWorkflowDefinitionStore reads", () => {
           }
         : EMPTY,
     );
-    const summaries = await new PostgresWorkflowDefinitionStore(conn).listByKey(
+    const read = await new PostgresWorkflowDefinitionStore(conn).listByKey(
       "purchase.approval",
       TENANT,
     );
-    expect(summaries.map((s) => s.version)).toEqual(["1.0.0", "1.1.0"]);
-    expect(summaries[0]?.contentSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(read.records.map((s) => s.version)).toEqual(["1.0.0", "1.1.0"]);
+    expect(read.records[0]?.contentSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(read.unreadable).toEqual([]);
+  });
+
+  it("listByKey reports a refused version and keeps the key's other versions", async () => {
+    // It used to `.map`, so one stored row the contract refuses took every *other* version of the
+    // key with it — and on the publication path below that is the dangerous direction, because the
+    // planner's whole input is this list.
+    const conn = mockConnection((sql) =>
+      sql.includes("WHERE definition_key = $1")
+        ? {
+            rows: [
+              row(definition({ id: "wfd_abcdef09" }), { status: "not-a-status" }),
+              row(definition({ id: "wfd_abcdef02", version: "1.1.0" })),
+            ],
+            rowCount: 2,
+          }
+        : EMPTY,
+    );
+    const read = await new PostgresWorkflowDefinitionStore(conn).listByKey(
+      "purchase.approval",
+      TENANT,
+    );
+    expect(read.records.map((s) => s.id)).toEqual(["wfd_abcdef02"]);
+    expect(read.unreadable).toEqual([
+      { identity: "wfd_abcdef09", detail: "status: invalid_enum_value" },
+    ]);
+  });
+
+  it("discloses no value from a refused version beyond its definition id", async () => {
+    const conn = mockConnection((sql) =>
+      sql.includes("WHERE definition_key = $1")
+        ? {
+            rows: [
+              row(
+                definition({
+                  id: "wfd_abcdef09",
+                  label: "Payroll approval — EU payroll admins",
+                }),
+                { status: "not-a-status" },
+              ),
+            ],
+            rowCount: 1,
+          }
+        : EMPTY,
+    );
+    const read = await new PostgresWorkflowDefinitionStore(conn).listByKey(
+      "purchase.approval",
+      TENANT,
+    );
+    const rendered = JSON.stringify(read.unreadable);
+    expect(rendered).toContain("wfd_abcdef09");
+    expect(rendered).not.toContain("Payroll approval");
+    expect(rendered).not.toContain("not-a-status");
+  });
+
+  it("refuses a publication rather than planning it against a short list", async () => {
+    // `planDefinitionPublication` folds every row sharing the key into five findings, so a dropped
+    // row admits a publication the full set would have refused. A throw and not a
+    // `decision: "refused"`: that channel answers about the *proposal*, and this cause is another
+    // version's row the caller neither authored nor can repair.
+    const capture: Recorded[] = [];
+    const conn = mockConnection(
+      (sql) =>
+        sql.includes("WHERE definition_key = $1")
+          ? {
+              rows: [row(definition({ id: "wfd_abcdef09" }), { status: "not-a-status" })],
+              rowCount: 1,
+            }
+          : EMPTY,
+      capture,
+    );
+    const store = new PostgresWorkflowDefinitionStore(conn);
+    await expect(
+      store.publish(definition({ id: "wfd_abcdef02", version: "1.1.0" })),
+    ).rejects.toThrow(UnreadableDefinitionRowsError);
+    // Nothing was written: the refusal lands before the plan, inside the transaction.
+    expect(capture.some((c) => c.sql.includes("INSERT INTO"))).toBe(false);
+    expect(capture.some((c) => c.sql.trimStart().toUpperCase().startsWith("UPDATE"))).toBe(false);
   });
 });
 

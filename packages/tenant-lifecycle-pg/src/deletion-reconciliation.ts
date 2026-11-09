@@ -10,7 +10,7 @@ import {
   type GdprDeletionRequest,
 } from "@crossengin/tenant-lifecycle";
 
-import type { UnreadableRow } from "@crossengin/kernel-pg";
+import type { RowRead, UnreadableRow } from "@crossengin/kernel-pg";
 
 import { isAnchoredByChain } from "./deletion-pipeline.js";
 import { DeletionRequestCommittedUnreadable } from "./deletion-request-store.js";
@@ -76,6 +76,29 @@ export const RECONCILIATION_VERDICTS = [
    * copying a digest off a record that fails verification launders the defect into a second row.
    */
   "evidence_unverified",
+  /**
+   * A row names the request and the contract cannot represent it, so the count this verdict is a
+   * function of cannot be taken (ADR-0373).
+   *
+   * The seventh member, and it exists because **no answer over the readable rows is an answer about
+   * the rows on disk.** Every other verdict here is decided by how many tombstones name the request
+   * — more than one is `ambiguous_evidence`, one is verified, none is `never_committed` — so a
+   * refused row dropped from the count does not merely lose a finding, it *changes the verdict*, and
+   * in the one direction that is destructive: a request whose deletion committed, whose only
+   * tombstone is unreadable, counts as zero and reads `never_committed`, which `/reconcile` will
+   * write as `rejected` on an operator's authorisation while the tenant's data is already gone.
+   *
+   * Distinct from its two neighbours, and neither would have been honest. `evidence_unverified`
+   * states that a record *was read* and failed verification — a claim about its content, which
+   * nothing here can make. `never_committed` is an inference from an **absence**, and a row is
+   * present. This is the third thing: the evidence exists and cannot be read, so the premise is
+   * unevaluable. `EVIDENCE_DEFECTS.attestations_unreadable` is the same shape one level down — the
+   * check could not be run — and `TombstoneAuditPage.unreadable` is it one level up.
+   *
+   * Never applied, like `ambiguous_evidence` and for its reason: nothing is chosen from a premise
+   * that is broken. It needs an operator, so `needsOperator` names it.
+   */
+  "evidence_unreadable",
   /** Not `in_progress` at all, so there is nothing to reconcile. */
   "not_stranded",
 ] as const;
@@ -214,7 +237,13 @@ export function needsOperator(verdict: ReconciliationVerdict): boolean {
   return (
     verdict === "never_committed" ||
     verdict === "ambiguous_evidence" ||
-    verdict === "evidence_unverified"
+    verdict === "evidence_unverified" ||
+    // A row naming the request that the contract cannot represent is nobody's to resolve
+    // automatically: nothing can be applied from a premise that could not be evaluated, and the
+    // remedy is a `WHERE tombstone_id = …` a person runs. `isConclusive` leaves it `false` by
+    // falling through, which is the right answer there and the wrong one here — a verdict that
+    // reaches neither predicate is a finding nothing surfaces.
+    verdict === "evidence_unreadable"
   );
 }
 
@@ -456,15 +485,25 @@ export class DeletionReconciler {
     return this.assessWith(request, await this.evidenceFor(request));
   }
 
-  private async evidenceFor(request: GdprDeletionRequest): Promise<readonly StoredTombstone[]> {
+  /**
+   * The pair returned for a request no evidence is read for.
+   *
+   * `unreadable: []` here is **not** the claim that the rows were read and all of them parsed — the
+   * store was not asked at all — and the distinction costs nothing because `assessWith` answers
+   * `not_stranded` from the status before it looks at either field. Named rather than written inline
+   * so the two fields cannot be set apart, and so this comment has somewhere to live.
+   */
+  private static readonly NOT_ASKED: RowRead<StoredTombstone> = { records: [], unreadable: [] };
+
+  private async evidenceFor(request: GdprDeletionRequest): Promise<RowRead<StoredTombstone>> {
     return request.status === "in_progress"
       ? this.opts.tombstones.findForRequest(request.id)
-      : [];
+      : DeletionReconciler.NOT_ASKED;
   }
 
   private assessWith(
     request: GdprDeletionRequest,
-    found: readonly StoredTombstone[],
+    found: RowRead<StoredTombstone>,
   ): ReconciliationResult {
     const base = {
       requestId: request.id,
@@ -489,19 +528,46 @@ export class DeletionReconciler {
       };
     }
 
-    const ids = found.map((t) => t.record.id);
+    const ids = found.records.map((t) => t.record.id);
 
-    if (found.length > 1) {
+    // Before every count branch, because each of them is a function of how many rows name this
+    // request and a refused row is one of those rows (ADR-0373). Asked first and not folded in
+    // beside `records.length > 1`: with one refused row and one readable one, *both* premises are
+    // broken, and the honest answer is that the set could not be read rather than that it held two.
+    if (found.unreadable.length > 0) {
+      return {
+        ...base,
+        verdict: "evidence_unreadable",
+        tombstoneId: null,
+        // The readable ones only. `tombstoneIds` is documented as the tombstones naming the
+        // request, and a refused row has not been established to be one — its id is a handle, not a
+        // record, and mixing the two would make this list mean "ids we saw" in one verdict and
+        // "records we read" in every other.
+        tombstoneIds: ids,
+        strandedForMs,
+        // `UnreadableRow`'s two fields and nothing else: the identity is the business key a remedy
+        // names and the detail is `unreadableDetail`, which is built to disclose no stored value.
+        detail:
+          `${found.unreadable.length.toString()} of ${(
+            found.records.length + found.unreadable.length
+          ).toString()} rows naming this request cannot be represented, so the count this verdict` +
+          ` turns on cannot be taken: ${found.unreadable
+            .map((u) => `${u.identity ?? "<unidentified>"}: ${u.detail}`)
+            .join("; ")}`,
+      };
+    }
+
+    if (found.records.length > 1) {
       return {
         ...base,
         verdict: "ambiguous_evidence",
         tombstoneId: null,
         tombstoneIds: ids,
         strandedForMs,
-        detail: `${found.length.toString()} tombstones name this request`,
+        detail: `${found.records.length.toString()} tombstones name this request`,
       };
     }
-    const only = found[0];
+    const only = found.records[0];
     if (only !== undefined) {
       const check = verifyStoredEvidence(only);
       if (!check.ok) {
@@ -563,7 +629,7 @@ export class DeletionReconciler {
   ): Promise<ReconciliationResult> {
     const found = await this.evidenceFor(request);
     const assessed = this.assessWith(request, found);
-    const only = found[0];
+    const only = found.records[0];
     if (assessed.verdict === "completed_by_evidence" && only !== undefined) {
       return this.report(await this.applyCompleted(request, assessed, only));
     }

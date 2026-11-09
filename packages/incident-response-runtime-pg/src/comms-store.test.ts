@@ -14,7 +14,14 @@ import {
   commsUpdateAssignments,
   rowToComms,
 } from "./comms-store.js";
-import { EMPTY, mockConnection, respondTo, type Captured } from "./test-fakes.js";
+import {
+  EMPTY,
+  EXPECT_ALL_READABLE,
+  collectUnreadable,
+  mockConnection,
+  respondTo,
+  type Captured,
+} from "./test-fakes.js";
 
 const T0 = "2026-09-30T10:00:00.000Z";
 /** 48 hours after T0 — inside the GDPR 72h window a breach notification is measured against. */
@@ -199,7 +206,11 @@ describe("listForIncident", () => {
   it("filters by incident in publication order", async () => {
     const capture: Captured[] = [];
     const conn = mockConnection(capture, respondTo([["SELECT", EMPTY]]));
-    await new PostgresCustomerCommsStore(conn).listForIncident("INC-2026-0007", 5);
+    await new PostgresCustomerCommsStore(conn).listForIncident(
+      "INC-2026-0007",
+      EXPECT_ALL_READABLE,
+      5,
+    );
     expect(capture[0]?.sql).toContain("WHERE incident_id = $1");
     expect(capture[0]?.sql).toContain("ORDER BY published_at ASC");
     expect(capture[0]?.params).toEqual(["INC-2026-0007", 5]);
@@ -208,22 +219,69 @@ describe("listForIncident", () => {
   it("defaults the limit to 100", async () => {
     const capture: Captured[] = [];
     const conn = mockConnection(capture, respondTo([["SELECT", EMPTY]]));
-    await new PostgresCustomerCommsStore(conn).listForIncident("INC-2026-0007");
+    await new PostgresCustomerCommsStore(conn).listForIncident(
+      "INC-2026-0007",
+      EXPECT_ALL_READABLE,
+    );
     expect(capture[0]?.params?.[1]).toBe(100);
   });
 
   it("rejects a non-positive limit before querying", async () => {
     const capture: Captured[] = [];
     const store = new PostgresCustomerCommsStore(mockConnection(capture));
-    await expect(store.listForIncident("INC-2026-0007", 0)).rejects.toThrow(/positive/);
+    await expect(
+      store.listForIncident("INC-2026-0007", EXPECT_ALL_READABLE, 0),
+    ).rejects.toThrow(/positive/);
     expect(capture).toHaveLength(0);
   });
 
   it("re-validates every row it returns", async () => {
     const rows = [commsRow(comms()), commsRow(breachNotification({ id: "comm-0002" }))];
     const conn = mockConnection(undefined, respondTo([["SELECT", { rows, rowCount: 2 }]]));
-    const loaded = await new PostgresCustomerCommsStore(conn).listForIncident("INC-2026-0007");
+    const loaded = await new PostgresCustomerCommsStore(conn).listForIncident(
+      "INC-2026-0007",
+      EXPECT_ALL_READABLE,
+    );
     expect(loaded.map((c) => c.record.kind)).toEqual(["investigating", "breach_notification"]);
+  });
+
+  it("reports a row the contract refuses and keeps the rest of the page", async () => {
+    const bad = commsRow(comms({ id: "comm-0001" }));
+    // `recipientCount` lower than `bouncesCount` is a rule no CHECK holds, so the row stores and
+    // only the re-parse refuses it — the shape this migration exists for.
+    bad["recipient_count"] = 0;
+    bad["bounces_count"] = 5;
+    const rows = [bad, commsRow(comms({ id: "comm-0002" }))];
+    const conn = mockConnection(undefined, respondTo([["SELECT", { rows, rowCount: 2 }]]));
+    const seen = collectUnreadable();
+
+    const loaded = await new PostgresCustomerCommsStore(conn).listForIncident(
+      "INC-2026-0007",
+      seen.report,
+    );
+
+    expect(loaded.map((c) => c.record.id)).toEqual(["comm-0002"]);
+    expect(seen.rows).toHaveLength(1);
+    expect(seen.rows[0]?.identity).toBe("comm-0001");
+    // The detail names the field and the issue code and no stored value (ADR-0403).
+    expect(seen.rows[0]?.detail).not.toContain("5");
+  });
+
+  it("reports an unidentifiable row as one, rather than losing the page", async () => {
+    // `communication_id` carries no pattern CHECK, so `''` is storable — the one column in this
+    // store where `textIdentity` can genuinely answer null against a real database.
+    const bad = commsRow(comms());
+    bad["communication_id"] = "";
+    const conn = mockConnection(undefined, respondTo([["SELECT", { rows: [bad], rowCount: 1 }]]));
+    const seen = collectUnreadable();
+
+    const loaded = await new PostgresCustomerCommsStore(conn).listForIncident(
+      "INC-2026-0007",
+      seen.report,
+    );
+
+    expect(loaded).toEqual([]);
+    expect(seen.rows).toEqual([{ identity: null, detail: "id: too_small" }]);
   });
 });
 
@@ -231,7 +289,10 @@ describe("listPublishedForIncident", () => {
   it("excludes retracted rows in SQL rather than in memory", async () => {
     const capture: Captured[] = [];
     const conn = mockConnection(capture, respondTo([["SELECT", EMPTY]]));
-    await new PostgresCustomerCommsStore(conn).listPublishedForIncident("INC-2026-0007");
+    await new PostgresCustomerCommsStore(conn).listPublishedForIncident(
+      "INC-2026-0007",
+      EXPECT_ALL_READABLE,
+    );
     expect(capture[0]?.sql).toContain("retracted_at IS NULL");
     expect(capture[0]?.sql).toContain("ORDER BY published_at ASC");
   });
@@ -241,7 +302,10 @@ describe("listBreachNotifications", () => {
   it("filters to the breach_notification kind", async () => {
     const capture: Captured[] = [];
     const conn = mockConnection(capture, respondTo([["SELECT", EMPTY]]));
-    await new PostgresCustomerCommsStore(conn).listBreachNotifications("INC-2026-0007");
+    await new PostgresCustomerCommsStore(conn).listBreachNotifications(
+      "INC-2026-0007",
+      EXPECT_ALL_READABLE,
+    );
     expect(capture[0]?.sql).toContain("kind = 'breach_notification'");
     expect(capture[0]?.params).toEqual(["INC-2026-0007", 100]);
   });

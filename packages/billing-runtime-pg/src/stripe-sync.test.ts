@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { usageRecordFrom } from "@crossengin/billing-runtime";
+import type { UnreadableRow } from "@crossengin/kernel-pg";
 
 import { PostgresUsageRecordStore } from "./usage-store.js";
 import {
@@ -27,6 +28,15 @@ function record(id: string, meter: "ai_call" | "integration_call" = "ai_call") {
   });
 }
 
+/**
+ * A reporter that fails the test if it fires. The reporter is required, so every call site has to
+ * supply one — and a test that quietly accepted a refused row would be asserting over a shorter
+ * page than it wrote.
+ */
+function refuse(row: UnreadableRow): never {
+  throw new Error(`unexpected unreadable row: ${JSON.stringify(row)}`);
+}
+
 class RecordingReporter implements UsageReporter {
   readonly calls: UsageReportInput[] = [];
   private seq = 0;
@@ -47,12 +57,43 @@ describe("staticSubscriptionItemResolver", () => {
 
 describe("PostgresUsageRecordStore.listUnsynced / markSynced", () => {
   it("lists un-synced records within the RLS context", async () => {
-    const row = { record: JSON.stringify(record("33333333-3333-3333-3333-333333333333")) };
+    const row = {
+      id: "33333333-3333-3333-3333-333333333333",
+      record: JSON.stringify(record("33333333-3333-3333-3333-333333333333")),
+    };
     const { conn, calls } = fakePg([[row]]);
-    const out = await new PostgresUsageRecordStore(conn).listUnsynced(TENANT);
+    const out = await new PostgresUsageRecordStore(conn).listUnsynced(TENANT, refuse);
     expect(out).toHaveLength(1);
     expect(calls.some((c) => c.sql.includes("set_config"))).toBe(true);
     expect(calls.some((c) => c.sql.includes("synced_to_stripe_at IS NULL"))).toBe(true);
+  });
+
+  // The identity column is selected *only* so a refused row can be named, so the statement is what
+  // the assertion is about: without `id` in the SELECT there is no column in hand to identify a row
+  // whose `record` blob is the thing that failed to parse.
+  it("selects the id beside the record so a refused row can be named", async () => {
+    const { conn, calls } = fakePg([[]]);
+    await new PostgresUsageRecordStore(conn).listUnsynced(TENANT, refuse);
+    expect(calls.some((c) => c.sql.includes("SELECT id, record"))).toBe(true);
+  });
+
+  it("reports an unreadable row and keeps the rest of the page", async () => {
+    const good = record("33333333-3333-3333-3333-333333333333");
+    const rows = [
+      { id: "44444444-4444-4444-4444-444444444444", record: { meter: "not_a_meter" } },
+      { id: "33333333-3333-3333-3333-333333333333", record: JSON.stringify(good) },
+    ];
+    const { conn } = fakePg([rows]);
+    const seen: UnreadableRow[] = [];
+    const out = await new PostgresUsageRecordStore(conn).listUnsynced(TENANT, (row) =>
+      seen.push(row),
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]?.id).toBe("33333333-3333-3333-3333-333333333333");
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.identity).toBe("44444444-4444-4444-4444-444444444444");
+    // The detail names the field and the issue code and never the stored value.
+    expect(seen[0]?.detail).not.toContain("not_a_meter");
   });
 
   it("marks a record synced by id, guarded on still-unsynced", async () => {
@@ -68,7 +109,10 @@ describe("PostgresUsageRecordStore.listUnsynced / markSynced", () => {
 describe("UsageStripeSync", () => {
   it("reports un-synced records to Stripe and marks them synced", async () => {
     const rows = [
-      { record: JSON.stringify(record("33333333-3333-3333-3333-333333333333")) },
+      {
+        id: "33333333-3333-3333-3333-333333333333",
+        record: JSON.stringify(record("33333333-3333-3333-3333-333333333333")),
+      },
     ];
     const { conn, calls } = fakePg([rows]);
     const reporter = new RecordingReporter();
@@ -76,10 +120,11 @@ describe("UsageStripeSync", () => {
       store: new PostgresUsageRecordStore(conn),
       reporter,
       resolver: staticSubscriptionItemResolver({ [`${SUB}|ai_call`]: "si_ai" }),
+      onUnreadable: refuse,
       now: () => new Date("2026-07-02T00:00:00.000Z"),
     });
     const result = await sync.syncTenant(TENANT);
-    expect(result).toEqual({ synced: 1, skipped: 0 });
+    expect(result).toEqual({ synced: 1, skipped: 0, unreadable: 0 });
     // Reported with rounded quantity, the period-end timestamp, and the record's idempotency key.
     expect(reporter.calls[0]?.subscriptionItemId).toBe("si_ai");
     expect(reporter.calls[0]?.quantity).toBe(200); // 200.4 rounded
@@ -89,7 +134,12 @@ describe("UsageStripeSync", () => {
 
   it("skips records with no subscription-item mapping without reporting", async () => {
     const rows = [
-      { record: JSON.stringify(record("33333333-3333-3333-3333-333333333333", "integration_call")) },
+      {
+        id: "33333333-3333-3333-3333-333333333333",
+        record: JSON.stringify(
+          record("33333333-3333-3333-3333-333333333333", "integration_call"),
+        ),
+      },
     ];
     const { conn } = fakePg([rows]);
     const reporter = new RecordingReporter();
@@ -97,9 +147,39 @@ describe("UsageStripeSync", () => {
       store: new PostgresUsageRecordStore(conn),
       reporter,
       resolver: staticSubscriptionItemResolver({ [`${SUB}|ai_call`]: "si_ai" }),
+      onUnreadable: refuse,
     });
     const result = await sync.syncTenant(TENANT);
-    expect(result).toEqual({ synced: 0, skipped: 1 });
+    expect(result).toEqual({ synced: 0, skipped: 1, unreadable: 0 });
     expect(reporter.calls).toHaveLength(0);
+  });
+
+  /**
+   * The outcome the migration created and the result shape had to grow a field for: before the page
+   * went through the primitive this threw and took the good record with it, and counting the
+   * refusal as `skipped` would call it "no Stripe subscription-item mapping", which is a different
+   * fact with a different remedy.
+   */
+  it("counts a refused record as neither synced nor skipped, and reports it", async () => {
+    const rows = [
+      { id: "44444444-4444-4444-4444-444444444444", record: { quantity: -1 } },
+      {
+        id: "33333333-3333-3333-3333-333333333333",
+        record: JSON.stringify(record("33333333-3333-3333-3333-333333333333")),
+      },
+    ];
+    const { conn } = fakePg([rows]);
+    const reporter = new RecordingReporter();
+    const seen: UnreadableRow[] = [];
+    const sync = new UsageStripeSync({
+      store: new PostgresUsageRecordStore(conn),
+      reporter,
+      resolver: staticSubscriptionItemResolver({ [`${SUB}|ai_call`]: "si_ai" }),
+      onUnreadable: (row) => seen.push(row),
+    });
+    const result = await sync.syncTenant(TENANT);
+    expect(result).toEqual({ synced: 1, skipped: 0, unreadable: 1 });
+    expect(reporter.calls).toHaveLength(1);
+    expect(seen.map((r) => r.identity)).toEqual(["44444444-4444-4444-4444-444444444444"]);
   });
 });

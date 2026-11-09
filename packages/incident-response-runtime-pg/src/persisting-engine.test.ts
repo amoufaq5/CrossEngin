@@ -10,6 +10,7 @@ import {
 import { INCIDENT_COLUMN_NAMES } from "./records.js";
 import {
   EMPTY,
+  EXPECT_ALL_READABLE,
   T0,
   declaredIncident,
   incidentRow,
@@ -326,7 +327,7 @@ describe("load and listOpen", () => {
     const capture: Captured[] = [];
     const conn = mockConnection(capture, () => EMPTY);
     const engine = new PersistentIncidentEngine({ conn });
-    await engine.listOpen(5);
+    await engine.listOpen(EXPECT_ALL_READABLE, 5);
     expect(capture[0]?.sql).toContain("status NOT IN ('closed', 'cancelled')");
   });
 
@@ -335,7 +336,7 @@ describe("load and listOpen", () => {
     const conn = mockConnection(capture, () => EMPTY);
     const store = new PostgresIncidentStore(conn);
     const engine = new PersistentIncidentEngine({ conn, store });
-    await engine.listOpen();
+    await engine.listOpen(EXPECT_ALL_READABLE);
     expect(capture).toHaveLength(1);
   });
 });

@@ -1,4 +1,27 @@
 import { PackInstallationSchema, type PackInstallation } from "@crossengin/marketplace";
+import type { UnreadableRow } from "@crossengin/kernel-pg";
+
+/**
+ * A read whose rows the contract refused, raised where the refusal cannot be carried any further.
+ *
+ * It carries the `UnreadableRow`s rather than only a message, so a caller can act on the fact where
+ * today's can only print it. `message` is built from `identity` and `detail` alone, which is the
+ * whole of what may be said about a refused row: no other column is reported, because scoping a
+ * manual fix by one invites an operator to act on the value that may be the reason the row was
+ * refused (ADR-0310's rule, and `read-rows.ts`' `UnreadableRow` doc).
+ */
+export class UnreadableInstallationRowsError extends Error {
+  readonly unreadable: readonly UnreadableRow[];
+
+  constructor(subject: string, unreadable: readonly UnreadableRow[]) {
+    super(
+      `${subject}: ${String(unreadable.length)} installation row(s) could not be represented — ` +
+        unreadable.map((u) => `${u.identity ?? "<unidentified>"} (${u.detail})`).join("; "),
+    );
+    this.name = "UnreadableInstallationRowsError";
+    this.unreadable = unreadable;
+  }
+}
 
 /** The `meta.pack_installations` row shape as read back from the driver. */
 export interface InstallationRow {

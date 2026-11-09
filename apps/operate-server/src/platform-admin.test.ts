@@ -20,8 +20,15 @@ const TENANT = "00000000-0000-4000-8000-000000000001";
 const USER = "00000000-0000-4000-8000-0000000000aa";
 const EVENT_ID = "9c1d2e3f-4a5b-4c6d-8e7f-0a1b2c3d4e5f";
 
-/** A fake PgConnection modelling the platform-wide meta.tenants registry (no RLS). */
-function fakePg(): PgConnection {
+/**
+ * A fake PgConnection modelling the platform-wide meta.tenants registry (no RLS).
+ *
+ * `stored` is handed back so a test can corrupt a row in place and exercise the **real**
+ * `rowToTenant` against it. That matters for ADR-0373's refusal test: injecting a throwing seam
+ * would prove the handler catches *something*, where corrupting the row proves it catches the
+ * refusal the contract itself raises.
+ */
+function fakePg(): PgConnection & { readonly stored: Map<string, Record<string, unknown>> } {
   const rows = new Map<string, Record<string, unknown>>();
   let seq = 0;
   const run = async (sql: string, params?: readonly unknown[]) => {
@@ -106,12 +113,14 @@ function fakePg(): PgConnection {
     withAdvisoryLock: (async <T>(_k: bigint, fn: () => Promise<T>) => fn()) as PgConnection["withAdvisoryLock"],
     close: (async () => undefined) as PgConnection["close"],
   };
-  return conn;
+  return { ...conn, stored: rows };
 }
 
-function makeCtx(): PlatformAdminContext {
+function makeCtx(): PlatformAdminContext & { readonly stored: Map<string, Record<string, unknown>> } {
+  const conn = fakePg();
   return {
-    store: new PostgresTenantStore(fakePg()),
+    stored: conn.stored,
+    store: new PostgresTenantStore(conn),
     principalRoles: (p: ResolvedPrincipal | null) => ({ primaryRole: p?.grantedScopes[0] ?? "anon" }),
     adminRoles: new Set(["platform_admin"]),
   };
@@ -197,6 +206,24 @@ describe("platform-admin — list", () => {
       input("platform_admin", { query: { status: "suspended" } }),
     )) as JsonOut;
     expect((suspended.body["data"] as { slug: string }[]).map((t) => t.slug)).toEqual(["one"]);
+  });
+
+  it("refuses the page rather than shortening it when a stored tenant no longer parses", async () => {
+    const ctx = makeCtx();
+    const keep = await createdId(ctx, "readable");
+    const bad = await createdId(ctx, "corrupt");
+    // Corrupt the row *in place*, so the real `rowToTenant` is what refuses it. `status` is an
+    // enum on the contract, so a value outside it is exactly the shape a drifted catalog produces.
+    (ctx.stored.get(bad) as Record<string, unknown>)["status"] = "not_a_status";
+
+    const out = (await findHandler(ctx, "platform.tenants.list")(input("platform_admin"))) as JsonOut;
+    expect(out.status).toBe(500);
+    expect(out.body["error"]).toBe("tenant_page_unreadable");
+    // The refused row's own values do not travel: an error about a row must not quote it.
+    expect(JSON.stringify(out.body)).not.toContain("not_a_status");
+    expect(JSON.stringify(out.body)).not.toContain(bad);
+    // And the refusal is not a vacuous one — the readable tenant was there to be served.
+    expect(keep).not.toBe(bad);
   });
 
   it("paginates with an opaque cursor", async () => {

@@ -46,7 +46,7 @@ describe("buildPersistentCertificationEngine", () => {
     );
     expect(reports).toHaveLength(2);
 
-    const persisted = await pe.store.listRecent(100, TENANT);
+    const persisted = (await pe.store.listRecent(100, TENANT)).records;
     expect(persisted).toHaveLength(2);
     expect(new Set(persisted.map((r) => r.framework))).toEqual(
       new Set(["soc2_type2", "hipaa_security_rule"]),

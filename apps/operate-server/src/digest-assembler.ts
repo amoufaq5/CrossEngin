@@ -1,3 +1,4 @@
+import type { UnreadableRow, UnreadableRowReporter } from "@crossengin/kernel-pg";
 import type { ContentCategory, DigestBatch, PriorityLevel } from "@crossengin/notifications";
 
 import { buildDigestDispatch, type DigestMember } from "./digest-assembly.js";
@@ -5,7 +6,12 @@ import type { DigestItemRecord } from "./digest-store.js";
 import type { DispatchInput } from "./notification-store.js";
 
 export interface AssemblyDigestSource {
-  dueForAssembly(tenantId: string, now: Date, limit?: number): Promise<readonly DigestBatch[]>;
+  dueForAssembly(
+    tenantId: string,
+    now: Date,
+    onUnreadable: UnreadableRowReporter,
+    limit?: number,
+  ): Promise<readonly DigestBatch[]>;
   itemsFor(
     tenantId: string,
     digestId: string,
@@ -34,6 +40,14 @@ export interface DigestAssemblyOptions {
   readonly dispatches: AssemblyDispatchSink;
   readonly clock?: () => Date;
   readonly batchSize?: number;
+  /**
+   * Where a digest row the contract refuses is reported (ADR-0373).
+   *
+   * Required rather than optional, and two arguments rather than one: an assembly pass sweeps
+   * every tenant, so a finding naming no tenant is unactionable, and an optional reporter
+   * defaulting to *say nothing* is the dropped row restated as a default (ADR-0364).
+   */
+  readonly onUnreadable: (row: UnreadableRow, tenantId: string) => void;
   readonly onError?: (err: unknown, tenantId: string) => void;
 }
 
@@ -118,6 +132,7 @@ export async function assembleDueDigests(
   const due = await opts.digests.dueForAssembly(
     tenantId,
     now(),
+    (row) => opts.onUnreadable(row, tenantId),
     opts.batchSize ?? DEFAULT_ASSEMBLY_BATCH_SIZE,
   );
 

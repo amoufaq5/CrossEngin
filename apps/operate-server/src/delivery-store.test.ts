@@ -1,4 +1,4 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import type { PgConnection, UnreadableRow, UnreadableRowReporter } from "@crossengin/kernel-pg";
 import { NotificationDispatchSchema, type DeliveryAttempt } from "@crossengin/notifications";
 import { describe, expect, it } from "vitest";
 
@@ -9,6 +9,14 @@ import {
   priorityRank,
   type DispatchAdvanceUpdate,
 } from "./delivery-store.js";
+
+/**
+ * A reporter for the tests that are not about reporting.
+ *
+ * Named rather than `() => {}` inline: the parameter is required precisely so a caller cannot
+ * forget it, and a test that quietly discards a report should say that is what it is doing.
+ */
+const noUnreadable: UnreadableRowReporter = () => undefined;
 
 const TENANT_A = "00000000-0000-4000-8000-000000000001";
 const TENANT_B = "00000000-0000-4000-8000-000000000002";
@@ -392,7 +400,7 @@ describe("delivery-store — claimQueued", () => {
     const { conn, dispatches } = fakeDeliveryDb();
     dispatches.push(dispatchRow({ id: "aaaa1111-1111-4111-8111-000000000001" }));
     const store = new PostgresDeliveryStore(conn);
-    const claimed = await store.claimQueued(TENANT_A);
+    const claimed = await store.claimQueued(TENANT_A, noUnreadable);
     expect(claimed).toHaveLength(1);
     expect(claimed[0]?.rowId).toBe("aaaa1111-1111-4111-8111-000000000001");
     expect(claimed[0]?.dispatch.templateId).toBe("delivery_receipt");
@@ -403,7 +411,7 @@ describe("delivery-store — claimQueued", () => {
     const { conn, captured, dispatches } = fakeDeliveryDb();
     dispatches.push(dispatchRow());
     const store = new PostgresDeliveryStore(conn);
-    await store.claimQueued(TENANT_A);
+    await store.claimQueued(TENANT_A, noUnreadable);
     const select = captured.find((c) => isSelect(c));
     expect(select?.sql).toContain("FOR UPDATE SKIP LOCKED");
     expect(select?.sql).toContain("WHERE tenant_id = $1 AND status = 'queued'");
@@ -418,7 +426,7 @@ describe("delivery-store — claimQueued", () => {
       dispatchRow({ priority: "high", queued_at: "2026-08-03T00:00:00.000Z" }),
     );
     const store = new PostgresDeliveryStore(conn);
-    const claimed = await store.claimQueued(TENANT_A);
+    const claimed = await store.claimQueued(TENANT_A, noUnreadable);
     expect(claimed.map((c) => c.dispatch.priority)).toEqual(["critical", "high", "normal"]);
     const select = captured.find((c) => isSelect(c));
     expect(select?.sql).toContain("ORDER BY CASE priority WHEN 'critical' THEN 0");
@@ -433,7 +441,7 @@ describe("delivery-store — claimQueued", () => {
       dispatchRow({ status: "completed", completed_at: "2026-08-01T00:01:00.000Z" }),
     );
     const store = new PostgresDeliveryStore(conn);
-    const claimed = await store.claimQueued(TENANT_A);
+    const claimed = await store.claimQueued(TENANT_A, noUnreadable);
     expect(claimed).toHaveLength(1);
     expect(claimed[0]?.dispatch.status).toBe("queued");
   });
@@ -442,13 +450,13 @@ describe("delivery-store — claimQueued", () => {
     const { conn, captured, dispatches } = fakeDeliveryDb();
     dispatches.push(dispatchRow(), dispatchRow());
     const store = new PostgresDeliveryStore(conn);
-    const claimed = await store.claimQueued(TENANT_A);
+    const claimed = await store.claimQueued(TENANT_A, noUnreadable);
     expect(claimed.map((c) => c.dispatch.status)).toEqual(["queued", "queued"]);
     expect(dispatches.map((r) => r["status"])).toEqual(["rendering", "rendering"]);
     const update = captured.find((c) => c.sql.startsWith("UPDATE"));
     expect(update?.sql).toContain("SET status = 'rendering'");
     expect(update?.inTx).toBe(true);
-    const second = await store.claimQueued(TENANT_A);
+    const second = await store.claimQueued(TENANT_A, noUnreadable);
     expect(second).toEqual([]);
   });
 
@@ -456,7 +464,7 @@ describe("delivery-store — claimQueued", () => {
     const { conn, captured, dispatches } = fakeDeliveryDb();
     dispatches.push(dispatchRow({ id: "aaaa1111-1111-4111-8111-000000000009" }));
     const store = new PostgresDeliveryStore(conn);
-    await store.claimQueued(TENANT_A);
+    await store.claimQueued(TENANT_A, noUnreadable);
     const update = captured.find((c) => c.sql.startsWith("UPDATE"));
     expect(update?.sql).toContain("WHERE tenant_id = $1 AND id = ANY($2::uuid[])");
     expect(update?.params).toEqual([TENANT_A, ["aaaa1111-1111-4111-8111-000000000009"]]);
@@ -467,10 +475,10 @@ describe("delivery-store — claimQueued", () => {
     const { conn, captured, dispatches } = fakeDeliveryDb();
     dispatches.push(dispatchRow());
     const store = new PostgresDeliveryStore(conn);
-    await store.claimQueued(TENANT_A);
-    await store.claimQueued(TENANT_A, 5000);
-    await store.claimQueued(TENANT_A, 0);
-    await store.claimQueued(TENANT_A, 2.9);
+    await store.claimQueued(TENANT_A, noUnreadable);
+    await store.claimQueued(TENANT_A, noUnreadable, 5000);
+    await store.claimQueued(TENANT_A, noUnreadable, 0);
+    await store.claimQueued(TENANT_A, noUnreadable, 2.9);
     const selects = captured.filter((c) => isSelect(c));
     expect(selects.map((s) => s.params[1])).toEqual([25, 200, 1, 2]);
   });
@@ -478,7 +486,7 @@ describe("delivery-store — claimQueued", () => {
   it("issues no UPDATE when nothing is queued", async () => {
     const { conn, captured } = fakeDeliveryDb();
     const store = new PostgresDeliveryStore(conn);
-    expect(await store.claimQueued(TENANT_A)).toEqual([]);
+    expect(await store.claimQueued(TENANT_A, noUnreadable)).toEqual([]);
     expect(captured.some((c) => c.sql.startsWith("UPDATE"))).toBe(false);
   });
 
@@ -486,10 +494,10 @@ describe("delivery-store — claimQueued", () => {
     const { conn, dispatches } = fakeDeliveryDb();
     dispatches.push(dispatchRow(), dispatchRow({ tenant_id: TENANT_B }));
     const store = new PostgresDeliveryStore(conn);
-    const a = await store.claimQueued(TENANT_A);
+    const a = await store.claimQueued(TENANT_A, noUnreadable);
     expect(a).toHaveLength(1);
     expect(a[0]?.dispatch.tenantId).toBe(TENANT_A);
-    const b = await store.claimQueued(TENANT_B);
+    const b = await store.claimQueued(TENANT_B, noUnreadable);
     expect(b.map((c) => c.dispatch.tenantId)).toEqual([TENANT_B]);
   });
 
@@ -497,7 +505,7 @@ describe("delivery-store — claimQueued", () => {
     const { conn, captured, dispatches } = fakeDeliveryDb();
     dispatches.push(dispatchRow());
     const store = new PostgresDeliveryStore(conn);
-    await store.claimQueued(TENANT_A);
+    await store.claimQueued(TENANT_A, noUnreadable);
     const setConfig = captured.find((c) => c.sql.includes("set_config"));
     expect(setConfig?.sql).toContain("app.current_tenant_id");
     expect(setConfig?.params).toEqual([TENANT_A]);
@@ -506,6 +514,57 @@ describe("delivery-store — claimQueued", () => {
       expect(c.inTx).toBe(true);
       expect(c.params[0]).toBe(TENANT_A);
     }
+  });
+
+  it("reports a dispatch row the contract refuses and still claims the rest", async () => {
+    const { conn, dispatches } = fakeDeliveryDb();
+    dispatches.push(
+      dispatchRow({ id: "aaaa1111-1111-4111-8111-00000000000a", dispatch_id: "disp_claim_ok_1" }),
+      dispatchRow({
+        id: "aaaa1111-1111-4111-8111-00000000000b",
+        dispatch_id: "disp_claim_refused",
+        channel: "carrier_pigeon",
+      }),
+      dispatchRow({ id: "aaaa1111-1111-4111-8111-00000000000c", dispatch_id: "disp_claim_ok_2" }),
+    );
+    const seen: UnreadableRow[] = [];
+    const store = new PostgresDeliveryStore(conn);
+    const claimed = await store.claimQueued(TENANT_A, (row) => seen.push(row));
+
+    // The other two recipients keep their tick: before ADR-0373 one refused row ended the whole
+    // claimed batch, so the drain made no progress on dispatches it had just locked.
+    expect(claimed.map((c) => c.rowId)).toEqual([
+      "aaaa1111-1111-4111-8111-00000000000a",
+      "aaaa1111-1111-4111-8111-00000000000c",
+    ]);
+    expect(seen).toHaveLength(1);
+    // The business key and never the surrogate `id`: a `disp_…` is what an operator can look up.
+    expect(seen[0]?.identity).toBe("disp_claim_refused");
+    expect(seen[0]?.detail).toBe("channel: invalid_enum_value");
+    // The stored value never travels in the detail — only the field path and the issue code.
+    expect(seen[0]?.detail).not.toContain("carrier_pigeon");
+  });
+
+  it("claims only the rows it could read, so a refused one is left for the next tick", async () => {
+    // The ordering that makes the fix safe rather than merely non-fatal: the mapping runs *before*
+    // the claiming UPDATE, so a refused row is never moved to `sending`. Mapped afterwards it
+    // would be locked into a state with nobody to deliver it and no retry selecting it — worse
+    // than the throw-and-rollback this replaced.
+    const { conn, captured, dispatches } = fakeDeliveryDb();
+    dispatches.push(
+      dispatchRow({ id: "aaaa1111-1111-4111-8111-00000000000d" }),
+      dispatchRow({ id: "aaaa1111-1111-4111-8111-00000000000e", channel: "carrier_pigeon" }),
+    );
+    const store = new PostgresDeliveryStore(conn);
+    await store.claimQueued(TENANT_A, noUnreadable);
+
+    const update = captured.find((c) => /^\s*UPDATE/i.test(c.sql));
+    expect(update).toBeDefined();
+    expect(JSON.stringify(update?.params)).toContain("aaaa1111-1111-4111-8111-00000000000d");
+    expect(JSON.stringify(update?.params)).not.toContain("aaaa1111-1111-4111-8111-00000000000e");
+    // And the refused row is still `queued`, so the next tick sees it again.
+    expect(dispatches.find((r) => r["id"] === "aaaa1111-1111-4111-8111-00000000000e")?.["status"])
+      .toBe("queued");
   });
 });
 
@@ -734,7 +793,7 @@ describe("delivery-store — dueRetries", () => {
     const { conn, dispatches, deliveries } = fakeDeliveryDb();
     const parent = seedRetry(dispatches, deliveries);
     const store = new PostgresDeliveryStore(conn);
-    const due = await store.dueRetries(TENANT_A, new Date("2026-08-01T00:10:00.000Z"));
+    const due = await store.dueRetries(TENANT_A, new Date("2026-08-01T00:10:00.000Z"), noUnreadable);
     expect(due).toHaveLength(1);
     expect(due[0]?.rowId).toBe(parent["id"]);
     expect(due[0]?.recipientAddressSha256).toBe(RECIPIENT_SHA);
@@ -746,7 +805,7 @@ describe("delivery-store — dueRetries", () => {
     const { conn, dispatches, deliveries } = fakeDeliveryDb();
     seedRetry(dispatches, deliveries, { next_retry_at: "2026-08-01T01:00:00.000Z" });
     const store = new PostgresDeliveryStore(conn);
-    expect(await store.dueRetries(TENANT_A, new Date("2026-08-01T00:10:00.000Z"))).toEqual([]);
+    expect(await store.dueRetries(TENANT_A, new Date("2026-08-01T00:10:00.000Z"), noUnreadable)).toEqual([]);
   });
 
   it("excludes non-retryable outcomes", async () => {
@@ -754,7 +813,7 @@ describe("delivery-store — dueRetries", () => {
     seedRetry(dispatches, deliveries, { outcome: "bounced_hard" });
     seedRetry(dispatches, deliveries, { outcome: "rate_limited" });
     const store = new PostgresDeliveryStore(conn);
-    const due = await store.dueRetries(TENANT_A, new Date("2026-08-01T00:10:00.000Z"));
+    const due = await store.dueRetries(TENANT_A, new Date("2026-08-01T00:10:00.000Z"), noUnreadable);
     expect(due).toHaveLength(1);
   });
 
@@ -762,7 +821,7 @@ describe("delivery-store — dueRetries", () => {
     const { conn, dispatches, deliveries } = fakeDeliveryDb();
     seedRetry(dispatches, deliveries, {}, { status: "cancelled", cancelled_reason: "opt out" });
     const store = new PostgresDeliveryStore(conn);
-    expect(await store.dueRetries(TENANT_A, new Date("2026-08-01T00:10:00.000Z"))).toEqual([]);
+    expect(await store.dueRetries(TENANT_A, new Date("2026-08-01T00:10:00.000Z"), noUnreadable)).toEqual([]);
   });
 
   it("binds now as a Date parameter and never formats it into the SQL", async () => {
@@ -770,7 +829,7 @@ describe("delivery-store — dueRetries", () => {
     seedRetry(dispatches, deliveries);
     const store = new PostgresDeliveryStore(conn);
     const now = new Date("2026-08-01T00:10:00.000Z");
-    await store.dueRetries(TENANT_A, now, 7);
+    await store.dueRetries(TENANT_A, now, noUnreadable, 7);
     const select = captured.find((c) => isSelect(c));
     expect(select?.sql).toContain("v.next_retry_at IS NOT NULL AND v.next_retry_at <= $2");
     expect(select?.params).toEqual([TENANT_A, now, 7]);
@@ -788,8 +847,35 @@ describe("delivery-store — dueRetries", () => {
     const { conn, dispatches, deliveries } = fakeDeliveryDb();
     seedRetry(dispatches, deliveries, { tenant_id: TENANT_B }, { tenant_id: TENANT_B });
     const store = new PostgresDeliveryStore(conn);
-    expect(await store.dueRetries(TENANT_A, new Date("2026-08-01T00:10:00.000Z"))).toEqual([]);
-    expect(await store.dueRetries(TENANT_B, new Date("2026-08-01T00:10:00.000Z"))).toHaveLength(1);
+    expect(await store.dueRetries(TENANT_A, new Date("2026-08-01T00:10:00.000Z"), noUnreadable)).toEqual([]);
+    expect(await store.dueRetries(TENANT_B, new Date("2026-08-01T00:10:00.000Z"), noUnreadable)).toHaveLength(1);
+  });
+
+  it("reports a refused retry row and still returns the rest of the batch", async () => {
+    const { conn, dispatches, deliveries } = fakeDeliveryDb();
+    // The 4th argument overrides the *dispatch*, which is what the mapper parses; `dispatch_id`
+    // is the business key `dueRetries` identifies a refused row by (never the surrogate `id`).
+    seedRetry(dispatches, deliveries, {}, { dispatch_id: "disp_retry_readable" });
+    seedRetry(
+      dispatches,
+      deliveries,
+      {},
+      { dispatch_id: "disp_retry_refused", channel: "carrier_pigeon" },
+    );
+    const seen: UnreadableRow[] = [];
+    const store = new PostgresDeliveryStore(conn);
+    const due = await store.dueRetries(
+      TENANT_A,
+      new Date("2026-08-01T00:10:00.000Z"),
+      (row) => seen.push(row),
+    );
+
+    // Before ADR-0373 one refused row stopped every other due retry in the batch.
+    expect(due).toHaveLength(1);
+    expect(due[0]?.dispatch.id).toBe("disp_retry_readable");
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.identity).toBe("disp_retry_refused");
+    expect(seen[0]?.detail).toBe("channel: invalid_enum_value");
   });
 });
 
@@ -901,10 +987,10 @@ describe("delivery-store — supersedeDeferred", () => {
     dispatches.push(parent);
     deliveries.push(deliveryRow(parent, { attempt_kind: "retry", attempt_number: 2 }));
     const store = new PostgresDeliveryStore(conn);
-    expect(await store.dueRetries(TENANT_A, new Date("2026-08-01T00:10:00.000Z"))).toHaveLength(1);
+    expect(await store.dueRetries(TENANT_A, new Date("2026-08-01T00:10:00.000Z"), noUnreadable)).toHaveLength(1);
     await store.supersedeDeferred(TENANT_A, String(parent["id"]), RECIPIENT_SHA, AT);
     expect(deliveries[0]?.["next_retry_at"]).toBeNull();
-    expect(await store.dueRetries(TENANT_A, new Date("2026-08-01T00:10:00.000Z"))).toEqual([]);
+    expect(await store.dueRetries(TENANT_A, new Date("2026-08-01T00:10:00.000Z"), noUnreadable)).toEqual([]);
   });
 
   it("is a single conditional UPDATE guarded on deferred + a live next_retry_at", async () => {
@@ -1387,7 +1473,7 @@ describe("delivery-store — identifier + parameter discipline", () => {
     const row = dispatchRow();
     dispatches.push(row);
     const store = new PostgresDeliveryStore(conn, { schema: "ops" });
-    await store.claimQueued(TENANT_A);
+    await store.claimQueued(TENANT_A, noUnreadable);
     await store.recordAttempt(TENANT_A, String(row["id"]), attempt());
     expect(captured.find((c) => isSelect(c))?.sql).toContain("FROM ops.notification_dispatches");
     expect(captured.find((c) => c.sql.startsWith("INSERT INTO"))?.sql).toContain(
@@ -1399,10 +1485,10 @@ describe("delivery-store — identifier + parameter discipline", () => {
     const { conn, captured } = fakeDeliveryDb();
     const store = new PostgresDeliveryStore(conn);
     const evil = "robert'); DROP TABLE tenants;--";
-    await expect(store.claimQueued(evil)).rejects.toThrow(/invalid tenantId/);
+    await expect(store.claimQueued(evil, noUnreadable)).rejects.toThrow(/invalid tenantId/);
     await expect(store.recordAttempt(evil, "row", attempt())).rejects.toThrow(/invalid tenantId/);
     await expect(store.advance(evil, "row", advanceUpdate())).rejects.toThrow(/invalid tenantId/);
-    await expect(store.dueRetries(evil, new Date())).rejects.toThrow(/invalid tenantId/);
+    await expect(store.dueRetries(evil, new Date(), noUnreadable)).rejects.toThrow(/invalid tenantId/);
     await expect(store.countByStatus(evil)).rejects.toThrow(/invalid tenantId/);
     expect(captured).toHaveLength(0);
   });
@@ -1422,10 +1508,10 @@ describe("delivery-store — identifier + parameter discipline", () => {
       next_retry_at: "2026-08-01T00:05:00.000Z",
     });
     const store = new PostgresDeliveryStore(conn);
-    await store.claimQueued(TENANT_A);
+    await store.claimQueued(TENANT_A, noUnreadable);
     await store.recordAttempt(TENANT_A, String(parent["id"]), attempt());
     await store.advance(TENANT_A, String(parent["id"]), advanceUpdate());
-    await store.dueRetries(TENANT_A, new Date("2026-08-01T00:10:00.000Z"));
+    await store.dueRetries(TENANT_A, new Date("2026-08-01T00:10:00.000Z"), noUnreadable);
     await store.countByStatus(TENANT_A);
     expect(captured.length).toBeGreaterThan(5);
     for (const c of captured) {
@@ -1441,10 +1527,10 @@ describe("delivery-store — identifier + parameter discipline", () => {
     const row = dispatchRow({ status: "sending" });
     dispatches.push(row);
     const store = new PostgresDeliveryStore(conn);
-    await store.claimQueued(TENANT_A);
+    await store.claimQueued(TENANT_A, noUnreadable);
     await store.recordAttempt(TENANT_A, String(row["id"]), attempt());
     await store.advance(TENANT_A, String(row["id"]), advanceUpdate());
-    await store.dueRetries(TENANT_A, new Date());
+    await store.dueRetries(TENANT_A, new Date(), noUnreadable);
     await store.countByStatus(TENANT_A);
     expect(captured.filter((c) => c.sql.includes("set_config"))).toHaveLength(5);
     expect(captured.every((c) => c.inTx)).toBe(true);

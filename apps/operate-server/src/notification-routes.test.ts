@@ -269,6 +269,45 @@ describe("notification-routes — list", () => {
     expect(source.calls.map((c) => c.tenantId)).toEqual([OTHER_TENANT]);
     expect(source.calls.map((c) => c.tenantId)).not.toContain(TENANT);
   });
+
+  it("refuses the inbox rather than shortening it when a stored notice no longer parses", async () => {
+    const { ctx } = makeCtx();
+    const failing: TenantNotificationSourceLike = {
+      listForTenant: async () => {
+        throw new Error("stored notification invalid");
+      },
+    };
+    const out = await call({ ...ctx, source: failing });
+    // 500 and not 503: the condition is permanent, and a 503 invites a retry that cannot help
+    // (ADR-0359's inverse mistake).
+    expect(out.status).toBe(500);
+    expect(out.body["error"]).toBe("inbox_page_unreadable");
+    // The one of these routes with a non-privileged caller, so no detail at all.
+    expect(JSON.stringify(out.body)).not.toContain("stored notification invalid");
+    expect(out.body).not.toHaveProperty("detail");
+    expect(out.body["data"]).toBeUndefined();
+  });
+
+  it("does not launder a proposal-join failure into the inbox refusal", async () => {
+    // The `try` is scoped to the store call, and the join has its own: `proposalFragment` catches
+    // and answers `proposal: null`, on the pre-existing decision that a notice missing its joined
+    // copy beats no inbox at all. So the two conditions are distinguished in *both* directions —
+    // an unreadable notice is a 500 that serves nothing, and an unresolvable join is a 200 that
+    // serves the notice without its copy.
+    const { ctx, source } = makeCtx();
+    source.seed();
+    const exploding: NotificationRoutesContext = {
+      ...ctx,
+      resolveProposal: async () => {
+        throw new Error("proposal store down");
+      },
+    };
+    const out = await call(exploding);
+    expect(out.status).toBe(200);
+    expect(itemsOf(out)).toHaveLength(1);
+    expect(itemsOf(out)[0]?.["proposal"]).toBeNull();
+    expect(JSON.stringify(out.body)).not.toContain("proposal store down");
+  });
 });
 
 describe("notification-routes — proposal join", () => {

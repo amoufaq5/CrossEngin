@@ -1095,12 +1095,27 @@ function buildListUsersHandler(ctx: PlatformUserRoutesContext): Handler {
     const query = queryOf(input);
     const parsed = parseRegistryListQuery(query, USER_STATUSES);
     if (!parsed.ok) return listQueryRefused(parsed.refusal);
-    const page = await ctx.store.list({
-      ...parsed.query,
-      // No refusal of its own: an `?email=` that is not an address names nothing this registry can
-      // hold, and zero rows is the right answer to it rather than a mistake to report.
-      email: suppliedQueryValue(query["email"]),
-    });
+    let page: UserListPage;
+    try {
+      page = await ctx.store.list({
+        ...parsed.query,
+        // No refusal of its own: an `?email=` that is not an address names nothing this registry can
+        // hold, and zero rows is the right answer to it rather than a mistake to report.
+        email: suppliedQueryValue(query["email"]),
+      });
+    } catch {
+      // `rowToUser` parses every row, so a user row the contract no longer accepts throws out of the
+      // read. Named and not dropped: the declared consequence is that no credential can be set from
+      // the console, and this surface already separates a bad request from an answer
+      // (`listQueryRefused` above), so a named page refusal is the missing third statement rather
+      // than a new kind of answer. No detail, following `audit_page_unreadable`.
+      //
+      // The response's own client already refuses a prefix for exactly this reason:
+      // `operate-web/lib/users.ts` returns the whole role-warning list or `null`, "never a readable
+      // prefix … the operator would believe they had seen every warning". The page must not do
+      // silently what an array on the same payload refuses.
+      return json(500, { error: "user_page_unreadable" });
+    }
     return json(200, { data: page.data, page: { nextCursor: page.nextCursor } });
   };
 }
@@ -1282,7 +1297,16 @@ function buildListMembersHandler(ctx: PlatformUserRoutesContext): Handler {
     }
     const parsed = parseRegistryListQuery(queryOf(input), MEMBERSHIP_STATUSES);
     if (!parsed.ok) return listQueryRefused(parsed.refusal);
-    const page = await ctx.store.membershipsForTenant(tenantId, parsed.query);
+    let page: MembershipListPage;
+    try {
+      page = await ctx.store.membershipsForTenant(tenantId, parsed.query);
+    } catch {
+      // A membership row is an authorization fact — the grant an operator revokes from — and it is
+      // the one of these pages with no sibling count tile to cross-check against, so a short page is
+      // undetectable from the console. Read through `withTenantContext`, so the refusal is also the
+      // honest answer where RLS and a malformed row are indistinguishable from here.
+      return json(500, { error: "membership_page_unreadable" });
+    }
     return json(200, { data: page.data, page: { nextCursor: page.nextCursor } });
   };
 }

@@ -1,4 +1,9 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  readRows,
+  textIdentity,
+  type PgConnection,
+  type UnreadableRowReporter,
+} from "@crossengin/kernel-pg";
 import {
   DISPATCH_STATUSES,
   DISPATCH_TRANSITIONS,
@@ -239,7 +244,34 @@ export class PostgresDeliveryStore {
     return `${this.schema}.notification_deliveries`;
   }
 
-  async claimQueued(tenantId: string, limit?: number): Promise<readonly ClaimedDispatch[]> {
+  /**
+   * Claims a batch of queued dispatches, **and claims exactly what the caller can act on**.
+   *
+   * Two things changed and the order of the two statements is the load-bearing one.
+   *
+   * The `.map` used to sit *after* the claiming `UPDATE`, so `dispatchFromRow`'s parse threw out of
+   * the read with every selected row already moved to `sending`. The transaction rolled back, so the
+   * rows were not left stuck — but the drain made no progress on the other recipients it had just
+   * locked, and every later tick failed the same way, so one unrepresentable dispatch stalled that
+   * tenant's delivery indefinitely with nothing naming the row.
+   *
+   * The mapping is therefore done **first**, and the `UPDATE` claims only the rows that mapped. A
+   * plain drop after the claim would be worse than the throw: the refused dispatch would sit in
+   * `sending` with nobody delivering it and no retry selecting it, which is the stuck state the old
+   * rollback avoided. Claiming only the readable rows leaves a refused one `queued`, so it is
+   * re-selected and **re-reported** on every tick — a standing condition reported repeatedly, which
+   * is ADR-0329's sweep-stall shape and the honest answer here: the row is unactionable until
+   * somebody repairs it, and `FOR UPDATE SKIP LOCKED` means it blocks nobody else meanwhile.
+   *
+   * `onUnreadable` precedes `limit`, which keeps its default: a required parameter may follow a
+   * *defaulted* one, so the position is chosen rather than forced, and it keeps the page size last
+   * where every other read in this file has it.
+   */
+  async claimQueued(
+    tenantId: string,
+    onUnreadable: UnreadableRowReporter,
+    limit?: number,
+  ): Promise<readonly ClaimedDispatch[]> {
     const batch = clampLimit(limit);
     return withTenantContext(this.conn, tenantId, async (tx) => {
       const selectSql =
@@ -249,15 +281,21 @@ export class PostgresDeliveryStore {
         ` LIMIT $2 FOR UPDATE SKIP LOCKED`;
       const selected = await tx.query(selectSql, [tenantId, batch]);
       if (selected.rows.length === 0) return [];
-      const rowIds = selected.rows.map((r) => String(r["id"]));
+      const claimed = readRows(
+        selected.rows,
+        (row) => ({ rowId: String(row["id"]), dispatch: dispatchFromRow(row) }),
+        (row) => textIdentity(row, "dispatch_id"),
+        onUnreadable,
+      );
+      if (claimed.length === 0) return [];
       const updateSql =
         `UPDATE ${this.dispatchTable} SET status = '${CLAIM_TO_STATUS}'` +
         ` WHERE tenant_id = $1 AND id = ANY($2::uuid[])`;
-      await tx.query(updateSql, [tenantId, rowIds]);
-      return selected.rows.map((row) => ({
-        rowId: String(row["id"]),
-        dispatch: dispatchFromRow(row),
-      }));
+      await tx.query(updateSql, [
+        tenantId,
+        claimed.map((c) => c.rowId),
+      ]);
+      return claimed;
     });
   }
 
@@ -323,9 +361,22 @@ export class PostgresDeliveryStore {
     });
   }
 
+  /**
+   * The retries whose time has come, with a report for every dispatch the contract refuses.
+   *
+   * Unlike `claimQueued` this issues **one statement** — a `SELECT … JOIN … LIMIT`, with no `UPDATE`
+   * and no `FOR UPDATE` — so it claims nothing and locks nothing, and dropping a refused row from
+   * the page leaves no state behind to go stale. The rows were put into their retryable state by an
+   * earlier attempt, so what a refusal costs is that one recipient's retry, not the batch.
+   *
+   * A dispatch appears once per due delivery row, so one page can report the same `dispatch_id`
+   * identity several times; de-duplicating across rows is the caller's problem, since
+   * `unreadableDetail` de-duplicates only the issues within one row.
+   */
   async dueRetries(
     tenantId: string,
     now: Date,
+    onUnreadable: UnreadableRowReporter,
     limit?: number,
   ): Promise<readonly DueRetry[]> {
     const batch = clampLimit(limit);
@@ -339,12 +390,17 @@ export class PostgresDeliveryStore {
         ` AND d.status = '${RETRY_PARENT_STATUS}'` +
         ` ORDER BY v.next_retry_at ASC, v.delivery_id ASC LIMIT $3`;
       const result = await tx.query(sql, [tenantId, now, batch]);
-      return result.rows.map((row) => ({
-        rowId: String(row["id"]),
-        dispatch: dispatchFromRow(row),
-        recipientAddressSha256: String(row["recipient_address_sha256"]),
-        attemptNumber: Number(row["attempt_number"]),
-      }));
+      return readRows(
+        result.rows,
+        (row) => ({
+          rowId: String(row["id"]),
+          dispatch: dispatchFromRow(row),
+          recipientAddressSha256: String(row["recipient_address_sha256"]),
+          attemptNumber: Number(row["attempt_number"]),
+        }),
+        (row) => textIdentity(row, "dispatch_id"),
+        onUnreadable,
+      );
     });
   }
 

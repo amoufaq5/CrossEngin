@@ -266,12 +266,55 @@ describe("listActiveForFlag", () => {
     const store = new PostgresKillSwitchStore(
       mockConnection(undefined, respondTo([["flag_id = $1", rows(a, b)]])),
     );
-    await expect(store.listActiveForFlag(FLAG_ID)).resolves.toEqual([a, b]);
+    await expect(store.listActiveForFlag(FLAG_ID)).resolves.toEqual({
+      records: [a, b],
+      unreadable: [],
+    });
   });
 
   it("returns an empty list rather than null when nothing is active", async () => {
     const store = new PostgresKillSwitchStore(mockConnection(undefined, () => EMPTY));
-    await expect(store.listActiveForFlag(FLAG_ID)).resolves.toEqual([]);
+    await expect(store.listActiveForFlag(FLAG_ID)).resolves.toEqual({
+      records: [],
+      unreadable: [],
+    });
+  });
+
+  /**
+   * The defect ADR-0373 closes, and it is the one that matters most on this table: one switch row
+   * the contract refuses used to throw out of `.map` and take every *other* active switch over the
+   * flag with it, so a rolled-back flag whose switches cannot be read reads as live.
+   *
+   * The refusal here is the live one — `META_FEATURE_FLAG_KILL_SWITCHES` carries no
+   * `instantRangeCheck`, so `'infinity'` is storable in `armed_at` and node-postgres hands it back
+   * as the number `Infinity`, which `asIso` renders and `KillSwitchSchema` refuses.
+   */
+  it("reports an unreadable row and keeps the rest of the flag's switches", async () => {
+    const good = killSwitch();
+    const store = new PostgresKillSwitchStore(
+      mockConnection(
+        undefined,
+        respondTo([
+          [
+            "flag_id = $1",
+            {
+              rows: [
+                {
+                  ...killSwitchRow(good),
+                  kill_switch_id: "fks_broken01",
+                  armed_at: Number.POSITIVE_INFINITY,
+                },
+                killSwitchRow(good),
+              ],
+              rowCount: 2,
+            },
+          ],
+        ]),
+      ),
+    );
+    const read = await store.listActiveForFlag(FLAG_ID);
+    expect(read.records.map((s) => s.id)).toEqual([good.id]);
+    expect(read.unreadable.map((r) => r.identity)).toEqual(["fks_broken01"]);
   });
 });
 

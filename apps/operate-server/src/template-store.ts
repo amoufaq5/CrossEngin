@@ -1,4 +1,9 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  readRows,
+  textIdentity,
+  type PgConnection,
+  type UnreadableRowReporter,
+} from "@crossengin/kernel-pg";
 import {
   NotificationTemplateSchema,
   TEMPLATE_STATUSES,
@@ -144,13 +149,30 @@ export function tryTemplateFromRow(row: Record<string, unknown>): NotificationTe
   }
 }
 
-function parseRows(rows: readonly Record<string, unknown>[]): readonly NotificationTemplate[] {
-  const templates: NotificationTemplate[] = [];
-  for (const row of rows) {
-    const template = tryTemplateFromRow(row);
-    if (template !== null) templates.push(template);
-  }
-  return templates;
+/**
+ * Converts a page of template rows, reporting any the contract refuses rather than dropping it.
+ *
+ * The same shape as `digest-store.ts`' sibling and for the same reason: filtering the nulls out
+ * made a refused template indistinguishable from one that was never authored, so the notification
+ * that needed it fell back to the built-in default with nothing naming the row — which for an
+ * *override* store is exactly the silence ADR-0313's authoring surface exists to break. It calls
+ * the throwing `templateFromRow`; `tryTemplateFromRow` remains for the single-row `find`, where
+ * `null` answers "there is no override".
+ *
+ * The reporter is forwarded rather than returned beside the records, because the consumer is
+ * template resolution on the dispatch path: the resolution still falls back, and the operator is
+ * told which row it fell back over.
+ */
+function parseRows(
+  rows: readonly Record<string, unknown>[],
+  onUnreadable: UnreadableRowReporter,
+): readonly NotificationTemplate[] {
+  return readRows(
+    rows,
+    templateFromRow,
+    (row) => textIdentity(row, "ntpl_id"),
+    onUnreadable,
+  );
 }
 
 /**
@@ -276,6 +298,7 @@ export class PostgresTemplateStore {
 
   async listForTenant(
     tenantId: string,
+    onUnreadable: UnreadableRowReporter,
     limit?: number,
   ): Promise<readonly NotificationTemplate[]> {
     const batch = clampLimit(limit);
@@ -285,7 +308,7 @@ export class PostgresTemplateStore {
         ` WHERE tenant_id = $1` +
         ` ORDER BY created_at DESC, ntpl_id DESC LIMIT $2`;
       const result = await tx.query(sql, [tenantId, batch]);
-      return parseRows(result.rows);
+      return parseRows(result.rows, onUnreadable);
     });
   }
 }

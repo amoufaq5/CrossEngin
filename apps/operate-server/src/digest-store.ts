@@ -1,4 +1,9 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  readRows,
+  textIdentity,
+  type PgConnection,
+  type UnreadableRowReporter,
+} from "@crossengin/kernel-pg";
 import {
   DigestBatchSchema,
   type DigestBatch,
@@ -159,13 +164,28 @@ export function tryDigestFromRow(row: Record<string, unknown>): DigestBatch | nu
   }
 }
 
-function parseRows(rows: readonly Record<string, unknown>[]): readonly DigestBatch[] {
-  const batches: DigestBatch[] = [];
-  for (const row of rows) {
-    const batch = tryDigestFromRow(row);
-    if (batch !== null) batches.push(batch);
-  }
-  return batches;
+/**
+ * Converts a page of digest rows, reporting any the contract refuses rather than dropping it.
+ *
+ * It used to call `tryDigestFromRow` and filter the nulls out, so a batch the contract refused
+ * left no trace: the page survived and the finding did not, and its pooled recipients were
+ * silently skipped (ADR-0373's class). It calls the *throwing* `digestFromRow` now, because
+ * `readRows` is what turns the throw into a report — the try/catch below it exists for the
+ * single-row `findById`, where answering `null` is the right answer to "is there one".
+ *
+ * The reporter is forwarded rather than returned beside the records, because every consumer is a
+ * drain or a scheduler: a refused batch is a note the operator needs and not part of the answer.
+ */
+function parseRows(
+  rows: readonly Record<string, unknown>[],
+  onUnreadable: UnreadableRowReporter,
+): readonly DigestBatch[] {
+  return readRows(
+    rows,
+    digestFromRow,
+    (row) => textIdentity(row, "digest_id"),
+    onUnreadable,
+  );
 }
 
 /**
@@ -351,7 +371,11 @@ export class PostgresDigestStore {
     });
   }
 
-  async listOpen(tenantId: string, limit?: number): Promise<readonly DigestBatch[]> {
+  async listOpen(
+    tenantId: string,
+    onUnreadable: UnreadableRowReporter,
+    limit?: number,
+  ): Promise<readonly DigestBatch[]> {
     const batch = clampLimit(limit);
     return withTenantContext(this.conn, tenantId, async (tx) => {
       const sql =
@@ -359,13 +383,14 @@ export class PostgresDigestStore {
         ` WHERE tenant_id = $1 AND status = '${OPEN_STATUS}'` +
         ` ORDER BY scheduled_dispatch_at ASC, digest_id ASC LIMIT $2`;
       const result = await tx.query(sql, [tenantId, batch]);
-      return parseRows(result.rows);
+      return parseRows(result.rows, onUnreadable);
     });
   }
 
   async dueForAssembly(
     tenantId: string,
     now: Date,
+    onUnreadable: UnreadableRowReporter,
     limit?: number,
   ): Promise<readonly DigestBatch[]> {
     const batch = clampLimit(limit);
@@ -376,7 +401,7 @@ export class PostgresDigestStore {
         ` AND scheduled_dispatch_at <= $2` +
         ` ORDER BY scheduled_dispatch_at ASC, digest_id ASC LIMIT $3`;
       const result = await tx.query(sql, [tenantId, now, batch]);
-      return parseRows(result.rows);
+      return parseRows(result.rows, onUnreadable);
     });
   }
 

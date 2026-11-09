@@ -1,4 +1,4 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import type { PgConnection, RowRead, UnreadableRow } from "@crossengin/kernel-pg";
 import {
   DEADLINE_STANDINGS,
   DEADLINE_STANDING_FACTS,
@@ -365,6 +365,14 @@ interface Harness {
 function harness(
   behaviour: {
     readonly evidence?: readonly StoredTombstone[];
+    /**
+     * Rows naming the request that the store could not represent, returned beside `evidence`.
+     *
+     * Its own field rather than folded into `evidence` for the reason the store returns the pair
+     * (ADR-0373): a refused row is not a `StoredTombstone` that happens to be wrong, it is a row
+     * nothing established to be one, so the two lists cannot be one list.
+     */
+    readonly evidenceUnreadable?: readonly UnreadableRow[];
     readonly stranded?: readonly GdprDeletionRequest[];
     readonly retires?: boolean;
     readonly retireThrows?: boolean;
@@ -494,7 +502,10 @@ function harness(
     },
   } as unknown as PostgresDeletionRequestStore;
   const tombstones = {
-    findForRequest: async (): Promise<readonly StoredTombstone[]> => behaviour.evidence ?? [],
+    findForRequest: async (): Promise<RowRead<StoredTombstone>> => ({
+      records: behaviour.evidence ?? [],
+      unreadable: behaviour.evidenceUnreadable ?? [],
+    }),
     read: async (id: string): Promise<StoredTombstone | null> => {
       if (behaviour.storedMissing === true) return null;
       return (behaviour.evidence ?? [tombstoneOf()]).find((t) => t.record.id === id) ?? null;
@@ -563,6 +574,7 @@ describe("the verdicts", () => {
       "ambiguous_evidence",
       "too_recent",
       "evidence_unverified",
+      "evidence_unreadable",
       "not_stranded",
     ]);
     // Only a present tombstone stands on its own: an absence is an inference, however old.
@@ -573,7 +585,18 @@ describe("the verdicts", () => {
       "never_committed",
       "ambiguous_evidence",
       "evidence_unverified",
+      "evidence_unreadable",
     ]);
+  });
+
+  it("leaves no verdict outside both predicates, which is how a finding reaches nobody", () => {
+    // `evidence_unreadable` fell through both when it landed: `isConclusive` was right to leave it
+    // (nothing can be applied from a premise that could not be evaluated) and `needsOperator` was
+    // not. A verdict neither predicate names is one no surface routes.
+    for (const verdict of RECONCILIATION_VERDICTS) {
+      if (verdict === "too_recent" || verdict === "not_stranded") continue;
+      expect(isConclusive(verdict) || needsOperator(verdict)).toBe(true);
+    }
   });
 
   it("waits an hour by default before reading anything into an absence", () => {
@@ -629,6 +652,60 @@ describe("assess", () => {
     expect(result.tombstoneIds).toHaveLength(2);
   });
 
+  it("refuses to count a row naming the request that the contract cannot represent", async () => {
+    // ADR-0373's sharpest consequence in this package. Every other verdict here is a function of
+    // how many tombstones name the request, so a refused row dropped from the count would answer
+    // `never_committed` for a request whose deletion committed — and `/reconcile` writes that as
+    // `rejected` on an operator's authorisation, with the tenant's data already gone.
+    const h = harness({
+      evidence: [],
+      evidenceUnreadable: [{ identity: TOMB, detail: "kind: invalid_enum_value" }],
+    });
+    const result = await h.reconciler.assess(requestOf());
+    expect(result.verdict).toBe("evidence_unreadable");
+    expect(result.tombstoneId).toBeNull();
+    // The readable ones only: a refused row's id is a handle, not a record.
+    expect(result.tombstoneIds).toEqual([]);
+    expect(result.evidence).toBeNull();
+    expect(result.applied).toBe(false);
+    expect(h.transitions).toEqual([]);
+    expect(result.detail).toContain(TOMB);
+    expect(result.detail).toContain("kind: invalid_enum_value");
+  });
+
+  it("answers unreadable ahead of the count, because both premises are then broken", async () => {
+    // One readable row and one refused: `records.length > 1` is false and `records[0]` is present,
+    // so without the ordering this would read `completed_by_evidence` off a set it could not read.
+    const h = harness({
+      evidence: [tombstoneOf()],
+      evidenceUnreadable: [{ identity: "tomb_bbbbccccddddeeee", detail: "scope: invalid_type" }],
+    });
+    const result = await h.reconciler.assess(requestOf());
+    expect(result.verdict).toBe("evidence_unreadable");
+    expect(result.detail).toContain("1 of 2");
+  });
+
+  it("writes nothing for an unreadable row even when asked to apply never_committed", async () => {
+    const h = harness({
+      evidence: [],
+      evidenceUnreadable: [{ identity: TOMB, detail: "kind: invalid_enum_value" }],
+    });
+    const result = await h.reconciler.reconcileOne(requestOf(), { applyNeverCommitted: true });
+    expect(result.verdict).toBe("evidence_unreadable");
+    expect(result.applied).toBe(false);
+    expect(h.transitions).toEqual([]);
+  });
+
+  it("reports an unidentified refused row without inventing a handle for it", async () => {
+    const h = harness({
+      evidence: [],
+      evidenceUnreadable: [{ identity: null, detail: "<root>: custom" }],
+    });
+    const result = await h.reconciler.assess(requestOf());
+    expect(result.verdict).toBe("evidence_unreadable");
+    expect(result.detail).toContain("<unidentified>");
+  });
+
   it("says nothing to do for a request that is not in_progress", async () => {
     const h = harness({ evidence: [tombstoneOf()] });
     const result = await h.reconciler.assess(requestOf({ status: "verified", inProgressAt: null }));
@@ -640,9 +717,9 @@ describe("assess", () => {
     let asked = 0;
     const h = harness({}, {
       tombstones: {
-        findForRequest: async (): Promise<readonly StoredTombstone[]> => {
+        findForRequest: async (): Promise<RowRead<StoredTombstone>> => {
           asked += 1;
-          return [];
+          return { records: [], unreadable: [] };
         },
       } as unknown as PostgresTombstoneStore,
     });

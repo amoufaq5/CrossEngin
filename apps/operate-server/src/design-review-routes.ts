@@ -362,7 +362,24 @@ function buildListHandler(ctx: DesignReviewContext): Handler {
   return async (input) => {
     const denial = guard(ctx, input.principal);
     if (denial !== null) return denial;
-    const page = await ctx.store.list(readListQuery(input));
+    let page: DesignReviewListPageLike;
+    try {
+      page = await ctx.store.list(readListQuery(input));
+    } catch {
+      // `rowToRecord` parses every row and this read runs under `withPlatformReview`, i.e.
+      // cross-tenant, so one refused proposal really does hide every other tenant's pending design —
+      // the declared consequence is that no design can be approved. Named rather than dropped.
+      //
+      // 500 and deliberately **not** 400, unlike `template_page_unreadable`: that one is a 4xx
+      // because the row was authored through that surface *by its caller*, and here the proposal's
+      // author is the tenant's Architect while the reader is the platform reviewer, so "your request
+      // is wrong" is false for them.
+      //
+      // The `try` is scoped to the store call alone: `toListItem` calls `ctx.assessRisk(manifest)`
+      // below, and a throw from the risk assessor is a different condition that must not be
+      // laundered into this code.
+      return json(500, { error: "design_review_page_unreadable" });
+    }
     return json(200, {
       data: page.data.map((r) => toListItem(ctx, r)),
       page: { nextCursor: page.nextCursor },

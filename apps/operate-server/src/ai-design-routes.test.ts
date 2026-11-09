@@ -7,6 +7,7 @@ import {
   buildAiDesignRoutes,
   type AiDesignContext,
   type AiManifestCreateInput,
+  type AiManifestListPage,
   type AiManifestListQuery,
   type AiManifestRecordLike,
   type AiManifestStore,
@@ -469,6 +470,32 @@ describe("ai-design-routes — list", () => {
     const data = out.body["data"] as readonly AiManifestRecordLike[];
     expect(data).toHaveLength(1);
     expect(data[0]?.tenantId).toBe(TENANT);
+  });
+
+  it("refuses the page rather than shortening it when a stored proposal no longer parses", async () => {
+    const ctx = makeCtx();
+    await draftId(ctx);
+    const failing: AiManifestStore = {
+      ...ctx.store,
+      list: async (): Promise<AiManifestListPage> => {
+        throw new Error("stored proposal invalid");
+      },
+      create: (t, i) => ctx.store.create(t, i),
+      getById: (t, id) => ctx.store.getById(t, id),
+      setStatus: (t, id, s) => ctx.store.setStatus(t, id, s),
+      activate: (t, id) => ctx.store.activate(t, id),
+    };
+    const out = (await findHandler({ ...ctx, store: failing }, "ai.manifests.list")(
+      input("tenant_admin"),
+    )) as JsonOut;
+    // This handler had no catch at all before ADR-0373, so the throw escaped as an unclassified
+    // 500 — on the one of these list routes the shipped compose mounts (`--ai-design`).
+    expect(out.status).toBe(500);
+    expect(out.body["error"]).toBe("manifest_page_unreadable");
+    // No detail: a manifest row quotes the tenant's own design.
+    expect(JSON.stringify(out.body)).not.toContain("stored proposal invalid");
+    expect(out.body).not.toHaveProperty("detail");
+    expect(out.body["data"]).toBeUndefined();
   });
 
   it("filters by status", async () => {
