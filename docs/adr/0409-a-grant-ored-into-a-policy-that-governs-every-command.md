@@ -172,6 +172,19 @@ the biconditional for the `_tenant_or_platform_*` family, whose other member
 is ADR-0331's: a name that no longer describes its policy, one sibling below a
 `_platform_review_read` that does.
 
+**The biconditional is not the fence for what shipped, and reading this section could suggest it
+is.** It rejects one *specific* wrong pair — the alternative above, a `SELECT`-scoped arm under a
+grant-shaped name — and **admits the opposite wrong pair**: measured, renaming the activation arm to
+`operate_tenant_manifests_tenant_or_platform_activation` *and* dropping its `command` passes
+`canonical.test.ts` **69 of 69**, because the renamed arm no longer matches `NARROWED_NAME` so the
+else-branch requires `ALL`-scope and the mutation supplies it. That pair is exactly the defect this
+ADR closes, reintroduced on the new arm. What catches it is the per-table assertion in
+`meta-schema.test.ts` (**1 failed of 284** under the same mutation), which pins the names *and* the
+`["ALL", "SELECT", "SELECT"]` command list. So the biconditional enforces *internal consistency*
+between a name and a command, and only the per-table assertion decides *which* consistent pair is
+correct — a distinction worth having before anyone renames one of these arms on the biconditional's
+authority.
+
 **Rename the surviving arm to `_tenant_isolation`.** Refused on measurement: a rename leaves the old
 permissive `ALL` policy live and undeclared, `allowLoosening` never reaches `policy_removed`, and
 because permissive policies are **OR'd** the fix would buy *nothing* until an operator ran a manual
