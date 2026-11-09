@@ -12404,7 +12404,12 @@ ranked items and 13 demotions** — a figure about *that audit* and no longer a 
 below, because later increments have added items of their own (P2.17 is the first), so **count the
 list rather than quoting this line**. (The figure first reported for the audit was 145, which was
 the eight-domain subtotal before the cross-domain pass added thirteen — carried forward once
-already, which is the subject of P3 item 1 and the reason it is corrected here rather than quietly.)
+already, which is the subject of P3 item 1 and the reason it is corrected here rather than quietly.
+Derived as of this sentence: **55 numbered items — P0 11, P1 17, P2 20, P3 7 — and 8 demotions**.
+The `13` half of the historical pair reconciles with nothing: the demoted section held **10** bolded
+entries at the commit that introduced the figure and holds 10 now, of which 3 are measurements
+inside one entry, so the section has never had more than 8 members — wrong when written, in the one
+number of the pair that names a *set* rather than a count of findings.)
 The conclusion is one sentence:
 
 > **The engine is genuinely complete and hardened. The deployment that ships is not, and breadth is
@@ -12434,7 +12439,11 @@ Each is reachable on a running deployment and produces a wrong answer, a disclos
 or an authorization bypass. The test against P1 is that **no new capability is needed to be harmed
 by it**.
 
-**This tier is closed as of ADR-0391.** Its **eleven** entries — nine numbered plus 6b and 8b — are
+**No entry in this tier still carries a live P0 defect, as of ADR-0391.** That is narrower than
+*the tier is closed*, which this paragraph used to say and which invites a reader to forget that
+**three entries remain open at a lower grade** — P0.3's file half and P0.8 as **P2** (latent behind
+a flag no compose passes) and P0.9's absent scheduler as **P1** — each demoted with its
+measurement rather than fixed. Its **eleven** entries — nine numbered plus 6b and 8b — are
 each fixed, demoted with the measurement that demoted them, or split so the live half closes and the
 rest is re-graded; **read each entry for which**, because several are more than one thing. The
 demotions matter as much as the fixes: P0.3's file half and P0.8 are **latent**, since every flag and
@@ -12449,7 +12458,12 @@ The standing rule the tier produced is register P3.1's, and it earned all three 
 **re-measure an entry before designing against it, check its *remedy* as well as its facts, and aim
 a refuter at the corrections.** Facts that measurement refuted: P0.3's bold file claim, P0.6's
 `decimal_places`, P0.6b's harm statement, P0.7's *"while the UI says the field is unique"*, P0.8's
-refuse/admit split, P0.9's *"no cron, no retention"*. **Prescribed remedies that could not work**:
+refuse/admit split, P0.9's *"no cron, no retention"* — and, measured after the tier was called
+closed, **P0.7's own closing grade**, where the duplicate a missing unique index admits turns out to
+cause a *second GL posting* rather than merely becoming creatable, so *permissive rather than a wrong
+answer* is false of the general ledger. A grading sentence is exactly as liable to be wrong as a
+fact, and it is the sentence that decides whether anybody looks again.
+**Prescribed remedies that could not work**:
 P0.3's platform write arm (proven unsatisfiable live), P0.4's `subjectIdentifier` threading (which
 would have made the record worse), and P0.1's named precedent (a second cached directory where the
 row was already being read). And twice a *correction* was itself wrong — see P3.1 — which is why the
@@ -13027,6 +13041,28 @@ third clause is not a flourish.
    pairs. The instruction to refuse the encrypted case was right and is what shipped. The entry also
    did not know `UniqueHintSchema` admits `{scope: string[]}`, which is read now, or that 14 of the
    45 are sequence-defaulted, which is what gates the 409.
+   **And the *grading* that closed it is refuted, measured on both stores on one cluster.** ADR-0360
+   called the absent index *permissive rather than a wrong answer*, on ADR-0359's line that it
+   "changes neither which rows come back nor their order, only which can be created" — **true of the
+   entity list and false of the general ledger**. Live on `--store pg` with the shipped `erp-core`:
+   two invoices POSTed with the same declared-unique `invoice_number` answer **201 and 201**, both
+   `send` answer 200, and the GL comes back holding **two `JournalEntry` rows both numbered
+   `INV-DUP-AR`** with four lines — **AR 200.00 and revenue 200.00 for one invoice number** — where
+   the same two POSTs on `--store pg-columns` answer **201 then 409 `unique_violation`** naming the
+   field. So the duplicate does not merely become *creatable*: it reaches
+   `recognitionGlPostingEffect` and causes a **second posting**, and `JournalEntry.entry_number` is
+   itself one of the 32 withheld declarations so nothing refuses that either. Each entry balances
+   independently, so `journalPostingGuard` passes — ADR-0378's *a wrong figure that balances*, which
+   no guard, replayer or integrity proof can see. **ADR-0366 had already named this consequence** for
+   the `billGlPostingEffect` it deleted (*"two identical posted entries double-counting expense and
+   AP on the shipped `pg` store where ADR-0360 measures 0 of 32"*); the live member is
+   `recognitionGlPostingEffect`, the shipped path, which nobody had measured. What the correction does
+   **not** reach: nothing in the engine resolves an entry *by number* (`journalReversalEffect` keys on
+   `input.id`), so no engine control flow is misdirected and each duplicate reverses correctly — the
+   cost lands on every reader **outside** the engine, for which `entry_number` is the entry's natural
+   key and is now ambiguous. ADR-0360's decision to report rather than refuse still stands, because
+   the remedy is a data migration no operator owns; what was wrong is one sentence, in the direction
+   that understates.
 8. **`compliancePacks` is a counted string — and a fifth measurement (2026-10-20) makes the
    deliverable bigger again, so the "one-line fix" named in (d) is withdrawn.** Re-derived against
    the committed tree while scoping it: `resolveCompliancePacks` has **zero** callers outside its

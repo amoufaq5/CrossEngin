@@ -77,8 +77,22 @@ describe("buildErpCorePack — counts", () => {
     expect(Object.keys(buildErpCorePack().roles ?? {})).toHaveLength(15);
   });
 
-  it("has 50 entity permission sets", () => {
-    expect(Object.keys(buildErpCorePack().permissions ?? {})).toHaveLength(50);
+  it("grants every entity it declares, by name", () => {
+    // Was `toHaveLength(50)` against 51 entities, which pinned the gap as the specification
+    // (ADR-0372's class): `WhtCertificate` had no entry, so all five of its CRUD routes answered
+    // 403 to every declared role while `whtCertificateClearingEffect` wrote the records through the
+    // store, which runs no RBAC. A bare count cannot see which one is missing and reads as
+    // deliberate, so the assertion is now the *relation* — every entity is granted — and names the
+    // offenders when it fails. A 52nd entity with no grant fails here rather than in production.
+    const pack = buildErpCorePack();
+    const entities = pack.entities ?? [];
+    // Non-vacuity floor: `Manifest.entities` is optional, so an empty list would satisfy both
+    // assertions below while examining nothing.
+    expect(entities.length).toBeGreaterThan(0);
+    const granted = new Set(Object.keys(pack.permissions ?? {}));
+    const ungranted = entities.map((e) => e.name).filter((n) => !granted.has(n));
+    expect(ungranted).toEqual([]);
+    expect(granted.size).toBe(entities.length);
   });
 
   it("has 19 workflows", () => {

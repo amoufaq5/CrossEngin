@@ -1841,3 +1841,158 @@ describe("paymentApplicationEffect — one coverage predicate, two readers", () 
 // than through the fold — measured, it is the only failure that mutation produces. A second
 // assertion over `readAppliedPayments` would have been the bucket test in `write-guards.test.ts`
 // written twice.
+
+describe("entersState — a one-step create reaches the state, so the effect fires", () => {
+  // Six effects keyed on *arriving* in a state opened with
+  // `operation !== "update" && operation !== "transition"`, which reads as "a document reaches this
+  // state by being transitioned" and is false: a lifecycle state is an ordinary `enum` field with a
+  // literal default and no field-level permissions in any shipped pack, so a caller may POST it
+  // directly. Measured live on `--store pg` + `erp-core` as `erp_admin`: an invoice created
+  // `{"state":"sent"}` answered 201 and recognised NO revenue, while the AR aging report counted it
+  // — 277 open against a general ledger carrying 250. Every figure balances on its own, so
+  // `journalPostingGuard` is satisfied and no detector can see it (ADR-0378).
+  //
+  // None of the 1117 pre-existing tests in this package failed on the defect, because every fixture
+  // here reaches its state through `operation: "transition"`. That is the point of this block.
+
+  const create = (entity: string, after: Record<string, unknown>, store: EntityStore, id: string): WriteEffectInput =>
+    ({ operation: "create", entity, tenantId: TENANT, id, before: null, after, store });
+
+  it("recognitionGlPostingEffect posts on an invoice created already sent", async () => {
+    const store = new InMemoryEntityStore();
+    const rec = recognitionGlPostingEffect({
+      entity: "Invoice", triggerState: "sent", controlSide: "debit", numberField: "invoice_number",
+      controlAccountRef: "ar", netAccountRef: "revenue", taxAccountRef: "tax_payable",
+      controlDescription: "AR", netDescription: "Revenue", taxDescription: "Tax", clock,
+    });
+    const inv = await store.create(TENANT, "Invoice", {
+      invoice_number: "INV-BORN-SENT", state: "sent", document_type: "invoice",
+      subtotal: 77, tax_total: 0, total: 77,
+    });
+    await rec(create("Invoice", inv, store, String(inv.id)));
+    const lines = await store.list(TENANT, "JournalLine");
+    expect(lines.length).toBe(2);
+    expect(lines.find((l) => l.ledger_account_id === "ar")!.debit).toBe(77);
+    expect(lines.find((l) => l.ledger_account_id === "revenue")!.credit).toBe(77);
+  });
+
+  it("bookingRateStampEffect stamps an invoice created already sent", async () => {
+    const store = new InMemoryEntityStore();
+    const usd = await store.create(TENANT, "Currency", { code: "USD", name: "USD" });
+    const eur = await store.create(TENANT, "Currency", { code: "EUR", name: "EUR" });
+    await store.create(TENANT, "ExchangeRate", {
+      from_currency_id: String(eur.id), to_currency_id: String(usd.id), rate: 1.15, rate_date: "2026-05-20",
+    });
+    const stamp = bookingRateStampEffect({
+      entity: "Invoice", triggerState: "sent", dateField: "issue_date", functionalCurrency: "USD", clock,
+    });
+    const inv = await store.create(TENANT, "Invoice", {
+      invoice_number: "INV-FX", state: "sent", currency: "EUR", issue_date: "2026-06-01", total: 10,
+    });
+    await stamp(create("Invoice", inv, store, String(inv.id)));
+    const after = await store.get(TENANT, "Invoice", String(inv.id));
+    expect(Number(after!.booking_rate)).toBeCloseTo(1.15, 6);
+  });
+
+  it("paymentSettlementGlPostingEffect posts on a payment created already completed", async () => {
+    const store = new InMemoryEntityStore();
+    const settle = paymentSettlementGlPostingEffect({ cashAccountRef: "cash", arAccountRef: "ar", clock });
+    const pay = await store.create(TENANT, "Payment", {
+      payment_number: "PAY-1", state: "completed", direction: "inbound", amount: 50, currency: "USD",
+    });
+    await settle(create("Payment", pay, store, String(pay.id)));
+    const lines = await store.list(TENANT, "JournalLine");
+    expect(lines.length).toBe(2);
+    expect(lines.find((l) => l.ledger_account_id === "cash")!.debit).toBe(50);
+    expect(lines.find((l) => l.ledger_account_id === "ar")!.credit).toBe(50);
+  });
+
+  it("paymentApplicationEffect settles the document for a payment created already completed", async () => {
+    const store = new InMemoryEntityStore();
+    const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-APP", state: "sent", total: 50 });
+    const apply = paymentApplicationEffect({
+      refField: "invoice_id", documentEntity: "Invoice", settleableStates: ["sent", "overdue"], clock,
+    });
+    const pay = await store.create(TENANT, "Payment", {
+      payment_number: "PAY-2", state: "completed", direction: "inbound", amount: 50, invoice_id: String(inv.id),
+    });
+    await apply(create("Payment", pay, store, String(pay.id)));
+    const after = await store.get(TENANT, "Invoice", String(inv.id));
+    expect(after!.state).toBe("paid");
+    expect(after!.paid_at).toBe("2026-06-21T00:00:00.000Z");
+  });
+
+  it("whtCertificateClearingEffect clears for a certificate created already confirmed", async () => {
+    const store = new InMemoryEntityStore();
+    const clear = whtCertificateClearingEffect({ clock });
+    const cert = await store.create(TENANT, "WhtCertificate", {
+      certificate_number: "WHT-1", state: "confirmed", amount: 12, currency: "USD",
+    });
+    await clear(create("WhtCertificate", cert, store, String(cert.id)));
+    expect((await store.list(TENANT, "JournalEntry")).length).toBe(1);
+  });
+
+  it("a create and a later transition into the same state fire exactly once between them", async () => {
+    // The `before` half of the edge is what prevents the double-fire, and it was already present at
+    // every site — only the operation test was narrower than the edge. Driving both halves pins
+    // that the widening did not introduce a second posting.
+    const store = new InMemoryEntityStore();
+    const rec = recognitionGlPostingEffect({
+      entity: "Invoice", triggerState: "sent", controlSide: "debit", numberField: "invoice_number",
+      controlAccountRef: "ar", netAccountRef: "revenue", taxAccountRef: "tax_payable",
+      controlDescription: "AR", netDescription: "Revenue", taxDescription: "Tax", clock,
+    });
+    const inv = await store.create(TENANT, "Invoice", {
+      invoice_number: "INV-ONCE", state: "sent", document_type: "invoice", subtotal: 5, tax_total: 0, total: 5,
+    });
+    const id = String(inv.id);
+    await rec(create("Invoice", inv, store, id));
+    await rec({ operation: "transition", entity: "Invoice", tenantId: TENANT, id, before: inv, after: { ...inv, state: "sent" }, store });
+    expect((await store.list(TENANT, "JournalEntry")).length).toBe(1);
+  });
+});
+
+describe("entersState — the three prior-state effects stay inert on a create", () => {
+  // `journalReversalEffect`, `invoiceVoidCreditNoteEffect` and `creditNoteGlPostingEffect` each
+  // require a *specific prior state* (`!wasPosted`, `!wasIssued`), and a create has none — so a
+  // record created already `reversed` or `void` was never posted and never issued, and ignoring it
+  // is the right answer. Widening these would reverse an entry that was never posted and
+  // credit-note an invoice that was never sent. This block is why the sweep is six sites and not
+  // nine.
+  //
+  // What these three fence is the **conjunction**, and that was measured rather than assumed: a
+  // create is refused twice over here, by the operation test *and* by the prior-state clause, and
+  // either alone suffices — so widening the operation test alone passes all three, and dropping
+  // `!wasPosted` / `!wasIssued` alone also passes all three. Both mutations together fail all
+  // three. A first draft of this comment claimed they "fail if somebody completes the sweep", which
+  // is false, and only the mutation said so: this file's own documented-the-hazard-and-checked-
+  // nothing class, in the comment claiming the check. Pinning the *outcome* rather than a
+  // particular guard is nonetheless the right property for an inertness claim — what matters is
+  // that something refuses the create, not which — but the fence is weaker than a single-mutation
+  // one and that is worth knowing before relying on it.
+
+  const create = (entity: string, after: Record<string, unknown>, store: EntityStore, id: string): WriteEffectInput =>
+    ({ operation: "create", entity, tenantId: TENANT, id, before: null, after, store });
+
+  it("journalReversalEffect writes nothing for an entry created already reversed", async () => {
+    const store = new InMemoryEntityStore();
+    const entry = await store.create(TENANT, "JournalEntry", { entry_number: "JE-X", state: "reversed", book_id: "b", fiscal_period_id: "p" });
+    await journalReversalEffect({ clock })(create("JournalEntry", entry, store, String(entry.id)));
+    expect((await store.list(TENANT, "JournalEntry")).length).toBe(1);
+    expect((await store.list(TENANT, "JournalLine")).length).toBe(0);
+  });
+
+  it("invoiceVoidCreditNoteEffect writes nothing for an invoice created already void", async () => {
+    const store = new InMemoryEntityStore();
+    const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-V", state: "void", document_type: "invoice", total: 10 });
+    await invoiceVoidCreditNoteEffect({ clock })(create("Invoice", inv, store, String(inv.id)));
+    expect((await store.list(TENANT, "Invoice")).length).toBe(1);
+  });
+
+  it("creditNoteGlPostingEffect writes nothing for an invoice created already void", async () => {
+    const store = new InMemoryEntityStore();
+    const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-V2", state: "void", document_type: "invoice", total: 10 });
+    await creditNoteGlPostingEffect({ clock })(create("Invoice", inv, store, String(inv.id)));
+    expect((await store.list(TENANT, "JournalEntry")).length).toBe(0);
+  });
+});

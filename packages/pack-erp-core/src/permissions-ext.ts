@@ -148,4 +148,19 @@ export const ERP_EXT_PERMISSIONS: Readonly<Record<string, EntityPermissions>> = 
   TaxJurisdiction: crud(TAX_READERS, TAX_WRITERS, { fields: TAX_JURISDICTION_FIELDS }),
   TaxRule: crud(TAX_READERS, TAX_WRITERS),
   TaxReturn: crud(TAX_READERS, TAX_WRITERS, { transitionsFor: "TaxReturn" }),
+  // `WhtCertificate` was the one entity of this pack's 51 with no entry at all, so all five of its
+  // CRUD routes answered 403 to every declared role — `erp_admin` included — while
+  // `whtCertificateClearingEffect` wrote those records through the store, which runs no RBAC. The
+  // entity was writable by the engine and readable by nobody: a withholding certificate a tax
+  // authority asks for, which the platform produces and will not show you.
+  //
+  // No `transitionsFor`, and that is a fact about this entity rather than an omission: it declares
+  // no lifecycle workflow at all (measured — 0 of the pack's 19 name it), so its `state` moves only
+  // by a create or a PATCH, which is also why the `entersState` widening is load-bearing here and
+  // not merely tidy.
+  //
+  // `validatePermissions` checks that a grant which *exists* is coherent; nothing checks that an
+  // entity serving routes has one. A rule for that would refuse exactly this one entity today,
+  // which is the cheapest moment it will ever have — see the register.
+  WhtCertificate: crud(TAX_READERS, TAX_WRITERS),
 };

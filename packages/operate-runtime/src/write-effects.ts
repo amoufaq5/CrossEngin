@@ -114,6 +114,10 @@ export function journalReversalEffect(config: JournalReversalConfig = {}): Write
   const c = { ...DEFAULTS, ...config };
   return async (input) => {
     if (input.entity !== c.entryEntity) return;
+    // NOT `entersState`: this trigger needs a *specific prior state*, and a create has none.
+    // A record created already in the target state was never in the prior one, so ignoring it is
+    // the right answer rather than a missed edge — see `entersState` for the arrival/prior-state
+    // split and why that makes the sweep six sites and not nine.
     if (input.operation !== "update" && input.operation !== "transition") return;
     const wasPosted = input.before?.[c.stateField] === c.postedState;
     const nowReversed = input.after[c.stateField] === c.reversedState;
@@ -292,6 +296,10 @@ export function invoiceVoidCreditNoteEffect(config: InvoiceCreditNoteConfig = {}
   const c = { ...CN_DEFAULTS, ...config };
   return async (input) => {
     if (input.entity !== c.invoiceEntity) return;
+    // NOT `entersState`: this trigger needs a *specific prior state*, and a create has none.
+    // A record created already in the target state was never in the prior one, so ignoring it is
+    // the right answer rather than a missed edge — see `entersState` for the arrival/prior-state
+    // split and why that makes the sweep six sites and not nine.
     if (input.operation !== "update" && input.operation !== "transition") return;
     const beforeState = input.before?.[c.stateField];
     const wasIssued = typeof beforeState === "string" && c.issuedStates.includes(beforeState);
@@ -487,6 +495,10 @@ export function creditNoteGlPostingEffect(config: CreditNoteGlConfig = {}): Writ
   const c = { ...GL_DEFAULTS, ...config };
   return async (input) => {
     if (input.entity !== c.invoiceEntity) return;
+    // NOT `entersState`: this trigger needs a *specific prior state*, and a create has none.
+    // A record created already in the target state was never in the prior one, so ignoring it is
+    // the right answer rather than a missed edge — see `entersState` for the arrival/prior-state
+    // split and why that makes the sweep six sites and not nine.
     if (input.operation !== "update" && input.operation !== "transition") return;
     const beforeState = input.before?.[c.stateField];
     const wasIssued = typeof beforeState === "string" && c.issuedStates.includes(beforeState);
@@ -839,8 +851,7 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
   const opposite: GlSide = c.controlSide === "debit" ? "credit" : "debit";
   return async (input) => {
     if (input.entity !== c.entity) return;
-    if (input.operation !== "update" && input.operation !== "transition") return;
-    if (input.before?.[c.stateField] === c.triggerState || input.after[c.stateField] !== c.triggerState) return;
+    if (!entersState(input, c.stateField, c.triggerState)) return;
     if (c.skipDocumentType !== undefined && input.after[c.skipDocumentType.field] === c.skipDocumentType.value) return;
 
     const doc = input.after;
@@ -1040,6 +1051,60 @@ const SETTLEMENT_FALLBACKS = {
 } as const;
 
 /**
+ * A record *enters* a state, whichever way it got there — the one trigger every effect keyed on an
+ * arrival reads, and the thing six of them used to get wrong.
+ *
+ * All six opened with `operation !== "update" && operation !== "transition"`, which reads as *a
+ * document reaches this state by being transitioned* and is false: a lifecycle state is an ordinary
+ * `enum` field with a **literal** default, carries no field-level permissions in any shipped pack,
+ * and `lockedDocumentGuard` answers `null` first when the *before* state is unlocked — so a caller
+ * may POST the state directly and no transition is involved. Measured live on the shipped pack and
+ * store (`--store pg`, `erp-core`), as `erp_admin`, two ordinary POSTs:
+ *
+ * - `POST /v1/invoices {…,"state":"sent"}` → **201**, and **no journal entry at all**: revenue was
+ *   never recognised, AR was never debited, `sent_at` was never stamped and `booking_rate` was never
+ *   stamped either. The AR aging report counted the invoice all the same, so the subledger read
+ *   **277 open** against a general ledger carrying **250** — the divergence being the whole invoice.
+ * - `POST /v1/payments {…,"amount":"50.00","state":"completed"}` → **201**, and neither
+ *   payment-driven effect fired: the GL still carried the receivable, the invoice still read
+ *   `state: "sent"` with `paid_at` null, and the aging report **dropped it as settled**, because it
+ *   derives `applied` from the Payment rows directly rather than from either. Three surfaces, three
+ *   answers, and the divergence was exactly the payment.
+ *
+ * Each figure balances on its own, so `journalPostingGuard`'s double-entry invariant is satisfied
+ * and nothing in the detection stack can see it — ADR-0378's *a wrong figure that balances*.
+ *
+ * So the trigger is keyed on the **state edge** and not on the operation, which is ADR-0391's rule
+ * for exactly this reason, one layer in. The edge's two halves do different jobs: `after` must be
+ * the state, and `before` must not be — the second is what keeps a create and a later transition
+ * from both firing, and it was already present at every site. Only the operation test was narrower
+ * than the edge.
+ *
+ * **Three sibling effects are deliberately NOT converted**, because their trigger is not an arrival:
+ * `journalReversalEffect` (`!wasPosted || !nowReversed`), `invoiceVoidCreditNoteEffect` and
+ * `creditNoteGlPostingEffect` (both `!wasIssued || !nowVoid`) each require a *specific prior state*,
+ * and a create has no prior state — so a document created already `reversed` or `void` was never
+ * posted and never issued, and ignoring it is the right answer rather than a missed edge. Widening
+ * those would reverse an entry that was never posted and credit-note an invoice that was never
+ * sent. The split is *arrival* versus *prior state*, and it is the whole of why this is six sites
+ * and not nine.
+ *
+ * `delete` is excluded explicitly rather than left to fall out. A delete passes `after = before`
+ * (`WriteGuardInput`'s own contract), so the `before` clause already refuses every delete of a
+ * record in the state and the `after` clause every delete of one outside it — but that is a property
+ * of *another* module's contract, and an effect that fires or not depending on it is the implicit
+ * coupling this repo keeps finding. Note also that `id` is **non-null on create here**: the create
+ * handler passes `created["id"]` (`handlers.ts:460`), so a `payId === null` guard downstream is
+ * about a store that returned no id, not about the operation — `WriteGuardInput.id`'s "null on
+ * create" is true of the *guard* input and not of the effect's.
+ */
+function entersState(input: WriteEffectInput, stateField: string, state: string): boolean {
+  if (input.operation === "delete") return false;
+  if (input.before?.[stateField] === state) return false;
+  return input.after[stateField] === state;
+}
+
+/**
  * Payment-driven settlement: when a Payment completes, posts a balanced entry for
  * its amount — inbound (customer) → debit cash, credit AR; outbound (vendor) →
  * debit AP, credit cash. Because each Payment carries its own amount, **partial
@@ -1053,8 +1118,7 @@ export function paymentSettlementGlPostingEffect(config: PaymentSettlementGlConf
   const c = { ...SETTLEMENT_FALLBACKS, ...config };
   return async (input) => {
     if (input.entity !== c.paymentEntity) return;
-    if (input.operation !== "update" && input.operation !== "transition") return;
-    if (input.before?.[c.stateField] === c.completedState || input.after[c.stateField] !== c.completedState) return;
+    if (!entersState(input, c.stateField, c.completedState)) return;
 
     const pay = input.after;
     const payId = input.id;
@@ -1160,8 +1224,7 @@ export function paymentApplicationEffect(config: PaymentApplicationConfig): Writ
   const c = { ...APPLICATION_FALLBACKS, ...config };
   return async (input) => {
     if (input.entity !== c.paymentEntity) return;
-    if (input.operation !== "update" && input.operation !== "transition") return;
-    if (input.before?.[c.stateField] === c.completedState || input.after[c.stateField] !== c.completedState) return;
+    if (!entersState(input, c.stateField, c.completedState)) return;
 
     const docId = input.after[c.refField];
     if (typeof docId !== "string" || docId.length === 0) return;
@@ -1333,10 +1396,7 @@ export function unrealizedFxRevaluationEffect(config: UnrealizedFxRevaluationCon
   const c = { ...FX_REVAL_FALLBACKS, ...config };
   return async (input) => {
     if (input.entity !== c.periodEntity) return;
-    if (input.operation !== "update" && input.operation !== "transition") return;
-    const wasClosed = input.before?.[c.periodStateField] === c.closedState;
-    const nowClosed = input.after[c.periodStateField] === c.closedState;
-    if (wasClosed || !nowClosed) return; // fire once, on the →closed edge
+    if (!entersState(input, c.periodStateField, c.closedState)) return; // fire once, on the →closed edge
 
     const period = input.after;
     const periodId = input.id;
@@ -1535,8 +1595,7 @@ export function bookingRateStampEffect(config: BookingRateStampConfig): WriteEff
   const c = { ...BOOKING_RATE_FALLBACKS, ...config };
   return async (input) => {
     if (input.entity !== c.entity) return;
-    if (input.operation !== "update" && input.operation !== "transition") return;
-    if (input.before?.[c.stateField] === c.triggerState || input.after[c.stateField] !== c.triggerState) return;
+    if (!entersState(input, c.stateField, c.triggerState)) return;
 
     const doc = input.after;
     const docId = input.id;
@@ -1681,10 +1740,7 @@ export function whtCertificateClearingEffect(config: WhtCertificateClearingConfi
   const c = { ...WHT_CLEARING_FALLBACKS, ...config };
   return async (input) => {
     if (input.entity !== c.entity) return;
-    if (input.operation !== "update" && input.operation !== "transition") return;
-    const wasConfirmed = input.before?.[c.stateField] === c.confirmedState;
-    const nowConfirmed = input.after[c.stateField] === c.confirmedState;
-    if (wasConfirmed || !nowConfirmed) return; // fire once, on the →confirmed edge
+    if (!entersState(input, c.stateField, c.confirmedState)) return; // fire once, on the →confirmed edge
 
     const cert = input.after;
     const certId = input.id;
