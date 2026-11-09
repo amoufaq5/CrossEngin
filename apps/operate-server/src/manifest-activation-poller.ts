@@ -3,6 +3,16 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 const MIN_INTERVAL_MS = 1_000;
 
+/**
+ * The poller's own platform grant, read by
+ * `operate_tenant_manifests_platform_activation_read` (ADR-0409). `is_local => true`, so the
+ * elevation is released with the transaction and never rides on a pooled connection —
+ * `withPlatformReview`'s and `withTenantContext`'s rule, and the reason the read is wrapped in a
+ * transaction at all rather than issued on the pool.
+ */
+const SET_MANIFEST_ACTIVATION_SQL =
+  "SELECT set_config('app.platform_manifest_activation', 'on', true)";
+
 export interface ActivationWatermarkSource {
   /** Latest activation instant per tenant that currently has an active manifest. */
   activationWatermarks(): Promise<ReadonlyMap<string, string>>;
@@ -21,10 +31,30 @@ function isoOf(value: unknown): string | null {
 /**
  * The activation watermark of every tenant with an active manifest, in ONE
  * cross-tenant aggregate — cost is one query per interval regardless of tenant
- * count. `meta.operate_tenant_manifests` carries tenant RLS, but this is a
- * platform-level sweep (like `PostgresTenantSource`), so it deliberately runs
- * OUTSIDE `withTenantContext`: binding one tenant would hide every other
- * tenant's activation from the poller.
+ * count. Binding one tenant with `withTenantContext` would hide every other
+ * tenant's activation from the poller, so this is a platform-level sweep and
+ * runs under a platform grant of its own.
+ *
+ * Until ADR-0409 it ran under **no** scope at all, and the comment here cited
+ * `PostgresTenantSource` as the precedent for that. The analogy was false:
+ * `meta.tenants` carries no RLS and no policies, so that source needs no
+ * context and gets none, while this table has RLS whose only platform disjunct
+ * was `app.platform_review` — which this poller never set. So as a non-owner
+ * the read was admitted by neither arm and matched **zero rows with no error
+ * code** (measured: 2 rows as the owner, 0 as the serving role), the first poll
+ * recorded that empty map as its baseline, and cross-replica gateway
+ * invalidation was silently dead for the life of the process. ADR-0333's class,
+ * and the one of its arms that answers a `SELECT` rather than raising.
+ *
+ * The grant is its own and not `app.platform_review`, because RLS is row-level:
+ * a `SELECT` arm on any GUC grants every *column* of the admitted rows, so
+ * sharing the reviewer's grant would hand a read-only scheduler every tenant's
+ * draft proposals and manifest bodies. What a second grant buys is a narrower
+ * **predicate**, and this read's own `status = 'active'` makes it free — the arm
+ * reads 1 row where the review grant reads 2, with 0 drafts and 0 pending
+ * reviews. (Column narrowing is unavailable through RLS at all: `GRANT SELECT
+ * (cols)` is role-scoped and both paths are the same serving role, so it would
+ * need a view.)
  */
 export class PostgresActivationWatermarkSource implements ActivationWatermarkSource {
   private readonly conn: PgConnection;
@@ -44,10 +74,13 @@ export class PostgresActivationWatermarkSource implements ActivationWatermarkSou
   }
 
   async activationWatermarks(): Promise<ReadonlyMap<string, string>> {
-    const result = await this.conn.query<{ tenant_id: unknown; watermark: unknown }>(
-      `SELECT tenant_id, MAX(activated_at) AS watermark FROM ${this.table}` +
-        ` WHERE status = 'active' AND activated_at IS NOT NULL GROUP BY tenant_id`,
-    );
+    const result = await this.conn.transaction(async (tx) => {
+      await tx.query(SET_MANIFEST_ACTIVATION_SQL);
+      return tx.query<{ tenant_id: unknown; watermark: unknown }>(
+        `SELECT tenant_id, MAX(activated_at) AS watermark FROM ${this.table}` +
+          ` WHERE status = 'active' AND activated_at IS NOT NULL GROUP BY tenant_id`,
+      );
+    });
     const out = new Map<string, string>();
     for (const row of result.rows) {
       if (row.tenant_id == null || row.watermark == null) continue;

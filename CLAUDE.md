@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 21,398 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 21,400 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -3877,6 +3877,71 @@ report; `apps/operate-web` has none).
   measurement must not rest on a build that errored*, and the emitted path is `dist/src/` rather than
   `dist/`, which the first grep for it got wrong and reported as absent.
 
+  ADR-0409 closes register P2.0 and the class is **a grant ORed into a policy that governs every
+  command**. `CREATE POLICY` defaults to `FOR ALL` and an `ALL`-scope policy's NULL `WITH CHECK`
+  makes its `USING` the check for *every* command, so of the catalog's **215** policies the **one**
+  whose `ALL`-scope `using` contained an `OR` sold read **and** write: `app.platform_review`, a
+  grant whose name and every document say *review*, bought cross-tenant `UPDATE`, `DELETE`,
+  `INSERT` and a row **move**. Measured live as the non-owner `serving` role with the grant alone
+  and no tenant context, each arm in its own `psql` process because a statement in an aborted
+  transaction is not a measurement: the declared purpose (cross-tenant `SELECT`) returned **2 of 2**
+  bodies and so did five acts nobody declared — a reviewer rewrote another tenant's manifest **and
+  flipped it to `active`** with a forged hash, moved a row to another tenant, forged a row for a
+  tenant that never asked, and deleted a proposal. All five answer **0 rows** or
+  `new row violates row-level security policy` now, with arms 2b and 7c as the positive controls
+  that make the zeros refusals rather than broken probes.
+  **The design was settled by the repo's own precedent and my first sketch was refuted by it.** I
+  had planned to narrow the surviving policy's *command* to `SELECT` and add a fresh `ALL` isolation
+  arm beside it — and `canonical.test.ts`'s `NARROWED_NAME` biconditional (*a policy is scoped to
+  one command iff its name says so*) rejects a `SELECT`-scoped `_tenant_or_platform_review`, while
+  the sibling ADR-0332 had already answered the same question the other way:
+  `audit_integrity_verdicts_tenant_or_platform_audit` is **`ALL`-scope with pure tenant isolation**,
+  its stale name kept and its predicate narrowed. So the isolation arm **keeps the name** and loses
+  the disjunct, which is also what buys the migration: a rename leaves the old permissive `ALL`
+  policy live and undeclared, `allowLoosening` never reaches `policy_removed`, and because
+  permissive policies are **OR'd** the fix would buy *nothing* until an operator ran a manual
+  `DROP`. Measured with the real reconciler against a populated pre-fix database: **3 planned steps,
+  0 unreconciled, no manual SQL**, and a clean re-plan.
+  **The second half is a defect in no register entry, found by asking which readers the elevation
+  had.** `PostgresActivationWatermarkSource` ran under **no scope at all** and its comment cited
+  `PostgresTenantSource` as the precedent — a false analogy, because `meta.tenants` carries no RLS
+  and no policies while this table's only platform disjunct was `app.platform_review`, which the
+  poller never set. So as a non-owner the read was admitted by neither arm and matched **zero rows
+  with no error code** (measured: 2 as the owner, 0 as `serving`), the first poll recorded that
+  empty map as its baseline, and **cross-replica gateway invalidation was silently dead for the life
+  of the process** — ADR-0333's class, in the arm that answers a `SELECT` rather than raising. It
+  gets `app.platform_manifest_activation`, its own grant and not the reviewer's, because RLS is
+  row-level: a `SELECT` arm on any GUC grants every *column* of the admitted rows, so sharing the
+  reviewer's grant would hand a read-only scheduler every tenant's draft proposals and manifest
+  bodies. What a second grant buys is a narrower **predicate**, and the poller's own
+  `WHERE status = 'active'` makes it free — measured at **1 row where the review grant reads 2**,
+  with 0 drafts, 0 pending reviews and B's body unreadable. **Both halves of the fix are
+  load-bearing**: the old statement on the new catalog reads 0, and the new statement on the old
+  catalog reads 0.
+  Three things were sharper than the defect. **This file declared the class closed one table
+  early** — *"the one remaining member … is `meta.audit_integrity_verdicts`"* — and the
+  biconditional's own vocabulary is why the survivor was invisible: `platformReadOf` matches by
+  predicate **string equality** against `tenant_id IS NULL`, so a bare-GUC arm is not a "platform
+  read arm" and the INSERT-pairing rule skips it, while invariant 3 forbids the literal
+  `IS NULL OR` and a *grant* OR is a different string. **Two tests pinned the defects as the
+  specification** (ADR-0372's class, ninth instance in this run): `meta-schema.test.ts`'s
+  *"allows an explicit platform-review escape from tenant isolation"* **required** the OR in the
+  `ALL`-scope arm, and `design-review-store.test.ts`' fake modelled every row as writable, so a
+  `SELECT`-only elevation was **inexpressible** — it has a `writable()` predicate now, which is what
+  let the new floor test be written at all. And **`decide` keeps the elevation on**, which before
+  the split would have been load-bearing (one `ALL`-scope disjunction, so the review disjunct
+  permitted the write whatever the tenant context said, and a two-step built on it would have been
+  cosmetic) and is **inert** after it, because a `SELECT`-scoped arm cannot admit an `UPDATE` at
+  all: it learns the row's tenant under the review grant, sets that tenant's context with
+  `setTenantContextWithin`, and writes under the isolation arm in **one** transaction — ADR-0333's
+  *the scope is a fact about the row*, never something a caller supplies.
+  **And my own note on the migration window was false and the step-by-step run is what caught it.**
+  It read *"a tenant's own **writes** are denied for the span of one statement"*, which was derived
+  for a design where the surviving name's *command* changed: measured after each of the three steps,
+  the window denies the **platform reviewer's cross-tenant reads** (2 → **0** → 2 → 2) and **no
+  tenant operation is affected at any step** (1 read / 1 write throughout), while the poller reads 0
+  before and after step 1 so it has no window at all and the migration can only improve it.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -3923,9 +3988,14 @@ increment. See **What's actually left** at the bottom for the current open ends.
   grown since: re-derived in ADR-0400 the whole-catalog shape is **33** tables with an `INSERT` arm,
   **13** with an `UPDATE` arm and **20** append-only, and per write-GUC it is `record_write` 18,
   `config_write` 11, `audit_write` 3, `key_write` 1. Read the catalog, not these numbers.
-  **Sixteen `DELETE`-scoped policies exist since ADR-0400, and they are the catalog's first
-  restrictive ones** — one per `PLATFORM_RECORD_TABLES` member, denying a tenant-context `DELETE` of
-  the platform's own evidence about that tenant. Before them **no `DELETE`-scoped policy existed on
+  **Eighteen `DELETE`-scoped policies exist since ADR-0400, and they are the catalog's first
+  restrictive ones** — one per `RETAINED_SHARED_TABLES` member, denying a tenant-context `DELETE` of
+  the platform's own evidence about that tenant. (This read *"Sixteen … one per
+  `PLATFORM_RECORD_TABLES` member"* until ADR-0409 re-derived the histogram and found it: both
+  halves are ADR-0400's pre-ADR-0401 figures, and the wrong one is wrong in the direction that
+  sends a reader to fence two tables already fenced — while `RETAINED_SHARED_TABLES` is the
+  predicate invariant 5 is checked against, since `PLATFORM_RECORD_TABLES` is one of the two
+  retention sets it unions. Register P3.1.) Before them **no `DELETE`-scoped policy existed on
   any table, and that was a statement about the named arms rather than about the behaviour**
   (ADR-0374). An `ALL`-scope isolation arm
   with a NULL `WITH CHECK` has its `USING` serve as the `WITH CHECK`, so it admits a tenant-scoped
@@ -3966,10 +4036,12 @@ increment. See **What's actually left** at the bottom for the current open ends.
   *detected* (the signature breaks) where a `DELETE` is detected by nothing. **Re-derive the census
   from `pg_policy` rather than from a policy name** — see *What's actually left*. The one
   remaining member of the write-split class is `meta.audit_integrity_verdicts`, whose hole is
-  differently shaped — see *What's actually left*. **And one table of the 115 is not in that class
-  at all and is worse than any of it**: `meta.operate_tenant_manifests` is the sole table whose
-  platform grant is ORed *inside* its `ALL`-scope arm, so `app.platform_review` buys cross-tenant
-  **write** — see *What's actually left*.
+  differently shaped — see *What's actually left*. **And one table of the 115 was not in that class
+  at all and was worse than any of it**: `meta.operate_tenant_manifests` was the sole table whose
+  platform grant was ORed *inside* its `ALL`-scope arm, so `app.platform_review` bought cross-tenant
+  **write** — closed by ADR-0409, which is why **no `ALL`-scope `using` in the catalog contains an
+  `OR` any more** (measured: the empty list), and that absence is the one-line form of the whole
+  class. The grant is a `SELECT`-scoped arm beside the isolation one now.
 - **Strict TypeScript.** No `any`. No `--no-verify`. Explicit return types on
   exported functions.
 
@@ -3995,6 +4067,14 @@ names, and the suffix tells you what layer you are in:
   confines every query, a `buildPersistent*` factory that wraps the pure engine so each
   decision is written as it is made, and usually a `replayer` that re-derives state from the
   log and reports drift.
+  **`setTenantContextWithin(tx, tenantId)` is the same setting inside a transaction a caller
+  already holds** (ADR-0409), `appendWithin`'s and `writeWithin`'s shape one setting across — for
+  the caller that must open the transaction under *another* elevation and then narrow to one
+  tenant's own scope, which `withTenantContext` cannot express because it opens the transaction
+  itself. Both go through one `assertTenantIdShape`, and `withTenantContext` asserts **before**
+  `conn.transaction` rather than inside it, which its own test pins: a malformed id must not cost a
+  round trip, and the guard is the only thing between a caller's string and a `set_config`
+  parameter.
 
 So `dr` declares tiers and RPO/RTO; `dr-runtime` executes a failover state machine and
 scores readiness; `dr-runtime-pg` persists the failover/drill/readiness rows. Read the
@@ -7907,6 +7987,25 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `PENDING_DELETION_ADMISSION_MAY_SERVE` is a total map so a fourth effect is a compile error, and
   `pendingDeletionAdmissionMessage` builds both sentences from one shared half and names no remedy of
   its own, because the `ALTER` has one producer.
+  **The platform review elevation reads and no longer writes, and the activation poller has a grant
+  of its own** (ADR-0409). `withPlatformReview` wrapped `decide`'s `UPDATE` with `WHERE id = $1`
+  and no tenant predicate — a deliberate cross-tenant write, and the only thing permitting it was
+  the `OR` inside the table's `ALL`-scope policy, so narrowing that policy without changing this
+  code would have made every decision a silent no-op (ADR-0400's silent-zero direction: a refused
+  `UPDATE` returns 0 rows with no error code, and `decide` reads 0 rows as *no such proposal* and
+  answers `null`, which the route turns into a **404 for a proposal that exists**). `decide` is
+  **two arms in one transaction** now: the review grant resolves `SELECT tenant_id … WHERE id = $1`,
+  `setTenantContextWithin` sets that tenant's own scope, and the `UPDATE` carries
+  `WHERE id = $1 AND tenant_id = $2` — `scopeFilter`'s strict form (ADR-0333), because a reviewer's
+  decision is about one tenant's row and the predicate is beside RLS rather than instead of it. The
+  elevation is deliberately **not** turned off first, and that is a decision rather than an
+  oversight: a `SELECT`-scoped arm cannot admit an `UPDATE` at all, so leaving it on is inert, where
+  before the split it was load-bearing and a two-step built on it would have been cosmetic.
+  `withPlatformReview` stays exported and its doc says why — three cross-tenant **reads**
+  (`list`, `getById`, `counts`) still need it, and it is the one place the grant's scope is written
+  down. `PostgresActivationWatermarkSource` claims **`app.platform_manifest_activation`**,
+  transaction-locally, which is why its read is wrapped in a transaction at all rather than issued
+  on the pool.
   **`audit-chain-env.ts` is the chain's keypair route and the reason it has one** (ADR-0406).
   `AUDIT_CHAIN_SIGNING_KEY` carries the 32-byte seed and `ed25519PublicKeyFromSeed` derives the
   public half, which is ADR-0358's precedent and rests on its measurement: node builds an Ed25519
@@ -8618,9 +8717,15 @@ Five invariants the test suite enforces:
    appears on a `SELECT` policy. That is a rule plus a count rather than a maintained list, because
    a maintained list is what ADR-0288's `needsAuditEmitter` was and it was wrong three times —
    `kernel-pg`'s canonical test matches
-   `/(_platform_(audit_)?(read|write|update)|_no_tenant_delete)$/` and asserts **100**, so a 30th
-   table cannot land without the number moving. The count was **82** over the narrower regex until
-   ADR-0400 (98) and ADR-0401 (100) — **not 78**, which this said until ADR-0401 and which is the
+   `/(_platform_(audit_|review_|activation_)?(read|write|update)|_no_tenant_delete)$/` and asserts
+   **102**, so a 30th
+   table cannot land without the number moving. **The optional group names *which grant*, and it is
+   deliberately not a wildcard** (ADR-0409): a looser `_platform_[a-z_]*` would also admit
+   `_tenant_or_platform_review`, which is an **`ALL`**-scope isolation arm whose name happens to end
+   that way — so the regex that admits the two narrowed grants must still exclude the one it
+   superseded, which is what the biconditional's else-branch tests. The count was **82** over the
+   narrower regex until
+   ADR-0400 (98), ADR-0401 (100) and ADR-0409 (102) — **not 78**, which this said until ADR-0401 and which is the
    `%_tenant_isolation` family count borrowed from the RLS bullet's census ~4,400 lines away, where
    it is stated correctly as `78 + 27 + 8 + 1 + 1 = 115`. Two real numbers counting different
    things, and the arithmetic of the wrong one sends a reader hunting four phantom policies; the
@@ -11568,11 +11673,21 @@ opened them.
   re-plan came back clean. The arithmetic that confirms the shape axis is the live policy census —
   `ALL 114`, `SELECT 34`, `INSERT 32`, **`UPDATE 12`** — twelve `UPDATE` arms for twelve mutable
   tables. **All four of those figures have drifted** (ADR-0400, re-derived from the built catalog):
-  the census is now `ALL 115`, `SELECT 36`, `INSERT 33`, `UPDATE 13`, `DELETE 16`, so the arithmetic
-  the sentence rests on still holds in *shape* (thirteen `UPDATE` arms for thirteen mutable tables)
-  and none of the numbers is current. They drifted because tables were added, not because anything
-  was wrong when written — so the remedy is to **count the catalog** rather than to re-number this
-  line again, and the `DELETE 16` is new rather than drifted (ADR-0400's fence).
+  the census is now `ALL 115`, `SELECT 38`, `INSERT 33`, `UPDATE 13`, `DELETE 18` — **217 policies**
+  — so the arithmetic the sentence rests on still holds in *shape* (thirteen `UPDATE` arms for
+  thirteen mutable tables) and none of the numbers is current. They drifted because tables and arms
+  were added, not because anything was wrong when written — so the remedy is to **count the
+  catalog** rather than to re-number this line again. **The line has now been re-numbered twice and
+  gone stale twice** (ADR-0400 recorded `SELECT 36 / DELETE 16`, which ADR-0401's two fences and
+  ADR-0409's two SELECT arms moved within three increments), which is the argument for counting
+  rather than for a third correction; the `DELETE` figure is new rather than drifted (ADR-0400's
+  and ADR-0401's fences). **The two per-GUC censuses count different units and they are not
+  equal**, which the first draft of this correction asserted they were: by **table** it is
+  `record_write 18 / config_write 11 / audit_write 3 / key_write 1` (what the bullet above states)
+  and by **policy** `record_write 21 / config_write 20 / audit_write 3 / key_write 2` — and the
+  difference is **9 + 3 + 1 = 13**, exactly the `UPDATE`-arm count, because a mutable table carries
+  two arms on one GUC. So the unit is load-bearing, the discrepancy is self-checking against the
+  shape axis, and `config_write` nearly doubles between the two readings.
   What remains: **15 of the 29 have no store** (machine-counted in ADR-0334; ADR-0332's
   "fourteen" was the count of those that *do* have one, transposed), so their write arms are
   capability with no caller — and the honest total is **16 of 29**, because `meta.notification_templates`
@@ -13701,7 +13816,33 @@ Genuine defects gated on a store flavour, a flag, a pack or a subsystem that doe
 tenant is harmed today — but closing the gate does not fix them, and the ones under a P1 item must
 land with or before it.
 
-0. **`meta.operate_tenant_manifests` is the only table of 115 whose cross-tenant grant is ORed
+0. ~~**`meta.operate_tenant_manifests` is the only table of 115 whose cross-tenant grant is ORed
+   *inside* an `ALL`-scope policy's `USING`.**~~ — **closed by ADR-0409, which confirmed every
+   structural claim in this entry and refuted its prescribed remedy — in the direction that would
+   have re-created the hole under a new name.** The entry's *"it cannot simply be narrowed to
+   `SELECT`"* is **right for one reason and wrong about the fix**. Right: narrowing the policy alone
+   makes `decide` a silent no-op, and traced through the route that is a **404 `review_not_found`
+   for a proposal that exists** (`design-review-routes.ts:450`), which is ADR-0400's silent-zero
+   direction — a refused `UPDATE` returns 0 rows with no error code and `decide` reads 0 rows as *no
+   such proposal*. Wrong: *"splitting it means giving that path its own `INSERT`/`UPDATE` arm with
+   the predicate restated in `WITH CHECK`"*. The grants are `PUBLIC`-scoped settings, so an
+   `UPDATE` arm on the bare GUC is **a cross-tenant write route for anyone able to call
+   `set_config`** — the defect restated under a narrower command — and measured, Postgres reuses an
+   `UPDATE` policy's `USING` as its `WITH CHECK` when none is declared, so such an arm would permit
+   a cross-tenant row **move** as well. What it needed was **no new arm at all**: the isolation arm
+   already permits a tenant's own write, so the *code* narrows to the row's own tenant
+   (`setTenantContextWithin`, two arms in one transaction) and the policy side is a pure removal
+   plus two `SELECT` grants. **A remedy is a claim too** (P3.1), and this one would have passed
+   every test in the repo.
+   Two figures to re-derive rather than carry: *"of the 52 policies naming a non-tenant GUC"* was
+   exact pre-fix and is **53** now (the review arm stayed at one and `app.platform_manifest_activation`
+   is the new one), and *"the other 51 are command-scoped"* is **52 of 53** with no exception left —
+   the sentence's own exception is what was closed. **P2 and not P0** held, and the reachability
+   argument understates one thing in the safe direction: the shipped compose passes
+   `--require-design-review`, so the **elevation** is live on every shipped deployment and it is the
+   *abuse* that needs a `set_config` session.
+   The original entry, kept because its measurements are what the fix rests on:
+   **`meta.operate_tenant_manifests` is the only table of 115 whose cross-tenant grant is ORed
    *inside* an `ALL`-scope policy's `USING`, so `app.platform_review` buys cross-tenant read **and
    UPDATE, DELETE and INSERT**.** Found by two independent audit slices against ADR-0400 and
    confirmed by an adversarial verifier that failed six refutation attempts; the structural half is
@@ -13733,6 +13874,11 @@ land with or before it.
    `INSERT`/`UPDATE` arm with the predicate restated in `WITH CHECK`. **P2 and not P0** on the
    register's own test: being harmed needs a session that can `set_config`, which is a deployment
    with a least-privilege role and SQL access rather than a route.
+   **What the entry did not have, and what the increment's own measurement added**: a second
+   reader. `PostgresActivationWatermarkSource` ran under **no scope at all** on the same table, so
+   as a non-owner it matched zero rows with no error code and cross-replica gateway invalidation was
+   silently dead for the life of the process — so the table had a *write* escalation and a *read*
+   that could not reach a row, and neither was visible to the census that found the first.
 
 1. ~~**A filter on an encrypted column is dropped from the `WHERE` clause**~~ — **closed by
    ADR-0359**, which also found it was **one of six members of one class** rather than an item, and
@@ -14536,10 +14682,13 @@ method is that a stale figure misleads.
    `audit_integrity_verdicts_tenant_or_platform_audit`) — five naming families, not three, and a
    `LIKE` filter built from that sentence would still miss two. Found by deriving the histogram
    rather than by re-reading the ADR. The second is **four drifted figures in one sentence**:
-   CLAUDE.md's live policy census read `ALL 114, SELECT 34, INSERT 32, UPDATE 12` and the catalog now
-   answers `ALL 115, SELECT 36, INSERT 33, UPDATE 13, DELETE 16` — *drifted*, because tables were
-   added and nothing was wrong when written, so the remedy is to count the catalog rather than to
-   re-number the line again. And the third is **a refutation of mine that a refuter caught before it
+   CLAUDE.md's live policy census read `ALL 114, SELECT 34, INSERT 32, UPDATE 12` and at ADR-0400 the
+   catalog answered `ALL 115, SELECT 36, INSERT 33, UPDATE 13, DELETE 16` — *drifted*, because tables
+   were added and nothing was wrong when written, so the remedy is to count the catalog rather than to
+   re-number the line again. **That replacement has itself gone stale twice since** (ADR-0401's two
+   fences and ADR-0409's two `SELECT` arms), which is the clause's own advice being vindicated rather
+   than contradicted — so it is stated here in the past tense, as what ADR-0400 measured, and the
+   present-tense figure lives in one place and is derived. And the third is **a refutation of mine that a refuter caught before it
    shipped**: I wrote that `FORCE ROW LEVEL SECURITY` on the sixteen would make the Article 17
    erasure refuse, and it cannot, because the erasure's probe asks about its own *targets* and those
    sixteen are the retention set it never targets. The claim is true only of a catalog-wide FORCE.
@@ -14807,6 +14956,45 @@ method is that a stale figure misleads.
    `tsconfig.typecheck.json` (ADR-0307's split) and mutation-confirmed by `TS2578`. The reusable
    shape: **a proxy for a property is not that property**, which is ADR-0363's own finding one
    instrument down.
+
+   **ADR-0409 adds six members and the first two are the costliest kinds this entry records — a
+   class declared closed one member early, and a defect written down as a specification twice.**
+   *Closed early*: this file read *"the one remaining member of the write-split class is
+   `meta.audit_integrity_verdicts`"* while a **worse** member sat beside it, and the gloss was not
+   merely a count — it told a reader the sweep was finished. What makes it a member rather than an
+   oversight is **why** the survivor was invisible, which is three fences each blind for a stated
+   reason: meta-schema invariant 3 forbids the literal `IS NULL OR` and a *grant* OR is a different
+   string; `platformReadOf` matches by predicate **string equality** against `tenant_id IS NULL`, so
+   a bare-GUC arm is not a "platform read arm" and the INSERT-pairing rule skips it; and ADR-0400's
+   census names the policy only as a naming-family member. **823 kernel tests passed with the defect
+   present.** *Written down as a specification* (ADR-0372's class, ninth instance in this run, and
+   the first where **two** tests pinned one defect from opposite sides): `meta-schema.test.ts`'s
+   *"allows an explicit platform-review escape from tenant isolation"* asserted the `OR` **inside**
+   the `ALL`-scope arm, and `design-review-store.test.ts`' fake modelled every row as writable, so a
+   `SELECT`-only elevation was **inexpressible in the test suite at all** — which is why the fake
+   needed a `writable()` predicate before the floor test could be written.
+   Then four ordinary members, two of them mine. **My own design was refuted by the repo's own
+   precedent**: I had sketched narrowing the surviving policy's *command* to `SELECT` while keeping
+   its OR predicate, and `canonical.test.ts`'s biconditional rejects a `SELECT`-scoped
+   `_tenant_or_platform_review` while ADR-0332 had already answered the same question the other way
+   on the sibling table — so the sketch was refuted by a *test* and a *precedent* rather than by a
+   measurement, which is the cheapest refutation available and the one easiest to skip. **My own
+   scratchpad note on the migration window was false**: it read *"a tenant's own **writes** are
+   denied for the span of one statement"*, derived for the design the precedent then refuted, and
+   measured step by step the window denies the **reviewer's cross-tenant reads** while every tenant
+   operation is 1/1 throughout — a note that survived its own design being discarded, which is how a
+   false claim outlives the reasoning that produced it. **The `DELETE` figure in the policy histogram
+   had drifted again** (`16` against a real 18, ADR-0401's two fences), making that one line
+   re-numbered **twice** and stale twice within three increments — which is the argument for
+   counting rather than for a third correction. And **the first draft of that very correction
+   asserted an equality it had not measured**: it said the per-GUC table and policy censuses are
+   "equal today because no table carries two arms on one GUC", and they are **not** —
+   `config_write` is 20 policies over 11 tables, `record_write` 21 over 18, `key_write` 2 over 1,
+   and the difference is **9 + 3 + 1 = 13**, exactly the `UPDATE`-arm count. P3.1's own
+   correction-of-a-correction clause, committed inside the increment adding P3.1 members, in the
+   sentence whose whole subject is that two censuses count different units; the remedy was free and
+   is the one this entry keeps naming — **derive both numbers before asserting a relation between
+   them.**
 2. **Six concepts are modelled several times over, two with non-nesting member sets.** Data
    classification has five declarations — four identical and one, in `data-lineage`, **disjoint past
    two members**, so the moment anything bridges the kernel's classification into the lineage graph
@@ -14905,7 +15093,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 402 records; 323 Accepted, 79 Proposed (the
+title or status change cannot drift. 403 records; 324 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

@@ -392,8 +392,23 @@ describe("policy role canonicalization", () => {
    * `_platform_audit_read` / `_platform_audit_write` are ADR-0313's and ADR-0331's spelling on
    * `meta.audit_log`, matched by the optional `audit_` group rather than renamed, because the names
    * are what deployments already hold.
+   *
+   * ADR-0409 generalised that optional group rather than adding an alternative beside it: the
+   * segment between `_platform_` and the command word names **which grant** the arm reads, and
+   * `audit_` was its first member. It is an explicit alternation and not `[a-z_]+?_`, so each new
+   * grant qualifier is a deliberate addition — and `review_` and `activation_` arrived together
+   * because a table with two read grants needs two distinct matching names and only `_platform_read`
+   * was available under the old form.
+   *
+   * Note what the group does **not** admit, which decided ADR-0409's shape: a name ending
+   * `_tenant_or_platform_review` is not in this vocabulary, because it names the grant and not the
+   * command. So the alternative of keeping that name on a `SELECT`-scoped arm — which would have
+   * made the surviving name describe its policy exactly — trips the else-branch below, and
+   * admitting it would break the biconditional for the `_tenant_or_platform_*` family, whose other
+   * member (`audit_integrity_verdicts_tenant_or_platform_audit`) is `ALL`-scope.
    */
-  const NARROWED_NAME = /(_platform_(audit_)?(read|write|update)|_no_tenant_delete)$/;
+  const NARROWED_NAME =
+    /(_platform_(audit_|review_|activation_)?(read|write|update)|_no_tenant_delete)$/;
 
   it("scopes a policy to one command iff its name says so, and never narrows `roles`", () => {
     let narrowed = 0;
@@ -412,9 +427,16 @@ describe("policy role canonicalization", () => {
     }
     // So the rule cannot pass vacuously on a catalog where nothing is narrowed: 8 from ADR-0313 and
     // ADR-0331, plus 71 from the 29-table split (29 reads, 29 inserts, 13 updates), plus 2 for
-    // `meta.audit_integrity_verdicts` — the last member of that class, whose single `ALL` policy
-    // ORed in the cross-tenant *read* grant and so let an elevated reader forge, flip or delete a
-    // verdict at any scope. Append-only, so a read arm and an `INSERT` arm and no `UPDATE`.
+    // `meta.audit_integrity_verdicts` — a member of that class, whose single `ALL` policy ORed in
+    // the cross-tenant *read* grant and so let an elevated reader forge, flip or delete a verdict
+    // at any scope. Append-only, so a read arm and an `INSERT` arm and no `UPDATE`.
+    //
+    // This sentence called it "the **last** member of that class" until ADR-0409, and the
+    // declaration was false: `meta.operate_tenant_manifests` carried the identical shape on the
+    // `app.platform_review` grant and survived three increments past it. ADR-0332's sweep matched
+    // the `tenant_id IS NULL OR` spelling and that one's OR joined a GUC, so it was outside the
+    // sweep's universe — which is why the class is now stated as a *rule* (the biconditional
+    // below, over every policy in the catalog) and never again as a membership claim.
     //
     // The 13th `UPDATE` arm is `dr_drill_executions`, which ADR-0332 classified append-only by
     // reading its INSERT-only store rather than its contract — the one place that increment applied
@@ -439,7 +461,17 @@ describe("policy role canonicalization", () => {
     // the count "was **78** over the narrower regex until ADR-0400", and 78 is the
     // `%_tenant_isolation` family count borrowed from a different census ~4,400 lines away. This
     // test asserted **82**, which is what the line above says and what `git show 4e66c0e` carries.
-    expect(narrowed).toBe(100);
+    //
+    // **102 since ADR-0409**: `operate_tenant_manifests` gains a `_platform_review_read` and a
+    // `_platform_activation_read` arm, and its `ALL` policy — the catalog's only one whose `USING`
+    // was satisfiable without a tenant match, and the surviving member of the class the
+    // `audit_integrity_verdicts` comment above calls closed — narrows to pure tenant isolation.
+    // Both new arms are reads on their own grants, so neither is in `PLATFORM_WRITE_GRANTS` and
+    // neither pairs with an `INSERT` arm: `platformReadOf` matches by predicate equality against
+    // `tenant_id IS NULL`, so a bare-GUC `SELECT` arm is not a platform read arm and the
+    // INSERT-pairing rule skips it — the same escape `gdpr_deletion_requests`,
+    // `tenant_lifecycle_events` and `tenant_tombstones` already take on a NOT NULL `tenant_id`.
+    expect(narrowed).toBe(102);
   });
 });
 

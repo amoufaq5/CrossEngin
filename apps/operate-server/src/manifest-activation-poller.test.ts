@@ -373,6 +373,11 @@ function fakeWatermarkDb(rows: Record<string, unknown>[]): {
   const conn: PgConnection = {
     query: ((sql: string, params?: readonly unknown[]) => {
       captured.push({ sql, params: params ?? [] });
+      // A `set_config` answers one row of its own value, never the aggregate's rows. Handing the
+      // seeded rows back for it would make a fake in which the elevation and the read are
+      // indistinguishable, which is how this module's own test came to assert the absence of the
+      // elevation as the specification (ADR-0409).
+      if (sql.includes("set_config")) return Promise.resolve({ rows: [], rowCount: 0 });
       return Promise.resolve({ rows, rowCount: rows.length });
     }) as PgConnection["query"],
     transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) => {
@@ -397,8 +402,8 @@ describe("PostgresActivationWatermarkSource", () => {
     const map = await new PostgresActivationWatermarkSource(db.conn).activationWatermarks();
 
     expect(map.size).toBe(0);
-    expect(db.captured).toHaveLength(1);
-    const sql = db.captured[0]?.sql ?? "";
+    expect(db.captured).toHaveLength(2);
+    const sql = db.captured[1]?.sql ?? "";
     expect(sql).toContain("MAX(activated_at) AS watermark");
     expect(sql).toContain("FROM meta.operate_tenant_manifests");
     expect(sql).toContain("status = 'active'");
@@ -406,12 +411,28 @@ describe("PostgresActivationWatermarkSource", () => {
     expect(sql).toContain("GROUP BY tenant_id");
   });
 
-  it("runs as a platform sweep — no set_config, no transaction", async () => {
+  it("runs as a platform sweep under its own grant, in one transaction, before the read", async () => {
+    // This test read "runs as a platform sweep — **no set_config, no transaction**" until ADR-0409,
+    // and it asserted exactly the defect: the table carries RLS whose only platform disjunct was
+    // `app.platform_review`, which this poller never set, so as a non-owner the read was admitted
+    // by neither arm and matched zero rows with no error code. The absence of a scope was the
+    // specification (ADR-0372's class), and it is rewritten rather than deleted because the sweep
+    // really must not bind one tenant — what changes is that it names a grant instead of none.
     const db = fakeWatermarkDb([{ tenant_id: TENANT_A, watermark: "2026-08-01T00:00:00.000Z" }]);
     await new PostgresActivationWatermarkSource(db.conn).activationWatermarks();
 
-    expect(db.captured.some((q) => q.sql.includes("set_config"))).toBe(false);
-    expect(db.transactions).toBe(0);
+    expect(db.transactions).toBe(1);
+    expect(db.captured.map((q) => q.sql)).toEqual([
+      "SELECT set_config('app.platform_manifest_activation', 'on', true)",
+      expect.stringContaining("MAX(activated_at) AS watermark") as unknown as string,
+    ]);
+    // `is_local => true`, so the elevation dies with the transaction rather than riding on the
+    // pooled connection the poller holds for the life of the process.
+    expect(db.captured[0]?.sql).toContain(", true)");
+    // Never the reviewer's grant, and never a tenant context: the first would hand a read-only
+    // scheduler every tenant's draft proposal bodies, the second would hide every tenant but one.
+    expect(db.captured.some((q) => q.sql.includes("app.platform_review"))).toBe(false);
+    expect(db.captured.some((q) => q.sql.includes("app.current_tenant_id"))).toBe(false);
   });
 
   it("maps Date and string activation instants into ISO watermarks", async () => {
@@ -443,7 +464,7 @@ describe("PostgresActivationWatermarkSource", () => {
   it("honors a custom schema and rejects an invalid identifier", async () => {
     const db = fakeWatermarkDb([]);
     await new PostgresActivationWatermarkSource(db.conn, { schema: "ops_meta" }).activationWatermarks();
-    expect(db.captured[0]?.sql).toContain("FROM ops_meta.operate_tenant_manifests");
+    expect(db.captured[1]?.sql).toContain("FROM ops_meta.operate_tenant_manifests");
 
     expect(() => new PostgresActivationWatermarkSource(db.conn, { schema: "meta; DROP TABLE x" })).toThrow(
       /invalid schema identifier/,

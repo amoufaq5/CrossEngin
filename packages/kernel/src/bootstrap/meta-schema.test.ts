@@ -2143,23 +2143,71 @@ describe("table column shapes", () => {
     expect(idx?.unique).toBeUndefined();
   });
 
-  it("META_OPERATE_TENANT_MANIFESTS allows an explicit platform-review escape from tenant isolation", () => {
-    const policy = META_OPERATE_TENANT_MANIFESTS.rls?.policies?.[0];
-    expect(policy?.name).toBe("operate_tenant_manifests_tenant_or_platform_review");
-    // Tenant isolation still holds by default; the cross-tenant read requires a
-    // transaction-scoped flag the platform review store sets and nothing else does.
-    expect(policy?.using).toContain(
-      "tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+  it("META_OPERATE_TENANT_MANIFESTS gives the platform review grant the SELECT scope and no wider one", () => {
+    // This test read "allows an explicit platform-review escape from tenant isolation" until
+    // ADR-0409, and two of its four assertions required the defect: it demanded that the one
+    // `ALL`-scope policy's `using` contain the review GUC, and that some emitted statement carry
+    // both the policy name and the GUC. Its comment called the elevation "the cross-tenant
+    // **read**" while the shape it pinned bought read, insert, update, delete and a cross-tenant
+    // row move. ADR-0372's class — the defect written down as a specification — which is why it is
+    // rewritten here rather than deleted.
+    const policies = META_OPERATE_TENANT_MANIFESTS.rls?.policies ?? [];
+    expect(META_OPERATE_TENANT_MANIFESTS.rls?.enabled).toBe(true);
+    expect(policies).toHaveLength(3);
+
+    // The isolation arm keeps its name and is pure tenant isolation, which is
+    // `audit_integrity_verdicts_tenant_or_platform_audit`'s committed shape: a rename would leave
+    // the old permissive arm live and undeclared, and permissive policies are OR'd.
+    const isolation = policies[0];
+    expect(isolation?.name).toBe("operate_tenant_manifests_tenant_or_platform_review");
+    expect(isolation?.command).toBeUndefined();
+    expect(isolation?.using).toBe(TENANT_ISOLATION_USING);
+    expect(isolation?.using).not.toContain("app.platform_review");
+    expect(isolation?.using).not.toContain("tenant_id IS NULL");
+
+    // The review grant is `SELECT`-scoped, so it carries no `WITH CHECK` and cannot authorise a
+    // write — the whole of ADR-0409.
+    const review = policies[1];
+    expect(review?.name).toBe("operate_tenant_manifests_platform_review_read");
+    expect(review?.command).toBe("SELECT");
+    expect(review?.using).toBe("current_setting('app.platform_review', true) = 'on'");
+    expect(review?.check).toBeUndefined();
+
+    // The activation poller's arm is strictly narrower than the review one by its own predicate,
+    // which is what earns it a second grant: a second GUC cannot narrow the *columns* (RLS is
+    // row-level), so a shared grant would hand a read-only scheduler every draft proposal body.
+    const activation = policies[2];
+    expect(activation?.name).toBe("operate_tenant_manifests_platform_activation_read");
+    expect(activation?.command).toBe("SELECT");
+    expect(activation?.using).toContain("status = 'active'");
+    expect(activation?.using).toContain(
+      "current_setting('app.platform_manifest_activation', true) = 'on'",
     );
-    expect(policy?.using).toContain("current_setting('app.platform_review', true) = 'on'");
+    expect(activation?.check).toBeUndefined();
+    expect(activation?.using).not.toContain("app.platform_review");
+
+    expect(policies.map((p) => p.command ?? "ALL")).toEqual(["ALL", "SELECT", "SELECT"]);
+
+    // No statement may carry the isolation arm's name beside a platform grant: that conjunction is
+    // the pre-ADR-0409 emission, and asserting its *absence* is what the old `toBe(true)` was.
     const statements = emitMetaBootstrapSql();
     expect(
-      statements.some(
+      statements.filter(
         (s) =>
           s.includes("operate_tenant_manifests_tenant_or_platform_review") &&
-          s.includes("current_setting('app.platform_review', true) = 'on'"),
+          s.includes("app.platform_review"),
       ),
-    ).toBe(true);
+    ).toEqual([]);
+    // And the two narrowed arms really are emitted, so the assertion above is not vacuous.
+    for (const [name, clause] of [
+      ["operate_tenant_manifests_platform_review_read", "FOR SELECT"],
+      ["operate_tenant_manifests_platform_activation_read", "FOR SELECT"],
+    ] as const) {
+      const stmt = statements.find((s) => s.includes(name));
+      expect(`${name}: ${stmt === undefined ? "(absent)" : "emitted"}`).toBe(`${name}: emitted`);
+      expect(stmt).toContain(clause);
+      expect(stmt).not.toContain("WITH CHECK");
+    }
   });
 
   it("META_INCIDENT_POSTMORTEMS enforces PM-YYYY-NNNN pattern + four-status enum", () => {

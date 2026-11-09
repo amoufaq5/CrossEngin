@@ -12223,12 +12223,68 @@ export const META_OPERATE_TENANT_MANIFESTS: TableDefinition = {
     enabled: true,
     policies: [
       {
+        // Three arms rather than one, which is ADR-0313's split arriving at the table its own
+        // sibling's regression test declared the class empty without. That comment — on
+        // `meta.audit_integrity_verdicts`, "the last member of that class, whose single `ALL`
+        // policy ORed in the cross-tenant *read* grant and so let an elevated reader forge, flip
+        // or delete a verdict at any scope" — is this defect word for word, and this table was a
+        // surviving member: ADR-0332 swept the 29 tables spelling `tenant_id IS NULL OR`, and
+        // here the OR joined a **GUC** instead, so it was outside that sweep's universe.
+        //
+        // The isolation arm must not carry the review grant. On an `ALL`-scope policy the `USING`
+        // expression also serves as the `WITH CHECK`, so a session holding only the cross-tenant
+        // read could rewrite any tenant's manifest body, activate it, move the row to another
+        // tenant, forge a proposal for a tenant that never asked, or delete one. All five
+        // succeeded live as the non-owner `serving` role before the split and none after.
+        //
+        // The name is kept and only the predicate narrows, which is `audit_integrity_verdicts`'
+        // committed shape (`_tenant_or_platform_audit`, ALL, pure isolation) and not a
+        // preference: a rename leaves the old permissive arm live and undeclared, the reconciler
+        // never reaches `policy_removed`, and permissive policies are OR'd — so the fix would buy
+        // nothing until an operator ran a manual `DROP`. The stated cost is ADR-0331's: a name
+        // that no longer describes its policy, one sibling below a `_platform_review_read` that
+        // does.
+        name: "operate_tenant_manifests_tenant_or_platform_review",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
         // A platform reviewer must read + decide proposals across every tenant. Rather than
         // relying on the API connecting as the table owner (which bypasses RLS silently), the
         // cross-tenant path is an explicit, auditable opt-in: a transaction-scoped
         // `app.platform_review` flag the platform store sets and nothing else does.
-        name: "operate_tenant_manifests_tenant_or_platform_review",
-        using: `${TENANT_ISOLATION_USING} OR current_setting('app.platform_review', true) = 'on'`,
+        //
+        // `SELECT`-scoped, so it carries no `WITH CHECK` and cannot authorise a write. That is
+        // the whole of the fix and it costs the *decision* nothing: of the table's six write
+        // statements exactly one was cross-tenant, and the route holds the proposal's tenant id
+        // twelve lines before it, so `decide` learns the tenant under this arm and writes under
+        // the isolation arm in the same transaction.
+        name: "operate_tenant_manifests_platform_review_read",
+        command: "SELECT",
+        using: "current_setting('app.platform_review', true) = 'on'",
+      },
+      {
+        // The cross-replica activation poller's own arm, and its own grant. `app.platform_review`
+        // would serve it — the row set it needs is a subset — and reusing that grant would hand a
+        // read-only scheduler every tenant's draft proposals and manifest bodies, because RLS is
+        // row-level: a `SELECT` arm on any GUC grants every column of the admitted rows, so a
+        // second grant cannot narrow the columns and column narrowing is unavailable through RLS
+        // at all (`GRANT SELECT (cols)` is role-scoped, and both paths are the same serving role).
+        //
+        // What a second grant buys is a narrower **predicate**, and the poller's own
+        // `WHERE status = 'active'` makes it free: measured as the non-owner `serving` role, this
+        // arm reads 1 row where the review grant reads 2, and 0 drafts and 0 pending reviews
+        // where the review grant reads 1 of each.
+        //
+        // Without it the poller read is admitted by **neither** arm and matches zero rows with no
+        // error code, so cross-replica gateway invalidation is silently dead on any deployment
+        // whose serving role does not own the table (ADR-0333's class). The module's own doc
+        // comment cited `PostgresTenantSource` as precedent and the analogy is false:
+        // `meta.tenants` carries no RLS and no policies at all.
+        name: "operate_tenant_manifests_platform_activation_read",
+        command: "SELECT",
+        using:
+          "status = 'active' AND " +
+          "current_setting('app.platform_manifest_activation', true) = 'on'",
       },
     ],
   },

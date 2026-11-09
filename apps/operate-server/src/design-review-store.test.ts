@@ -45,6 +45,19 @@ function fakeReviewDb(): FakeDb {
   const visible = (): Record<string, unknown>[] =>
     [...rows.values()].filter((r) => platformReview || r["tenant_id"] === currentTenant);
 
+  /**
+   * The rows a **write** may reach, which since ADR-0409 is the isolation arm alone: the review
+   * grant is a `SELECT`-scoped policy and carries no `WITH CHECK`, so it cannot admit an `UPDATE`.
+   *
+   * Until then this fake had only `visible()` and routed its two `UPDATE` branches through it, so a
+   * `SELECT`-only elevation was **inexpressible** — every approve/reject test passed identically
+   * against the widened policy and against the split, and the fake could not have reported the
+   * defect whichever way the catalog was written. That is this repo's fake-boundary class
+   * (ADR-0333) on the one axis a fake *can* model, and it is why the live run is the authority.
+   */
+  const writable = (): Record<string, unknown>[] =>
+    [...rows.values()].filter((r) => r["tenant_id"] === currentTenant);
+
   const seed = (overrides: Record<string, unknown> = {}): Record<string, unknown> => {
     seq += 1;
     const at = new Date(Date.UTC(2026, 5, 1) + seq * 1000);
@@ -82,19 +95,19 @@ function fakeReviewDb(): FakeDb {
       return { rows: [], rowCount: 0 };
     }
     if (sql.startsWith("UPDATE") && sql.includes("review_status = 'pending'")) {
-      const row = visible().find((r) => r["tenant_id"] === p[0] && r["id"] === p[1]);
+      const row = writable().find((r) => r["tenant_id"] === p[0] && r["id"] === p[1]);
       if (row === undefined) return { rows: [], rowCount: 0 };
       row["review_status"] = "pending";
       row["updated_at"] = new Date();
       return { rows: [row], rowCount: 1 };
     }
-    if (sql.startsWith("UPDATE") && sql.includes("review_status = $2")) {
-      const row = visible().find((r) => r["id"] === p[0]);
+    if (sql.startsWith("UPDATE") && sql.includes("review_status = $3")) {
+      const row = writable().find((r) => r["id"] === p[0] && r["tenant_id"] === p[1]);
       if (row === undefined) return { rows: [], rowCount: 0 };
-      row["review_status"] = p[1];
-      row["reviewed_by"] = p[2];
+      row["review_status"] = p[2];
+      row["reviewed_by"] = p[3];
       row["reviewed_at"] = new Date();
-      row["review_notes"] = p[3];
+      row["review_notes"] = p[4];
       row["updated_at"] = new Date();
       return { rows: [row], rowCount: 1 };
     }
@@ -373,12 +386,27 @@ describe("design-review-store — approve / reject", () => {
     expect(record?.reviewedAt).not.toBeNull();
     expect(record?.tenantId).toBe(TENANT_B);
     const update = captured.find((c) => c.sql.startsWith("UPDATE"));
-    expect(captured[0]?.sql).toBe(SET_PLATFORM_SQL);
     expect(update?.inTx).toBe(true);
     expect(update?.sql).toContain("reviewed_at = now()");
     expect(update?.sql).toContain("updated_at = now()");
-    expect(update?.sql).toContain("WHERE id = $1");
-    expect(update?.params).toEqual([String(row["id"]), "approved", "ops@crossengin.dev", "looks good"]);
+    // One transaction, two policy arms, in this order (ADR-0409): the review grant admits the read
+    // that learns whose proposal this is, and the proposal's own tenant context admits the write.
+    // The write is scoped to `(id, tenant_id)` rather than to `id` alone, so the statement names
+    // its own scope (`scopeFilter`'s rule) instead of relying on the session setting in silence.
+    expect(captured.map((c) => c.sql)).toEqual([
+      SET_PLATFORM_SQL,
+      `SELECT tenant_id FROM meta.operate_tenant_manifests WHERE id = $1`,
+      "SELECT set_config('app.current_tenant_id', $1, true)",
+      expect.stringContaining("WHERE id = $1 AND tenant_id = $2") as unknown as string,
+    ]);
+    expect(captured[2]?.params).toEqual([TENANT_B]);
+    expect(update?.params).toEqual([
+      String(row["id"]),
+      TENANT_B,
+      "approved",
+      "ops@crossengin.dev",
+      "looks good",
+    ]);
   });
 
   it("reject sets review_status rejected with the reviewer and notes", async () => {
@@ -391,7 +419,10 @@ describe("design-review-store — approve / reject", () => {
     expect(record?.reviewStatus).toBe("rejected");
     expect(record?.reviewNotes).toBe("PHI field is unclassified");
     const update = captured.find((c) => c.sql.startsWith("UPDATE"));
-    expect(update?.params[1]).toBe("rejected");
+    // Resolved through the placeholder rather than indexed by a literal position, which is
+    // ADR-0370's lesson: a positional assertion models one numbering and stops modelling anything
+    // the moment the statement gains a parameter — as this one did when ADR-0409 bound the tenant.
+    expect(update?.params[paramIndex(update?.sql ?? "", "review_status") ?? -1]).toBe("rejected");
   });
 
   it("binds review_notes as null when notes are omitted or explicitly null", async () => {
@@ -404,8 +435,10 @@ describe("design-review-store — approve / reject", () => {
     expect(omitted?.reviewNotes).toBeNull();
     expect(explicit?.reviewNotes).toBeNull();
     const updates = captured.filter((c) => c.sql.startsWith("UPDATE"));
-    expect(updates[0]?.params[3]).toBeNull();
-    expect(updates[1]?.params[3]).toBeNull();
+    for (const u of updates) {
+      expect(u.params[paramIndex(u.sql, "review_notes") ?? -1]).toBeNull();
+    }
+    expect(updates).toHaveLength(2);
   });
 
   it("returns null for a missing id from both decisions", async () => {
@@ -414,6 +447,37 @@ describe("design-review-store — approve / reject", () => {
     const store = new PostgresDesignReviewStore(conn);
     expect(await store.approve(randomUUID(), { reviewedBy: "ops" })).toBeNull();
     expect(await store.reject(randomUUID(), { reviewedBy: "ops" })).toBeNull();
+  });
+
+  it("models a SELECT-scoped review arm: the grant alone reaches no write", async () => {
+    // The non-vacuity floor for everything above. Until ADR-0409 this fake had only `visible()`
+    // and routed both `UPDATE` branches through it, so the elevation admitted a write and a
+    // `SELECT`-scoped arm was **inexpressible** — every approve/reject test passed identically
+    // whichever way the catalog was written. Issued by hand under the review grant with no tenant
+    // context, the decision write must reach no row; the live run as a non-owner is the authority
+    // for the real policy and this is the authority for the fake that stands in for it.
+    const { conn, seed } = fakeReviewDb();
+    const row = seed({ tenant_id: TENANT_A, review_status: "pending" });
+    const decisionSql =
+      "UPDATE meta.operate_tenant_manifests SET review_status = $3, reviewed_by = $4," +
+      " reviewed_at = now(), review_notes = $5, updated_at = now()" +
+      " WHERE id = $1 AND tenant_id = $2 RETURNING id";
+    const params = [String(row["id"]), TENANT_A, "approved", "forged", null];
+
+    const withGrantOnly = await withPlatformReview(conn, async (tx) =>
+      (await tx.query(decisionSql, params)).rowCount,
+    );
+    expect(withGrantOnly).toBe(0);
+    expect(row["review_status"]).toBe("pending");
+
+    // Positive control: the identical statement with the row's own tenant context set reaches it,
+    // so the zero above is a refusal rather than a probe that matched nothing for another reason.
+    const withTenant = await withPlatformReview(conn, async (tx) => {
+      await tx.query("SELECT set_config('app.current_tenant_id', $1, true)", [TENANT_A]);
+      return (await tx.query(decisionSql, params)).rowCount;
+    });
+    expect(withTenant).toBe(1);
+    expect(row["review_status"]).toBe("approved");
   });
 
   it("does not gate on the current review status — the route layer owns the transition", async () => {

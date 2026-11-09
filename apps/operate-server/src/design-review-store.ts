@@ -1,5 +1,5 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
-import { withTenantContext } from "@crossengin/operate-runtime-pg";
+import { setTenantContextWithin, withTenantContext } from "@crossengin/operate-runtime-pg";
 import { z } from "zod";
 
 const REVIEW_STATUSES = ["not_required", "pending", "approved", "rejected"] as const;
@@ -71,10 +71,11 @@ const MAX_LIMIT = 200;
 
 /**
  * Elevates the transaction to the cross-tenant review scope the RLS policy on
- * `meta.operate_tenant_manifests` recognizes
- * (`... OR current_setting('app.platform_review', true) = 'on'`). The `true`
- * third argument makes the setting *transaction-local*, so the elevation is
- * released with the transaction and can never leak onto a pooled connection.
+ * `meta.operate_tenant_manifests` recognizes — since ADR-0409 a `SELECT`-scoped
+ * arm of its own, `operate_tenant_manifests_platform_review_read`, rather than a
+ * disjunct inside the isolation policy. The `true` third argument makes the
+ * setting *transaction-local*, so the elevation is released with the transaction
+ * and can never leak onto a pooled connection.
  */
 const SET_PLATFORM_REVIEW_SQL = "SELECT set_config('app.platform_review', 'on', true)";
 
@@ -133,9 +134,18 @@ function clampLimit(limit: number | undefined): number {
 
 /**
  * Runs `fn` inside a transaction carrying the platform review elevation, the
- * explicit and auditable opt-in the RLS policy requires for cross-tenant reads
- * and decisions. Modelled on `withTenantContext`: a `SELECT set_config(...)`
- * with `is_local => true`, never a session-wide `SET`.
+ * explicit and auditable opt-in the RLS policy requires for cross-tenant
+ * **reads**. Modelled on `withTenantContext`: a `SELECT set_config(...)` with
+ * `is_local => true`, never a session-wide `SET`.
+ *
+ * It said "reads and decisions" until ADR-0409, and that was the defect: the
+ * grant was ORed into an `ALL`-scope policy whose NULL `WITH CHECK` made its
+ * `USING` serve every command, so claiming it bought rewriting, activating,
+ * moving, forging and destroying any tenant's proposal. What it buys now is
+ * exactly what the sentence above says.
+ *
+ * Exported because this module's own test imports it; it has no other importer,
+ * and since the split an importer could claim a cross-tenant read and no write.
  */
 export async function withPlatformReview<T>(
   conn: PgConnection,
@@ -153,12 +163,19 @@ interface PostgresDesignReviewStoreOptions {
 
 /**
  * The platform operator's view of AI-generated manifest proposals across every
- * tenant, over `meta.operate_tenant_manifests`. Cross-tenant methods
- * (list/getById/counts/approve/reject) run under `withPlatformReview`;
- * `markPending` and `reviewStatusFor` are a tenant's own operations and run
- * under `withTenantContext` with `tenant_id` bound as a WHERE predicate too —
- * defense in depth. The store never gates a transition: the route layer owns
- * the review state machine.
+ * tenant, over `meta.operate_tenant_manifests`. Cross-tenant **reads**
+ * (list/getById/counts) run under `withPlatformReview`; `markPending` and
+ * `reviewStatusFor` are a tenant's own operations and run under
+ * `withTenantContext` with `tenant_id` bound as a WHERE predicate too — defense
+ * in depth. The store never gates a transition: the route layer owns the review
+ * state machine.
+ *
+ * `approve`/`reject` are the one method that spans both arms, and this comment
+ * listed them among the cross-tenant methods until ADR-0409 narrowed the review
+ * grant to `SELECT`: they now read the proposal's tenant under the review arm
+ * and write under that tenant's own isolation context, in one transaction. So
+ * the review grant buys reading every tenant's proposals and deciding none of
+ * them by itself — see `decide`.
  */
 export class PostgresDesignReviewStore {
   private readonly conn: PgConnection;
@@ -274,16 +291,44 @@ export class PostgresDesignReviewStore {
     return this.decide(id, "rejected", input);
   }
 
+  /**
+   * One transaction, two policy arms (ADR-0409).
+   *
+   * The review grant is `SELECT`-scoped since ADR-0409, so it admits the read and cannot admit the
+   * write — which is the whole of that increment. The write is therefore scoped to the proposal's
+   * **own** tenant, and the tenant is learned here rather than taken from a caller: it is a fact
+   * about the row (ADR-0333), so a parameter for it would be one more thing a caller could get
+   * wrong, and the route that would supply it only knows it from a read this store already makes.
+   *
+   * The elevation is deliberately **not** turned off before the `UPDATE`, and before the split that
+   * would have been load-bearing: the old policy was one `ALL`-scope disjunction, so with the flag
+   * still on the review disjunct permitted the write whatever the tenant context said, and a
+   * two-step built on it would have been cosmetic. A `SELECT`-scoped arm cannot admit an `UPDATE`
+   * at all, so the flag's being on is inert and the isolation arm is the only clause that can
+   * permit this statement.
+   *
+   * `tenant_id` is bound into the predicate as well, which is `scopeFilter`'s rule (ADR-0333): a
+   * statement that names its own scope says what it means, where one relying on the session setting
+   * alone matches zero rows in silence if the setting is ever absent.
+   */
   private async decide(
     id: string,
     reviewStatus: "approved" | "rejected",
     input: { reviewedBy: string; notes?: string | null },
   ): Promise<DesignReviewRecord | null> {
     return withPlatformReview(this.conn, async (tx) => {
+      const found = await tx.query(`SELECT tenant_id FROM ${this.table} WHERE id = $1`, [id]);
+      const owner = found.rows[0];
+      // No row with that id in any tenant — the review arm admits every tenant's rows, so this is
+      // conclusive rather than a scope miss, and the route answers 404 for it as it always has.
+      if (owner === undefined) return null;
+      const tenantId = String(owner["tenant_id"] ?? "");
+      await setTenantContextWithin(tx, tenantId);
       const result = await tx.query(
-        `UPDATE ${this.table} SET review_status = $2, reviewed_by = $3, reviewed_at = now(),` +
-          ` review_notes = $4, updated_at = now() WHERE id = $1 RETURNING ${SELECT_COLUMNS}`,
-        [id, reviewStatus, input.reviewedBy, input.notes ?? null],
+        `UPDATE ${this.table} SET review_status = $3, reviewed_by = $4, reviewed_at = now(),` +
+          ` review_notes = $5, updated_at = now() WHERE id = $1 AND tenant_id = $2` +
+          ` RETURNING ${SELECT_COLUMNS}`,
+        [id, tenantId, reviewStatus, input.reviewedBy, input.notes ?? null],
       );
       const row = result.rows[0];
       return row === undefined ? null : this.rowToRecord(row);

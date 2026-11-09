@@ -30,6 +30,34 @@ export const SET_EXTRA_SETTING_SQL = "SELECT set_config($1, $2, true)";
 const TENANT_ID_RE = /^[0-9a-fA-F-]{1,64}$/;
 
 /**
+ * The one spelling of the shape check, so the two setters below validate identically while each
+ * keeps its own *position*: `withTenantContext` refuses before it opens a transaction (which its
+ * own test pins by title), and a setter handed a transaction a caller already holds cannot.
+ */
+function assertTenantIdShape(tenantId: string): void {
+  if (!TENANT_ID_RE.test(tenantId)) {
+    throw new Error(`invalid tenantId for RLS context: ${JSON.stringify(tenantId)}`);
+  }
+}
+
+/**
+ * Establishes the tenant RLS context on a transaction a caller already holds, validating the tenant
+ * id before it is bound exactly as `withTenantContext` does.
+ *
+ * It exists for the one shape `withTenantContext` cannot serve: a transaction that must read a row
+ * under a **different** policy arm before it can know whose tenant to scope the write to.
+ * `PostgresDesignReviewStore.decide` is that caller (ADR-0409) — the proposal's tenant is a fact
+ * about the row rather than something a caller supplies, so it is learned under the platform review
+ * arm and set here, in the same transaction, before the write. Nesting is unavailable:
+ * `withTenantContext` opens its own `conn.transaction`, and the real binding's in-transaction
+ * connection throws `nested transactions are not supported` before issuing any SQL.
+ */
+export async function setTenantContextWithin(tx: PgConnection, tenantId: string): Promise<void> {
+  assertTenantIdShape(tenantId);
+  await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
+}
+
+/**
  * Runs `fn` inside a transaction with the tenant RLS context established. The
  * tenant id is validated to a UUID-ish shape before it is bound, so a malformed
  * value fails fast rather than silently widening RLS scope.
@@ -52,11 +80,9 @@ export async function withTenantContext<T>(
   fn: (tx: PgConnection) => Promise<T>,
   settings?: ReadonlyMap<string, string>,
 ): Promise<T> {
-  if (!TENANT_ID_RE.test(tenantId)) {
-    throw new Error(`invalid tenantId for RLS context: ${JSON.stringify(tenantId)}`);
-  }
+  assertTenantIdShape(tenantId);
   return conn.transaction(async (tx) => {
-    await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
+    await setTenantContextWithin(tx, tenantId);
     if (settings !== undefined) {
       for (const [name, value] of settings) {
         await tx.query(SET_EXTRA_SETTING_SQL, [name, value]);
