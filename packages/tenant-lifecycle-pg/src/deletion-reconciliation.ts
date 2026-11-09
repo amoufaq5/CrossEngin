@@ -764,6 +764,14 @@ export class DeletionReconciler {
    * proof: a completion can be late and perfectly evidenced. This pass owns `completed` and
    * `auditDeadlines` owns the other five statuses, which is what keeps one shared reporter from
    * seeing a request twice — a property of the two queries rather than of a filter either applies.
+   *
+   * **Per snapshot**, which ADR-0408 had to narrow: the status sets really are disjoint, so no
+   * request is in both at one instant, and these are two separate passes on two cadences — so a
+   * request that completes between them reaches `reportDeadline` from each, under a *different*
+   * standing each time (waiting-and-breached, then completed-late). That is two true statements
+   * about two moments rather than a double-report, which is why nothing is de-duplicated across
+   * the passes where `auditDeadlines` now de-duplicates **within** its own two reads: there the two
+   * statements are about one moment and one of them is stale.
    */
   async auditCompleted(limit = 100): Promise<readonly EvidenceAudit[]> {
     const completed = await this.opts.requests.completedWithTombstone(
@@ -844,6 +852,23 @@ export class DeletionReconciler {
    * `examined` is what this pass **assessed**, never what it hoped to: a row the contract refused was
    * read and not assessed, so it goes to `onUnreadableRequest` and sits outside this figure, which is
    * `auditTombstones`' rule for the same count.
+   *
+   * **And the two sets are made disjoint here rather than assumed to be** (ADR-0408). The comment
+   * below this one used to say the disjointness was "a property of the two queries rather than of a
+   * filter either applies" — true of one snapshot and **false of two**, because `rejected` is
+   * absorbing while the four waiting statuses are not: a request rejected between the two reads is
+   * `submitted` at the first and `rejected` at the second, so it arrives in **both** lists, is
+   * reported twice and is counted twice in `examined`. Each store read opens its own
+   * `conn.transaction`, and a bare `BEGIN` is READ COMMITTED, so one transaction is not one
+   * snapshot and there is nothing above these two reads that could make them one.
+   *
+   * De-duplicating is exact where **reordering is not**, which is the whole reason it is the fix:
+   * this is a *partition* rather than a containment, so ADR-0407's directional rule does not reach
+   * it. Read waiting first and the window produces a duplicate; read the refusals first and the
+   * same window produces a **miss** (the request was not yet rejected at the first read and is no
+   * longer waiting at the second). Keeping the order and dropping the duplicate answers every
+   * interleaving: the later read's view wins, which is the terminal truth, and `examined` counts
+   * the request once.
    */
   async auditDeadlines(limit = DEFAULT_DEADLINE_AUDIT_LIMIT): Promise<DeadlineAuditPage> {
     const bounded = Math.max(1, Math.min(500, Math.trunc(limit)));
@@ -854,13 +879,19 @@ export class DeletionReconciler {
     // different set than the one the reporter saw.
     const unreadable = [...waiting.unreadable, ...lateRefusals.unreadable];
     for (const row of unreadable) this.opts.onUnreadableRequest(row);
+    // The refusals **last**, so a request that moved between the two reads is assessed under the
+    // status it ended at. `Map` and not a `Set` of ids, because what has to survive is the record
+    // the later read returned and not merely the knowledge that it was seen twice.
+    const assessable = new Map<string, GdprDeletionRequest>();
+    for (const request of waiting.records) assessable.set(request.id, request);
+    for (const request of lateRefusals.records) assessable.set(request.id, request);
     const findings: DeadlineFinding[] = [];
-    for (const request of [...waiting.records, ...lateRefusals.records]) {
+    for (const request of assessable.values()) {
       const finding = this.reportDeadline(request);
       if (finding !== null) findings.push(finding);
     }
     return {
-      examined: waiting.records.length + lateRefusals.records.length,
+      examined: assessable.size,
       unreadable: unreadable.length,
       // From the **rows** each query returned and never from the records it yielded. A refused row
       // is a row: it holds a position in the ordering, so with one unreadable row on a full page the

@@ -26,9 +26,15 @@ export const ACCESS_REVIEW_DRIFT_ISSUE_KINDS = [
    * Three kinds and not one, because they are reported by three different reads and the sweep
    * carries on differently after each: an unreadable **campaign** is one campaign dropped from a
    * tenant's sweep, where an unreadable **item** or **decision** leaves that campaign's own graph
-   * incomplete — so every cross-row finding over it (`item_campaign_mismatch`,
-   * `decision_item_mismatch`, `decision_campaign_mismatch`, `auto_revoke_kind_mismatch`) becomes an
-   * inference. One kind would have lost that, and `CampaignReplay.complete` is what reports it.
+   * incomplete — so every cross-row finding **computed from those records**
+   * (`item_campaign_mismatch`, `auto_revoke_kind_mismatch`) becomes an inference. One kind would
+   * have lost that, and `CampaignReplay.complete` is what reports it.
+   *
+   * `decision_campaign_mismatch` is deliberately **not** in that list any more: since ADR-0408 it
+   * comes from `campaignMismatches`, a predicate over two tables in one statement with no mapper,
+   * so an unreadable decision row cannot weaken it — the comparison is made by the database over
+   * columns rather than here over records. That is the whole gain of moving it, beyond becoming
+   * reachable at all: it is the one cross-row finding this sweep states **conclusively**.
    *
    * These are **findings and not obstacles to finding** (ADR-0289). Before them, one row threw out
    * of a `.map` and took every other row in the read with it: a campaign with a NULL
@@ -44,7 +50,13 @@ export const ACCESS_REVIEW_DRIFT_ISSUE_KINDS = [
   "decided_without_decision_id",
   "auto_revoked_without_reason",
   "item_campaign_mismatch",
-  "decision_item_mismatch",
+  /**
+   * A decision whose campaign disagrees with its item's.
+   *
+   * Produced by `campaignMismatches` and by nothing else. `decision_item_mismatch` used to sit
+   * beside it and is **gone** rather than relocated — see `verifyDecisionRowShape` for why that
+   * question has no content left and why this one does.
+   */
   "decision_campaign_mismatch",
   "auto_revoke_kind_mismatch",
 ] as const;
@@ -187,29 +199,34 @@ const NO_RESPONSE_DEFAULT_KIND: Readonly<Record<AutoRevokePolicy, DecisionKind |
  * property of `autoRevokePolicy`, which lives on the campaign and not on the decision. So the
  * conjunct is gone and the campaign is in, and with no campaign the question is simply **not asked**
  * rather than answered with a constant.
+ *
+ * **And the two checks that sat beside it were the same defect, which ADR-0362 did not re-ask.**
+ * That increment found `auto_revoke_kind_mismatch` unemittable, wrote the rule down twenty lines
+ * above this signature, and left `decision_item_mismatch` and `decision_campaign_mismatch` as they
+ * were — both unreachable, for two different reasons, in the one function whose own doc comment
+ * narrates exactly that failure. Neither has a `kind` here any more:
+ *
+ * - `decision_item_mismatch` is **deleted outright**, because the question has no content. The only
+ *   caller fetched the item *by* `decision.itemId` out of a map, so `item.id === decision.itemId`
+ *   held by construction — a map key compared against the value used to fetch it. Nor is there a
+ *   weaker question underneath it: `decision.itemId` is `i.item_id` of the row joined
+ *   `ON i.id = d.item_id`, so the reference's integrity is the join's, the `item_id` foreign key is
+ *   `ON DELETE CASCADE`, and the read is an INNER JOIN — measured live, **0** decisions with no
+ *   item row. A judgement with no case left is not a judgement (ADR-0375).
+ * - `decision_campaign_mismatch` is **moved**, to `PostgresAccessReviewDecisionStore.campaignMismatches`,
+ *   which asks it in one statement over both tables. Its question is real — `d.campaign_id` and
+ *   `i.campaign_id` are two independent foreign keys with no constraint relating them — and it was
+ *   unanswerable from this pair of reads whatever their order. See that method for the measurement.
+ *
+ * So `item` is gone from the signature rather than left unread, which is the part a reader should
+ * take: a parameter nothing consults invites the next caller to believe a cross-row check is being
+ * made here, and this function now compares a decision against **its campaign** and nothing else.
  */
 export function verifyDecisionRowShape(
   decision: AccessReviewDecision,
-  item?: AccessReviewItem,
   campaign?: AccessReviewCampaign,
 ): readonly AccessReviewDriftIssue[] {
   const issues: AccessReviewDriftIssue[] = [];
-  if (item !== undefined) {
-    if (decision.itemId !== item.id) {
-      issues.push({
-        kind: "decision_item_mismatch",
-        id: decision.id,
-        detail: `decision itemId ${decision.itemId} != item ${item.id}`,
-      });
-    }
-    if (decision.campaignId !== item.campaignId) {
-      issues.push({
-        kind: "decision_campaign_mismatch",
-        id: decision.id,
-        detail: `decision campaignId ${decision.campaignId} != item campaign ${item.campaignId}`,
-      });
-    }
-  }
   if (campaign !== undefined && decision.reason === "no_response_auto_default") {
     const expected = NO_RESPONSE_DEFAULT_KIND[campaign.autoRevokePolicy];
     if (expected !== null && decision.kind !== expected) {
@@ -262,13 +279,18 @@ export interface CampaignReplay {
   /**
    * Whether this replay saw the whole of the campaign's graph.
    *
-   * `false` makes every **cross-row** finding an inference rather than an observation, and makes the
-   * absence of one say nothing: `verifyDecisionRowShape` compares a decision against the item
-   * `itemsById` holds, so a decision whose item was the unreadable row reads as having no item at
-   * all, and the question is simply not asked. `items` and `decisions` are counts of what could be
-   * read, which is a different quantity from what is on disk — so a clean replay with
-   * `complete: false` is "nothing wrong was found in what could be read", not "nothing is wrong".
+   * `false` makes a **record-derived** cross-row finding an inference rather than an observation,
+   * and makes the absence of one say nothing: `verifyItemRowShape` compares an item against the
+   * campaign record, so an unreadable campaign leaves the question unasked, and a refused item row
+   * is simply not examined at all. `items` and `decisions` are counts of what could be read, which
+   * is a different quantity from what is on disk — so a clean replay with `complete: false` is
+   * "nothing wrong was found in what could be read", not "nothing is wrong".
    * `IncidentReplayReport.windowComplete`'s rule for a different kind of incompleteness.
+   *
+   * It does **not** weaken `decision_campaign_mismatch`, and that is the one asymmetry worth
+   * knowing here: since ADR-0408 that finding comes from `campaignMismatches`, which compares two
+   * columns in one statement and parses nothing, so it is unaffected by any row this replay could
+   * not represent. A `complete: false` replay still states it conclusively.
    */
   readonly complete: boolean;
   readonly issues: readonly AccessReviewDriftIssue[];
@@ -361,19 +383,31 @@ export class AccessReviewReplayer {
       tenantId,
       campaignId,
     );
-    const itemsById = new Map(items.records.map((it) => [it.id, it] as const));
+    // A third read, and the one cross-row question this sweep can state conclusively. It is asked
+    // of the **database** rather than computed from the two reads above, because the pair cannot
+    // answer it: both filter on this campaign, so a decision whose item belongs to another one
+    // arrives with its item permanently absent from the item set. ADR-0408's measurement.
+    //
+    // Deliberately **not** order-sensitive, which is why it is placed after the pair rather than
+    // woven into it: the predicate is evaluated in one statement, so there is no pair of reads
+    // whose order could forge or clear it. A decision committed after this read is not covered
+    // yet — the conservative direction, and the next pass catches it (ADR-0407).
+    const mismatches = await this.stores.decisionStore.campaignMismatches(tenantId, campaignId);
     const issues: AccessReviewDriftIssue[] = [
       ...unreadableIssues("unreadable_item_row", items.unreadable),
       ...unreadableIssues("unreadable_decision_row", decisions.unreadable),
       ...verifyCampaignRowShape(campaign),
+      ...mismatches.map((m) => ({
+        kind: "decision_campaign_mismatch" as const,
+        id: m.decisionId,
+        detail: `decision is in campaign ${campaignId} but its item is in ${m.itemCampaignId}`,
+      })),
     ];
     for (const item of items.records) {
       issues.push(...verifyItemRowShape(item, campaign));
     }
     for (const decision of decisions.records) {
-      issues.push(
-        ...verifyDecisionRowShape(decision, itemsById.get(decision.itemId), campaign),
-      );
+      issues.push(...verifyDecisionRowShape(decision, campaign));
     }
     return {
       tenantId,

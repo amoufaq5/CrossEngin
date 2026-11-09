@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 21,389 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 21,398 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -6248,6 +6248,18 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   the other half of the coverage claim — a page where nothing was assessable read
   `{examined: 0, complete: true, findings: []}`, byte-identical to a healthy deployment with no
   pending requests — and a clean page is one where **both** lists are empty.
+  **And the two reads are de-duplicated by request id since ADR-0408, which is the exact fix where
+  ADR-0407's read-order rule is not.** The two statuses sets are disjoint **per snapshot** and the
+  reads take two, so a request rejected between them appears in `waiting.records` and in
+  `lateRefusals.records` — reported twice and counted twice in `examined`, which is a coverage claim.
+  Reordering is the obvious move and is **refused on reasoning**: the two sets partition rather than
+  nest (`rejected` is absorbing, the other four are not), so reading the absorbing side first turns
+  the duplicate into a one-pass **miss** — a trade, not a fix. A `Map` keyed on `request.id` keeps the
+  order *and* makes the duplicate impossible, with insertion order putting the waiting read first so
+  the **later** read's view wins — the right direction, because it is the one that sees the
+  transition. `examined` is `assessable.size`, so the coverage figure counts requests and not rows
+  returned. `auditCompleted`'s own disjointness comment is narrowed to say **per snapshot** rather
+  than claiming it as a property of the two queries, which is true of one snapshot and false of two.
   **And `eraseSharedTablesWithin` is the second real erasure** (ADR-0329), which until then did not
   exist at all: **112 of the 143 `META_TABLES` carry a `tenant_id`** and nothing erased one of them,
   so every deployment declared `shared_tables: "absent"` and signed an Article 17 proof over a tenant
@@ -6728,6 +6740,34 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   in every certification report ever produced**. `latestSealed` had no tenant predicate either, so as
   the table's owner tenant A's SOC 2 report read *satisfied at 100% citing tenant B's digest* — the
   owner-bypass class of ADR-0331/ADR-0333, in the one table a compliance claim is built from.
+  **`campaignMismatches` asks in one statement what `replayCampaign` could not answer from two
+  reads** (ADR-0408), and **`verifyDecisionRowShape` takes no item** because both of its cross-row
+  checks were structurally unreachable from their only caller. `decision_item_mismatch` compared
+  `decision.itemId !== item.id` where the item came out of a map keyed on `decision.itemId` — **a map
+  key against the value used to fetch it** — with no weaker question underneath (the reference's
+  integrity is the join's, the FK is `ON DELETE CASCADE`, the read is an INNER JOIN, and the live run
+  measured **0** decisions with no item row), so it is **deleted** on ADR-0375's rule.
+  `decision_campaign_mismatch` is a real question — `d.campaign_id` and `i.campaign_id` are two
+  independent foreign keys with no constraint relating them — and was unanswerable from that pair
+  **whatever their order**, because both reads filter on `c.campaign_id = $1` against *different*
+  campaign joins: a mismatch means exactly one of the two holds, so when the decision is read its
+  item is permanently absent from the item set and the `if (item !== undefined)` guard skips.
+  Measured live on PG 16 as the non-owner `serving` role against a real mismatch with two controls:
+  both campaigns read `issues=[-]` before and campaign A reads
+  `issues=[decision_campaign_mismatch]` after, with B correctly still `[-]`.
+  It is therefore **not** a read-order fix and that distinction is the whole of it: reordering
+  reaches nothing, while one statement has no order to get wrong (ADR-0407's rule read forward) and
+  makes the finding **conclusive**, since nothing is parsed to produce it — so a `complete: false`
+  replay still states it, which the issue-kind doc now says instead of listing it among the findings
+  an unreadable row turns into an inference. **Why it survived is the reusable part**: two tests
+  pinned both kinds over hand-built pairs the caller cannot construct, in the function whose own doc
+  comment narrates exactly that failure for the third check ADR-0362 retired — so this is not a new
+  class member but that member's two siblings, left standing by the increment that found it.
+  `connFor`'s branch order needed fixing with it, and that is ADR-0363's defect verbatim: the fake
+  matched `FROM meta.access_review_decisions d`, which the new statement also begins with, so the
+  mismatch probe was handed the **list's** rows and invented a finding on every replay — a shape
+  match **true of** the statement rather than **specific to** it, now keyed on
+  `d.campaign_id <> i.campaign_id`.
 - **`certification-runtime`** — runtime-only (no contracts sibling): a control catalog
   mapped to frameworks, evidence adapters that pull real signals from other packages
   (encryption coverage, DR readiness, forensic chain integrity, access-review completion),
@@ -14101,27 +14141,52 @@ land with or before it.
     the reconciliation probe, the checkpoint scheduler, `verify-chain`, `anchor-audit`,
     `witness-memory`, `certification`, `dr-readiness`, metering, the link sweep, the read-state store,
     the shared-table erasure and the rekey. Every claim here was re-verified against the tree.
-    **Two sites are wrong by the rule and one cannot be fixed by it.**
-    `AccessReviewReplayer.replayCampaign` reads the item set *before* the decisions it must contain
-    and fails **open**, because `verifyDecisionRowShape` guards its cross-row block with
-    `if (item !== undefined)` — so a decision whose item the earlier read missed yields **no issue at
-    all** and both `decision_item_mismatch` and `decision_campaign_mismatch` go unasked; worse,
-    `undefined` is also what a *genuinely orphaned* decision looks like, so **that replayer can never
-    report an orphan**, and reading items second would make `undefined` conclusive (the `item_id`
-    foreign key licenses it). It is the one of the three that is **wired** —
-    `operate-server replay --access-reviews` has a runner. `DeletionReconciler.auditDeadlines` reads
-    the four non-terminal statuses before the absorbing `rejected` one and concatenates both lists
-    into one reporter, so a request rejected between the two reads is **reported twice and counted
-    twice in `examined`**, against the disjointness `auditCompleted`'s own comment claims as *"a
-    property of the two queries rather than of a filter either applies"* — true of one snapshot and
-    false of two. That one is a **partition rather than a containment**, so no order makes it exact:
-    reading the absorbing side first turns the duplicate into a one-pass miss, which is the better
-    error (`examined` is a coverage claim, ADR-0372, while the miss is caught next pass) — so it is a
-    trade needing its argument written down, not a free swap. And `WorkflowReplayer.verifyInstance`
-    compares `stored.sequence_cursor !== expected.sequenceCursor`, an **equality**, which forges in
-    *both* orders, compounded by `ProjectingEventLog.append` writing the event and its projection as
-    two statements with no transaction so the projection is *expected* to lag; latent, since that
-    replayer has no runner, and its honest fixes are a one-sided comparison or a real snapshot.
+    **Two sites were wrong by the rule and one cannot be fixed by it. ADR-0408 closed both and
+    refuted all three clauses of the first.**
+    *Member 1, `AccessReviewReplayer.replayCampaign`* — **closed, and it was not a read-order defect
+    at all.** This entry read: it *"reads the item set before the decisions it must contain and fails
+    **open**, because `verifyDecisionRowShape` guards its cross-row block with
+    `if (item !== undefined)`"*, so both cross-row checks *"go unasked"*, and separately that *"that
+    replayer can never report an orphan"*. The mechanism was right about the guard and wrong about
+    the remedy in three ways. `decision_item_mismatch` compared `decision.itemId !== item.id` where
+    the item came out of a map keyed on `decision.itemId` — **a map key against the value used to
+    fetch it**, true for every input, with no weaker question underneath it (the reference's
+    integrity is the join's, the FK is `ON DELETE CASCADE`, the read is an INNER JOIN, and the live
+    run measured **0** decisions with no item row), so it is **deleted** on ADR-0375's rule rather
+    than reordered. `decision_campaign_mismatch` is a real question — `d.campaign_id` and
+    `i.campaign_id` are two independent foreign keys with no constraint relating them — and was
+    unanswerable from that pair **whatever their order**, because both reads filter on
+    `c.campaign_id = $1` against *different* campaign joins: a mismatch means exactly one of the two
+    returns its row, so when the decision is read its item is permanently absent from the item set
+    and the guard skips. So reordering reaches **neither** check, and the fix is one SQL statement
+    (`campaignMismatches`), which has **no order to get wrong** — ADR-0407's rule read forward — and
+    is **conclusive** rather than inferential, since nothing is parsed to produce it, so a
+    `complete: false` replay still states it. Measured live on PG 16.15 as the non-owner `serving`
+    role with two controls: both campaigns read `issues=[-]` before, and campaign A reads
+    `issues=[decision_campaign_mismatch]` after with B correctly still `[-]`. **Why it survived is
+    the reusable part**: two tests pinned both kinds over hand-built pairs the caller cannot
+    construct, in the function whose own doc comment narrates exactly that failure for the third
+    check ADR-0362 retired — so this was not a new class member but that member's two siblings, left
+    standing by the increment that found it. The orphan clause is **true and vacuous** for the same
+    four reasons, and `undefined` can no longer mean two things because no reader of it is left.
+    *Member 2, `DeletionReconciler.auditDeadlines`* — **closed, and the fix is de-duplication rather
+    than ordering, exactly as this entry reasoned.** It reads the four non-terminal statuses before
+    the absorbing `rejected` one and concatenated both lists into one reporter, so a request rejected
+    between the two reads was **reported twice and counted twice in `examined`**, against the
+    disjointness `auditCompleted`'s own comment claimed as *"a property of the two queries rather
+    than of a filter either applies"* — true of one snapshot and false of two. A **partition rather
+    than a containment**, so no order makes it exact: reading the absorbing side first turns the
+    duplicate into a one-pass miss. A `Map` keyed on `request.id` keeps the order *and* removes the
+    duplicate, with insertion order making the **later** read's view win, and the sibling comment is
+    narrowed to say *per snapshot*.
+    *Member 3, `WorkflowReplayer.verifyInstance`* — **recorded, not closed.** It compares
+    `stored.sequence_cursor !== expected.sequenceCursor`, an **equality**, which forges in *both*
+    orders, compounded by `ProjectingEventLog.append` writing the event and its projection as two
+    statements with no transaction so the projection is *expected* to lag; latent, since that
+    replayer has no runner (`operate-server replay` declares `workflow` in `REPLAY_SCOPE_SUPPORT`
+    and serves it with nothing). Its honest fixes are a one-sided comparison or a real snapshot, and
+    neither is this increment's shape: the first is a semantics decision about what drift means for
+    a lagging projection, the second is the primitive below.
     **Four sites are right with no comment saying so**, the highest-stakes being `pruneDanglingLinks`,
     whose comparison drives a `DELETE` and whose inversion would delete links created in the window;
     in three of the four the order is *forced* by a data dependency and the unstated premise is a
@@ -14138,6 +14203,27 @@ land with or before it.
     `scanCheckpoints` is the one place that has measured and written this down, for one scan rather
     than as a property of the primitive, and it names the blocker: the level must be set before
     `set_config`, which `withTenantContext` issues first.
+    **ADR-0408 measured that blocker and it dissolves; what survives is that the primitive is
+    necessary and not sufficient.** Live on PG 16.15 as the non-owner `serving` role:
+    `BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ` sets the level **on the `BEGIN` itself** and
+    composes with a following `set_config` (`repeatable read` / `on`), where
+    `SET TRANSACTION ISOLATION LEVEL …` issued *after* `set_config` raises
+    `25001 SET TRANSACTION ISOLATION LEVEL must be called before any query` — so the recorded
+    blocker is an artefact of the *separate-statement* spelling and not of the ordering.
+    `REPEATABLE READ READ ONLY` additionally makes `40001` unreachable for a pure reader (a
+    serialization failure needs a write), which is what makes it safe for a sweep with no retry
+    loop. It is refused **not** because it cannot be built but because **no site shares a
+    transaction across its two reads**: each access-review read opens its own
+    `withTenantContext`, `unanswered` and `rejectedAfterDeadline` each open their own
+    `conn.transaction`, and `instance-store.ts` uses bare `this.conn.query` → `pool.query` with no
+    transaction at all — so the primitive would change nothing until each site is restructured to
+    read both halves inside one callback, which is a different change per site. Two further costs
+    measured rather than reasoned: an open RR snapshot **pins the vacuum horizon** (18,001 dead
+    tuples held against a concurrent delete+vacuum), so a long sweep inside one trades bloat for
+    exactness; and the `PgConnection` surface is 128 test files typing something as it and **138**
+    declaring a `transaction:` member, so a required fifth method is unshippable while an optional
+    parameter is free by contravariance *and* makes the snapshot unobservable to every fake that
+    ignores it (ADR-0389's discarded-callback class, one argument in).
 
 ### P3 — debt and stale documentation
 
@@ -14625,6 +14711,32 @@ method is that a stale figure misleads.
    following. A reviewer reading the tree while it is being edited also cannot cite it as fixed
    ground: that verifier's own line citations were low by exactly 42, the width of the comment that
    had grown underneath it.
+
+   **ADR-0408 adds four members and the first is this entry's own lesson paid by its own author one
+   increment later.** ADR-0403 recorded that an unparseable ADR header reads silently as `Proposed`
+   and said to *"write the header as the template's table"* — and ADR-0408 was committed with
+   `| Status | Accepted |`, a perfectly well-formed table, which the generator counts as
+   **Proposed**, because the parser is `^\|\s*\*\*Status\*\*\s*\|\s*(.+?)\s*\|$` and the field names
+   must be **bold**. So the recorded remedy was *weaker than the rule it described*, and the tell was
+   free and the same one ADR-0403 names: the record count moved while `Accepted` did not. Its
+   paragraph also claimed *"zero carry a header this generator cannot parse"* as though it were a
+   property of the convention when it was a measurement over the tree at that moment — now retracted
+   in place, with the instruction to **run the generator and read both numbers** before committing.
+   The other three are instrument defects, and all three answered a **zero** that reads as a clean
+   result. **`grep -F -c` with a multi-line pattern counts matching *lines* and treats the newline as
+   an OR**, so a mutation harness's `count()` answered `0\n0` for an absent string and `3` for a
+   two-line one, and it **refused all six mutations on garbage** — caught because a refusal of
+   *every* mutation is not a plausible outcome; rewritten in Python. A raw cross-check probe answered
+   `mismatches=0` with an **empty** "what the database holds" block while the subject read the same
+   rows, because it issued no `app.current_tenant_id` and RLS confined it — and **the tell was the
+   control block, which no arrangement of the subject could have emptied**, which is this run's
+   non-vacuity floor doing its job rather than reading. And `verifyDecisionRowShape.length` was
+   asserted as a fence against the deleted parameter returning: `Function.length` **stops at the
+   first optional parameter**, so it answered 2 for a two-parameter signature whose second is
+   optional, and the real fence is `@ts-expect-error` — evaluated only by
+   `tsconfig.typecheck.json` (ADR-0307's split) and mutation-confirmed by `TS2578`. The reusable
+   shape: **a proxy for a property is not that property**, which is ADR-0363's own finding one
+   instrument down.
 2. **Six concepts are modelled several times over, two with non-nesting member sets.** Data
    classification has five declarations — four identical and one, in `data-lineage`, **disjoint past
    two members**, so the moment anything bridges the kernel's classification into the lineage graph
@@ -14723,7 +14835,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 401 records; 322 Accepted, 79 Proposed (the
+title or status change cannot drift. 402 records; 323 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 
@@ -14731,11 +14843,20 @@ include `0000-template.md`, which the count has always included).
 `Proposed` and says nothing** (ADR-0403): `field("Status", "Proposed")` is the
 generator's default, so a bullet-list header — which is what ADR-0403 was
 drafted with, caught by running the generator before the commit — counts as
-Proposed with no warning, and the tell is that `398 records` moved while
+Proposed with no warning, and the tell is that the record count moved while
 `Accepted` did not. The silent default is register P3.3's
 `pg-record-reads.ts` shape in the index generator (*a fact a parser cannot read
-must come back as unreadable, never as absent*), and it has no other victim:
-measured over all 398, **zero** carry a header this generator cannot parse.
+must come back as unreadable, never as absent*).
+
+**And it is stricter than "the template's table": the field names must be
+bold.** The parser is `^\|\s*\*\*Status\*\*\s*\|\s*(.+?)\s*\|$`, so a perfectly
+well-formed table whose first column reads `| Status |` rather than
+`| **Status** |` is unparseable and silently `Proposed` — which is what ADR-0408
+was drafted with, one increment after this paragraph was written, by the author
+who wrote it. So *"zero carry a header this generator cannot parse"* was a
+measurement over the tree at that moment and not a property of the convention;
+run the generator and read **both** numbers before committing, because the count
+alone moves either way.
 
 ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never
 written; those milestones landed under other numbers. The gap is permanent.

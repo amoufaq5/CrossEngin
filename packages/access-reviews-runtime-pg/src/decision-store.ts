@@ -158,4 +158,70 @@ export class PostgresAccessReviewDecisionStore {
       return readRowsWithUnreadable(result.rows, rowToDecision, (row) => rowKey(row.decision_id));
     });
   }
+
+  /**
+   * Decisions of this campaign whose **item** belongs to a different one.
+   *
+   * One statement over both tables, which is the whole reason it exists: the replayer used to ask
+   * this by comparing two reads — `itemsById.get(decision.itemId)` against a per-campaign item
+   * set — and that comparison **could never answer it**. Both reads filter on
+   * `c.campaign_id = $1`, so the decisions read returns a mismatched decision iff its *own*
+   * campaign is the asked-for one, while the items read returns its item iff the *item's* campaign
+   * is — and a mismatch means exactly one of those holds. So the item was permanently absent from
+   * the map, `verifyDecisionRowShape`'s `if (item !== undefined)` guard skipped, and the finding
+   * was unreachable from either campaign. Measured live on PG 16 as the non-owner `serving` role:
+   * a decision in campaign A naming an item in campaign B reported `issues=[-]` for **both**
+   * campaigns while this query answers `1` for A and `0` for B.
+   *
+   * It is **not** a read-order fix. Reordering the two reads cannot help, because the absence is
+   * produced by the two WHERE clauses rather than by an interleaving — and asking it in one
+   * statement is strictly better than ordering two, since a predicate evaluated in a single
+   * snapshot has no order to get wrong (ADR-0407's rule read forward). A decision committed after
+   * this read is simply not covered yet, which is the conservative direction.
+   *
+   * No mapper and so no refusal axis: every column it reads is a business key compared to another
+   * business key, so there is no row it can fail to represent and the finding is **conclusive**
+   * where the old one was inferential (ADR-0322's axis). All four joined relations carry the
+   * tenant predicate, for `listByCampaign`'s reason — `campaign_id` is table-wide unique, so
+   * without it this read is global as the owner.
+   */
+  async campaignMismatches(
+    tenantId: string,
+    campaignId: string,
+  ): Promise<readonly DecisionCampaignMismatch[]> {
+    return withTenantContext(this.conn, tenantId, async (tx) => {
+      const result = await tx.query<{ decision_id: string; item_campaign_id: string }>(
+        `SELECT d.decision_id, ic.campaign_id AS item_campaign_id
+           FROM ${SCHEMA}.${TABLE} d
+           JOIN ${SCHEMA}.access_review_items i ON i.id = d.item_id
+           JOIN ${SCHEMA}.access_review_campaigns dc ON dc.id = d.campaign_id
+           JOIN ${SCHEMA}.access_review_campaigns ic ON ic.id = i.campaign_id
+          WHERE dc.campaign_id = $1
+            AND d.campaign_id <> i.campaign_id
+            AND ${tenantScopePredicate("d", 2)}
+            AND ${tenantScopePredicate("i", 2)}
+            AND ${tenantScopePredicate("dc", 2)}
+            AND ${tenantScopePredicate("ic", 2)}
+          ORDER BY d.decision_id ASC`,
+        [campaignId, tenantId],
+      );
+      return result.rows.map((row) => ({
+        decisionId: row.decision_id,
+        itemCampaignId: row.item_campaign_id,
+      }));
+    });
+  }
+}
+
+/**
+ * A decision whose campaign disagrees with its item's, as `campaignMismatches` answers it.
+ *
+ * Both fields are business keys read straight off a column: the decision's own id, and the campaign
+ * the item really belongs to. The decision's *claimed* campaign is the one the caller asked about,
+ * so it is not repeated here — a finding must not invite a reader to act on a value that came back
+ * from the row rather than from the question.
+ */
+export interface DecisionCampaignMismatch {
+  readonly decisionId: string;
+  readonly itemCampaignId: string;
 }

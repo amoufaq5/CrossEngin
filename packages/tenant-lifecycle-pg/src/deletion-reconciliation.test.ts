@@ -1357,6 +1357,50 @@ describe("auditDeadlines", () => {
     expect(h.findings).toEqual([...page.findings]);
   });
 
+  /**
+   * The interleaving the two reads cannot exclude, and the reason de-duplicating is the fix rather
+   * than reordering (ADR-0408).
+   *
+   * Each store read opens its own `conn.transaction` and a bare `BEGIN` is READ COMMITTED, so one
+   * transaction is not one snapshot: a request `submitted` at the waiting read and `rejected` at
+   * the refusals read arrives in **both** lists. `rejected` is absorbing and the four waiting
+   * statuses are not, so this is a *partition* rather than a containment — reordering only
+   * converts the duplicate into a **miss**, which is why ADR-0407's directional rule does not
+   * reach this site. The fixture is the same request in both lists under its two statuses, which
+   * is exactly what the two reads return across that window.
+   */
+  it("assesses a request that moved between the two reads exactly once", async () => {
+    const MOVED_WAITING = requestOf({
+      id: "dreq_moved0000001",
+      status: "submitted",
+      verificationMethod: null,
+      verifiedAt: null,
+      verifiedBy: null,
+      inProgressAt: null,
+      deadlineAt: "2026-09-28T00:00:00.000Z",
+    });
+    const MOVED_REJECTED = requestOf({
+      id: "dreq_moved0000001",
+      status: "rejected",
+      inProgressAt: null,
+      rejectedAt: "2026-09-30T00:00:00.000Z",
+      rejectedReason: "not a data subject",
+      deadlineAt: "2026-09-28T00:00:00.000Z",
+    });
+    const h = harness({ unanswered: [MOVED_WAITING], lateRefusals: [MOVED_REJECTED] });
+    const page = await h.reconciler.auditDeadlines();
+    expect(page.examined).toBe(1);
+    expect(page.findings.map((f) => f.requestId)).toEqual(["dreq_moved0000001"]);
+    // The **later** read's view, which is the terminal truth: the request was answered, late, and
+    // is no longer waiting on anybody. Reporting `breached` here would send an operator to act on
+    // a request that has already been refused.
+    expect(page.findings[0]?.assessment).toMatchObject({
+      standing: "answered_late",
+      status: "rejected",
+    });
+    expect(h.findings).toEqual([...page.findings]);
+  });
+
   it("writes nothing", async () => {
     // A deadline is not a repair: curing an approaching one is the runner's act or an operator's,
     // and nothing cures a breach at all (ADR-0323's rule, one subject over).

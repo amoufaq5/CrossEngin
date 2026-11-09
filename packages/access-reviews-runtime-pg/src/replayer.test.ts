@@ -68,21 +68,48 @@ describe("verifyItemRowShape", () => {
 });
 
 describe("verifyDecisionRowShape", () => {
-  it("passes a decision consistent with its item", () => {
-    expect(verifyDecisionRowShape(makeDecision(), makeItem())).toHaveLength(0);
+  it("passes a well-formed decision", () => {
+    expect(verifyDecisionRowShape(makeDecision())).toHaveLength(0);
   });
 
-  it("flags a decision whose itemId disagrees", () => {
-    const decision = makeDecision();
-    const item = makeItem({ id: "ari_00000099" });
-    expect(verifyDecisionRowShape(decision, item).map((i) => i.kind)).toContain(
-      "decision_item_mismatch",
-    );
+  /**
+   * ADR-0408 **rewrote** the two tests that used to live here rather than deleting them, because
+   * both pinned an unreachable check as the specification (ADR-0372's class, eighth instance in
+   * this run). Each handed this function a `(decision, item)` pair that the only caller cannot
+   * construct:
+   *
+   * - `makeItem({id: "ari_00000099"})` beside a decision naming `ari_00000001` — but
+   *   `replayCampaign` fetched the item **by** `decision.itemId` out of a map, so the pairing was
+   *   a map key disagreeing with the value used to fetch it: impossible.
+   * - `makeDecision({campaignId: "arc_00000099"})` beside an item in `arc_00000001` — but both
+   *   store reads filter on one campaign, so when the decision comes back its item is in a
+   *   different campaign and is absent from the item set: the guard skipped, permanently.
+   *
+   * So the function takes no item at all now, and the two questions are asked where they can be
+   * answered: one in SQL, one nowhere because it has no content. These are the fences for that.
+   */
+  it("takes no item, so no caller can believe a cross-row check is made here", () => {
+    // The real fence is the **type**, and it is what found all nine call sites when the parameter
+    // went: only `tsconfig.typecheck.json` evaluates this directive, so vitest cannot see it
+    // (ADR-0307's split, ADR-0403's idiom). Deliberately not `verifyDecisionRowShape.length`,
+    // which counts an optional parameter and so answers 2 either way — a proxy for the question
+    // rather than the question.
+    // @ts-expect-error — an item is no longer a parameter of this function.
+    verifyDecisionRowShape(makeDecision(), makeItem(), makeCampaign());
+    expect(
+      verifyDecisionRowShape(makeDecision({ itemId: "ari_99999999" })).map((i) => i.kind),
+    ).toEqual([]);
   });
 
-  it("flags a decision whose campaignId disagrees with its item's", () => {
+  it("no longer carries decision_item_mismatch as a kind at all", () => {
+    expect([...ACCESS_REVIEW_DRIFT_ISSUE_KINDS]).not.toContain("decision_item_mismatch");
+  });
+
+  it("does not produce decision_campaign_mismatch, which is now the store's answer", () => {
+    // The whole set of kinds this function can emit, asserted as a set rather than per kind: a
+    // cross-row kind reintroduced here would fail this, which is the thing that must not come back.
     const decision = makeDecision({ campaignId: "arc_00000099" });
-    expect(verifyDecisionRowShape(decision, makeItem()).map((i) => i.kind)).toContain(
+    expect(verifyDecisionRowShape(decision, makeCampaign()).map((i) => i.kind)).not.toContain(
       "decision_campaign_mismatch",
     );
   });
@@ -101,7 +128,7 @@ describe("auto_revoke_kind_mismatch is reachable and policy-aware", () => {
 
   it("is not asked at all without a campaign, rather than answered with a constant", () => {
     const decision = makeDecision({ ...AUTO_DEFAULT, kind: "keep" });
-    expect(verifyDecisionRowShape(decision, makeItem()).map((i) => i.kind)).not.toContain(
+    expect(verifyDecisionRowShape(decision).map((i) => i.kind)).not.toContain(
       "auto_revoke_kind_mismatch",
     );
   });
@@ -109,7 +136,7 @@ describe("auto_revoke_kind_mismatch is reachable and policy-aware", () => {
   it("flags a keep under auto_revoke_on_deadline", () => {
     const decision = makeDecision({ ...AUTO_DEFAULT, kind: "keep" });
     const campaign = makeCampaign({ autoRevokePolicy: "auto_revoke_on_deadline" });
-    const issues = verifyDecisionRowShape(decision, makeItem(), campaign);
+    const issues = verifyDecisionRowShape(decision, campaign);
     expect(issues.map((i) => i.kind)).toContain("auto_revoke_kind_mismatch");
     expect(issues[0]?.detail).toContain("auto_revoke_on_deadline");
     expect(issues[0]?.detail).toContain("'revoke'");
@@ -119,27 +146,27 @@ describe("auto_revoke_kind_mismatch is reachable and policy-aware", () => {
     const decision = makeDecision({ ...AUTO_DEFAULT, kind: "keep" });
     const campaign = makeCampaign({ autoRevokePolicy: "default_revoke" });
     expect(
-      verifyDecisionRowShape(decision, makeItem(), campaign).map((i) => i.kind),
+      verifyDecisionRowShape(decision, campaign).map((i) => i.kind),
     ).toContain("auto_revoke_kind_mismatch");
   });
 
   it("accepts a revoke under auto_revoke_on_deadline", () => {
     const campaign = makeCampaign({ autoRevokePolicy: "auto_revoke_on_deadline" });
     const decision = makeDecision({ ...AUTO_DEFAULT, kind: "revoke" });
-    expect(verifyDecisionRowShape(decision, makeItem(), campaign)).toHaveLength(0);
+    expect(verifyDecisionRowShape(decision, campaign)).toHaveLength(0);
   });
 
   it("accepts a keep under default_keep, which the old rule would have called drift", () => {
     // The reason "no_response_auto_default implies revoke" is false as a standalone rule.
     const campaign = makeCampaign({ autoRevokePolicy: "default_keep" });
     const decision = makeDecision({ ...AUTO_DEFAULT, kind: "keep" });
-    expect(verifyDecisionRowShape(decision, makeItem(), campaign)).toHaveLength(0);
+    expect(verifyDecisionRowShape(decision, campaign)).toHaveLength(0);
   });
 
   it("flags a revoke under default_keep", () => {
     const campaign = makeCampaign({ autoRevokePolicy: "default_keep" });
     const decision = makeDecision({ ...AUTO_DEFAULT, kind: "revoke" });
-    const issues = verifyDecisionRowShape(decision, makeItem(), campaign);
+    const issues = verifyDecisionRowShape(decision, campaign);
     expect(issues.map((i) => i.kind)).toContain("auto_revoke_kind_mismatch");
     expect(issues[0]?.detail).toContain("'keep'");
   });
@@ -148,14 +175,14 @@ describe("auto_revoke_kind_mismatch is reachable and policy-aware", () => {
     const campaign = makeCampaign({ autoRevokePolicy: "escalate_to_manager" });
     for (const kind of ["keep", "revoke"] as const) {
       const decision = makeDecision({ ...AUTO_DEFAULT, kind });
-      expect(verifyDecisionRowShape(decision, makeItem(), campaign)).toHaveLength(0);
+      expect(verifyDecisionRowShape(decision, campaign)).toHaveLength(0);
     }
   });
 
   it("asks nothing of a decision with a different reason", () => {
     const campaign = makeCampaign({ autoRevokePolicy: "auto_revoke_on_deadline" });
     const decision = makeDecision({ reason: "role_appropriate", kind: "keep" });
-    expect(verifyDecisionRowShape(decision, makeItem(), campaign)).toHaveLength(0);
+    expect(verifyDecisionRowShape(decision, campaign)).toHaveLength(0);
   });
 });
 
@@ -172,7 +199,9 @@ describe("ACCESS_REVIEW_DRIFT_ISSUE_KINDS", () => {
       "decided_without_decision_id",
       "auto_revoked_without_reason",
       "item_campaign_mismatch",
-      "decision_item_mismatch",
+      // `decision_item_mismatch` was the twelfth and is **gone** (ADR-0408): its only caller
+      // fetched the item by `decision.itemId`, so the check compared a map key against the value
+      // used to fetch it and could not fire. A judgement with no case left is not a judgement.
       "decision_campaign_mismatch",
       "auto_revoke_kind_mismatch",
     ]);
@@ -189,8 +218,19 @@ function connFor(
   campaignRows: unknown[],
   itemRows: unknown[],
   decisionRows: unknown[],
+  mismatchRows: unknown[] = [],
 ): FakeConn {
   return new FakeConn((sql, params) => {
+    // **First, and keyed on the one clause that is specific to it.** ADR-0408 added
+    // `campaignMismatches`, whose statement also begins `FROM meta.access_review_decisions d` — so
+    // with the list branch first the mismatch probe was handed the *list's* rows and mapped them
+    // to `{decisionId, itemCampaignId: undefined}`, inventing a `decision_campaign_mismatch` on
+    // every replay. That is ADR-0363's defect verbatim: a shape match that is **true of** the
+    // statement rather than **specific to** it, found by the three tests it broke rather than by
+    // reading. The discriminator is the predicate no other read in this package carries.
+    if (sql.includes("d.campaign_id <> i.campaign_id")) {
+      return { rows: mismatchRows as Record<string, unknown>[], rowCount: mismatchRows.length };
+    }
     if (sql.includes("FROM meta.access_review_items i")) {
       return { rows: itemRows as Record<string, unknown>[], rowCount: itemRows.length };
     }
@@ -462,6 +502,49 @@ describe("AccessReviewReplayer", () => {
     expect(replay.decisions).toBe(0);
   });
 
+  /**
+   * The finding the old pair of reads could not produce, in the direction that matters.
+   *
+   * The pre-ADR-0408 shape is reconstructible here and that is the control: with `itemsById`
+   * holding only this campaign's items, a decision whose item is in another campaign resolves to
+   * `undefined` and the guard skips — so the fixture below (a decision read for this campaign, no
+   * item for it in the item set) is *exactly* the live state that reported nothing, and it now
+   * reports the mismatch because the answer comes from the database instead.
+   */
+  it("reports a decision whose item is in another campaign", async () => {
+    const conn = connFor(
+      [campaignDbRow],
+      [itemDbRow],
+      [decisionDbRow],
+      [{ decision_id: "ard_0000cafe", item_campaign_id: "arc_00000099" }],
+    );
+    const replay = await replayerOn(conn).replayCampaign(UUIDS.tenant, "arc_00000001");
+    const mismatch = replay.issues.find((i) => i.kind === "decision_campaign_mismatch");
+    expect(mismatch?.id).toBe("ard_0000cafe");
+    expect(mismatch?.detail).toContain("arc_00000001");
+    expect(mismatch?.detail).toContain("arc_00000099");
+  });
+
+  it("states the mismatch even when the graph is incomplete", async () => {
+    // The asymmetry worth pinning: a refused row makes every record-derived cross-row finding an
+    // inference, and leaves this one conclusive, because no record is parsed to produce it.
+    const conn = connFor(
+      [campaignDbRow],
+      [{ ...itemDbRow, granted_at: null }],
+      [],
+      [{ decision_id: "ard_0000cafe", item_campaign_id: "arc_00000099" }],
+    );
+    const replay = await replayerOn(conn).replayCampaign(UUIDS.tenant, "arc_00000001");
+    expect(replay.complete).toBe(false);
+    expect(replay.issues.map((i) => i.kind)).toContain("decision_campaign_mismatch");
+  });
+
+  it("reports nothing when the two campaigns agree", async () => {
+    const conn = connFor([campaignDbRow], [itemDbRow], [decisionDbRow], []);
+    const replay = await replayerOn(conn).replayCampaign(UUIDS.tenant, "arc_00000001");
+    expect(replay.issues.map((i) => i.kind)).not.toContain("decision_campaign_mismatch");
+  });
+
   it("stops claiming a complete graph once any row is withheld", async () => {
     // `complete: false` is what makes every cross-row finding an inference: a decision whose item
     // was the unreadable row reads as having no item at all, so the question is not asked.
@@ -514,16 +597,26 @@ describe("AccessReviewReplayer", () => {
     expect((err as Error).message).toContain("ari_0000bad2");
   });
 
-  it("summarize reads each table once, not twice", async () => {
+  it("summarize reads each record set once, not twice", async () => {
     // It used to read all three and then call verifyCampaign, which read all three again — so one
     // reported summary was assembled from two separate reads of a table that can change between.
+    //
+    // The decisions **table** is touched twice since ADR-0408 and that is the fix rather than a
+    // regression: the second touch is `campaignMismatches`, which reads no record and answers a
+    // two-column predicate in one statement. So the property this test pins is per *record set*,
+    // and the mismatch probe is counted separately — exactly once, because asking it twice would
+    // be two answers to one question at two moments, which is the thing this test exists to stop.
     const conn = connFor([campaignDbRow], [itemDbRow], []);
     await replayerOn(conn).summarize(UUIDS.tenant, "arc_00000001");
     const reads = conn.calls.filter((c) => c.sql.includes("SELECT"));
     expect(reads.filter((c) => c.sql.includes("FROM meta.access_review_items i"))).toHaveLength(1);
-    expect(
-      reads.filter((c) => c.sql.includes("FROM meta.access_review_decisions d")),
-    ).toHaveLength(1);
+    const decisionReads = reads.filter((c) =>
+      c.sql.includes("FROM meta.access_review_decisions d"),
+    );
+    expect(decisionReads.filter((c) => !c.sql.includes("<>"))).toHaveLength(1);
+    expect(decisionReads.filter((c) => c.sql.includes("d.campaign_id <> i.campaign_id"))).toHaveLength(
+      1,
+    );
   });
 });
 

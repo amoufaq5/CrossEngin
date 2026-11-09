@@ -207,6 +207,62 @@ describe("PostgresAccessReviewDecisionStore.record", () => {
     expect(paired.conn.calls.map((c) => c.sql)).toEqual(plain.conn.calls.map((c) => c.sql));
     expect(paired.conn.calls.map((c) => c.params)).toEqual(plain.conn.calls.map((c) => c.params));
   });
+
+  /**
+   * The question `AccessReviewReplayer` could not answer from two reads (ADR-0408).
+   *
+   * Four relations, four tenant predicates, and the comparison between the decision's own campaign
+   * and its item's — which is the whole content, since `d.campaign_id` and `i.campaign_id` are two
+   * independent foreign keys with no constraint relating them. Measured live on PG 16 as the
+   * non-owner `serving` role: the pair of per-campaign reads reported `issues=[-]` for **both**
+   * campaigns on a real mismatch while this statement answers 1 for the decision's campaign.
+   */
+  it("campaignMismatches compares the two campaigns in one statement", async () => {
+    const { conn, store } = resolvedStore();
+    await store.campaignMismatches(UUIDS.tenant, "arc_00000001");
+    const select = conn.find("FROM meta.access_review_decisions d");
+    expect(select?.sql).toContain("d.campaign_id <> i.campaign_id");
+    expect(select?.sql).toContain("WHERE dc.campaign_id = $1");
+    expect(select?.params).toEqual(["arc_00000001", UUIDS.tenant]);
+  });
+
+  it("carries the tenant predicate on every one of the four joined relations", async () => {
+    // `campaign_id` is table-wide unique, so without these this read is global as the owner —
+    // `listByCampaign`'s own measured reason, and there are four relations here rather than three.
+    const { conn, store } = resolvedStore();
+    await store.campaignMismatches(UUIDS.tenant, "arc_00000001");
+    const sql = conn.find("FROM meta.access_review_decisions d")?.sql ?? "";
+    for (const alias of ["d", "i", "dc", "ic"]) {
+      expect(sql).toContain(`${alias}.tenant_id = $2`);
+    }
+  });
+
+  it("maps each row to its decision id and the campaign its item really belongs to", async () => {
+    const conn = new FakeConn((sql) =>
+      sql.includes("d.campaign_id <> i.campaign_id")
+        ? {
+            rows: [{ decision_id: "ard_0000cafe", item_campaign_id: "arc_00000099" }],
+            rowCount: 1,
+          }
+        : { rows: [], rowCount: 0 },
+    );
+    const found = await new PostgresAccessReviewDecisionStore(conn).campaignMismatches(
+      UUIDS.tenant,
+      "arc_00000001",
+    );
+    expect(found).toEqual([
+      { decisionId: "ard_0000cafe", itemCampaignId: "arc_00000099" },
+    ]);
+  });
+
+  it("sets the tenant context, so a non-owner is not confined to zero rows", async () => {
+    // Not belt-and-braces: measured while building ADR-0408's live harness, a raw read of these
+    // tables with no `app.current_tenant_id` answered **0 rows** for a mismatch the database held,
+    // and a probe failure read as a clean subject. The silent zero, in the reader.
+    const { conn, store } = resolvedStore();
+    await store.campaignMismatches(UUIDS.tenant, "arc_00000001");
+    expect(conn.find(SET_TENANT_CONTEXT_SQL)?.params).toEqual([UUIDS.tenant]);
+  });
 });
 
 describe("PostgresAccessReviewDecisionStore reports a row it cannot represent", () => {

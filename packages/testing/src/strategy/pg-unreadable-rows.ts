@@ -1885,7 +1885,7 @@ export const UNREADABLE_ROW_SITES: readonly UnreadableRowDeclaration[] = Object.
     note:
       "The survey a human approves a DROP SCHEMA from (ADR-0316), and the figures a tombstone commits to: a survey short by one table under-reports what is about to be destroyed, so refusing is the only answer that cannot license a false proof.",
   },
-  /* ----------------------- ADR-0362's class: asserted, never parsed (11) */
+  /* ----------------------- ADR-0362's class: asserted, never parsed (12) */
   {
     file: "apps/operate-server/src/digest-store.ts",
     scope: "itemsFor",
@@ -2004,6 +2004,17 @@ export const UNREADABLE_ROW_SITES: readonly UnreadableRowDeclaration[] = Object.
     consequence: "a timer row edited into a shape the contract forbids is fired rather than reported",
     note:
       "ClaimedTimer is built inline from the RETURNING row of the claim's own UPDATE, so every field is asserted from the column type. A worker acts on it immediately, which is why nothing between the two would be read.",
+  },
+  {
+    file: "packages/access-reviews-runtime-pg/src/decision-store.ts",
+    scope: "campaignMismatches",
+    conversion: "<inline>",
+    reason: "record_asserted_not_parsed",
+    fencedBy: "nothing",
+    consequence:
+      "a NULL in either business key would render as 'null' in the finding's id and detail, where ADR-0331's rule is that a finding carries an identity or admits it has none",
+    note:
+      "DecisionCampaignMismatch is this module's own projection of two columns and not a stored contract, so there is no clause for a parse to check (user-fk-readiness.ts' reason, over tenant data rather than a pg_catalog row). Both columns are NOT NULL with a regex CHECK the catalog declares, so the assertion is true for every row the database admits and the only way it is wrong is a drift surveyCheckAdmission reports at boot. Deliberately not a flatMap that drops the row: record_dropping has no members left and a silent dropper may only be unmigrated (ADR-0405).",
   },
   /* --------------------------- the row is dropped and nobody is told (2) */
   /* ------------------ the backlog: these should go through the primitive */

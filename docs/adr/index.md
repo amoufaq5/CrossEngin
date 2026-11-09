@@ -1,10 +1,10 @@
 # ADR index
 
-401 records. Generated from the ADR files themselves — regenerate rather than
+402 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 322  **Proposed:** 79
+- **Accepted:** 323  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -413,3 +413,4 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0405](0405-a-page-one-bad-row-takes-with-it.md) | A page one bad row takes with it | — | Accepted | 2026-11-09 |
 | [0406](0406-a-flag-whose-only-route-an-operator-must-not-take.md) | A flag whose only route an operator must not take | — | Accepted | 2026-11-09 |
 | [0407](0407-a-read-placed-where-its-value-was-needed.md) | A read placed where its value was needed | — | Accepted | 2026-11-09 |
+| [0408](0408-a-cross-row-check-its-own-caller-made-unreachable.md) | A cross-row check its own caller made unreachable | — | Accepted | 2026-11-09 |
