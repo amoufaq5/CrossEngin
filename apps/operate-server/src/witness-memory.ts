@@ -392,10 +392,14 @@ export function witnessMemoryShowsHistory(check: WitnessMemoryCheck): boolean {
  * nothing else, so a pass with nothing to anchor saw an **empty** chain, which means
  * `attestedTail === null` too and `witnessMemoryShowsHistory` is false — the arm is never reached.
  * The reachable configurations are a deployment running the proof with no checkpoint scheduler at
- * all, or the two configs differing in `tenants`, `includePlatform` or `tenantStatuses`, each an
- * independent field on the two schemas; the other non-anchoring outcome, `refused_unverified`,
- * cannot produce it either, because a failed verification makes the proof store `compromised` and
- * `latestBaseline` admits only a `verified` row.
+ * all, the two configs differing in `tenants`, `includePlatform` or `tenantStatuses` (each an
+ * independent field on the two schemas), and — the one a later pass found this enumeration short
+ * by, in the comment correcting an enumeration — a checkpoint pass whose outcome is **`error`** on
+ * every tick: that writes no anchor and changes no verdict, while the integrity proof is a separate
+ * scheduler and goes on storing `verified` baselines, so the scope accumulates an attested tail with
+ * no attested witness. Of `CHECKPOINT_PASS_OUTCOMES`' four members three are non-anchoring, and
+ * `refused_unverified` is the one of the three that cannot produce it, because a failed verification
+ * makes the proof store `compromised` and `latestBaseline` admits only a `verified` row.
  *
  * Two residuals, both stated rather than closed, because **neither predicate is total over the
  * question an operator is asking** — *did this scope ever have anchors?* — which cannot be answered

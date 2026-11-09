@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import { IntegrityProofConfigSchema } from "./integrity-proof.js";
+
 /**
  * The first fence over `deploy/`, and it exists because this increment's own class is **a default
  * that is not a default**: three capabilities were measured as unreachable on every shipped
@@ -474,6 +476,42 @@ describe("the tamper-evidence chain and its two passes (ADR-0406)", () => {
     expect(node).toContain("formatAuditChain");
     expect(node).toContain("formatChainScopes");
     expect(node).toContain("COVERAGE_REACHES_A_TENANT");
+  });
+
+  it("README's replica paragraph rests on facts this fence holds, not on prose", () => {
+    // Two sentences in README's Day-2 bullet were measured FALSE by a refutation that landed ~100
+    // minutes after ADR-0407 shipped, and both were outside every fence: `deployment-defaults.test.ts`
+    // reads this document for its *backup commands* and its *cross-references* and never for the
+    // replica paragraph, so a claim about scheduler concurrency sat in shipped operator
+    // documentation with nothing standing over it.
+    //
+    // (1) "the three mechanisms named above are all request-path mechanisms that no scheduler goes
+    // through" is false for two of the three. Every chain append takes a per-scope
+    // `pg_advisory_xact_lock` — already fenced where it lives, at
+    // packages/forensics-pg/src/chain-log-store.test.ts:607, so it is cited here rather than
+    // duplicated — and the integrity pass's verdict recorder goes through that append; and every
+    // scheduler store read goes through a tenant or platform scope, which is the premise of
+    // ADR-0399's and ADR-0400's whole argument. The sentence was offered as the REASON duplicated
+    // scheduled work is unsafe, and the true reason is narrower: neither mechanism guards a whole
+    // **pass**. The lock serialises one append, not one verification. So what is fenced is the
+    // qualifier, because that is the clause whose loss restores the false claim.
+    const readme = deployDoc(README);
+    expect(readme).toContain("pg_advisory_xact_lock");
+    expect(readme).toMatch(/guards? a whole\s+\*\*pass\*\*/);
+    // Floor: a stripped or mis-read document would satisfy neither of the above by absence, so pin
+    // that the paragraph itself is still here (ADR-0390's rule — an assertion about an absence needs
+    // the positive control beside it).
+    expect(readme).toContain("Scale the API:");
+
+    // (2) "each replica still folds the whole chain" is false of the shipped default. This is the
+    // measurement that sentence rests on, keyed here so a change to the default reds the test and
+    // sends its author to the README paragraph rather than leaving it stale — `CI_MEASURED_STEP_SECONDS`'
+    // shape (ADR-0382). What IS unconditional per pass is a whole-chain `loadChain` for the anchor
+    // half, which is heap rather than the 152 µs/entry of Ed25519 verify (ADR-0371), and that
+    // distinction is the whole of why an operator costing replicas off the old sentence would have
+    // concluded replication unaffordable.
+    expect(IntegrityProofConfigSchema.parse({}).fromCheckpoint).toBe(true);
+    expect(readme).toMatch(/loads the whole chain once per pass/);
   });
 
   it(".env.example names the variable, with a generator and the back-it-up warning", () => {

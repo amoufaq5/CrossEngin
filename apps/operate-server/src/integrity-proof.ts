@@ -320,10 +320,17 @@ export async function proveScopeIntegrity(
   // Read order is part of this proof, and the rule is **directional**: of two reads whose values
   // are then compared, the side that must be the LARGER is read second.
   //
-  // Every table read here is append-only for every writer that ships — and the premise is measured
-  // over all **four** tables this function reads rather than the two an earlier version of this
-  // parenthetical named, which were precisely the two the rule does *not* turn on. Through
-  // `scanWorkspaceSql()` over 940 files, `meta.forensic_chain_entries`,
+  // Every table whose reads are COMPARED here is append-only for every writer that ships — and the
+  // premise is measured over all **four** of them rather than the two an earlier version of this
+  // parenthetical named, which were precisely the two the rule does *not* turn on. The predicate is
+  // "compared" and not "read": this function reads a **fifth** table, `meta.crypto_keys`, through
+  // `deps.registry` → `keyRegistryResolver` → `getByFingerprint`, once per entry inside
+  // `verifyChainSignatures` — and that one is **not** append-only (`scanWorkspaceSql()` gives it
+  // `insert` 1, `conflict_update` 1, `update` 1). Its read is compared against no other read here,
+  // so the directional rule's soundness is untouched; what the fifth table refutes is the
+  // *universal*, which an earlier version of this comment asserted over "every table read here"
+  // while making the census's completeness load-bearing one clause later — the same defect it
+  // corrects, one table out. Through `scanWorkspaceSql()` over 940 files, `meta.forensic_chain_entries`,
   // `meta.forensic_chain_checkpoints`, `meta.audit_log` and `meta.audit_integrity_verdicts` each
   // carry **one `INSERT` and zero `UPDATE`/`conflict_update`** statements, with no `DELETE FROM`,
   // `TRUNCATE` or `UPDATE <table>` anywhere in non-test source; both `record` methods are
@@ -388,7 +395,9 @@ export async function proveScopeIntegrity(
   // `anchor_missing` for a row whose anchor sequence is absent from the chain it was handed,
   // `anchor_missing` is in `TAMPERED`, and `audit_row_tampered` is a compromise cause — so a row
   // committed between the chain read and this one was read as a tampered audit row. It is not a
-  // narrow window: `listAnchoredForScope` is `ORDER BY occurred_at DESC LIMIT n`, so it reads the
+  // narrow window: `listAnchoredForScope` is `ORDER BY occurred_at DESC, id DESC LIMIT n` (the
+  // tiebreaker is what makes the newest-n window total rather than arbitrary between two rows
+  // sharing an instant), so it reads the
   // NEWEST rows, which is exactly the population written while the pass runs, and the gap used to
   // span the whole paged anchor scan. `emit` appends the chain entry and inserts the row in ONE
   // transaction, so a row visible here has its entry visible too, and a chain read afterwards holds
@@ -398,7 +407,10 @@ export async function proveScopeIntegrity(
   // (every recorded read writes an anchored row): **90 of 140 verdicts `compromised`** while rows
   // were being emitted against **0 of 84** on the same server with nothing emitting, zero audit
   // rows whose anchor was really absent, and the report itself printing `integrity valid, signatures
-  // valid` one line above `COMPROMISED`.
+  // valid` one line **below** `COMPROMISED` — `formatIntegrityProof` seeds `lines` with the verdict
+  // and pushes the chain line after it, so there is no surface that emits the two in the other
+  // order. An earlier version of this sentence said "above", which is a sentence describing an
+  // ordering the code does not have, in the one function whose subject is read ordering.
   const audit = await deps.audit.listAnchoredForScope(scope, { limit: deps.auditRowLimit });
 
   const chain = deps.fromCheckpoint

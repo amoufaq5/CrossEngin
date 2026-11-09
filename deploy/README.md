@@ -548,12 +548,24 @@ What the flag buys is the limit being *yours* and every decision being on the re
 - **Scale the API:** the **request path** is stateless — run several `api` replicas behind Caddy and
   they share Postgres safely there (idempotency, advisory locks, RLS all hold). The **schedulers are
   not**, and they run in the same process: every replica runs its own copy of each one, so the work
-  is duplicated rather than shared. Measured, **4 of 16 scheduler classes have an in-process overlap
-  guard and none has a cross-process one**, and the three mechanisms named above are all request-path
-  mechanisms that no scheduler goes through. What that costs today, with the two chain flags on by
+  is duplicated rather than shared. Measured, **only four scheduler classes have an in-process
+  overlap guard and none has a cross-process one** (`DeliveryScheduler`, `SloEvaluationScheduler`,
+  `IntegrityProofScheduler`, `CheckpointScheduler`; the denominator depends on what counts as a
+  scheduler — 13 classes named `*Scheduler`, 16 if you add the four periodic loops that are not,
+  17 including the packages — so the four is the number to read). And the reason the duplication is
+  unsafe is **not** that the three mechanisms above are request-path only: two of the three are used
+  by scheduled work — every chain append takes a per-scope `pg_advisory_xact_lock`, which is how N
+  replicas' concurrent appends stay linear, and every scheduler read goes through a tenant or
+  platform scope so RLS confines it. The reason is narrower: neither mechanism guards a whole
+  **pass**. The lock serialises one append, not one verification. What that costs today, with the two
+  chain flags on by
   default: the audit-integrity proof's *verdict* is sound across replicas since ADR-0407, but each
-  replica still folds the whole chain and appends its own verdict entry, which permanently enlarges
-  every later full fold; and the **platform** checkpoint anchor's `ON CONFLICT … DO NOTHING` never
+  replica loads the whole chain once per pass and appends its own verdict entry, which permanently
+  enlarges every later full fold. (It does **not** re-fold the whole chain per replica:
+  `fromCheckpoint` defaults to `true`, so the shipped pass verifies only the suffix after the latest
+  checkpoint and the per-replica cost is one whole-chain *load* — heap, not the 152 µs/entry of
+  Ed25519 — unless a pass is forced into a full fold by `--integrity-proof-config` or by an anchor it
+  cannot trust.) And the **platform** checkpoint anchor's `ON CONFLICT … DO NOTHING` never
   fires for `tenant_id IS NULL` (ADR-0371), so those rows grow linearly in replica count and the
   serving role cannot reclaim them. So scale the API for request throughput, and expect one
   replica's worth of scheduled work to become N replicas' worth of duplicated scheduled work.

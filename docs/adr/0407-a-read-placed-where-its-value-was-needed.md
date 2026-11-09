@@ -96,7 +96,12 @@ read writes one anchored audit row, ADR-0313):
 - **0** audit rows whose anchor sequence was really absent from the chain, by direct SQL against
   `meta.forensic_chain_entries`.
 
-The report printed `integrity valid, signatures valid (64 checked)` one line above `COMPROMISED`.
+The report printed `integrity valid, signatures valid (64 checked)` one line **below** `COMPROMISED`
+— `formatIntegrityProof` seeds its line list with the verdict and pushes the chain line after it, so
+no surface in the workspace emits the two in the other order. An earlier draft of this sentence said
+*above*, which is a sentence describing an ordering the code does not have, in the increment whose
+whole subject is read ordering; the rhetorical point (a report asserting the chain is sound one line
+from a `COMPROMISED` verdict) survives the correction and the stated direction does not.
 
 **The `verify-chain` arbiter in that arm did not run, and the reason is this increment's other
 defect landing on its own measurement**: the harness invoked it as `verify-chain --full`, a flag that
@@ -243,8 +248,14 @@ Beside it:
    above: the data dependency makes it a compile error rather than a test, and a test over it would
    assert what the type system already refuses.
 3. **The rule is stated once, at the top of the function**, with each site naming which of its two
-   sides must be the larger — over all five pairs and all four tables, with the premise's scope
-   (*every writer that ships*, not *everything a tamperer can do*) stated rather than implied.
+   sides must be the larger — over all five pairs and all four tables **whose reads are compared**,
+   with the premise's scope (*every writer that ships*, not *everything a tamperer can do*) stated
+   rather than implied. The predicate is *compared* and not *read*: the function reads a **fifth**
+   table, `meta.crypto_keys`, through `deps.registry` inside `verifyChainSignatures`, and that one
+   carries `insert` + `conflict_update` + `update` — so it is **not** append-only. Its read is
+   compared against no other read, so the rule's soundness is untouched; what it refutes is the
+   universal an earlier draft asserted over *every table read here*, one clause before making the
+   census's completeness load-bearing. The same defect that draft corrected, one table out.
 
 ## Why the rule was known and applied inconsistently
 
