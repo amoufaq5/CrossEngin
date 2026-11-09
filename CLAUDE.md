@@ -13836,8 +13836,15 @@ land with or before it.
    every test in the repo.
    Two figures to re-derive rather than carry: *"of the 52 policies naming a non-tenant GUC"* was
    exact pre-fix and is **53** now (the review arm stayed at one and `app.platform_manifest_activation`
-   is the new one), and *"the other 51 are command-scoped"* is **52 of 53** with no exception left —
-   the sentence's own exception is what was closed. **P2 and not P0** held, and the reachability
+   is the new one), and *"the other 51 are command-scoped"* is **53 of 53**, with no exception left
+   — the sentence's own exception is what was closed. (That read *"**52 of 53** with no exception
+   left"*, which is **internally contradictory**: "no exception" and "52 of 53" cannot both hold. It
+   came from carrying the original's *"the other N"* framing after the review arm had left the
+   population it excluded. Measured: 53 policies name a non-tenant GUC, their commands are
+   `{SELECT 7, INSERT 33, UPDATE 13}`, and **0** are `ALL`-scope. P3.1's
+   correction-of-a-correction clause, inside the paragraph correcting that very figure — and the
+   tell was free, because the two halves of one sentence disagree with each other and needed no
+   measurement to catch.) **P2 and not P0** held, and the reachability
    argument understates one thing in the safe direction: the shipped compose passes
    `--require-design-review`, so the **elevation** is live on every shipped deployment and it is the
    *abuse* that needs a `set_config` session.
@@ -14979,14 +14986,24 @@ method is that a stale figure misleads.
    `_tenant_or_platform_review` while ADR-0332 had already answered the same question the other way
    on the sibling table — so the sketch was refuted by a *test* and a *precedent* rather than by a
    measurement, which is the cheapest refutation available and the one easiest to skip. **And the
-   write-up of that refutation invites a false inference, which measuring it afterwards caught**:
-   the biconditional enforces *internal consistency* between a name and a command, so it rejects
-   one wrong pair (a `SELECT`-scoped arm under a grant-shaped name) and **admits the opposite one** —
-   renaming the activation arm and dropping its `command` passes `canonical.test.ts` **69 of 69**,
-   and that pair is the defect reintroduced on the new arm. The fence is the per-table assertion in
-   `meta-schema.test.ts` (**1 failed of 284**), which pins which consistent pair is correct. A
-   section explaining why a *test* refused an alternative reads as though that test also fences the
-   choice it left standing. **My own
+   write-up of that refutation invites a false inference — and the first correction of it was
+   **itself measured against a stale `dist`**, which is this entry's own class a third time in one
+   session. The biconditional *clause* enforces internal consistency between a name and a command,
+   so it rejects one wrong pair (a `SELECT`-scoped arm under a grant-shaped name, failing
+   `canonical.test.ts:425`) and **admits the opposite one** — renaming the activation arm and
+   dropping its `command` satisfies the iff, and that pair is the defect reintroduced on the new
+   arm. But the test **file** catches it **twice**: `canonical.test.ts` fails **1 of 69** at `:474`
+   (`expected 101 to be 102`, the arm dropping out of `NARROWED_NAME`'s matches) and
+   `meta-schema.test.ts` **1 of 284**. So *"only the per-table assertion decides which consistent
+   pair is correct"* is **false**, and the sharpest part is that `git log -1 -S` names **`e44d3b8`
+   itself** as the commit that raised that floor from 100 to 102 — **the fence the commit said did
+   not exist is the one the same commit added.** The `69 of 69` came from `canonical.test.ts`
+   importing `@crossengin/kernel/bootstrap`, which `package.json` maps to `./dist/`, so a
+   `src`-only mutation is invisible to it while `meta-schema.test.ts` reads `src` directly — which
+   is why that half was right and this one was not. ADR-0329's rule, and the durable form is
+   structural rather than a slip: **this measurement cannot be taken correctly without rebuilding
+   kernel first.** Two readings of one mutation, and the vacuous one returns the denominator intact,
+   which is exactly what makes it look like a result. **My own
    scratchpad note on the migration window was false**: it read *"a tenant's own **writes** are
    denied for the span of one statement"*, derived for the design the precedent then refuted, and
    measured step by step the window denies the **reviewer's cross-tenant reads** while every tenant
@@ -15017,6 +15034,44 @@ method is that a stale figure misleads.
    hash) *before* measuring rather than to reconcile the two readings. A false finding about one's
    own fence being vacuous is the dangerous direction, because the natural next act is to "fix" a
    fence that works.
+   **And a second late pass, aimed at those corrections, refuted one of them and found two more
+   members — so this entry's correction-of-a-correction clause paid out three times in one
+   session.** The refuted one is above (`69 of 69` measured against a stale `dist`), and its
+   durable form is **structural**: `canonical.test.ts` imports `@crossengin/kernel/bootstrap`,
+   which resolves to `dist`, so that measurement **cannot be taken correctly without rebuilding
+   kernel** — and the vacuous reading returns the denominator intact, which is what makes it look
+   like a result. **The sharpest member is that the fence I said did not exist was added by the same
+   commit**: `git log -1 -S 'expect(narrowed).toBe(102)'` names `e44d3b8`, which raised that floor
+   from 100 — so the commit wrote a fence, and then its own write-up asserted the fence was absent.
+   A floor raised as routine bookkeeping is easy not to count as a fence. And the third is the
+   **internally contradictory** *"52 of 53 with no exception left"*, where the two halves of one
+   sentence disagree and no measurement was needed to catch it.
+   **Then the same clause paid out a fourth time, on the one correction that had read as pure
+   gain**: that pass corrected my loose *"every other column"* to **"16 of 17"**, which is wrong in
+   **both** terms — `META_TABLES` and the live table both answer **16** columns, so the measured
+   figure is **15 of 16** (a `tenant_id` rewrite raises; `id`, `status`, `manifest` and
+   `manifest_hash` all rewrite in one statement), and it was wrong when written, since nothing
+   changed the table's shape between the two commits the refuters read and HEAD. I had propagated
+   it into the ADR addendum *and* a test comment before measuring it. The shape to carry is that
+   **a correction which replaces vagueness with a number is the most persuasive kind and the least
+   checked** — the vague original was true.
+   What those four have in common is the one thing worth carrying: **the cheapest check was
+   available in every case and none of them needed a database** — a rebuild, a `git log -S`,
+   reading a sentence to its end, and one `t.columns.length`.
+   **One further finding from the same session is outside that series, because its subject is the
+   instrument's ground truth rather than any claim, and it is the first of that shape here: I handed
+   five refuters a brief naming HEAD `c703a04` and then moved HEAD to `972488f` while they ran.** So
+   one of the five was measuring a
+   tree one commit behind the one I compared its findings against, and the direction is the quiet
+   one — it **confirmed** a defect I had already fixed, and a confirmation reads as validation of
+   the finding rather than as a statement about a stale tree. (It cost nothing here, because that
+   finding was the one I had verified and closed myself; had the skew gone the other way it would
+   have reported a defect as absent.) Two remedies and they are not equivalent: *don't commit during
+   a refuter run* is a discipline request, while **making each refuter report the SHA it measured
+   against** is checkable by the synthesis — which is this file's own standing preference, since a
+   rule that can be checked earlier should be. The same applies to a refuter reading a tree that is
+   being edited: ADR-0407's verify stage recorded line citations low by exactly 42, the width of a
+   comment that had grown underneath it.
 2. **Six concepts are modelled several times over, two with non-nesting member sets.** Data
    classification has five declarations — four identical and one, in `data-lineage`, **disjoint past
    two members**, so the moment anything bridges the kernel's classification into the lineage graph

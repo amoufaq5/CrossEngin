@@ -172,18 +172,33 @@ the biconditional for the `_tenant_or_platform_*` family, whose other member
 is ADR-0331's: a name that no longer describes its policy, one sibling below a
 `_platform_review_read` that does.
 
-**The biconditional is not the fence for what shipped, and reading this section could suggest it
-is.** It rejects one *specific* wrong pair — the alternative above, a `SELECT`-scoped arm under a
-grant-shaped name — and **admits the opposite wrong pair**: measured, renaming the activation arm to
-`operate_tenant_manifests_tenant_or_platform_activation` *and* dropping its `command` passes
-`canonical.test.ts` **69 of 69**, because the renamed arm no longer matches `NARROWED_NAME` so the
-else-branch requires `ALL`-scope and the mutation supplies it. That pair is exactly the defect this
-ADR closes, reintroduced on the new arm. What catches it is the per-table assertion in
-`meta-schema.test.ts` (**1 failed of 284** under the same mutation), which pins the names *and* the
-`["ALL", "SELECT", "SELECT"]` command list. So the biconditional enforces *internal consistency*
-between a name and a command, and only the per-table assertion decides *which* consistent pair is
-correct — a distinction worth having before anyone renames one of these arms on the biconditional's
-authority.
+**The biconditional *clause* is not the fence for what shipped, and the first draft of this
+paragraph got the fence wrong by measuring against a stale `dist`.** The clause rejects one
+*specific* wrong pair — the alternative above, a `SELECT`-scoped arm under a grant-shaped name,
+which fails `canonical.test.ts:425`, the else-branch — and **admits the opposite wrong pair**:
+renaming the activation arm to `operate_tenant_manifests_tenant_or_platform_activation` *and*
+dropping its `command` satisfies the iff, because the renamed arm no longer matches `NARROWED_NAME`
+so the else-branch requires `ALL`-scope and the mutation supplies it. That pair is exactly the defect
+this ADR closes, reintroduced on the new arm.
+
+**But the test *file* catches it, twice over, and one of the two fences is this ADR's own.**
+`canonical.test.ts` fails **1 of 69** at `:474` — `expected 101 to be 102` — because the renamed arm
+drops out of `NARROWED_NAME`'s matches, and `meta-schema.test.ts` fails **1 of 284** at `:2180` on
+the name. `git log -1 -S 'expect(narrowed).toBe(102)'` names **this increment's own commit** as the
+one that raised that floor from 100, so the fence the first draft said did not exist is the one the
+same commit added. The surviving distinction is therefore **clause versus file**: the iff enforces
+internal consistency between a name and a command and cannot say which consistent pair is correct,
+while the count floor and the per-table assertion each pin it independently.
+
+**The first draft measured `69 of 69` and that figure is what a vacuous measurement returns.**
+`canonical.test.ts` imports `@crossengin/kernel/bootstrap`, which `package.json` maps to
+`./dist/bootstrap/index.js`, so a mutation applied only to `src` is **invisible** to it —
+`meta-schema.test.ts` reads `src` directly, which is why its half was right. Measured correctly, in
+order: src mutated and kernel **not** rebuilt gives 69/69; `pnpm --filter @crossengin/kernel build`
+with the mutation confirmed present in `dist` gives **1 failed | 68 passed**; reversal restores
+`md5 88591e26` byte-identical and both files return to 69/69 and 284/284. ADR-0329's rule —
+*running vitest was not running the build* — and the durable point is structural rather than a slip:
+**this measurement cannot be taken correctly without rebuilding kernel first.**
 
 **Rename the surviving arm to `_tenant_isolation`.** Refused on measurement: a rename leaves the old
 permissive `ALL` policy live and undeclared, `allowLoosening` never reaches `policy_removed`, and
@@ -257,3 +272,107 @@ the statement.
 6. **`withPlatformReview` is exported with no importer outside its own test.** Cosmetic since the
    split — an importer could now claim a cross-tenant read and no write — but it is a published
    symbol that claims an elevation, and nothing reports it.
+
+## Addendum: four findings from a late adversarial pass, all refused with their measurements
+
+An 11-agent measurement pass launched before this increment completed after it shipped, and a
+6-agent pass was then aimed at its findings and at this ADR's own corrections. ADR-0402's rule is
+that a refuter's findings are delivered by content rather than by whether the claim survived, so the
+four that are **not** code changes are recorded here with what refuted them — three of the four
+proposed a remedy, and all three remedies are refused.
+
+**The activation arm should not gain `activated_at IS NOT NULL`.** The claim was that the arm admits
+one conjunct more than the read consumes and the extra population is zero, so the narrowing is free.
+Two premises hold: the arm is wider (the column is `{notNull: false}`, the table declares no
+`constraints`, and the emitted DDL is a bare `"activated_at" TIMESTAMPTZ`), and **no committed
+writer produces the shape** — exactly three classes build SQL against the table, six write
+statements, `create` binds the literal `'draft'`, `setStatus` appends `, activated_at = now()` iff
+the target is `active`, `activate` demotes then promotes with the stamp, `decide`/`markPending` write
+only `review_status`, and `git log -S` puts the column and both stamping paths in the single commit
+that created the table, so no historical window exists either. The operative clause is refused four
+ways. **The population is not zero**: a policy's predicate is quantified over every session the
+policy admits, not over the workspace's writers, and the untouched `ALL` arm's NULL `WITH CHECK`
+lets a tenant-context session produce it directly (measured as the non-owner `serving` role:
+`UPDATE … SET activated_at = NULL` → `UPDATE 1`; `INSERT … status='active', activated_at=NULL` →
+`INSERT 0 1`) — which is this ADR's own open question 1, so the producer is a documented hole rather
+than a hypothetical. **It buys nothing**: RLS filters rows before the query's own `WHERE` and the
+read's `WHERE` already excludes that population, so the poller's read returns the identical 1 row
+under either policy — no row, no column and no caller is withheld, which is the opposite of what the
+second grant's own predicate buys (1 draft, 1 pending review and a manifest body withheld from the
+review grant's 2 rows). **It is not free**: a narrowed *policy* predicate is the one declaration
+class with no row-facing gate — `probeForReconciliation`'s `needed` filter names policies nowhere,
+the `prove*` family applies only to constraint expressions, and `changedPolicies` pushes
+`replace_policy` with `guarded: false` unconditionally — so the rows it stopped admitting answer exit
+0, no error and no warning, which is ADR-0333's silent zero on the arm created to end one. And
+**decisively it would hide a served manifest**: `activeManifestFor` is `status = 'active'` with
+`ORDER BY activated_at DESC NULLS LAST`, which *admits* a NULL, so the shipped arm is aligned with
+the serving predicate and narrowing it to one consumer's query makes *no active manifest* and *an
+active manifest the poller cannot track* byte-identical to every holder of the grant (ADR-0331).
+ADR-0402's floor 1 also fails — `TenantManifestRecordSchema` carries no refinement and parses
+`{status: 'active', activatedAt: null}` — so if the invariant is wanted its instruments are a
+`superRefine` first and then a table CHECK under ADR-0363's gates, in that order. The one thing
+worth adding was the **reason**, which is now at the policy site.
+
+**The un-applied-migration silence is real and unreachable on every documented deployment.** The
+mechanism reproduces exactly: on the pre-fix catalog the new statement reads **0 rows with no error
+code** as the non-owner `serving` role against 2 rows, with the control confirming the old arm's only
+platform disjunct was `app.platform_review` (2 of 2 with that GUC). And the poller has **no boot
+line** — zero `console.*` in the module, exactly two in its wiring and both event-driven. But the
+reachability premise is refused twice: **both documented paths connect as the table owner**, and
+ownership alone bypasses RLS (measured with the superuser confound removed — a `NOSUPERUSER
+NOBYPASSRLS` owner reads 2 of 2 and `row_security_active` answers `f`), while **no document in
+`deploy/` creates a least-privilege serving role at all** — zero `CREATE ROLE`/`GRANT` across all
+four, and `postgres/init/00-extension.sql`'s own comment says those files run as the superuser
+*because* the stack is not configured that way. The compose path closes it twice more, by the
+`service_completed_successfully` gate and by `apply` planning all three steps. So this is debt to
+record rather than a probe to build, and the remaining residue is the managed path for an operator
+who has also built a serving role no document describes.
+
+**Neither GUC's settability can be fenced in core Postgres, and three of the claim's grounds are
+invalid.** The conclusion survives every refutation route: `REVOKE SET ON PARAMETER` is accepted and
+the serving role still sets the GUC, `ALTER ROLE … SET` is overridden by the session's own
+`set_config`, core has no way to make a placeholder `PGC_SUSET`, and tenant-hopping reaches the same
+rows. But **`0 rows in pg_parameter_acl` is not evidence** — the positive control on `log_statement`
+shows an *effective* revoke also leaves 0 rows, while `GRANT SET ON PARAMETER app.platform_review`
+*does* record one — and **the cause is the parameter's `context` and not its custom-ness**
+(`work_mem` is reserved with `context = user` and behaves identically). "Cannot be fenced at the
+database" is also false on the word *fenced*: the split's command scope and predicate are database
+fences that hold against a session setting the GUC at will. And the fact neither the claim nor this
+ADR stated: **the shipped compose connects as the owning superuser**, for which
+`row_security_active` is `f`, so on the deployment that ships the split changes nothing in either
+direction and the whole question is about a least-privilege serving role — ADR-0389's conditional,
+one table across.
+
+**The write-side residual is the catalog-wide designed state, not a residual of this increment.**
+Every factual assertion holds and two were understated, though the first was then **corrected
+again**: the claim's loose "every other" is really **15 of 16** columns (a `tenant_id` rewrite
+raises `new row violates row-level security policy`, while `id`, `status`, `manifest` and
+`manifest_hash` are all rewritten in one statement), where this addendum first recorded the
+refuter's *"16 of 17"* — wrong in **both** terms and wrong when written, since `META_TABLES` and
+the live table both answer **16** columns at this commit and at the two the refuters read. The
+free tell was one `information_schema.columns` query, which is the register's own
+correction-of-a-correction clause paying out a third time on one paragraph. It is also **not one
+row** — with a tenant's context set an
+unqualified `UPDATE` reached 2 of 2 of that tenant's rows, so the `WHERE id = $1` in the SQL text is
+what limits it. "Only the SQL text" is also literally false: `uq_operate_tenant_manifests_active` is
+a real non-SQL constraint that raises `23505` on a bare flip when the tenant already holds an active
+row — a one-statement speed bump rather than a fence, and inert for a tenant with no active manifest.
+What refutes the framing is the census: **115 RLS-enabled `meta` tables, 115 `ALL`-scope policies, 0
+carrying an explicit `check`, 18 restrictive policies all `FOR DELETE`, and zero restrictive
+`UPDATE` anywhere** — so the property is true verbatim of every table, is recorded in CLAUDE.md as a
+decision, and ADR-0400's open question 1 already narrows the remaining question to the eleven fenced
+tables with no writer, explicitly excluding tables with a tenant-context writer because a restrictive
+`FOR UPDATE` there would break a live writer silently.
+
+**One finding is about the pass itself rather than about any of its claims, and it is worth more
+than three of the four above.** The brief handed to those five refuters named HEAD as `c703a04`,
+and HEAD moved to `972488f` while they ran — so one of the five measured a tree one commit behind
+the one its findings were compared against. The direction is the quiet one: it **confirmed** a
+defect that commit had already closed, and a confirmation reads as validation of the finding rather
+than as a statement about a stale tree. It cost nothing here, because that finding was the one
+already verified and fixed by hand; the symmetric skew would have reported a live defect as absent.
+*Don't commit during a refuter run* is a discipline request and the weaker of the two remedies;
+**making each refuter report the SHA it measured against** is checkable by the synthesis, which is
+this repository's standing preference wherever a rule can be moved earlier (ADR-0348). The same
+hazard applies to a refuter reading a tree under edit rather than under commit: ADR-0407's verify
+stage produced line citations low by exactly 42, the width of a comment that had grown beneath them.

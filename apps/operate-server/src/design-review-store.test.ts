@@ -389,6 +389,28 @@ describe("design-review-store — approve / reject", () => {
     expect(update?.inTx).toBe(true);
     expect(update?.sql).toContain("reviewed_at = now()");
     expect(update?.sql).toContain("updated_at = now()");
+    // The SET list is the ONLY thing limiting which columns a decision rewrites, so it is pinned
+    // EXACTLY rather than by presence. RLS gives no column granularity: the isolation arm carries
+    // no `check`, so its `USING` serves as the check and pins `tenant_id` and nothing else — a
+    // tenant-context session may rewrite 15 of this table's 16 columns in one statement — `id`,
+    // `status`, `manifest` and `manifest_hash` among them, with only a `tenant_id` rewrite raising
+    // (measured live as the non-owner `serving` role: `UPDATE 1`, against `UPDATE 0` for another
+    // tenant's row — ADR-0409). A narrowing is unavailable at the policy
+    // layer and that is measured rather than assumed: RLS cannot reference `OLD`, and a restrictive
+    // `FOR UPDATE WITH CHECK (status <> 'active')` would refuse `activate()`'s own promote, which is
+    // the same NEW row under the same context. So widening this list is how a reviewer's decision
+    // would come to activate the manifest it approves or rewrite its body, and until this assertion
+    // that widening landed green — the file's only other `not.toContain` is on a `SELECT`.
+    //
+    // Exactly, and not three `not.toContain`s, because the obvious negative form is **unsatisfiable
+    // here**: `review_status = $3` contains the substring `status =`, so the first draft of this
+    // fence failed on the correct statement. A substring negative over SQL is unsound wherever a
+    // legitimate column name contains a forbidden one, and `RETURNING` names every column anyway.
+    const setClause = /UPDATE \S+ SET (.*?) WHERE /.exec(update?.sql ?? "")?.[1];
+    expect(setClause).toBe(
+      "review_status = $3, reviewed_by = $4, reviewed_at = now()," +
+        " review_notes = $5, updated_at = now()",
+    );
     // One transaction, two policy arms, in this order (ADR-0409): the review grant admits the read
     // that learns whose proposal this is, and the proposal's own tenant context admits the write.
     // The write is scoped to `(id, tenant_id)` rather than to `id` alone, so the statement names

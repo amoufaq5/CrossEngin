@@ -12280,6 +12280,26 @@ export const META_OPERATE_TENANT_MANIFESTS: TableDefinition = {
         // whose serving role does not own the table (ADR-0333's class). The module's own doc
         // comment cited `PostgresTenantSource` as precedent and the analogy is false:
         // `meta.tenants` carries no RLS and no policies at all.
+        //
+        // The predicate is `status = 'active'` and deliberately **not** the poller's own
+        // `status = 'active' AND activated_at IS NOT NULL`, which would be narrower and was
+        // refused on measurement. It is aligned with the **serving** predicate instead:
+        // `activeManifestFor` reads `status = 'active'` with `ORDER BY activated_at DESC NULLS
+        // LAST`, which *admits* a NULL, so an unstamped active row is served to the tenant and a
+        // grant narrowed to the poller's query would hide a live manifest from the platform's only
+        // grant over it — making *no active manifest* and *an active manifest the poller cannot
+        // track* byte-identical to every holder (ADR-0331's conflation). The narrower form also
+        // buys nothing even where it applies: RLS filters before the query's own `WHERE`, and the
+        // read's `WHERE` already excludes that population, so the conjunct withholds no row, no
+        // column and no caller. And a narrowed *policy* predicate is the one declaration class
+        // with **no row-facing gate** — `changedPolicies` pushes `replace_policy` with
+        // `guarded: false` unconditionally, where ADR-0363 gates a narrowed CHECK three ways — so
+        // the rows it stopped admitting would answer exit 0 with no error and no warning. The
+        // writer census (ADR-0402's floor 2) is the wrong floor here: a policy's predicate is
+        // quantified over every session the policy admits, not over the writers in the workspace,
+        // and a tenant-context session reaches the shape directly through the untouched `ALL`
+        // arm's NULL `WITH CHECK` (measured: `UPDATE 1`, `INSERT 0 1`). If the invariant is wanted
+        // it belongs in `TenantManifestRecordSchema` first, which parses the shape today.
         name: "operate_tenant_manifests_platform_activation_read",
         command: "SELECT",
         using:
