@@ -1,7 +1,3 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-
 import { describe, expect, it } from "vitest";
 import type { PipelineExecution } from "@crossengin/api-gateway";
 import {
@@ -61,7 +57,6 @@ import {
   auditChainStore,
   buildAuditChain,
   ed25519ChainSigner,
-  loadAuditChainConfig,
   parseAuditChainConfig,
   resolveAuditPolicy,
   sampleValue,
@@ -120,7 +115,7 @@ describe("parseAuditChainConfig", () => {
 
   it("refuses a key half that is not a 32-byte Ed25519 key, naming the field", () => {
     // Both halves, at parse time, where the field name comes from zod and the file name from
-    // `loadAuditChainConfig` — rather than from a hand-written string at the one use site, which
+    // `loadAuditChainFile` — rather than from a hand-written string at the one use site, which
     // is what left `publicKeyBase64: "x"` passing `.min(1)` and throwing a bare
     // `public key must decode to 32 bytes, got 0` at boot (ADR-0371).
     for (const [field, value] of [
@@ -144,19 +139,6 @@ describe("parseAuditChainConfig", () => {
       // And the refusal must not echo the configured value back, since the private half is a secret.
       expect(JSON.stringify(issues.error.issues)).not.toContain(value);
     }
-  });
-});
-
-describe("loadAuditChainConfig", () => {
-  it("reads + validates a file", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "audit-cfg-"));
-    const path = join(dir, "a.json");
-    await writeFile(path, JSON.stringify({ privateKeyBase64: keypair.privateKeyBase64, publicKeyBase64: keypair.publicKeyBase64 }), "utf8");
-    expect((await loadAuditChainConfig(path)).actorReference).toBe("operate-server");
-  });
-
-  it("wraps a missing file", async () => {
-    await expect(loadAuditChainConfig("/no/such.json")).rejects.toThrow(/cannot read/);
   });
 });
 

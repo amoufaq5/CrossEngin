@@ -705,3 +705,32 @@ describe("runVerifyChain — the anchor audit's chain argument", () => {
     expect(body.indexOf("auditAnchors(")).toBeLessThan(body.indexOf("reader.tail("));
   });
 });
+
+describe("the chain scheduler flags name the flag the operator passed", () => {
+  // As text because no type can ask it: a message naming `--checkpoint-config` to somebody who
+  // passed `--checkpoints` typechecks, and the boolean is the shipped default, so that is the
+  // reading an operator gets (ADR-0334 — a remedy they cannot act on; ADR-0364's addendum class).
+  const src = readFileSync(resolve(import.meta.dirname, "./node.ts"), "utf8");
+
+  for (const [pair, flagVar, boolFlag, configFlag] of [
+    ["checkpoint", "checkpointFlag", "--checkpoints", "--checkpoint-config"],
+    ["integrity-proof", "proofFlag", "--integrity-proof", "--integrity-proof-config"],
+  ] as const) {
+    it(`[${pair}] selects its flag name from which route was used`, () => {
+      // The selector itself: the ternary over the `-config` option, not a hardcoded name.
+      const selector = new RegExp(
+        `const ${flagVar} =[^;]*\\?\\s*"${configFlag}"\\s*:\\s*"${boolFlag}"`,
+        "s",
+      );
+      expect(src).toMatch(selector);
+
+      // Every warn in that block that names a flag names it through the selector. The mutation is
+      // restoring either literal into the message, which is what shipped before ADR-0406 defaulted
+      // the booleans on and is invisible to `tsc` and to every other test.
+      const warns = [...src.matchAll(new RegExp(`\\[${pair}\\] \\$\\{${flagVar}\\}`, "g"))];
+      expect(warns.length).toBeGreaterThanOrEqual(2);
+      expect(src).not.toContain(`[${pair}] ${configFlag} requires a Postgres store`);
+      expect(src).not.toContain(`[${pair}] ${configFlag} needs the chain signing key`);
+    });
+  }
+});

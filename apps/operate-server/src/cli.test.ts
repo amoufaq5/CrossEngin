@@ -2443,3 +2443,114 @@ describe("--jwks-key validation", () => {
     expect(opts.jwksKeys).toEqual([`k:${JWKS_PUB}`]);
   });
 });
+
+describe("--deletion-capability (the inline route for an Article 17 proof's reach)", () => {
+  const HONEST: readonly [string, string][] = [
+    ["tenant_schema", "erases"],
+    ["shared_tables", "erases"],
+    ["object_storage", "absent"],
+    ["backups", "present_not_erased"],
+    ["search_indexes", "absent"],
+    ["caches", "absent"],
+  ];
+  const argv = (pairs: readonly (readonly [string, string])[]): string[] => [
+    "--pack=erp-core",
+    ...pairs.flatMap(([k, v]) => ["--deletion-capability", `${k}=${v}`]),
+  ];
+
+  it("accumulates a complete set, and is null when the flag is absent", () => {
+    expect(parseServeArgs(["--pack=erp-core"]).deletionCapabilityDeclarations).toBeNull();
+    expect(parseServeArgs(argv(HONEST)).deletionCapabilityDeclarations).toEqual(
+      Object.fromEntries(HONEST),
+    );
+  });
+
+  it("is equivalent to the file route over the same six values", () => {
+    // The two routes must produce the same declaration, which is why `node.ts` parses both through
+    // one `DeletionCapabilitiesSchema` rather than assembling the inline one.
+    const inline = parseServeArgs(argv(HONEST)).deletionCapabilityDeclarations;
+    expect(inline).toEqual(JSON.parse(JSON.stringify(Object.fromEntries(HONEST))));
+  });
+
+  it("refuses an incomplete set, naming every missing subsystem", () => {
+    // The decision ADR-0328 turns on: silence may not answer the reach of a proof, so a partial
+    // set is refused here — where the operator can read which subsystems are unanswered — rather
+    // than one layer in by six `invalid_type` issues naming neither the flag nor the remedy.
+    try {
+      parseServeArgs(argv(HONEST.slice(0, 4)));
+      throw new Error("expected a refusal");
+    } catch (err) {
+      expect(err).toBeInstanceOf(CliUsageError);
+      const msg = (err as Error).message;
+      expect(msg).toContain("2 of 6 subsystems undeclared");
+      expect(msg).toContain("caches");
+      expect(msg).toContain("search_indexes");
+      expect(msg).toContain("ADR-0328");
+    }
+  });
+
+  it("refuses an unknown subsystem and an unknown disposition, each against the real vocabulary", () => {
+    expect(() => parseServeArgs(argv([["backup", "absent"]]))).toThrow(/unknown subsystem 'backup'/);
+    expect(() => parseServeArgs(argv([["backups", "presnt_not_erased"]]))).toThrow(
+      /unknown disposition 'presnt_not_erased' for backups/,
+    );
+    // And the refusal lists what IS admissible, so an operator can act on it without the docs.
+    expect(() => parseServeArgs(argv([["backup", "absent"]]))).toThrow(/tenant_schema/);
+    expect(() => parseServeArgs(argv([["backups", "x"]]))).toThrow(/present_not_erased/);
+  });
+
+  it("refuses a repeated subsystem rather than taking the last one", () => {
+    // Every other repeatable flag here accumulates, because a role list is a set. A disposition is
+    // one decision, so last-wins would let argv order decide what a signed proof claims.
+    try {
+      parseServeArgs(argv([...HONEST, ["backups", "absent"]]));
+      throw new Error("expected a refusal");
+    } catch (err) {
+      expect(err).toBeInstanceOf(CliUsageError);
+      expect((err as Error).message).toMatch(
+        /backups declared twice \('present_not_erased' then 'absent'\)/,
+      );
+    }
+  });
+
+  it("refuses the grammar it shares with --audit-read-sensitive-class, naming the form", () => {
+    expect(() => parseServeArgs(["--pack=erp-core", "--deletion-capability", "backups"])).toThrow(
+      /expected <subsystem>=<disposition>/,
+    );
+    expect(() => parseServeArgs(["--pack=erp-core", "--deletion-capability", "=absent"])).toThrow(
+      /expected <subsystem>=<disposition>/,
+    );
+  });
+
+  it("is mutually exclusive with the file, because two declarations of one reach is precedence", () => {
+    expect(() =>
+      parseServeArgs([...argv(HONEST), "--deletion-capabilities", "/tmp/caps.json"]),
+    ).toThrow(/mutually exclusive/);
+  });
+
+  it("accepts the `=` form as well as the two-token form", () => {
+    const opts = parseServeArgs([
+      "--pack=erp-core",
+      ...HONEST.map(([k, v]) => `--deletion-capability=${k}=${v}`),
+    ]);
+    expect(opts.deletionCapabilityDeclarations).toEqual(Object.fromEntries(HONEST));
+  });
+
+  it("--help names the flag, its totality rule and why the file route was not enough", () => {
+    const help = helpText;
+    expect(help).toContain("--deletion-capability <subsystem>=<disposition>");
+    expect(help).toContain("All six or none");
+    expect(help).toContain("volumes:");
+  });
+});
+
+describe("--audit-chain-config's help names the environment route", () => {
+  it("names the variable, that the public half is derived, and the same-key rule", () => {
+    // The flag was the only route to the seed and `--help` was where an operator looked. A route
+    // nothing documents is a route nobody takes.
+    const help = helpText;
+    expect(help).toContain("AUDIT_CHAIN_SIGNING_KEY");
+    expect(help).toContain("public half is derived");
+    expect(help).toMatch(/state the SAME one/);
+  });
+});

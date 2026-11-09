@@ -395,6 +395,104 @@ describe("the two defaults this increment measured", () => {
   });
 });
 
+describe("the tamper-evidence chain and its two passes (ADR-0406)", () => {
+  const args = apiCommandArgs();
+  const compose = readFileSync(COMPOSE, "utf8");
+
+  it("passes the chain's signing key through the environment and never on argv", () => {
+    // The keystone. Until this variable existed `--audit-chain-config <file>` was the ONLY route to
+    // the seed, this service declares no `volumes:` key, and the file route that did exist was an
+    // image layer — so no shipped deployment could anchor anything, and the two passes below had no
+    // chain to witness. The variable is also the whole of what a deployment needs: measured,
+    // `AuditChainConfigSchema.parse({privateKeyBase64, publicKeyBase64})` supplies every other
+    // field, so there is nothing a file would add for the defaults.
+    expect(compose).toContain("AUDIT_CHAIN_SIGNING_KEY: ${AUDIT_CHAIN_SIGNING_KEY:-}");
+    // ADR-0301's fence, which already covers `--api-key` and extends here by one name. The seed is
+    // a credential and argv is readable by anyone who can run `ps`.
+    expect(args.join(" ")).not.toContain("AUDIT_CHAIN_SIGNING_KEY");
+    expect(args).not.toContain("--audit-chain-config");
+  });
+
+  it("mounts both passes as booleans, because the file's documented content was a trap", () => {
+    // `{}` parses for both schemas, and an empty config resolves to the PLATFORM chain alone —
+    // which on a deployment passing no escalation flag is empty, and an empty scope's report is
+    // discarded entirely (ADR-0399). Measured live at a 2s tick: three passes each, 0 anchors,
+    // 0 verdicts, 0 log lines, while the tenant's chain held an entry. So a documented `{}` would
+    // have shipped a control reporting healthy over a population it never read.
+    expect(args).toContain("--checkpoints");
+    expect(args).toContain("--integrity-proof");
+    // And not the file flags, which are mutually exclusive with them and would need a mount.
+    expect(args).not.toContain("--checkpoint-config");
+    expect(args).not.toContain("--integrity-proof-config");
+  });
+
+  it("declares no `volumes:` key on api, which is why the routes above are fileless", () => {
+    // The withholding, stated here because it is the measurement that justifies the two booleans
+    // and the environment variable rather than a mount. A host mount is NOT unavailable — `db`,
+    // `extensions` and `caddy` each mount a host path read-only in this very file — so the claim is
+    // narrower and checkable: nothing in the shipped set needs a file any more. The eight other
+    // file-taking flags are out of scope, so this is about the shipped set and not about the key
+    // being unnecessary for ever.
+    const apiBlock = compose.slice(compose.indexOf("\n  api:"), compose.indexOf("\n  web:"));
+    expect(apiBlock.length).toBeGreaterThan(1000);
+    // COMMENTS STRIPPED, and the first draft of this assertion failed because of it: the comment
+    // two screens up in the compose file *quotes* `volumes:` while explaining why api has none, so
+    // the raw read found its own justification and reported the key present. That is ADR-0390's
+    // addendum class verbatim — a fence a later author satisfies, or breaks, by changing prose —
+    // and the remedy is the one the ten workspace rules already use: strip comments before you
+    // believe a match.
+    const apiKeys = apiBlock
+      .split("\n")
+      .map((l) => l.replace(/#.*$/, ""))
+      .join("\n");
+    expect(apiKeys).not.toContain("volumes:");
+    // Two floors, because this is an assertion about an ABSENCE and both ways of reading nothing
+    // look identical to it. The first: the three mounts that DO exist are outside this block, so a
+    // file-wide count of zero would mean the read broke rather than that api has none. The second:
+    // stripping must not have eaten the block, which `--checkpoints` still being in it shows.
+    expect(compose.split("volumes:").length - 1).toBeGreaterThanOrEqual(4);
+    expect(apiKeys).toContain("--checkpoints");
+  });
+
+  it("the deletion capabilities route is inline, for the same reason", () => {
+    // `--deletion-capabilities <file>` is the one remaining shipped-set flag that wanted a mount,
+    // and `--deletion-capability k=v` is why it no longer does. Neither is passed here (the three
+    // deletion surfaces are not mounted on this stack), so what is fenced is that the inline route
+    // EXISTS — because the absence of the file route was the reason the register graded the file
+    // half of P0.3 latent rather than closed.
+    const help = readFileSync(resolve(here, "./cli.ts"), "utf8");
+    expect(help).toContain("--deletion-capability");
+    expect(args).not.toContain("--deletion-capabilities");
+  });
+
+  it("is reported at boot either way, including when there is no chain", () => {
+    // What made the vacuity invisible: of 28 bracketed boot lines a live boot printed before this
+    // increment, the only one naming any of the three surfaces was `[audit-chain] registered
+    // sealing key …` — a side effect of a registry write, not a survey. So the lines are part of
+    // the change rather than a follow-up.
+    const node = readFileSync(resolve(here, "./node.ts"), "utf8");
+    expect(node).toContain("formatAuditChain");
+    expect(node).toContain("formatChainScopes");
+    expect(node).toContain("COVERAGE_REACHES_A_TENANT");
+  });
+
+  it(".env.example names the variable, with a generator and the back-it-up warning", () => {
+    // A route nothing documents is a route nobody takes, and this one has a second obligation the
+    // other secrets do not: losing it does not merely cost a re-login, it costs the ability to
+    // prove the chain intact.
+    const example = readFileSync(resolve(here, "../../../deploy/.env.example"), "utf8");
+    // UNCOMMENTED, which is the whole assertion and which the first draft of this fence got wrong:
+    // `toContain("AUDIT_CHAIN_SIGNING_KEY=")` passes on `#AUDIT_CHAIN_SIGNING_KEY=…`, so commenting
+    // the line out was a mutation this fence did not catch — ADR-0377's exact finding (both column
+    // and cursor secrets were *named* in this file and commented out, so naming was not setting)
+    // reproduced in the fence written to prevent it, and caught by the mutation check rather than
+    // by reading. Anchored to the line start, so a `#` anywhere ahead of it fails.
+    expect(example).toMatch(/^AUDIT_CHAIN_SIGNING_KEY=\S+$/m);
+    expect(example).toContain("randomBytes(32).toString(\"base64\")");
+    expect(example).toMatch(/Back it up|KEEP IT/);
+  });
+});
+
 describe("the tenant-settings grant", () => {
   const args = apiCommandArgs();
 
@@ -1069,5 +1167,64 @@ describe("deploy/Caddyfile — the edge the trust declaration is about", () => {
     // Non-vacuity: the flag exists and the compose does pass its siblings, so the absence above is
     // a withheld default and not a flag nothing could pass.
     expect(compose).toContain("--credential-login");
+  });
+});
+
+describe("every secret an operator must replace is named in README's first-launch list", () => {
+  /*
+   * Found by adding one (ADR-0406's `AUDIT_CHAIN_SIGNING_KEY`) and having to fix README in three
+   * places by hand: the secrets list is prose, so a variable added to `.env.example` and to the
+   * compose is invisible to it, and an operator following README sets the ones it names and reads
+   * warn lines about the one it does not. ADR-0364's addendum class, created by the default.
+   *
+   * Derived from `.env.example` rather than restated, because a second list is the thing that went
+   * stale. The discriminator is `SECRET_PLACEHOLDER_PREFIX` — the same marker `refuseWeakSecret`
+   * refuses on (ADR-0377), so what counts as a must-replace secret is the binary's own answer and
+   * not this test's taste.
+   */
+  const SECRET_PLACEHOLDER_PREFIX = "REPLACE_WITH_";
+  const env = readFileSync(resolve(here, "../../../deploy/.env.example"), "utf8");
+  const readme = readFileSync(README, "utf8");
+
+  // `?? ""` and not a non-null assertion: a group the regex cannot fail to capture is still
+  // `string | undefined` to `tsc`, and an assertion here would be the annotation standing in for a
+  // check that ADR-0362 is about. An empty value simply is not a placeholder.
+  const mustReplace = [...env.matchAll(/^([A-Z0-9_]+)=(\S*)$/gm)]
+    .filter((m) => (m[2] ?? "").startsWith(SECRET_PLACEHOLDER_PREFIX))
+    .map((m) => m[1] ?? "");
+
+  it("finds the placeholder-bearing variables at all (non-vacuity floor)", () => {
+    // Without this a regex that stopped matching would make every assertion below vacuous — the
+    // shape that made ADR-0390's first three fences pass on a mutated tree.
+    expect(mustReplace.length).toBeGreaterThanOrEqual(5);
+    expect(mustReplace).toContain("AUDIT_CHAIN_SIGNING_KEY");
+    expect(mustReplace).toContain("CURSOR_ENCRYPTION_SECRET");
+  });
+
+  for (const name of mustReplace) {
+    it(`README names ${name}`, () => {
+      expect(readme).toContain(name);
+    });
+  }
+
+  it("names them where an operator reads before the first boot, not only later", () => {
+    // The two lists an operator follows: the First launch `cp .env.example .env` comment and the
+    // Oracle step-8 copy of it. Both drifted, so both are fenced — the Oracle one is the abridged
+    // copy that ADR-0390 found with a dangling reference, which is why it is checked separately
+    // rather than trusted to follow the first.
+    // The window is 1200 rather than a round guess: measured, the First launch block's closing
+    // fence is 1079 characters past its `cp` line and the Oracle one's is 330, so a 700-character
+    // window silently matched only the second — caught by the floor below rather than by reading.
+    const launchBlocks = [...readme.matchAll(/cp \.env\.example \.env[\s\S]{0,1200}?```/g)].map(
+      ([block]) => block,
+    );
+    expect(launchBlocks.length).toBeGreaterThanOrEqual(2);
+    for (const block of launchBlocks) {
+      for (const name of mustReplace) {
+        // POSTGRES_PASSWORD uses a different marker and is named in both; these are the five the
+        // prefix finds, and each must appear in each list.
+        expect(block, `${name} missing from a first-launch list`).toContain(name);
+      }
+    }
   });
 });

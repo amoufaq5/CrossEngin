@@ -169,6 +169,20 @@ services:
       # Changing it invalidates every session in flight -- one 401 and a re-login.
       CREDENTIAL_PEPPER: ${CREDENTIAL_PEPPER:-}
       OPERATE_TOKEN_SIGNING_KEY: ${OPERATE_TOKEN_SIGNING_KEY:-}
+      # The Ed25519 seed the audit chain signs entries with -- the thing that makes an edited or
+      # deleted audit row detectable at all (ADR-0286). Here and never in `command:` for the reason
+      # above, and never in a file under `deploy/` either: `Dockerfile`'s `COPY . .` runs under a
+      # repo-root build context with `.dockerignore` matching nothing there, so a seed in a file is
+      # baked into a layer that `docker save` and every registry push carry -- worse than argv
+      # rather than an alternative to it. Until this variable existed `--audit-chain-config <file>`
+      # was the only route to it, so no shipped compose could anchor anything and the two
+      # schedulers below had no chain to witness.
+      #
+      # ONE variable: the public half is DERIVED (the same decision, for the same measured reason,
+      # as OPERATE_TOKEN_SIGNING_KEY above). `--audit-chain-config` still works and may now carry
+      # the chain's policy with no key in it; both sources may carry a key only if they state the
+      # same one, compared by fingerprint.
+      AUDIT_CHAIN_SIGNING_KEY: ${AUDIT_CHAIN_SIGNING_KEY:-}
     # Args in list form so no value is ever shell-split.
     command:
       - node
@@ -438,6 +452,33 @@ services:
       # is about the placeholder above. It goes away by pointing a key at a provisioned tenant, which
       # you can only do after step 1 of the bootstrap, since the id is minted by the server.
       - --tenant-status-gate
+      # The two tamper-evidence passes, defaulted on because the chain they witness now has a
+      # route (AUDIT_CHAIN_SIGNING_KEY above). Without the chain these two had nothing to anchor or
+      # verify; with it and without these, every audited row is appended to the chain and nobody
+      # ever folds it — a hash-linked trail nothing checks is not a tamper-evident trail, it is a
+      # log with extra columns.
+      #
+      # BOOLEANS and not `--checkpoint-config <file>` / `--integrity-proof-config <file>`, for two
+      # reasons that compose. The file had no route here at all: this service declares no `volumes:`
+      # key, so the only way one reached the container was a commit baked into an image layer, which
+      # costs a full install+build to change one word. And the file's documented content was a
+      # TRAP -- `{}` parses, and an empty config resolves to the PLATFORM chain alone, which on a
+      # deployment passing no escalation flag is empty, and an empty scope's report is discarded
+      # entirely. Measured live at a 2s tick: `{}` gave 0 anchors, 0 verdicts and **0 log lines**
+      # over three passes while the tenant's chain held an entry; `allTenants` gave 4 / 4 / 8.
+      # These flags mount the schema's defaults plus `allTenants`, over EVERY tenant status rather
+      # than only `active` -- the four chain tables are retained by the Article 17 erasure precisely
+      # so an auditor can read them after the tenant is gone, so a pass that skips a retired tenant
+      # skips the trail the retention rule exists to protect.
+      #
+      # What each prints at boot: `[checkpoint] scope: every tenant with status ...` and
+      # `[integrity-proof] scope: ...`. A deployment wanting a narrower scope, a different interval
+      # or an escalation policy passes the file flag instead; the two are mutually exclusive.
+      #
+      # Cost: one full fold per scope the FIRST time it is covered (~107 µs per chain entry, so
+      # about a second at 10k entries), then every later pass is bounded from the anchor.
+      - --checkpoints
+      - --integrity-proof
     expose:
       - "8787"
     # Published on the LOOPBACK ONLY, which is what makes the documented bootstrap runnable.

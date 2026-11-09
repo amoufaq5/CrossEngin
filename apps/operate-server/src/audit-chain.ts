@@ -1,4 +1,3 @@
-import { readFile } from "node:fs/promises";
 
 import { z } from "zod";
 import { STAGE_OUTCOMES, type PipelineExecution } from "@crossengin/api-gateway";
@@ -148,21 +147,15 @@ export function parseAuditChainConfig(json: unknown): AuditChainConfig {
   return AuditChainConfigSchema.parse(json);
 }
 
-export async function loadAuditChainConfig(path: string): Promise<AuditChainConfig> {
-  let text: string;
-  try {
-    text = await readFile(path, "utf8");
-  } catch (err) {
-    throw new Error(`--audit-chain-config: cannot read ${path}: ${errMessage(err)}`);
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch (err) {
-    throw new Error(`--audit-chain-config: invalid JSON in ${path}: ${errMessage(err)}`);
-  }
-  return parseAuditChainConfig(parsed);
-}
+// `loadAuditChainConfig` lived here and is **deleted** rather than kept beside its replacement.
+// It parsed the *resolved* schema, so it refused a policy-only file — the one shape ADR-0406 exists
+// to admit — which makes it a second spelling that disagrees with the live one rather than a
+// narrower sibling (ADR-0337's test for a deletion). `loadAuditChainFile` in `audit-chain-env.ts`
+// is the reader, and it keeps both of this function's named errors verbatim, because those name the
+// flag and the path an operator edits where zod's own message names neither.
+//
+// `parseAuditChainConfig` stays: it is the resolved-shape parse that `resolveAuditChain` composes
+// through, so the two routes cannot produce objects a consumer could tell apart.
 
 /**
  * A `ChainSigner` backed directly by an Ed25519 keypair (no key store needed for the serving edge).

@@ -39,6 +39,8 @@ import {
   COMPROMISE_CAUSES,
   INTEGRITY_VERDICTS,
   IntegrityProofScheduler,
+  IntegrityProofConfigSchema,
+  DEFAULT_INTEGRITY_PROOF_CONFIG,
   compromiseCauses,
   formatIntegrityProof,
   integrityConfigScopes,
@@ -51,6 +53,7 @@ import {
   type ChainTruncationCheck,
   type CompromiseCause,
   type CompromiseEvidence,
+  type IntegrityProofConfig,
   type IntegrityProofReport,
 } from "./integrity-proof.js";
 import {
@@ -2155,5 +2158,37 @@ describe("proveScopeIntegrity — the witness is an anchor the chain does not co
     // Withholding the comparison withholds the exclusion too, which is the safe direction here: it
     // can only ever add a truncation finding to a report that is already `compromised`.
     expect(proof.anchorAudit.witnessSequence).toBe(1);
+  });
+});
+
+describe("DEFAULT_INTEGRITY_PROOF_CONFIG", () => {
+  it("is the schema's own defaults plus allTenants, and nothing else", () => {
+    // `DEFAULT_CHECKPOINT_CONFIG`'s fence, in the sibling module, so neither literal can grow a
+    // second departure without a failure here.
+    const empty = IntegrityProofConfigSchema.parse({});
+    const differing = (
+      Object.keys(DEFAULT_INTEGRITY_PROOF_CONFIG) as (keyof IntegrityProofConfig)[]
+    ).filter(
+      (k) =>
+        JSON.stringify(DEFAULT_INTEGRITY_PROOF_CONFIG[k]) !== JSON.stringify(empty[k]),
+    );
+    expect(differing).toEqual(["allTenants"]);
+    expect(DEFAULT_INTEGRITY_PROOF_CONFIG.allTenants).toBe(true);
+    expect(Object.keys(DEFAULT_INTEGRITY_PROOF_CONFIG).sort()).toEqual(Object.keys(empty).sort());
+  });
+
+  it("declares no escalation, so a page is the deployment's own decision", () => {
+    // Mounting an escalation by default would declare an incident and page an on-call rotation
+    // from a flag that reads as "turn the proof on" — and `alertPolicy` is required inside it, so
+    // there is no honest literal to supply anyway.
+    expect(DEFAULT_INTEGRITY_PROOF_CONFIG.escalation).toBeUndefined();
+  });
+
+  it("leaves tenantStatuses to chainScopeStatuses rather than restating it", () => {
+    expect(DEFAULT_INTEGRITY_PROOF_CONFIG.tenantStatuses).toBeUndefined();
+  });
+
+  it("the empty config it replaces resolves to the platform chain alone", () => {
+    expect(integrityConfigScopes(IntegrityProofConfigSchema.parse({}))).toEqual([null]);
   });
 });

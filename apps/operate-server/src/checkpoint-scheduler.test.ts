@@ -29,6 +29,9 @@ import {
   tenantSourceScopes,
   CheckpointScheduler,
   CHECKPOINT_PASS_OUTCOMES,
+  CheckpointConfigSchema,
+  DEFAULT_CHECKPOINT_CONFIG,
+  type CheckpointConfig,
 } from "./checkpoint-scheduler.js";
 
 const TENANT_A = "11111111-1111-1111-1111-111111111111";
@@ -1427,5 +1430,39 @@ describe("CheckpointScheduler lifecycle", () => {
 
     await scheduler.runOnce();
     expect(await checkpointStore.latest(TENANT_A)).not.toBeNull();
+  });
+});
+
+describe("DEFAULT_CHECKPOINT_CONFIG", () => {
+  it("is the schema's own defaults plus allTenants, and nothing else", () => {
+    // The fence that keeps `--checkpoints` from becoming a second set of defaults: the literal is
+    // compared field-by-field against `parse({})`, so the only admissible difference is the one
+    // field whose absence made the empty config vacuous. A new field with a default is covered by
+    // arriving; a *second* departure fails here.
+    const empty = CheckpointConfigSchema.parse({});
+    const differing = (Object.keys(DEFAULT_CHECKPOINT_CONFIG) as (keyof CheckpointConfig)[]).filter(
+      (k) =>
+        JSON.stringify(DEFAULT_CHECKPOINT_CONFIG[k]) !== JSON.stringify(empty[k]),
+    );
+    expect(differing).toEqual(["allTenants"]);
+    expect(DEFAULT_CHECKPOINT_CONFIG.allTenants).toBe(true);
+    expect(empty.allTenants).toBe(false);
+    // Same key set, so the literal cannot quietly omit a field the schema supplies.
+    expect(Object.keys(DEFAULT_CHECKPOINT_CONFIG).sort()).toEqual(Object.keys(empty).sort());
+  });
+
+  it("leaves tenantStatuses to chainScopeStatuses rather than restating it", () => {
+    // The decision lives in one place (ADR-0406). A literal naming the five statuses here would be
+    // a second spelling that the file route does not get.
+    expect(DEFAULT_CHECKPOINT_CONFIG.tenantStatuses).toBeUndefined();
+  });
+
+  it("the empty config it replaces really does resolve to the platform chain alone", () => {
+    // The measurement the flag exists for, asserted through the real resolver rather than quoted.
+    expect(configScopes(CheckpointConfigSchema.parse({}))).toEqual([null]);
+    expect(configScopes(DEFAULT_CHECKPOINT_CONFIG)).toEqual([null]);
+    // ...and `allTenants` is what makes `node.ts` replace that list with the live registry, which
+    // `configScopes` cannot show — so the field, not this list, is the assertion above.
+    expect(DEFAULT_CHECKPOINT_CONFIG.allTenants).toBe(true);
   });
 });

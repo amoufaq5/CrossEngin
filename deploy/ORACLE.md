@@ -639,13 +639,19 @@ anchored until you say so.
 | `--rate-limit-policy …` | durable, cross-replica rate limiting | a `command:` line |
 | `--workflow-workers` | the timer, activity and job workers — without this a due timer never fires | a `command:` line, **and a job handler** (see below) |
 | `--schedule-ms 60000` | the manifest's scheduled jobs | `--workflow-workers`, **and a job handler** |
-| `--checkpoint-config …` | the periodic chain checkpoints the truncation check needs | a **file**, see below |
-| `--integrity-proof-config …` | the periodic audit-integrity verification | a **file** |
-| `--deletion-capabilities …` | GDPR Article 17 — neither deletion surface mounts without it | a **file**, and six decisions (below) |
+| `--checkpoints` | the periodic chain checkpoints the truncation check needs | **passed already** — ADR-0406 |
+| `--integrity-proof` | the periodic audit-integrity verification | **passed already** — ADR-0406 |
+| `--deletion-capability k=v` ×6 | GDPR Article 17 — `--tenant-deletion-routes` and the `--deletion-runner-ms` runner each refuse to mount without it (the other two deletion surfaces do not gate on it) | six `command:` lines, and six decisions (below) |
 | `--deletion-subject-scope tenant` | the Article 17 **runner** — it does not mount without it | a `command:` line, and a decision (below) |
-| `--audit-chain-config …` | the hash-chained audit trail | a file **holding a private key** |
+| `AUDIT_CHAIN_SIGNING_KEY` | the hash-chained audit trail | an **environment** line, and one generated secret |
 
-The last column is the honest part, and none of it is a `command:` line.
+The last column is the honest part, and **four of these rows changed in ADR-0406** — this table
+used to read `a **file**` four times and `none of it is a command: line` underneath. Two of the four
+are now passed by the shipped compose, the Article 17 declaration is six inline flags instead of a
+file, and the chain's key is an environment variable instead of a file holding a private key. What
+is left in that column is **five** flags wanting `command:` lines — ten lines, since the Article 17
+declaration is six of them — and one `environment:` line, so the four **file**-taking flags this
+section was written about are down to none.
 
 **The route that exists for a config file is the image, and it is too expensive to use.** This
 section used to say there was no route at all, in bold, and that was false. `deploy/Dockerfile:18`
@@ -674,21 +680,85 @@ Two things make it a gap even so, and they are different in kind:
   from a tag that has been pulled. That **sharpens** ADR-0301's rule rather than weakening it:
   argv is readable by `ps`, and an image layer is readable by anyone who can pull.
 
-So the `volumes:` key the three committable configs want is still the edit to make, and the keypair
-below wants an environment route instead of either.
+**So the `volumes:` key is withheld, and that is now a measurement rather than a plan.** ADR-0406
+gave all three of the flags this section was written about a fileless route — two booleans and six
+inline `k=v` pairs — and the keypair an environment variable, so **nothing in the shipped set needs
+a file any more.** The claim is deliberately narrow: a host mount is not unavailable, and this very
+file uses one three times (`db` and `extensions` each mount `./postgres/init` read-only, `caddy`
+mounts its `Caddyfile`). What those three carry is non-secret configuration. The eight *other*
+file-taking flags (`--slo-config`, `--slo-defaults`, `--access-reviews-config`,
+`--certification-config`, `--dr-readiness-config`, `--metering-config`,
+`--stripe-usage-sync-config`, `--pack-catalog`) still want a file, so the key is withheld **for the
+shipped set** and is not declared unnecessary for ever.
 
 They are also not peers, and it is a three-way split rather than the two this section used to draw:
 
-- **Two take `{}` and nothing else.** Measured, `CheckpointConfigSchema.safeParse({})` and
-  `IntegrityProofConfigSchema.safeParse({})` both succeed — so `{}` in a file is a valid config for
-  either, and the useful ones (`intervalMs: 3600000`, `includePlatform: true`) are defaults you do
-  not have to write. The *reason* this section used to give was wrong: it is not that every field
-  has a default. `tenantStatuses` on both, and `escalation` on the integrity proof, are optional
-  with **no** default, which is why `{}` parses to 6 keys out of 7 declared and 9 out of 11 rather
-  than to all of them. Optional-and-absent is not the same fact as defaulted, and here it matters:
-  an absent `escalation` means findings reach the callbacks and page nobody, which is a decision
-  rather than a value you left blank.
-- **`--deletion-capabilities` is six decisions and `{}` is refused.** Measured,
+- **Two need no file at all now, and the `{}` this section used to recommend was a TRAP.** Both
+  flags have a value-less sibling since ADR-0406 — `--checkpoints` and `--integrity-proof`, which
+  the compose passes — and that is not a convenience: it is a correction. What was true was that
+  `CheckpointConfigSchema.safeParse({})` and `IntegrityProofConfigSchema.safeParse({})` both
+  succeed, so `{}` **parses**. What this section then said — that the useful defaults
+  (`intervalMs: 3600000`, `includePlatform: true`) are ones you do not have to write — is **false
+  about coverage**, and it is the one claim here that cost something.
+
+  An empty config resolves to `{tenants: [], allTenants: false, includePlatform: true}`, so its
+  scope set is `[null]`: **the platform chain alone, and not one tenant's.** On this stack the
+  platform chain holds only escalation rows, and with no escalation flag passed it is empty — and an
+  empty scope's report is discarded entirely (zero callbacks, no stored verdict, no finding). So a
+  pass mounted over `{}` is a control that reports healthy over a population it never read.
+  Measured live on one cluster at a two-second tick, three passes each, only the config differing:
+
+  | config | anchors | verdicts | log lines |
+  |---|---|---|---|
+  | `{"intervalMs":2000}` — i.e. the `{}` this section recommended | 0 | 0 | **0** |
+  | `{"intervalMs":2000,"allTenants":true}` | 4 | 4 | 8 |
+
+  The tenant's chain held an entry throughout. You could not tell the first row from not having
+  passed the flag at all, which is why `includePlatform: true` being named as the *useful* default
+  was the sharpest part of the error: it is the field that makes the vacuous case look non-empty.
+
+  `--checkpoints` and `--integrity-proof` mount the schema's own defaults plus `allTenants` — and
+  over **every** tenant status rather than only `active`, which matters for the same reason: all
+  four chain tables are retained by the Article 17 erasure precisely so an auditor can read them
+  after the tenant is gone, so a pass skipping a suspended, archived, `pending_deletion` or
+  `deleted` tenant skips the trail the retention rule exists to protect. Each prints what it will
+  cover at boot (`[checkpoint] scope: every tenant with status …`), which is the line whose absence
+  made all of this invisible: before ADR-0406 none of `[audit-chain]`, `[checkpoint]` or
+  `[integrity-proof]` had an affirmative boot line at all.
+
+  Use the file flags when you want a narrower scope, a different interval or an `escalation` block;
+  they are mutually exclusive with the booleans. One correction to keep if you do: it is not that
+  every field has a default. `tenantStatuses` on both, and `escalation` on the integrity proof, are
+  optional with **no** default, which is why `{}` parses to 6 keys of 7 declared and 9 of 11.
+  Optional-and-absent is not the same fact as defaulted, and an absent `escalation` means findings
+  reach the callbacks and page nobody — a decision rather than a value you left blank.
+- **The Article 17 declaration is six decisions, and `{}` is refused.** Since ADR-0406 it needs no
+  file either: `--deletion-capability <subsystem>=<disposition>`, repeatable, six times. Paste this
+  into `command:` (and read the *why each* paragraph below before you do — `backups` is the one to
+  read twice):
+
+  ```yaml
+      - --deletion-capability
+      - tenant_schema=erases
+      - --deletion-capability
+      - shared_tables=erases
+      - --deletion-capability
+      - object_storage=absent
+      - --deletion-capability
+      - backups=present_not_erased
+      - --deletion-capability
+      - search_indexes=absent
+      - --deletion-capability
+      - caches=absent
+  ```
+
+  All six or none: an incomplete set is **refused naming what is missing**, because silence may not
+  answer the reach of an Article 17 proof. A repeated subsystem is refused rather than last-wins,
+  since a disposition is one decision and argv order must not decide what a signed proof claims. The
+  flag is mutually exclusive with `--deletion-capabilities`; the file form below is unchanged and
+  still works.
+
+- **The file form, and why `{}` is refused for it.** Measured,
   `DeletionCapabilitiesSchema.safeParse({})` fails with **six** `Required` issues, one per
   subsystem — by design, because ADR-0328's rule is that a schema default is applied to *silence*
   and the reach of an Article 17 proof is not something silence may answer. `cli.ts`'s `--help` for
@@ -719,26 +789,48 @@ They are also not peers, and it is a three-way split rather than the two this se
   claiming the subsystem is not there — a positive signed statement that the data is still held.
   Its horizon — *"we hold it for 14 days"*, which is what `-mtime +14` means above — is not
   expressible yet, so the proof says the data is retained and not for how long.
-- **`--audit-chain-config` holds a 32-byte Ed25519 private seed.** Its required fields
-  (`privateKeyBase64` and `publicKeyBase64`, both validated as real keys rather than merely
-  non-empty) are not what sets it apart — the capabilities file has six required fields of its own.
-  What sets it apart is that one of them is a **credential**, so ADR-0301's rule applies: a
-  credential reaches this process through the **environment**, which means this flag wants an env
-  route for its keypair before it wants either a volume or the image bake above.
+- **The chain's signing key is `AUDIT_CHAIN_SIGNING_KEY`, and the flag no longer needs one.** This
+  entry used to say `--audit-chain-config` *holds* a 32-byte Ed25519 private seed and that the flag
+  "wants an env route for its keypair before it wants either a volume or the image bake above."
+  ADR-0406 built that route, so: the variable holds the base64 **seed**, the public half is
+  **derived** from it, and the variable alone turns the chain on — the compose passes it in
+  `environment:` and no file is involved. Generate it with
+  `node -e 'console.log(require("node:crypto").randomBytes(32).toString("base64"))'`.
+
+  One variable and not two is a correctness decision, not a convenience: node builds an Ed25519
+  private key from `d` and silently discards an inconsistent `x`, so a pair stated twice can be
+  stated wrongly with no error at all — the signer then announces one fingerprint while signing
+  under another, and every entry it writes reads `bad_signature` for ever. There is a live instance
+  of exactly that on file (ADR-0371 found a chain whose 323–325 were signed by a well-formed but
+  mismatched pair, which on the full verification path is a paging `sev1` at a 100% false-positive
+  rate). Derived, the two cannot disagree.
+
+  `--audit-chain-config` still works and may now carry the chain's **policy** alone — sampling,
+  actor reference, per-tenant overrides — with no key in it. If both carry a key they must state the
+  **same** one: they are compared by fingerprint and a disagreement is refused by name, because
+  whichever won would decide the fingerprint every entry announces. That also gives you a migration:
+  set the variable to the seed the file already holds, boot, then delete the file. **Do not put the
+  seed in a file under `deploy/`** — see the image-bake paragraph above; a layer is readable by
+  anyone who can pull and is not deletable from a tag that has been pulled.
+
+  Back it up with the database, not separately. Rotating the key does not invalidate the chain, but
+  verification resolves each entry's own `signingKeyFingerprint` against the key registry, so a
+  rotated-away key must stay registered or every entry it signed reads as unverifiable — and a chain
+  whose key is lost cannot be proven intact, which is the one thing it exists for.
 
   **It gates one of the three deletion surfaces and not all three**, and the difference decides what
   you can turn on:
 
-  | Surface | Without `--audit-chain-config` | Needs `--deletion-capabilities`? |
+  | Surface | Without a chain key | Needs the capability declaration? |
   |---|---|---|
-  | `--tenant-deletion-routes` (writes the tombstone) | **skipped**, naming the flag | yes |
+  | `--tenant-deletion-routes` (writes the tombstone) | **skipped**, naming the key | yes |
   | `--deletion-request-routes` (the async handle) | **warns and mounts**, rows unanchored | yes |
   | `--tenant-erasure-routes` (`DROP SCHEMA`) | **warns and mounts** | **no gate at all** |
 
   That last row is deliberate rather than an oversight: ADR-0316's rule is that an erasure which
   succeeds and cannot be *recorded* is refused, and without a chain it is still recorded and merely
   unanchored — so refusing would deny a working surface over a weaker guarantee. The consequence to
-  know before you add a flag: **the keypair is not an interlock on destroying tenant data.** The
+  know before you add a flag: **the chain key is not an interlock on destroying tenant data.** The
   surface that drops a tenant's schema mounts on `--store pg` plus a role, with neither the chain nor
   a capability declaration, and the integrity proof will later report its rows as unproven.
 

@@ -68,6 +68,7 @@ export const IntegrityProofConfigSchema = z
      */
     includePlatform: z.boolean().default(true),
     allTenants: z.boolean().default(false),
+    /** Absent means `chainScopeStatuses`' wide set; see `CHAIN_SCOPE_TENANT_STATUSES`. */
     tenantStatuses: z.array(z.string().min(1)).nonempty().optional(),
     /** How many of the most recent audit rows to prove per pass (the store clamps at 500). */
     auditRowLimit: z.number().int().positive().default(500),
@@ -96,6 +97,18 @@ export type IntegrityProofConfig = z.infer<typeof IntegrityProofConfigSchema>;
 export function parseIntegrityProofConfig(json: unknown): IntegrityProofConfig {
   return IntegrityProofConfigSchema.parse(json);
 }
+
+/**
+ * What `--integrity-proof` mounts: the schema's own defaults plus `allTenants`, and nothing else.
+ *
+ * `DEFAULT_CHECKPOINT_CONFIG`'s shape and its reasons, which hold a notch harder here: the empty
+ * config this replaces resolves to the platform chain alone, and a pass over an empty scope is
+ * discarded entirely — so `--integrity-proof-config` over `{}` is a control that reports healthy
+ * over a population it never read, which is this repository's most-found defect class. `escalation`
+ * stays absent, so a deployment that wants a page declares the alert policy itself.
+ */
+export const DEFAULT_INTEGRITY_PROOF_CONFIG: IntegrityProofConfig =
+  IntegrityProofConfigSchema.parse({ allTenants: true });
 
 export async function loadIntegrityProofConfig(path: string): Promise<IntegrityProofConfig> {
   let text: string;

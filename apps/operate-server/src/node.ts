@@ -458,7 +458,9 @@ import {
   formatIntegrityEscalation,
 } from "./integrity-escalation.js";
 import {
+  DEFAULT_INTEGRITY_PROOF_CONFIG,
   buildIntegrityProofLifecycle,
+  integrityConfigScopes,
   loadIntegrityProofConfig,
   formatIntegrityProof,
   type IntegrityProofLifecycle,
@@ -467,13 +469,27 @@ import {
   auditChainStore,
   buildAuditChain,
   ed25519ChainSigner,
-  loadAuditChainConfig,
   type AuditChain,
   type AuditChainConfig,
 } from "./audit-chain.js";
+import {
+  AUDIT_CHAIN_SIGNING_KEY_VAR,
+  KEY_SOURCE_EXPOSES_A_LAYER,
+  formatAuditChain,
+  loadAuditChainFile,
+  resolveAuditChain,
+} from "./audit-chain-env.js";
+import {
+  COVERAGE_REACHES_A_TENANT,
+  chainScopeStatuses,
+  formatChainScopes,
+  surveyChainScopes,
+} from "./chain-scope-survey.js";
 import { registerAuditChainKey } from "./audit-chain-key-registration.js";
 import {
+  DEFAULT_CHECKPOINT_CONFIG,
   buildCheckpointLifecycle,
+  configScopes,
   loadCheckpointConfig,
   tenantSourceScopes,
   type CheckpointLifecycle,
@@ -1695,9 +1711,40 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // appending to one chain per tenant is the point: a single tamper-evident trail, not two.
   let auditConfig: AuditChainConfig | null = null;
   let auditChainProducer: ReturnType<typeof auditChainStore> | null = null;
-  if (options.auditChainConfig !== null && conn !== undefined) {
-    auditConfig = await loadAuditChainConfig(options.auditChainConfig);
-    auditChainProducer = auditChainStore(conn, auditConfig);
+  // The keypair is resolved from the environment and the file **together** (ADR-0406), so the
+  // resolution runs whether or not `--audit-chain-config` was passed — `AUDIT_CHAIN_SIGNING_KEY`
+  // alone turns the chain on, which is what lets the shipped compose anchor with one `environment:`
+  // line. A refusal **throws**: there is no degraded-but-coherent chain, every audited row would be
+  // written unanchored under a configuration that asked for anchoring, and `ed25519ChainSigner`
+  // already exits on an inconsistent pair one layer in.
+  const auditChainResolution = resolveAuditChain({
+    env: process.env,
+    file:
+      options.auditChainConfig !== null ? await loadAuditChainFile(options.auditChainConfig) : null,
+  });
+  // The refusal sentence and the boot line are **one string**, so the two cannot disagree about why
+  // a deployment was refused — `formatPhiStorageDecision`'s idiom (ADR-0338) and
+  // `abac-obligations.ts`' stated reason, one surface across.
+  if (auditChainResolution.kind === "refused") throw new Error(formatAuditChain(auditChainResolution));
+  if (auditChainResolution.kind === "resolved" && KEY_SOURCE_EXPOSES_A_LAYER[auditChainResolution.material.source]) {
+    console.warn(`[audit-chain] ${formatAuditChain(auditChainResolution)}`);
+  } else {
+    console.info(`[audit-chain] ${formatAuditChain(auditChainResolution)}`);
+  }
+  if (auditChainResolution.kind === "resolved") {
+    if (conn === undefined) {
+      // Resolved and unbuildable: the key is good and there is no chain to put an entry in. Said
+      // rather than left to inference, because the line above reads as "enabled" and an operator on
+      // `--store memory` would otherwise believe the trail is anchored (ADR-0322's rule — a surface
+      // that degrades rather than refusing has to say so out loud).
+      console.warn(
+        "[audit-chain] no Postgres store, so nothing is anchored — the chain is a Postgres table;" +
+          " pass --store pg or --store pg-columns",
+      );
+    } else {
+      auditConfig = auditChainResolution.material.config;
+      auditChainProducer = auditChainStore(conn, auditConfig);
+    }
   }
   // Built for every Postgres deployment, gated on nothing else (ADR-0327 — see
   // `auditEmitterAvailable` for the three defects the old flag list caused).
@@ -1737,10 +1784,21 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
    * Refusing to mount is the loud failure, and the loud failure is the right one for a proof.
    */
   let deletionCapabilities: DeletionCapabilities | null = null;
-  if (options.deletionCapabilities !== null) {
-    deletionCapabilities = DeletionCapabilitiesSchema.parse(
-      JSON.parse(await readFile(options.deletionCapabilities, "utf8")) as unknown,
-    );
+  // Two sources, mutually exclusive at parse (`cli.ts` refuses both), and **one parse** — the
+  // inline declaration goes through the same `DeletionCapabilitiesSchema` as the file, so the two
+  // routes cannot produce a declaration a consumer could tell apart and the schema's own
+  // `superRefine` (which refuses `tenant_schema: "absent"` and `shared_tables: "absent"`, the two
+  // subsystems this pipeline performs) covers both. `cli.ts` has already checked each key against
+  // `DELETION_SUBSYSTEMS`, each value against `SUBSYSTEM_DISPOSITIONS` and the set for
+  // completeness, so what reaches here is well-shaped and what the schema adds is the
+  // cross-subsystem rule.
+  const capabilitiesSource: unknown =
+    options.deletionCapabilityDeclarations ??
+    (options.deletionCapabilities !== null
+      ? (JSON.parse(await readFile(options.deletionCapabilities, "utf8")) as unknown)
+      : null);
+  if (capabilitiesSource !== null) {
+    deletionCapabilities = DeletionCapabilitiesSchema.parse(capabilitiesSource);
     // What the declaration *means*, said once at boot — because until now nothing read it. The three
     // readers (`requiredSubsystemsFor`, `absentSubsystemsFor`, `unerasedSubsystemsFor`) had zero
     // callers anywhere outside `assembleTombstone`, so an operator's only route to discovering what
@@ -3589,66 +3647,92 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     );
   }
   // Audit chain: append a signed, hash-linked audit-log entry per request into the tamper-evident chain,
-  // so certification's forensic-chain source has a live chain to verify. Enabled by --audit-chain-config
-  // over a pg store.
+  // so certification's forensic-chain source has a live chain to verify. Enabled by
+  // AUDIT_CHAIN_SIGNING_KEY or by a keypair in --audit-chain-config, over a pg store.
   let auditChain: AuditChain | null = null;
   let auditPolicy: TenantAuditPolicyLifecycle | null = null;
-  if (options.auditChainConfig !== null) {
-    if (conn === undefined || auditConfig === null || auditChainProducer === null) {
-      console.warn("[audit-chain] --audit-chain-config requires a Postgres store (--store pg); skipping");
-    } else {
-      // Live per-tenant sampling from meta.operate_tenant_settings (overrides the config map, no redeploy).
-      // Enabled by --audit-sampling-refresh-ms; refreshed into an in-memory snapshot the observer reads.
-      if (options.auditSamplingRefreshMs !== null) {
-        auditPolicy = buildTenantAuditPolicyCache({
-          settingsStore,
-          tenants: new PostgresTenantSource(conn),
-          intervalMs: options.auditSamplingRefreshMs,
-          onError: (err, tenantId) =>
-            console.error(`[audit-sampling] tenant=${tenantId} settings load error`, err),
-          refreshOnError: (err) => console.error("[audit-sampling] refresh error", err),
-        });
-      }
-      auditChain = buildAuditChain(conn, auditConfig, {
-        // The producer the audit-log emitter already anchors into, so per-request entries and
-        // per-record anchors share one chain (and one advisory lock) per tenant.
-        store: auditChainProducer,
-        onError: (err) => console.error("[audit-chain] append error", err),
-        ...(auditPolicy !== null ? { policyCache: auditPolicy.cache } : {}),
+  // Keyed on **whether the chain resolved** and no longer on the flag, which is what lets the
+  // environment route reach the per-request observer: the flag is now one of two sources, so a
+  // deployment with the variable set and no file was previously parsed, logged and then skipped
+  // here. The store warning moved to the resolution site, where it is said once for all consumers
+  // rather than per surface.
+  // `conn !== undefined` is a type-system necessity rather than a live condition: `auditChainProducer`
+  // is assigned only inside the branch that established it, so the three cannot disagree.
+  if (auditConfig !== null && auditChainProducer !== null && conn !== undefined) {
+    // Live per-tenant sampling from meta.operate_tenant_settings (overrides the config map, no redeploy).
+    // Enabled by --audit-sampling-refresh-ms; refreshed into an in-memory snapshot the observer reads.
+    if (options.auditSamplingRefreshMs !== null) {
+      auditPolicy = buildTenantAuditPolicyCache({
+        settingsStore,
+        tenants: new PostgresTenantSource(conn),
+        intervalMs: options.auditSamplingRefreshMs,
+        onError: (err, tenantId) =>
+          console.error(`[audit-sampling] tenant=${tenantId} settings load error`, err),
+        refreshOnError: (err) => console.error("[audit-sampling] refresh error", err),
       });
-      // Register the sealing key's public half into the platform key registry (best-effort — a registry
-      // failure must not stop serving) so a chain entry's signingKeyFingerprint resolves to a known key.
-      try {
-        const registered = await registerAuditChainKey(new PostgresKeyRegistry(conn), auditConfig);
-        console.info(`[audit-chain] registered sealing key ${registered.keyId}`);
-      } catch (err) {
-        console.error("[audit-chain] key registration failed", err);
-      }
+    }
+    auditChain = buildAuditChain(conn, auditConfig, {
+      // The producer the audit-log emitter already anchors into, so per-request entries and
+      // per-record anchors share one chain (and one advisory lock) per tenant.
+      store: auditChainProducer,
+      onError: (err) => console.error("[audit-chain] append error", err),
+      ...(auditPolicy !== null ? { policyCache: auditPolicy.cache } : {}),
+    });
+    // Register the sealing key's public half into the platform key registry (best-effort — a registry
+    // failure must not stop serving) so a chain entry's signingKeyFingerprint resolves to a known key.
+    try {
+      const registered = await registerAuditChainKey(new PostgresKeyRegistry(conn), auditConfig);
+      console.info(`[audit-chain] registered sealing key ${registered.keyId}`);
+    } catch (err) {
+      console.error("[audit-chain] key registration failed", err);
     }
   }
   // Periodic per-tenant chain checkpointing: anchor a ChainCheckpoint at each configured scope's tail so
   // verification stays bounded (verify only the suffix after the latest checkpoint). Enabled by
   // --checkpoint-config over a pg store; reuses the audit chain's signing key, so it needs --audit-chain-config.
   let checkpoints: CheckpointLifecycle | null = null;
-  if (options.checkpointConfig !== null) {
+  if (options.checkpointConfig !== null || options.checkpoints) {
+    // Name the flag the operator passed, not the one this block was written for. A message naming
+    // `--checkpoint-config` to somebody who passed `--checkpoints` is a remedy they cannot act on
+    // (ADR-0334), and the boolean is the shipped default, so that is the reading an operator gets.
+    const checkpointFlag = options.checkpointConfig !== null ? "--checkpoint-config" : "--checkpoints";
     if (conn === undefined) {
-      console.warn("[checkpoint] --checkpoint-config requires a Postgres store (--store pg); skipping");
+      console.warn(`[checkpoint] ${checkpointFlag} requires a Postgres store (--store pg); skipping`);
     } else if (auditConfig === null) {
       console.warn(
-        "[checkpoint] --checkpoint-config requires --audit-chain-config (for the chain signing key); skipping",
+        `[checkpoint] ${checkpointFlag} needs the chain signing key — set` +
+          ` ${AUDIT_CHAIN_SIGNING_KEY_VAR} or put a keypair in --audit-chain-config; skipping`,
       );
     } else {
-      const checkpointConfig = await loadCheckpointConfig(options.checkpointConfig);
+      // One config, two routes: the named literal or the file. Parsed through the same schema
+      // either way (the literal IS a `parse`), so the scheduler cannot tell them apart.
+      const checkpointConfig =
+        options.checkpointConfig !== null
+          ? await loadCheckpointConfig(options.checkpointConfig)
+          : DEFAULT_CHECKPOINT_CONFIG;
+      const statuses = chainScopeStatuses(checkpointConfig.tenantStatuses);
+      // What this pass will actually cover, said before it runs. An empty config resolves to the
+      // platform chain ALONE, and on a deployment whose platform chain is empty ADR-0399's
+      // `isEmptyScope` discards the report — so the pass prints nothing, ever, while every tenant's
+      // chain goes unanchored. Measured live both arms. Fed the scope list this block's **own**
+      // resolver produced, so the line cannot disagree with the thing it describes (ADR-0361).
+      const checkpointScopes = surveyChainScopes({
+        allTenants: checkpointConfig.allTenants,
+        staticScopes: configScopes(checkpointConfig),
+        includePlatform: checkpointConfig.includePlatform,
+        intervalMs: checkpointConfig.intervalMs,
+        tenantStatuses: statuses,
+      });
+      const checkpointScopeLine = `[checkpoint] ${formatChainScopes("scope", checkpointScopes)}`;
+      if (checkpointScopes.coverage === "nothing") console.error(checkpointScopeLine);
+      else if (!COVERAGE_REACHES_A_TENANT[checkpointScopes.coverage])
+        console.warn(checkpointScopeLine);
+      else console.info(checkpointScopeLine);
       // The tenant registry (meta.tenants) is always in `meta`, independent of the chain `schema`.
       const liveScopes = checkpointConfig.allTenants
         ? {
             tenants: tenantSourceScopes(
-              new PostgresTenantSource(
-                conn,
-                checkpointConfig.tenantStatuses !== undefined
-                  ? { statuses: checkpointConfig.tenantStatuses }
-                  : {},
-              ),
+              new PostgresTenantSource(conn, { statuses }),
               { includePlatform: checkpointConfig.includePlatform },
             ),
           }
@@ -3696,29 +3780,43 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // against the chain entry that commits to it, and the chain's own links + signatures — and append the
   // verdict to the chain. A check nobody performs proves nothing; this is the thing that performs it.
   let integrityProof: IntegrityProofLifecycle | null = null;
-  if (options.integrityProofConfig !== null) {
+  if (options.integrityProofConfig !== null || options.integrityProof) {
+    // The checkpoint block's reason, one flag over.
+    const proofFlag =
+      options.integrityProofConfig !== null ? "--integrity-proof-config" : "--integrity-proof";
     if (conn === undefined) {
-      console.warn(
-        "[integrity-proof] --integrity-proof-config requires a Postgres store (--store pg); skipping",
-      );
+      console.warn(`[integrity-proof] ${proofFlag} requires a Postgres store (--store pg); skipping`);
     } else if (auditConfig === null) {
       console.warn(
-        "[integrity-proof] --integrity-proof-config requires --audit-chain-config (for the chain signing key); skipping",
+        `[integrity-proof] ${proofFlag} needs the chain signing key — set` +
+          ` ${AUDIT_CHAIN_SIGNING_KEY_VAR} or put a keypair in --audit-chain-config; skipping`,
       );
     } else {
-      const proofConfig = await loadIntegrityProofConfig(options.integrityProofConfig);
+      const proofConfig =
+        options.integrityProofConfig !== null
+          ? await loadIntegrityProofConfig(options.integrityProofConfig)
+          : DEFAULT_INTEGRITY_PROOF_CONFIG;
+      const statuses = chainScopeStatuses(proofConfig.tenantStatuses);
+      // The same line as the checkpoint block's, for the same reason and read off this block's own
+      // resolver. Both are needed rather than one: the two configs are independent, so a deployment
+      // can cover every tenant with one pass and the platform chain alone with the other.
+      const proofScopes = surveyChainScopes({
+        allTenants: proofConfig.allTenants,
+        staticScopes: integrityConfigScopes(proofConfig),
+        includePlatform: proofConfig.includePlatform,
+        intervalMs: proofConfig.intervalMs,
+        tenantStatuses: statuses,
+      });
+      const proofScopeLine = `[integrity-proof] ${formatChainScopes("scope", proofScopes)}`;
+      if (proofScopes.coverage === "nothing") console.error(proofScopeLine);
+      else if (!COVERAGE_REACHES_A_TENANT[proofScopes.coverage]) console.warn(proofScopeLine);
+      else console.info(proofScopeLine);
       // The tenant registry (meta.tenants) is always in `meta`, independent of the chain `schema`.
       const liveScopes = proofConfig.allTenants
         ? {
-            tenants: tenantSourceScopes(
-              new PostgresTenantSource(
-                conn,
-                proofConfig.tenantStatuses !== undefined
-                  ? { statuses: proofConfig.tenantStatuses }
-                  : {},
-              ),
-              { includePlatform: proofConfig.includePlatform },
-            ),
+            tenants: tenantSourceScopes(new PostgresTenantSource(conn, { statuses }), {
+              includePlatform: proofConfig.includePlatform,
+            }),
           }
         : {};
       // Escalation: a compromised verdict becomes a declared incident + a page, once per

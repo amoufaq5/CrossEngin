@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 21,249 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 21,380 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -3628,6 +3628,61 @@ report; `apps/operate-web` has none).
   **admits**, since nothing in the record asserts base64-ness, so the arm reported `unreadable=0` and
   read as the pair being broken. **A corruption the contract accepts is not a corruption**, which is
   register P2.12b's population measured from the inside on one table.
+
+  ADR-0406 asks register P0.3's per-flag question of the four **file**-taking flags, and the class is
+  **a flag whose only route an operator must not take**: the flag exists, the feature behind it is
+  built and correct, and the sole route for its input either exposes a secret, does nothing, or
+  refuses everything. *The keystone*: `--audit-chain-config` was the only route to the chain's
+  Ed25519 keypair, ADR-0301 forbids a credential on argv, and `deploy/Dockerfile:18`'s `COPY . .`
+  under a repo-root context with `.dockerignore` excluding `deploy/.env` and **not** `deploy/*.json`
+  bakes such a file into a pushable layer — which is why ADR-0390 **withheld** the `volumes:` key
+  with its reason stated. So no shipped compose passed it, **no audit row has ever been anchored in
+  any shipped deployment**, and `--checkpoints`/`--integrity-proof` had nothing to anchor or verify:
+  the whole tamper-evidence story was gated on one credential with no honest route. *The
+  falsely-true control*: `--checkpoint-config '{}'` parses, is the file's natural minimal content and
+  is what `ORACLE.md` documented — and resolves to `{tenants: [], allTenants: false, includePlatform:
+  true}`, scope set `[null]`, **the platform chain alone**, which on the shipped stack is empty, and
+  ADR-0399's `isEmptyScope` discards an empty scope's report entirely. Measured live against
+  `--checkpoints`: **0 anchors / 0 verdicts / 0 log lines** against **4 / 4 / 8**, so the documented
+  example configured a pass into permanent silence. *The template that refuses everything*:
+  `CONSERVATIVE_DELETION_CAPABILITIES` is all six `erases`, which refuses every deletion, so the one
+  exported starting point was unusable and the guidance lived in `--help` prose and no `deploy/`
+  document.
+  And one defect was in none of the three: `DEFAULT_TENANT_STATUSES = ["active"]` is **one constant
+  answering two questions** — right for a cron scheduler and wrong for a tamper-evidence pass,
+  because all four chain tables are `PLATFORM_RECORD_TABLES` members retained by the Article 17
+  erasure *precisely so an auditor can read them after the tenant is gone*, and retirement is
+  `UPDATE … SET status = 'deleted'` so the row survives and the id stays enumerable. **The population
+  the retention set exists to preserve was the one population the two chain passes never covered.**
+  Four decisions carry it. **One variable with a derived public half**
+  (`AUDIT_CHAIN_SIGNING_KEY` + `ed25519PublicKeyFromSeed`), on ADR-0358's precedent and its
+  measurement: node builds an Ed25519 key from `d` and **silently discards an inconsistent `x`**, so
+  a pair stated twice can be stated wrongly with the only symptom being that the signer announces one
+  fingerprint while signing under another. **Two sources are admissible iff they state the same
+  keypair**, compared by fingerprint — precedence refused, because a deployment that set one and
+  forgot the other would serve one silently and which one depends on a rule nobody reads, and
+  concatenation (ADR-0357's answer for api-key specs) is unavailable because a keypair is not a list.
+  **`--checkpoints` and `--integrity-proof` are booleans**, defaulted on, each mutually exclusive
+  with its `-config` sibling: a boolean cannot be `{}`, so the falsely-true control is made
+  inexpressible rather than documented against (ADR-0334's conversion). And **the two chain passes
+  read every tenant status**, widening rather than confining on ADR-0338's rule — a pass that
+  reaches more rows can only find more, and one skipping the retained population was not working.
+  Verified live as the non-owner `serving` role, **26 arms green**: 21 in the main harness (three
+  sources, four refusals, the `{}` finding against its control, the entry fingerprint equal to the
+  derived one) and **5 in an F8 harness whose result is an exact complement** over two tenants
+  holding genuinely signed entries and differing only in `status` — narrow (`["active"]`) anchors
+  the active tenant `1/1` and the retired one **`0/0`**, wide anchors both **`1/1`**, each count read
+  as `serving/owner` so a confined read cannot pass as an empty table.
+  Three harness defects are the reusable part, because each made a probe failure read as a subject
+  failure and the premise check caught all three. `psql -At -c "INSERT … RETURNING id"` prints the
+  row **and** the `INSERT 0 1` tag, so a captured id was two lines — corrupting every SQL
+  interpolation *and* the api-key spec, surfacing as a 500 on the seeding request; `-q` fixes it and
+  the durable half is **a floor validating the id as a bare uuid before it reaches any SQL or any
+  argv**. `meta.forensic_chain_entries` has no `operation` column (it is `kind`) and
+  `payload_size_bytes` is NOT NULL with no default. And `entry_hash` carries a **table-wide** UNIQUE,
+  so an entry cannot be copied into another scope — while the stated reason for copying was itself
+  false, because `--tenant-status-gate` is opt-in and not passed, so a `deleted` tenant **is**
+  served, which is ADR-0334's own finding and the reason that flag exists.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -7524,6 +7579,48 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `PENDING_DELETION_ADMISSION_MAY_SERVE` is a total map so a fourth effect is a compile error, and
   `pendingDeletionAdmissionMessage` builds both sentences from one shared half and names no remedy of
   its own, because the `ALTER` has one producer.
+  **`audit-chain-env.ts` is the chain's keypair route and the reason it has one** (ADR-0406).
+  `AUDIT_CHAIN_SIGNING_KEY` carries the 32-byte seed and `ed25519PublicKeyFromSeed` derives the
+  public half, which is ADR-0358's precedent and rests on its measurement: node builds an Ed25519
+  key from `d` and **silently discards an inconsistent `x`**, so a pair stated twice can be stated
+  wrongly with the only symptom being a signer that announces one fingerprint and signs under
+  another. `AuditChainFileSchema` is `AuditChainConfigSchema.partial({privateKeyBase64: true,
+  publicKeyBase64: true})` — measured on zod 3.25.76, `.partial({subset})` preserves `.strict()` and
+  keeps every refinement on a supplied field — so a file may carry the *policy* (`schema`,
+  `actorReference`, `samplingRate`) with no key material at all. `resolveAuditChain` answers
+  `file_only` / `env_only` / `both` and **refuses precedence**: two sources are admissible iff they
+  state the same keypair, compared by **fingerprint** (`ed25519ChainSigner`'s own comparison, one
+  layer out), because a deployment that set one and forgot the other would otherwise serve one
+  silently and which one depends on a rule nobody reads — ADR-0357's `both` verdict, and
+  concatenation is unavailable there because a keypair is not a list. Four refusals
+  (`signing_key_malformed`, `private_key_absent`, `public_half_mismatched`, `sources_disagree`) and
+  **none prints a seed**, pinned by a test. `KEY_SOURCE_EXPOSES_A_LAYER` is a total map with only
+  `env_only` false, so the two file-bearing sources warn by name about the pushable layer
+  (`COPY . .` under a repo-root context, `.dockerignore` excluding `deploy/.env` and not
+  `deploy/*.json`) and name the variable as the remedy. The resolution composes a **complete**
+  `AuditChainConfig` through the existing `AuditChainConfigSchema.parse`, so no consumer of that
+  type changed; `loadAuditChainConfig` is deleted and its place carries a comment naming its
+  successor (ADR-0337's test for a deletion).
+  **`chain-scope-survey.ts` owns both halves of *which scopes a chain pass covers***, and they are
+  two defects rather than one. `chainScopeStatuses` widens the status set from
+  `PostgresTenantSource`'s `DEFAULT_TENANT_STATUSES = ["active"]` to all five `TENANT_STATUSES` for
+  the checkpoint scheduler and the integrity proof — **one constant was answering two questions**,
+  and the chain tables are `PLATFORM_RECORD_TABLES` members the Article 17 erasure retains
+  *precisely so an auditor can read them after the tenant is gone*, with retirement an
+  `UPDATE … SET status`, so the row survives and the id stays enumerable. A **helper and not a
+  `z.default()`**, because `tenantStatuses` is `.nonempty()` and a default would need a non-empty
+  tuple, hence a cast, hence ADR-0362's class. `surveyChainScopes` + `formatChainScopes` +
+  `COVERAGE_REACHES_A_TENANT` are the boot line that says what the pass will cover before it runs,
+  which is what `--checkpoint-config '{}'` needed: that resolves to the platform chain **alone**,
+  and ADR-0399's `isEmptyScope` discards an empty scope's report entirely, so the documented example
+  configured a pass into permanent silence (measured 0 anchors / 0 verdicts / **0 log lines**).
+  `namedTenants` is **0** under `allTenants` — `node.ts` passes `tenants:`, which *replaces* the
+  static scope list — and the first implementation returned 1 and contradicted the field's own doc
+  comment. Each scheduler block reads **its own** resolver, so the two boot lines cannot come to
+  describe one scope differently; and each block's warn messages name **the flag the operator
+  passed**, selected from which route was used, because a message naming `--checkpoint-config` to
+  somebody who passed `--checkpoints` is a remedy they cannot act on (ADR-0334) and the boolean is
+  the shipped default. Fenced as text in `node.test.ts`, since no type can ask it.
   **And `surveyEnvelopeTenantReadiness` names api-key tenants with no `meta.tenants` row** under
   `--column-key-mode envelope` (ADR-0349's live finding (a)), whose every PHI read and write is
   otherwise refused by `tenant_data_keys_tenant_id_fkey` and surfaced as an HTTP **504** — a
@@ -9265,6 +9362,20 @@ isolated copy of the package instead, which is the better answer when more than 
   and is not. It also fences ADR-0301's `--api-key`-on-argv instance by name and the documented
   bootstrap's step ordering. What it cannot see is whether a flag the compose passes is one this
   deployment should pass, which is the per-flag judgement the register's P0.3 entry holds.
+  **And a *secret* added to that compose is outside it too** (ADR-0406), which is this reading one
+  variable in: README's first-launch list is prose, so `AUDIT_CHAIN_SIGNING_KEY` landed in
+  `.env.example` and in the compose's `environment:` block and in **neither** of README's two lists,
+  and an operator following README would have set the three it named and read warn lines about the
+  one it did not — ADR-0364's addendum class, created by the default that made the variable
+  necessary. The fence is **derived from `.env.example` rather than a second list**, because a second
+  list is the thing that went stale: a variable whose value starts with `SECRET_PLACEHOLDER_PREFIX`
+  is a must-replace secret — the same marker `refuseWeakSecret` refuses on, so what counts is the
+  binary's own answer — and each must appear in **both** of README's lists, the First launch one and
+  the Oracle step-8 copy ADR-0390 found with a dangling reference. Two things about it are worth
+  copying: the window from each `cp .env.example .env` to its closing fence is **1200** characters
+  because the two were *measured* at 1079 and 330, and a round 700 silently matched only the second
+  — caught by the floor rather than by reading; and the floor asserts the placeholder regex finds at
+  least five, so a regex that stopped matching cannot make every per-variable assertion vacuous.
   **And a path served ahead of route matching is outside every registry, so it is outside anything
   derived from one** (ADR-0392) — the **eleventh** reading, and the second not about source code.
   Three interceptor wrappers and one `WebhookRoute` serve five paths by closing over a dispatch
@@ -9477,6 +9588,25 @@ Two constraints worth knowing before suggesting a host:
   from `principal.principalId` unconditionally and `bodyNamesAViewer` refuses a body naming one, so
   the ordinary grants gate a principal's access to its *own* row while the backfill role marks a whole
   backlog read in one call.
+- **The audit chain is on, from one environment variable, and the two chain passes with it**
+  (ADR-0406). `AUDIT_CHAIN_SIGNING_KEY` is in the `environment:` block and `--checkpoints` /
+  `--integrity-proof` are on the `command:` — **booleans, not the `-config` files**, because
+  `--checkpoint-config '{}'` is the file's natural minimal content and resolves to the platform
+  chain *alone*, which ADR-0399's `isEmptyScope` then discards: measured at **0 anchors / 0
+  verdicts / 0 log lines** against 4 / 4 / 8, so the documented example configured a pass into
+  permanent silence. A boolean cannot be `{}`. `.env.example` carries the variable
+  **uncommented** with a generator line, and the placeholder is **refused at boot** by the 32-byte
+  width check rather than accepted — the opposite of ADR-0377's `unreplaced_placeholder` hazard, and
+  the reason no placeholder-prefix check is owed here. There is deliberately **no second variable**
+  for the public half: node silently discards an `x` inconsistent with `d`, so a pair stated twice
+  can be stated wrongly and the only symptom is a signer announcing one fingerprint while signing
+  under another (ADR-0358). With the variable unset the two flags print one warn line each **naming
+  the flag that was passed** and skip; with it set, every audited row is anchored and the chain is
+  verified hourly over **every tenant status**, which is the population the Article 17 retention set
+  preserves and the one both passes previously skipped. The `volumes:` key is still **withheld**:
+  the keypair has an environment route, the two chain flags have booleans and
+  `--deletion-capabilities` has a repeatable `--deletion-capability <subsystem>=<disposition>`, so
+  a mount would serve nothing a flag does not while licensing a private seed in a mounted file.
 - **The documented bootstrap is five curls and no shell** (ADR-0376). `deploy/.env.example` omitted
   **creating the tenant**, so its step 2 was a `422 meta.tenants has no row for the id this grant
   names` on every fresh deployment; the id is minted by the server (`{slug, name}`, and an `id` key
@@ -11920,20 +12050,23 @@ third clause is not a flourish.
    first open question. What is left: **14 (pack, field) pairs on a deployment that has not set the
    secret**, no per-tenant-manifest survey, and `?sort=` on an unreadable field still accepted.
 3. **The shipped compose mounts no background subsystem, so nearly everything built since Phase 3
-   is off.** Measured against the committed tree: the `api` command passes **22 distinct** flags
-   (**24** occurrences — `--ai-design-role` and `--read-state-role` twice each; the figure went stale
-   a **fourth** time, re-derived twice independently in ADR-0389's measurement pass, and the previous
-   reading of 20/21 predates ADR-0385 adding the three read-state lines), not the six
+   is off.** Measured against the committed tree: the `api` command passes **25 distinct** flags
+   (**28** occurrences — `--admin-role`, `--ai-design-role` and `--read-state-role` twice each; the
+   figure has gone stale a **fifth** time, 22/24 at ADR-0389 and 20/21 before ADR-0385, so **do not
+   carry it: count it** with `yaml.safe_load` over the `api` service's `command:`), not the six
    on record, and `--platform-user-routes` is among them — ADR-0358 added it (with a `deploy/README.md`
    note that the page had told readers to POST to a route the stack did not serve), so that clause of
    this entry was **false**, and so is any claim that the operator provisioning path is unreachable on
-   a shipped deployment. What stands is the whole of the *background* half, absent as of this
-   measurement: `--schedule-ms`, `--workflow-workers`, `--notification-drain-ms`,
-   `--audit-chain-config`, `--integrity-proof-config`, `--checkpoint-config`,
-   `--deletion-capabilities` (so neither Article 17 surface can mount), `--tenant-status-gate`,
-   `--rate-limit-policy`, `--read-state-routes`, `--preference-routes`. So the request path is
-   configured and nothing *recurs*: no job fires, no timer fires, no notification is delivered, no
-   audit row is anchored, no integrity proof runs. ~~One increment, and the only question is which
+   a shipped deployment. What stands is the *background* half, and **ADR-0406 took three of its
+   eleven**: `--checkpoints` and `--integrity-proof` are on the compose and
+   `AUDIT_CHAIN_SIGNING_KEY` is in its `environment:` block, so a deployment that sets one variable
+   anchors every audited row and verifies the chain hourly. Still absent as of this measurement:
+   `--schedule-ms`, `--workflow-workers`, `--notification-template-routes`,
+   `--deletion-capabilities` / `--deletion-capability` (so no Article 17 surface mounts — and none
+   of the three is on the compose either, so declaring capabilities for them would be inert),
+   `--rate-limit-policy`, `--preference-routes`. So the request path is configured and **most** of
+   what recurs still does not: no job fires, no timer fires, and nothing is rate-limited — while
+   notifications are delivered (ADR-0376), and audit rows are anchored and verified (ADR-0406). ~~One increment, and the only question is which
    flags a reference deployment should default to.~~ — **that framing is false for 4 of the 9, and
    the per-flag map below says which.** **This entry's own count has gone stale three
    times in three increments** — 15 when it was written, a 16th from ADR-0364
@@ -12029,13 +12162,25 @@ third clause is not a flourish.
    third at boot. Nor can the one exported template be pasted: `CONSERVATIVE_DELETION_CAPABILITIES`
    is all six `erases`, which register P2.6 records as refusing every deletion, so each value is a
    per-subsystem judgement — guidance that **exists in `cli.ts`'s `--help` prose and not in
-   `deploy/`**, which is ADR-0376's asymmetry in a second place. `AuditChainConfigSchema` is still
+   `deploy/`**, which is ADR-0376's asymmetry in a second place —
+   **and ADR-0406 answered it with `--deletion-capability <subsystem>=<disposition>`, repeatable and
+   inline, plus a pasteable block in `ORACLE.md`.** It refuses five ways (no `=`, an unknown
+   subsystem, an unknown disposition, a **repeated** subsystem — last-wins would make an Article 17
+   proof's scope depend on argv order — and an **incomplete set naming the missing subsystems**,
+   because the map is total and silence must not decide how much a proof covers), and
+   `DISPOSITION_REQUIRES_ATTESTATION` is what makes an honest template satisfiable where
+   all-`erases` refuses every deletion. Inline rather than a mount for the reading above: a mounted
+   file's content is outside every workspace rule and every test.
+   `AuditChainConfigSchema` is still
    the odd one out and still a **credential** (`privateKeyBase64` and `publicKeyBase64` are its
    only two fields with neither a default nor `.optional()`, each refined against a real key), so
    ADR-0301 sends it through the environment; `ed25519PublicKeyFromSeed` means **one** variable and
    not two, on `credential-auth-env.ts`'s own argument that a pair which can be stated twice can be
    stated inconsistently. The generator is `generateEd25519Keypair` — lowercase `p`, and the
-   obvious spelling answers `undefined`.
+   obvious spelling answers `undefined`. **All of that is what ADR-0406 built**, and the file route
+   survives beside it: `AuditChainFileSchema` makes both key fields optional, so a file may carry
+   the policy alone and a deployment supplying both is admitted only if the two state the **same**
+   keypair.
    **The grade is P2 and the register's own test settles it**: all four flags and all five gated
    surfaces appear **0** times across the three compose files, every warn arm prints its reason and
    names its flag, and being harmed requires an operator to pass a flag — which is the new
@@ -12051,7 +12196,22 @@ third clause is not a flourish.
    no chain nothing is anchored and the integrity proof verifies an empty chain — which ADR-0380
    made print `NO HISTORY — nothing was examined` — so shipping a host mount now would quietly
    license a private seed in a mounted file (ADR-0334: a remedy that cannot work is worse than
-   none). Two further measurements an implementer needs: `--deletion-capabilities` is the one of
+   none).
+   **ADR-0406 closes three of the four and the withholding survives with a narrowed reason, which
+   is the better outcome than retiring it.** The keypair has an environment route
+   (`AUDIT_CHAIN_SIGNING_KEY`, one variable with the public half derived), and the two chain flags
+   have **booleans** — so of the four, only `--deletion-capabilities` still takes a file, and it has
+   a repeatable `--deletion-capability <subsystem>=<disposition>` beside it. A mount would therefore
+   serve nothing a flag does not while still licensing a private seed in a mounted file. Three of
+   that measurement's own facts were sharpened by building it: the `{}` this entry recorded as
+   merely parsing is a **falsely-true control** (platform-chain-only, discarded by ADR-0399's
+   `isEmptyScope`, measured at 0 anchors / 0 verdicts / **0 log lines**), so the honest fix was to
+   make `{}` inexpressible rather than to document against it; `CONSERVATIVE_DELETION_CAPABILITIES`
+   being all-`erases` is why the inline route needed `DISPOSITION_REQUIRES_ATTESTATION` to have a
+   satisfiable template at all; and the per-flag question gained a defect in neither the entry nor
+   the flags — `DEFAULT_TENANT_STATUSES = ["active"]` meant both chain passes skipped exactly the
+   retired population the Article 17 retention set preserves for an auditor.
+   Two further measurements an implementer needs: `--deletion-capabilities` is the one of
    the four with **no dedicated loader** (an inline `JSON.parse(await readFile(...))`, so a missing
    or malformed file names neither the flag nor the path, where the other three each produce a
    "cannot read" and an "invalid JSON in" message), and `--deletion-runner-ms` has **five**
@@ -14166,7 +14326,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 399 records; 320 Accepted, 79 Proposed (the
+title or status change cannot drift. 400 records; 321 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 
@@ -14182,6 +14342,10 @@ measured over all 398, **zero** carry a header this generator cannot parse.
 
 ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never
 written; those milestones landed under other numbers. The gap is permanent.
+**ADR-0404 is a second permanent gap** and is not a reservation: it was skipped
+in numbering, and the string occurs in no file in the repository (measured), so
+nothing cites it and nothing is missing. Do not reuse the number — a reader
+finding a record there later could not tell it from one that had been lost.
 
 When you ship something, write its ADR in the same session, following
 `0000-template.md`: what was broken, the decision and the rule behind it, what

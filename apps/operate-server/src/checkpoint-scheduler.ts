@@ -39,7 +39,14 @@ export const CheckpointConfigSchema = z
     includePlatform: z.boolean().default(true),
     /** Checkpoint every active tenant from the live tenant registry instead of the static `tenants` list. */
     allTenants: z.boolean().default(false),
-    /** With `allTenants`, which tenant statuses to include (passed to the live source; default `['active']`). */
+    /**
+     * With `allTenants`, which tenant statuses to include (passed to the live source).
+     *
+     * Absent means `chainScopeStatuses`' wide set — **every** `TENANT_STATUSES` member — and not
+     * `PostgresTenantSource`'s own `['active']`, which is right for a cron scheduler and wrong for a
+     * tamper-evidence pass whose subject is a trail that outlives the tenant. See
+     * `CHAIN_SCOPE_TENANT_STATUSES`.
+     */
     tenantStatuses: z.array(z.string().min(1)).nonempty().optional(),
   })
   .strict();
@@ -70,6 +77,29 @@ export function tenantSourceScopes(
 export function parseCheckpointConfig(json: unknown): CheckpointConfig {
   return CheckpointConfigSchema.parse(json);
 }
+
+/**
+ * What `--checkpoints` mounts: the schema's own defaults plus `allTenants`, and nothing else.
+ *
+ * Not a second set of defaults — one named literal, parsed through the same schema, with a test
+ * asserting it equals `parse({})` plus that one field. The flag exists because the file route had
+ * none: `--checkpoint-config` takes a path, the `api` service declares no `volumes:` key, so the
+ * only way a file reached a shipped container was a commit baked into an image layer.
+ *
+ * `allTenants` is the whole departure, and it is the one that makes the flag worth having rather
+ * than a convenience: measured, an empty config resolves to the platform chain **alone**, and on a
+ * deployment whose platform chain is empty ADR-0399's `isEmptyScope` discards the report — so a
+ * pass mounted over `{}` anchors nothing, verifies nothing and prints nothing, while every tenant's
+ * chain goes unanchored. Verified live both arms: 0 anchors / 0 verdicts / 0 log lines against
+ * 4 / 4 / 8 on the same binary. So the file's *natural* content is a trap, which is why this is a
+ * boolean over a named literal rather than a documented `{}`.
+ *
+ * `tenantStatuses` is deliberately absent: `chainScopeStatuses` answers it, so the wide set reaches
+ * the file route too and this literal does not restate a decision made one module over.
+ */
+export const DEFAULT_CHECKPOINT_CONFIG: CheckpointConfig = CheckpointConfigSchema.parse({
+  allTenants: true,
+});
 
 export async function loadCheckpointConfig(path: string): Promise<CheckpointConfig> {
   let text: string;

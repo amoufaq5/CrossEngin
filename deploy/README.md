@@ -22,11 +22,16 @@ git clone <your-fork-url> crossengin && cd crossengin/deploy
 
 cp .env.example .env
 # Edit .env: set POSTGRES_PASSWORD, DOMAIN, ACME_EMAIL, a strong token in
-# OPERATE_ADMIN_API_KEY, and the two login secrets (CREDENTIAL_PEPPER and
-# OPERATE_TOKEN_SIGNING_KEY) and CURSOR_ENCRYPTION_SECRET -- three secrets, one
-# generator line each in .env.example. The cursor one is not optional on this
+# OPERATE_ADMIN_API_KEY, the two login secrets (CREDENTIAL_PEPPER and
+# OPERATE_TOKEN_SIGNING_KEY), CURSOR_ENCRYPTION_SECRET and
+# AUDIT_CHAIN_SIGNING_KEY -- four secrets, one generator line each in
+# .env.example. The cursor one is not optional on this
 # pack: unsealed, `?sort=work_email` hands that field's plaintext back in
-# `nextCursor` to a caller the body redacts it from. The UI has a login now, so
+# `nextCursor` to a caller the body redacts it from. The chain one is what makes
+# the audit trail tamper-evident: without it every audited row is written
+# UNANCHORED and the two hourly chain passes print one warn line each and skip.
+# Back it up -- it is the only thing that can verify the entries written under
+# it, and there is no rotation path. The UI has a login now, so
 # you create the first tenant and user yourself -- five curl calls, no shell in
 # the container; see "The UI has a login" below.
 
@@ -319,12 +324,24 @@ a `middleware.ts` that redirects a cookie-less page request and answers a cookie
 cookie is only a hint — the API verifies the token on every request, so a forged or expired
 one is a 401 from the API rather than something the browser layer decides.
 
-Three things to know before you expose it.
+Four things to know before you expose it.
 
-**Set the two secrets.** `CREDENTIAL_PEPPER` and `OPERATE_TOKEN_SIGNING_KEY` are required,
-and `.env.example` says what each is for and how to generate it. The boot line is
+**Set the two login secrets.** `CREDENTIAL_PEPPER` and `OPERATE_TOKEN_SIGNING_KEY` are
+required, and `.env.example` says what each is for and how to generate it. The boot line is
 `[auth] credential login: enabled (kid login-v1, public key …)`; if it says `refused`,
 nobody can log in and the reason names the variable.
+
+**And set the chain's.** `AUDIT_CHAIN_SIGNING_KEY` is the Ed25519 seed the forensic chain
+signs with, and it is the only route to it: there is no flag, because a private key must not
+travel on argv (ADR-0301) and a file in `deploy/` is baked into a pushable image layer. One
+variable and not two — the public half is derived, because node builds a key from the private
+half and silently discards an inconsistent public one, so a pair stated twice can be stated
+wrongly and the only symptom is a signer that announces one fingerprint while signing under
+another. The boot line is
+`[audit-chain] audit chain: enabled (key <fingerprint>, …, from env_only)`; without the
+variable the two hourly chain passes print one warn line each and skip, and every audited row
+is written **unanchored**. **Back it up.** It is the only thing that can verify the entries
+written under it and there is no rotation path, so losing it leaves a trail nothing can check.
 
 **One boot line on a fresh stack is an error and is correct.** `--tenant-status-gate` is a
 default now, and it surveys the tenants your api-key specs name before the first request:
@@ -934,14 +951,15 @@ here is Oracle-specific.
 git clone <your fork> crossengin && cd crossengin/deploy
 cp .env.example .env    # then set POSTGRES_PASSWORD, DOMAIN, ACME_EMAIL,
                         # OPERATE_ADMIN_API_KEY, CREDENTIAL_PEPPER,
-                        # OPERATE_TOKEN_SIGNING_KEY and CURSOR_ENCRYPTION_SECRET
+                        # OPERATE_TOKEN_SIGNING_KEY, CURSOR_ENCRYPTION_SECRET
+                        # and AUDIT_CHAIN_SIGNING_KEY
 docker compose up -d --build
 docker compose logs -f api
 ```
 
 The first build takes 10–20 minutes on 2 A1 cores. Then read the boot lines the
 [Going to production (auth)](#going-to-production-auth) section lists — `[auth]` twice,
-`[pg]`, `[cursor]` and `[read-state]` — and create your first tenant and user with
+`[audit-chain]`, `[pg]`, `[cursor]` and `[read-state]` — and create your first tenant and user with
 [Create your first tenant](#create-your-first-tenant) and
 [Create your first user](#create-your-first-user). There is no sign-up page and no
 forgot-password, so you create the first account yourself — five `curl` calls against

@@ -7,6 +7,7 @@ import {
 } from "@crossengin/api-gateway-pg";
 import { REQUIRED_JWT_CLAIMS } from "@crossengin/api-gateway-runtime";
 import { REGIONS } from "@crossengin/residency";
+import { DELETION_SUBSYSTEMS, SUBSYSTEM_DISPOSITIONS } from "@crossengin/tenant-lifecycle";
 import {
   SENSITIVE_DATA_CLASSIFICATIONS,
   type DataClassification,
@@ -382,8 +383,20 @@ export interface ServeOptions {
   readonly auditChainConfig: string | null;
   /** Path to a JSON checkpoint config ({schema?, intervalMs?, checkpointedBy?, tenants?, includePlatform?, allTenants?, tenantStatuses?}) — periodically anchors a chain checkpoint per tenant (or every active tenant when allTenants) so verification stays bounded (needs --store pg + --audit-chain-config). */
   readonly checkpointConfig: string | null;
+  /**
+   * Mount the checkpoint scheduler over `DEFAULT_CHECKPOINT_CONFIG` — the schema's own defaults
+   * plus `allTenants` — with no file.
+   *
+   * A boolean rather than a documented `{}` because the file's natural content is a trap: an empty
+   * config resolves to the platform chain alone, which on a deployment with no escalation flag is
+   * empty, and an empty scope's report is discarded (ADR-0399) — so the pass anchors nothing,
+   * verifies nothing and prints nothing. Mutually exclusive with `--checkpoint-config`.
+   */
+  readonly checkpoints: boolean;
   /** Path to a JSON integrity-proof config ({schema?, intervalMs?, verifiedBy?, tenants?, includePlatform?, allTenants?, tenantStatuses?, auditRowLimit?, fromCheckpoint?, recordVerdict?, escalation?}) — periodically runs BOTH halves of the audit-integrity proof (row↔anchor and the chain's own links + signatures) per tenant, records the verdict in the chain, and with `escalation` declares an incident + pages once per compromised episode (needs --store pg + --audit-chain-config). */
   readonly integrityProofConfig: string | null;
+  /** `--checkpoints`' sibling for the integrity proof; same literal shape, same reason. */
+  readonly integrityProof: boolean;
   /** Refresh interval (ms) for live per-tenant audit sampling read from meta.operate_tenant_settings; enables the live policy cache (needs --store pg + --audit-chain-config). Null disables it. */
   readonly auditSamplingRefreshMs: number | null;
   /** Expose the platform super-admin tenant-management routes under /v1/platform (list/create/suspend/archive/reactivate tenants + stats over meta.tenants; needs --store pg|pg-columns). */
@@ -547,6 +560,21 @@ export interface ServeOptions {
    */
   readonly deletionCapabilities: string | null;
   /**
+   * The same six-value declaration, stated inline through repeatable `--deletion-capability`
+   * `<subsystem>=<disposition>` pairs, or null when none was passed.
+   *
+   * A second route and not a replacement: the file keeps working and the two are mutually
+   * exclusive, because two configs for one declaration is the precedence question again and this
+   * declaration decides the reach of a cryptographic proof. The inline route exists because the
+   * file had **no route at all** on a shipped deployment — the `api` service declares no
+   * `volumes:` key, so the only way a file reached the container was a commit baked into an image
+   * layer, which costs a full `pnpm install && pnpm -r build` to change one word. Inline, the
+   * declaration is in `docker-compose.yml` where a diff shows it and
+   * `deployment-defaults.test.ts` can fence it; a mounted file's content is outside every
+   * workspace rule and every test by construction.
+   */
+  readonly deletionCapabilityDeclarations: Readonly<Record<string, string>> | null;
+  /**
    * Whether a verified Article 17 request erases one data subject or the whole tenant.
    *
    * REQUIRED by the deletion runner, and there is no default because neither value is safe to
@@ -709,6 +737,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let auditChainConfig: string | null = null;
   let checkpointConfig: string | null = null;
   let integrityProofConfig: string | null = null;
+  let checkpoints = false;
+  let integrityProof = false;
   let auditSamplingRefreshMs: number | null = null;
   let platformAdmin = false;
   const platformAdminRoles: string[] = [];
@@ -759,6 +789,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let deletionStrandedAfterMs: number | null = null;
   let deletionEscalationConfig: string | null = null;
   let deletionCapabilities: string | null = null;
+  const deletionCapabilityDeclarations: Record<string, string> = {};
   let deletionSubjectScope: "tenant" | null = null;
   let deletionAuditEveryTicks: number | null = null;
   let deletionWarningDays: number | null = null;
@@ -1215,6 +1246,10 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--integrity-proof-config" || arg.startsWith("--integrity-proof-config=")) {
       integrityProofConfig = takeValue(arg, next, "--integrity-proof-config");
       i += consumed();
+    } else if (arg === "--checkpoints") {
+      checkpoints = true;
+    } else if (arg === "--integrity-proof") {
+      integrityProof = true;
     } else if (arg === "--audit-sampling-refresh-ms" || arg.startsWith("--audit-sampling-refresh-ms=")) {
       const raw = takeValue(arg, next, "--audit-sampling-refresh-ms");
       const n = Number(raw);
@@ -1488,6 +1523,52 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       arg.startsWith("--deletion-capabilities=")
     ) {
       deletionCapabilities = takeValue(arg, next, "--deletion-capabilities");
+      i += consumed();
+    } else if (
+      arg === "--deletion-capability" ||
+      arg.startsWith("--deletion-capability=")
+    ) {
+      // Deliberately byte-for-byte the grammar of `--audit-read-sensitive-class`, including the
+      // `eq < 1` test and the "expected <k>=<v>" wording, because an operator who has written one
+      // of this binary's `k=v` flags has written them all. What differs is the three refusals
+      // below, and each of them is a decision rather than validation hygiene.
+      const raw = takeValue(arg, next, "--deletion-capability");
+      const eq = raw.indexOf("=");
+      if (eq < 1) {
+        throw new CliUsageError(
+          `invalid --deletion-capability: ${raw} (expected <subsystem>=<disposition>)`,
+        );
+      }
+      const subsystem = raw.slice(0, eq).trim();
+      const disposition = raw.slice(eq + 1).trim();
+      // Checked against the REAL vocabularies, not copies: a typo'd subsystem would otherwise be
+      // accepted, satisfy nothing, and leave the completeness check below refusing the subsystem
+      // the operator believes they declared — while a typo'd disposition would silently answer a
+      // different question about the same subsystem.
+      if (!(DELETION_SUBSYSTEMS as readonly string[]).includes(subsystem)) {
+        throw new CliUsageError(
+          `invalid --deletion-capability: unknown subsystem '${subsystem}' (one of ` +
+            `${[...DELETION_SUBSYSTEMS].sort().join(", ")})`,
+        );
+      }
+      if (!(SUBSYSTEM_DISPOSITIONS as readonly string[]).includes(disposition)) {
+        throw new CliUsageError(
+          `invalid --deletion-capability: unknown disposition '${disposition}' for ${subsystem}` +
+            ` (one of ${[...SUBSYSTEM_DISPOSITIONS].sort().join(", ")})`,
+        );
+      }
+      // A repeated subsystem is REFUSED rather than accumulated, which is where this departs from
+      // every other repeatable flag here: a role list is a set and a disposition is one decision,
+      // so last-wins would let argv order decide what a signed Article 17 proof claims about a
+      // subsystem (ADR-0357's refusal of precedence, one declaration across).
+      const already = deletionCapabilityDeclarations[subsystem];
+      if (already !== undefined) {
+        throw new CliUsageError(
+          `invalid --deletion-capability: ${subsystem} declared twice ('${already}' then` +
+            ` '${disposition}') — a disposition is one decision, so state it once`,
+        );
+      }
+      deletionCapabilityDeclarations[subsystem] = disposition;
       i += consumed();
     } else if (
       arg === "--deletion-subject-scope" ||
@@ -2064,6 +2145,41 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     throw new CliUsageError("--access-reviews-live-grants requires --access-reviews-config");
   }
 
+  // Two configs for one mount is the precedence question again, and here it decides what a
+  // tamper-evidence pass covers — so it is refused rather than resolved by a rule nobody reads.
+  if (checkpoints && checkpointConfig !== null) {
+    throw new CliUsageError("--checkpoints and --checkpoint-config are mutually exclusive");
+  }
+  if (integrityProof && integrityProofConfig !== null) {
+    throw new CliUsageError("--integrity-proof and --integrity-proof-config are mutually exclusive");
+  }
+
+  const declaredCapabilities = Object.keys(deletionCapabilityDeclarations);
+  if (declaredCapabilities.length > 0 && deletionCapabilities !== null) {
+    throw new CliUsageError(
+      "--deletion-capability and --deletion-capabilities are mutually exclusive (two declarations" +
+        " of one proof's reach — state it once, inline or in the file)",
+    );
+  }
+  if (declaredCapabilities.length > 0) {
+    // An INCOMPLETE set is refused naming what is missing, which is what preserves ADR-0328's rule
+    // that silence may not answer the reach of an Article 17 proof. `DeletionCapabilitiesSchema` is
+    // a total `z.object` with all six keys required for exactly this reason, so a partial inline
+    // set would be refused one layer in with six `invalid_type` issues naming neither the flag nor
+    // the remedy — this says which subsystems are unanswered, at the layer the operator typed.
+    const missing = DELETION_SUBSYSTEMS.filter(
+      (s) => deletionCapabilityDeclarations[s] === undefined,
+    );
+    if (missing.length > 0) {
+      throw new CliUsageError(
+        `--deletion-capability: ${missing.length.toString()} of ` +
+          `${DELETION_SUBSYSTEMS.length.toString()} subsystems undeclared ` +
+          `(${[...missing].sort().join(", ")}) — the reach of an Article 17 proof is total or it` +
+          " is nothing (ADR-0328), so every subsystem states its disposition",
+      );
+    }
+  }
+
   if (
     (jwksKeys.length > 0 || jwksFile !== null || jwksUrl !== null) &&
     (jwtIssuer === null || jwtAudience === null)
@@ -2228,6 +2344,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     auditChainConfig,
     checkpointConfig,
     integrityProofConfig,
+    checkpoints,
+    integrityProof,
     auditSamplingRefreshMs,
     platformAdmin,
     platformAdminRoles: platformAdminRoles.length > 0 ? platformAdminRoles : ["platform_admin"],
@@ -2295,6 +2413,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     deletionStrandedAfterMs,
     deletionEscalationConfig,
     deletionCapabilities,
+    deletionCapabilityDeclarations:
+      Object.keys(deletionCapabilityDeclarations).length > 0 ? deletionCapabilityDeclarations : null,
     deletionSubjectScope,
     deletionAuditEveryTicks,
     deletionWarningDays,
@@ -2953,6 +3073,17 @@ Options:
                        which is ADR-0317 inverted rather than an instance of it: it is a positive
                        signed statement that the data is still held. Its horizon — "we hold it for
                        35 days" — is deliberately not expressible yet; see the boot line
+  --deletion-capability <subsystem>=<disposition>  The same six-value declaration, inline and
+                       repeatable, mutually exclusive with --deletion-capabilities. Exists because
+                       the FILE had no route on a shipped deployment: the compose declares no
+                       volumes: key, so the only way one reached the container was a commit baked
+                       into an image layer, which costs a full install+build to change one word.
+                       Inline, the declaration sits in docker-compose.yml where a diff shows it and
+                       a test can fence it. All six or none — an incomplete set is refused naming
+                       what is missing, because silence may not answer the reach of an Article 17
+                       proof (ADR-0328) — and a repeated subsystem is refused rather than
+                       last-wins, since a disposition is one decision and argv order must not
+                       decide what a signed proof claims
   --deletion-escalation-config <file>  JSON ({severity?, category?, declaredBy?, alertPolicy}) —
                        declares an incident and pages when a deletion proof does not verify or two
                        tombstones name one request. These are the findings the forensic chain
@@ -3012,11 +3143,20 @@ Options:
                        framework (SOC 2 / HIPAA / …) from live control-evidence (encryption coverage, DR
                        readiness, sealed access reviews, tamper-evident audit chain) and persists a sealed
                        report per framework (needs --store pg)
-  --audit-chain-config <file>  JSON audit-chain config ({schema?, actorReference?, privateKeyBase64,
-                       publicKeyBase64, outcomes?, operations?, sampleRate?, tenantOverrides?}) — appends a
-                       signed, hash-linked audit-log entry per (sampled/filtered) request into the
-                       tamper-evident chain and registers its sealing key in the key registry (needs
-                       --store pg)
+  --audit-chain-config <file>  JSON audit-chain POLICY, with the keypair now optional ({schema?,
+                       actorReference?, privateKeyBase64?, publicKeyBase64?, outcomes?, operations?,
+                       sampleRate?, tenantOverrides?}) — appends a signed, hash-linked audit-log
+                       entry per (sampled/filtered) request into the tamper-evident chain and
+                       registers its sealing key in the key registry (needs --store pg).
+                       The signing key's own route is the ENVIRONMENT: set AUDIT_CHAIN_SIGNING_KEY
+                       to a base64 Ed25519 seed and the public half is derived, so there is one
+                       value and not two and nothing can state the pair inconsistently. The
+                       variable alone turns the chain on, so no file is needed for the defaults.
+                       Until it existed this flag was the only route to the seed, and no shipped
+                       compose could pass a file — so nothing was anchored anywhere. Both sources
+                       may carry a key only if they state the SAME one (compared by fingerprint);
+                       a disagreement is refused by name, because whichever won would decide the
+                       fingerprint every entry announces
   --checkpoint-config <file>  JSON checkpoint config ({schema?, intervalMs?, checkpointedBy?, tenants?,
                        includePlatform?, allTenants?, tenantStatuses?}) — periodically anchors a chain
                        checkpoint per tenant (allTenants: every active tenant from the live registry,
@@ -3024,6 +3164,13 @@ Options:
                        includePlatform defaults to TRUE and is paired with the integrity proof's: the
                        proof's truncation check has no witness without a checkpoint
                        (needs --store pg + --audit-chain-config)
+  --checkpoints        Mount the checkpoint scheduler with no file: the schema's own defaults plus
+                       allTenants, over every tenant status rather than only 'active'. A boolean
+                       rather than a documented empty file because an empty config resolves to the
+                       PLATFORM chain alone — and on a deployment with no escalation flag that
+                       chain is empty, so the pass anchors nothing, verifies nothing and prints
+                       nothing. Measured live: 0 anchors / 0 verdicts / 0 log lines against
+                       4 / 4 / 8 with allTenants. Mutually exclusive with --checkpoint-config
   --integrity-proof-config <file>  JSON integrity-proof config ({schema?, intervalMs?, verifiedBy?,
                        tenants?, includePlatform?, allTenants?, tenantStatuses?, auditRowLimit?,
                        fromCheckpoint?, recordVerdict?, escalation?}) — periodically runs BOTH
@@ -3035,6 +3182,10 @@ Options:
                        includePlatform defaults to TRUE: three escalators write platform-scope rows,
                        so leaving it off meant writing rows nothing verified
                        (needs --store pg + --audit-chain-config)
+  --integrity-proof    Mount the integrity proof with no file: --checkpoints' sibling, same
+                       literal, same reason. No escalation block, so a deployment that wants a page
+                       declares the alert policy itself. Mutually exclusive with
+                       --integrity-proof-config
   --audit-sampling-refresh-ms <n>  Refresh interval (ms, >=1000) for live per-tenant audit sampling read
                        from meta.operate_tenant_settings (overrides the config map without a redeploy);
                        enables the live policy cache (needs --store pg + --audit-chain-config)
