@@ -271,7 +271,7 @@ Two flags worth setting on a real deployment:
 | Flag | Why |
 |---|---|
 | `--ai-max-usd-per-month <n>` | Per-tenant monthly ceiling on AI design spend (default `25`). A tenant that exhausts it gets `402 ai_budget_exceeded`; the ledger is durable and shared across replicas. |
-| `--manifest-refresh-ms 15000` | If you run **more than one API replica**, this makes an activation on one replica invalidate the others within the interval (otherwise they serve the previous manifest for up to 30s). One query per interval regardless of tenant count. |
+| `--manifest-refresh-ms 15000` | If you run **more than one API replica**, this makes an activation on one replica invalidate the others within the interval (otherwise they serve the previous manifest for up to 30s). One aggregate per interval regardless of tenant count — four statements and one pooled connection held across them, since the read claims its platform grant transaction-locally (ADR-0409). |
 
 **Dev-time (local):** the `crossengin chat` CLI, run **locally**, not on Vercel
 or Supabase. To run it against a self-hosted open-source model:

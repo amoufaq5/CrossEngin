@@ -5140,9 +5140,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         ),
     });
     // Cross-replica invalidation: activation on replica A is invisible to B/C until their TTL
-    // expires. One aggregate query per interval (independent of tenant count) detects changed
+    // expires. One aggregate per interval, independent of tenant count, detects changed
     // activation watermarks — and tenants whose active manifest was archived — and drops just
-    // those cache entries.
+    // those cache entries. Since ADR-0409 that aggregate claims a platform grant
+    // transaction-locally, so an interval is four statements and one held pooled client rather
+    // than a single `query`; the tenant-count independence is unchanged.
     if (options.manifestRefreshMs !== null && conn !== undefined) {
       manifestPoller = new ManifestActivationPoller({
         source: new PostgresActivationWatermarkSource(conn, schemaOpt),

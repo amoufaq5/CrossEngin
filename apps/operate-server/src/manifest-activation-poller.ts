@@ -30,10 +30,20 @@ function isoOf(value: unknown): string | null {
 
 /**
  * The activation watermark of every tenant with an active manifest, in ONE
- * cross-tenant aggregate — cost is one query per interval regardless of tenant
- * count. Binding one tenant with `withTenantContext` would hide every other
- * tenant's activation from the poller, so this is a platform-level sweep and
- * runs under a platform grant of its own.
+ * cross-tenant aggregate, whose cost is **independent of tenant count**.
+ * Binding one tenant with `withTenantContext` would hide every other tenant's
+ * activation from the poller, so this is a platform-level sweep and runs under
+ * a platform grant of its own.
+ *
+ * This said "cost is one query per interval" until ADR-0409, and that half is
+ * no longer true *because of* the grant: a transaction-local `set_config` must
+ * be in a transaction, so an interval is `BEGIN` + `set_config` + the aggregate
+ * + `COMMIT` and one pooled client held across the four, where before it was a
+ * single pooled `query`. The tenant-count independence is the property that
+ * matters and is unchanged; the statement count is what the fix bought it with.
+ * Said here, at `node.ts`'s wiring and in `deploy/VERCEL-SUPABASE.md` — the one
+ * document that recommends the flag, on the managed path where a held
+ * connection costs the most.
  *
  * Until ADR-0409 it ran under **no** scope at all, and the comment here cited
  * `PostgresTenantSource` as the precedent for that. The analogy was false:
