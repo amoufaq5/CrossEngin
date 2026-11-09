@@ -38,6 +38,7 @@ import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
 import {
   COMPROMISE_CAUSES,
   INTEGRITY_VERDICTS,
+  INTEGRITY_PASS_SKIP_REASONS,
   IntegrityProofScheduler,
   IntegrityProofConfigSchema,
   DEFAULT_INTEGRITY_PROOF_CONFIG,
@@ -218,6 +219,12 @@ function manualScheduler(): { scheduler: IntervalScheduler; fire: () => void; cl
   };
 }
 
+// A macrotask boundary, so every pending microtask has run by the time it resolves — the idiom four
+// sibling test files here already use (`manifest-activation-poller.test.ts` calls it `flush`). A
+// counted `await Promise.resolve()` chain is what it replaces: that models one await-depth of the
+// scheduler's internals and silently stops modelling anything when the depth changes.
+const drainMicrotasks = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
 describe("IntegrityProofConfigSchema", () => {
   it("defaults to hourly, all 500 rows, checkpoint-bounded, verdict recorded", () => {
     const c = parseIntegrityProofConfig({});
@@ -309,6 +316,7 @@ describe("IntegrityProofScheduler — verdicts", () => {
     const passes: IntegrityProofReport[] = [];
     const findings: IntegrityProofReport[] = [];
     const s = new IntegrityProofScheduler({
+      onPassSkipped: () => {},
       prove: async () => r,
       record: async (rep) => {
         recorded.push(rep);
@@ -348,6 +356,7 @@ describe("IntegrityProofScheduler — verdicts", () => {
 
   it("computes but does not record when no record hook is wired", async () => {
     const s = new IntegrityProofScheduler({
+      onPassSkipped: () => {},
       prove: async () => report(),
       scopes: () => [TENANT_A],
       intervalMs: 1000,
@@ -367,6 +376,7 @@ describe("IntegrityProofScheduler — passes", () => {
     });
     const recorded: unknown[] = [];
     const s = new IntegrityProofScheduler({
+      onPassSkipped: () => {},
       prove: async () => empty,
       record: async () => {
         recorded.push(1);
@@ -389,6 +399,7 @@ describe("IntegrityProofScheduler — passes", () => {
       truncation: noTruncation({ checkpointSequence: null, tailSequence: null }),
     });
     const s = new IntegrityProofScheduler({
+      onPassSkipped: () => {},
       prove: async () => r,
       scopes: () => [TENANT_A],
       intervalMs: 1000,
@@ -399,6 +410,7 @@ describe("IntegrityProofScheduler — passes", () => {
   it("isolates a per-scope failure and finishes the rest", async () => {
     const errors: unknown[] = [];
     const s = new IntegrityProofScheduler({
+      onPassSkipped: () => {},
       prove: async (scope) => {
         if (scope === TENANT_A) throw new Error("scope A exploded");
         return report({ scope });
@@ -416,6 +428,7 @@ describe("IntegrityProofScheduler — passes", () => {
   it("routes a failure to record as a scope error rather than losing the pass", async () => {
     const errors: unknown[] = [];
     const s = new IntegrityProofScheduler({
+      onPassSkipped: () => {},
       prove: async () => report(),
       record: async () => {
         throw new Error("chain unavailable");
@@ -431,6 +444,7 @@ describe("IntegrityProofScheduler — passes", () => {
   it("survives a failing scope source without throwing", async () => {
     const errors: unknown[] = [];
     const s = new IntegrityProofScheduler({
+      onPassSkipped: () => {},
       prove: async () => report(),
       scopes: () => {
         throw new Error("tenant registry down");
@@ -445,6 +459,7 @@ describe("IntegrityProofScheduler — passes", () => {
   it("proves every scope, including the platform chain", async () => {
     const seen: (string | null)[] = [];
     const s = new IntegrityProofScheduler({
+      onPassSkipped: () => {},
       prove: async (scope) => {
         seen.push(scope);
         return report({ scope, anchors: scope === null ? null : anchors() });
@@ -460,6 +475,7 @@ describe("IntegrityProofScheduler — passes", () => {
   it("re-reads the scope list each pass, so a new tenant is picked up", async () => {
     let scopes: (string | null)[] = [TENANT_A];
     const s = new IntegrityProofScheduler({
+      onPassSkipped: () => {},
       prove: async (scope) => report({ scope }),
       scopes: () => scopes,
       intervalMs: 1000,
@@ -473,8 +489,10 @@ describe("IntegrityProofScheduler — passes", () => {
 describe("IntegrityProofScheduler — lifecycle", () => {
   it("runs once on start, then on each interval tick", async () => {
     let calls = 0;
+    const skips: string[] = [];
     const m = manualScheduler();
     const s = new IntegrityProofScheduler({
+      onPassSkipped: (reason) => skips.push(reason),
       prove: async () => {
         calls += 1;
         return report();
@@ -484,18 +502,24 @@ describe("IntegrityProofScheduler — lifecycle", () => {
       scheduler: m.scheduler,
     });
     s.start();
-    await Promise.resolve();
+    await drainMicrotasks();
     expect(calls).toBe(1);
     m.fire();
-    await Promise.resolve();
-    await Promise.resolve();
+    await drainMicrotasks();
     expect(calls).toBe(2);
+    // The subject of this test is the wiring — a tick causes a pass — and since the overlap guard
+    // landed that is only observable once the start pass has fully unwound. `skips` is the proof the
+    // drain was sufficient: a counted-microtask drain would leave `inFlight` set, the tick would be
+    // skipped, and `calls` alone would fail with no cause named (ADR-0370's own lesson about a fake
+    // that models one numbering). The overlap itself has its own describe block below.
+    expect(skips).toEqual([]);
   });
 
   it("can skip the immediate pass", async () => {
     let calls = 0;
     const m = manualScheduler();
     new IntegrityProofScheduler({
+      onPassSkipped: () => {},
       prove: async () => {
         calls += 1;
         return report();
@@ -512,6 +536,7 @@ describe("IntegrityProofScheduler — lifecycle", () => {
   it("start is idempotent and stop clears the timer", () => {
     const m = manualScheduler();
     const s = new IntegrityProofScheduler({
+      onPassSkipped: () => {},
       prove: async () => report(),
       scopes: () => [],
       intervalMs: 1000,
@@ -1225,6 +1250,7 @@ describe("IntegrityProofScheduler — emptiness is judged by the tail, not the s
       truncation: noTruncation({ checkpointSequence: 11, tailSequence: 11 }),
     });
     const s = new IntegrityProofScheduler({
+      onPassSkipped: () => {},
       prove: async () => caughtUp,
       scopes: () => [null],
       intervalMs: 1000,
@@ -1234,6 +1260,7 @@ describe("IntegrityProofScheduler — emptiness is judged by the tail, not the s
 
   it("skips a scope with no tail and no rows", async () => {
     const s = new IntegrityProofScheduler({
+      onPassSkipped: () => {},
       prove: async () =>
         report({
           anchors: anchors({ checked: 0, verified: 0 }),
@@ -1290,6 +1317,7 @@ describe("IntegrityProofScheduler — a refused row is not an empty scope", () =
     const recorded: IntegrityProofReport[] = [];
     const escalated: IntegrityProofReport[] = [];
     const s = new IntegrityProofScheduler({
+      onPassSkipped: () => {},
       prove: async () => empty,
       record: async (r) => {
         recorded.push(r);
@@ -1320,6 +1348,7 @@ describe("IntegrityProofScheduler — a refused row is not an empty scope", () =
   it("still skips the same scope when nothing was refused", async () => {
     const recorded: unknown[] = [];
     const s = new IntegrityProofScheduler({
+      onPassSkipped: () => {},
       prove: async () => report({ ...emptyChain, anchors: anchors({ checked: 0, verified: 0 }) }),
       record: async () => {
         recorded.push(1);
@@ -1341,6 +1370,7 @@ describe("IntegrityProofScheduler — a refused row is not an empty scope", () =
     const refused: UnreadableRow = { identity: "2", detail: "kind: invalid_enum_value" };
     const outcomeFor = async (over: Partial<IntegrityProofReport>): Promise<string | undefined> => {
       const s = new IntegrityProofScheduler({
+      onPassSkipped: () => {},
         prove: async () =>
           report({ ...emptyChain, anchors: anchors({ checked: 0, verified: 0 }), ...over }),
         scopes: () => [TENANT_A],
@@ -1372,6 +1402,7 @@ describe("IntegrityProofScheduler — a refused row is not an empty scope", () =
     // discarded before `onPass`, `record`, `onFinding` and `escalate`.
     const refusedAnchor: UnreadableRow = { identity: "4", detail: "provenance: invalid_enum_value" };
     const s = new IntegrityProofScheduler({
+      onPassSkipped: () => {},
       prove: async () =>
         report({
           ...emptyChain,
@@ -1392,6 +1423,7 @@ describe("IntegrityProofScheduler — a refused row is not an empty scope", () =
     // of it.
     const outcomeFor = async (audit: AnchorAuditReport): Promise<string | undefined> => {
       const s = new IntegrityProofScheduler({
+      onPassSkipped: () => {},
         prove: async () =>
           report({ ...emptyChain, anchors: anchors({ checked: 0, verified: 0 }), anchorAudit: audit }),
         scopes: () => [TENANT_A],
@@ -1454,6 +1486,7 @@ describe("IntegrityProofScheduler — a proven truncation is not an empty scope"
     const recorded: IntegrityProofReport[] = [];
     const escalated: IntegrityProofReport[] = [];
     const s = new IntegrityProofScheduler({
+      onPassSkipped: () => {},
       prove: (scope) => proveScopeIntegrity(scope, deps),
       record: async (r) => {
         recorded.push(r);
@@ -1535,6 +1568,7 @@ describe("IntegrityProofScheduler — a proven truncation is not an empty scope"
     const outcomes: (string | undefined)[] = [];
     for (const verdict of ["compromised", "unproven"] as const) {
       const s = new IntegrityProofScheduler({
+      onPassSkipped: () => {},
         prove: async () => report({ ...emptyShape, verdict }),
         scopes: () => [TENANT_A],
         intervalMs: 1000,
@@ -2190,5 +2224,114 @@ describe("DEFAULT_INTEGRITY_PROOF_CONFIG", () => {
 
   it("the empty config it replaces resolves to the platform chain alone", () => {
     expect(integrityConfigScopes(IntegrityProofConfigSchema.parse({}))).toEqual([null]);
+  });
+});
+
+describe("IntegrityProofScheduler — the overlap guard", () => {
+  /*
+   * The guard the sibling scheduler had and this one did not, and ADR-0406 made its absence live:
+   * `--integrity-proof` defaulted on, the scope set widened to all five tenant statuses, and
+   * `proveScopeIntegrity`'s `loadChain` unconditional — so one pass holds one scope's whole chain
+   * and k overlapping passes hold k of them. The failure is the detector going down, not a wrong
+   * verdict.
+   *
+   * Every assertion here is about the pair (no second pass, AND the skip reported), because a guard
+   * that is silent is a falsely-true boot line: "the hourly proof is running" would be true of the
+   * timer and false of the verification.
+   */
+  const slowScheduler = () => {
+    let release: (() => void) | null = null;
+    const gate = new Promise<void>((res) => {
+      release = res;
+    });
+    const proved: (string | null)[] = [];
+    const skips: string[] = [];
+    const s = new IntegrityProofScheduler({
+      onPassSkipped: (reason) => skips.push(reason),
+      prove: async (scope) => {
+        proved.push(scope);
+        await gate;
+        return report();
+      },
+      scopes: () => [TENANT_A],
+      intervalMs: 1000,
+      runOnStart: false,
+    });
+    return { s, proved, skips, release: () => release?.() };
+  };
+
+  it("performs no second pass while one is in flight, and says so", async () => {
+    const { s, proved, skips, release } = slowScheduler();
+    const first = s.runOnce();
+    // Second tick lands mid-fold. It must not start a pass, and it must not be silent.
+    const second = await s.runOnce();
+    expect(second).toEqual([]);
+    expect(proved).toHaveLength(1);
+    expect(skips).toEqual(["pass_already_in_flight"]);
+    release();
+    const firstResults = await first;
+    // The non-vacuity control: the guard skipped a pass rather than killing the scheduler, so the
+    // first pass still completed and still produced its verdict. Without this the test passes just
+    // as well against a `runOnce` that returns `[]` unconditionally.
+    expect(firstResults).toHaveLength(1);
+    expect(firstResults[0]).toMatchObject({ outcome: "proved" });
+  });
+
+  it("clears the guard after a pass that throws, so one failure is not permanent", async () => {
+    const skips: string[] = [];
+    let proveCalls = 0;
+    /*
+     * A throwing `onError` is the one failure that escapes `pass`, measured over five arms against
+     * the built scheduler rather than reasoned: `scopes()`, `prove()` and `onPass()` throws are all
+     * caught and routed to `onError`, and only `onError`'s own throw gets past the catch it is
+     * called from. An earlier draft of this test named `scopes` and fenced nothing, because `pass`
+     * returns normally on that arm — so the reset-outside-the-`finally` mutation survived.
+     *
+     * `onError` throws unconditionally, which is what a broken reporter looks like; `prove` fails
+     * only the first time, so the second pass has something real to produce. With the reset outside
+     * the `finally` the first throw leaves `inFlight` set and every later pass reports
+     * `pass_already_in_flight` — permanently, for the life of the process, from one reporter
+     * failure. That is the leak this asserts against, confirmed by applying the mutation and
+     * watching exactly these two arms start leaking.
+     */
+    const s = new IntegrityProofScheduler({
+      onPassSkipped: (reason) => skips.push(reason),
+      prove: async (scope) => {
+        proveCalls += 1;
+        if (proveCalls === 1) throw new Error("fold failed");
+        return report({ scope });
+      },
+      scopes: () => [TENANT_A],
+      intervalMs: 1000,
+      runOnStart: false,
+      onError: () => {
+        throw new Error("reporter down");
+      },
+    });
+    await expect(s.runOnce()).rejects.toThrow("reporter down");
+    const second = await s.runOnce();
+    // Both halves, because either alone passes against the defect: `skips` empty says the guard was
+    // released, and the length says the released guard let a real pass through.
+    expect(skips).toEqual([]);
+    expect(second).toHaveLength(1);
+    expect(second[0]).toMatchObject({ outcome: "proved" });
+    expect(proveCalls).toBe(2);
+  });
+
+  it("reports every skipped tick rather than deduplicating", async () => {
+    // For a scope whose fold never fits the interval this is the only line that ever appears
+    // again, so one-shot reporting would make a permanently dead detector a quiet one.
+    const { s, skips, release } = slowScheduler();
+    const first = s.runOnce();
+    await s.runOnce();
+    await s.runOnce();
+    await s.runOnce();
+    expect(skips).toHaveLength(3);
+    release();
+    await first;
+  });
+
+  it("names its skip reasons as an enum with no unreachable member", () => {
+    expect(INTEGRITY_PASS_SKIP_REASONS).toEqual(["pass_already_in_flight"]);
   });
 });

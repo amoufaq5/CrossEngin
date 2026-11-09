@@ -717,7 +717,31 @@ export interface IntegrityProofSchedulerOptions {
    */
   readonly escalate?: (report: IntegrityProofReport) => Promise<IntegrityEscalationOutcome>;
   readonly onError?: (err: unknown) => void;
+  /**
+   * Fires when a tick finds a pass already in flight and performs none.
+   *
+   * **Required**, where `onPass` and `onFinding` are not, and the asymmetry is the whole reason the
+   * callback exists rather than a counter: a skipped pass is a skipped *detection*, and the only
+   * state in which that is fatal — a scope whose fold never fits the interval, so every tick skips
+   * — is precisely the state in which no other callback ever fires again. A counter with a getter
+   * would be read by `onPass`, which that scope never reaches; silence would then be
+   * indistinguishable from a healthy quiet deployment, and `[integrity-proof]` would be true of the
+   * timer and false of the verification (ADR-0374's rule: a detector going quiet is the dangerous
+   * direction). `CheckpointSchedulerOptions.onRefused` is required for the same shape of reason.
+   *
+   * It fires on **every** skipped tick and is deliberately not deduplicated. For a stuck scope that
+   * is the signal and not noise: the line an operator needs is that the proof has not run, repeated
+   * for as long as it has not run.
+   */
+  readonly onPassSkipped: (reason: IntegrityPassSkipReason) => void;
 }
+
+/**
+ * Why a tick performed no pass. One member today, and an enum rather than a bare call so a second
+ * reason (a circuit breaker, a maintenance window) cannot arrive as an unexplained silence.
+ */
+export const INTEGRITY_PASS_SKIP_REASONS = ["pass_already_in_flight"] as const;
+export type IntegrityPassSkipReason = (typeof INTEGRITY_PASS_SKIP_REASONS)[number];
 
 const DEFAULT_SCHEDULER: IntervalScheduler = {
   setInterval(handler, ms) {
@@ -747,6 +771,7 @@ const DEFAULT_SCHEDULER: IntervalScheduler = {
  */
 export class IntegrityProofScheduler {
   private handle: IntervalHandle | null = null;
+  private inFlight = false;
 
   constructor(private readonly opts: IntegrityProofSchedulerOptions) {}
 
@@ -762,9 +787,51 @@ export class IntegrityProofScheduler {
     this.handle = null;
   }
 
-  /** One proof pass over every scope. Never rejects — a per-scope error is captured + routed. */
+  /**
+   * One proof pass over every scope. Never rejects — a per-scope error is captured + routed.
+   *
+   * A pass already in flight makes this a no-op returning `[]`, and the guard is not cost hygiene
+   * copied from the sibling scheduler — it bounds the **heap**, which is what binds here.
+   * `proveScopeIntegrity` loads the whole chain **unconditionally** (see its `loadChain`, read
+   * above the anchor audit because the audit cross-checks every anchor against it), so a checkpoint
+   * bounds the signature CPU and not the memory: one pass holds one scope's entire chain whatever
+   * `fromCheckpoint` answers. `intervalMs` is therefore no lever at all on the quantity that binds
+   * — it changes how often a pass runs and not what one pass holds — so peak heap is identical at a
+   * one-hour and a six-hour interval and only the overlap count moves it.
+   *
+   * Three changes composed to make this reachable rather than theoretical, all of them ADR-0406's:
+   * `--integrity-proof` is defaulted on in the shipped compose, the scope set widened from
+   * `["active"]` to all five `TENANT_STATUSES` so retired tenants are scopes, and that ADR's own
+   * open question 3 records that an **idle** retired scope re-folds on *every* pass for ever,
+   * because `record`'s `ON CONFLICT … DO NOTHING` never replaces its anchor and nothing will ever
+   * append to it. So k overlapping passes hold k whole chains, and the failure is not a wrong
+   * verdict but the detector going down.
+   *
+   * The cost is stated rather than discovered: a guarded tick is a **skipped detection**, so this
+   * trades latency for survival and is adaptive rather than free — which is why `onPassSkipped` is
+   * required. It also does **not** cover the other overlap: both schedulers default `runOnStart`
+   * and `node.ts` starts them back to back unawaited, so at boot a checkpoint pass and a proof pass
+   * run concurrently, each holding a chain. That is two schedulers rather than one and no
+   * per-scheduler guard can see it; sequencing them would make a memory property depend on a start
+   * order in a third file, which is the shape ADR-0371 refused for soundness.
+   */
   async runOnce(): Promise<readonly IntegrityProofPassResult[]> {
     const results: IntegrityProofPassResult[] = [];
+    if (this.inFlight) {
+      this.opts.onPassSkipped("pass_already_in_flight");
+      return results;
+    }
+    this.inFlight = true;
+    try {
+      return await this.pass(results);
+    } finally {
+      this.inFlight = false;
+    }
+  }
+
+  private async pass(
+    results: IntegrityProofPassResult[],
+  ): Promise<readonly IntegrityProofPassResult[]> {
     let scopes: readonly (string | null)[];
     try {
       scopes = await this.opts.scopes();
@@ -1070,6 +1137,8 @@ export interface IntegrityProofLifecycleOptions {
   readonly onFinding?: (report: IntegrityProofReport) => void;
   readonly escalate?: (report: IntegrityProofReport) => Promise<IntegrityEscalationOutcome>;
   readonly onError?: (err: unknown) => void;
+  /** Required here too, so the compile error reaches the one non-test construction site. */
+  readonly onPassSkipped: (reason: IntegrityPassSkipReason) => void;
   readonly now?: () => Date;
 }
 
@@ -1192,6 +1261,10 @@ export function buildIntegrityProofLifecycle(
     ...(opts.onFinding !== undefined ? { onFinding: opts.onFinding } : {}),
     ...(opts.escalate !== undefined ? { escalate: opts.escalate } : {}),
     ...(opts.onError !== undefined ? { onError: opts.onError } : {}),
+    // Not a conditional spread: required on both interfaces, so there is no absent case — and a
+    // spread here is the shape ADR-0386 found silently dropping a field past the excess-property
+    // check.
+    onPassSkipped: opts.onPassSkipped,
   });
 
   return { scheduler, runOnce: () => scheduler.runOnce() };

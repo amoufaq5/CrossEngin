@@ -3880,6 +3880,19 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             }
           : {}),
         onError: (err) => console.error("[integrity-proof] pass error", err),
+        // `console.error` and not `console.warn`, because this is the detector reporting that it
+        // did not run: the previous pass's verdict stands and is now stale by an interval, and for
+        // a scope whose fold never fits the interval this is the *only* line that will ever appear
+        // again — `onPass` is unreachable there, so a warn would make a dead detector a quiet one.
+        // Deliberately not deduplicated: repeated for as long as it has not run is the signal.
+        onPassSkipped: (reason) =>
+          console.error(
+            `[integrity-proof] a pass was already in flight, so this tick verified NOTHING` +
+              ` (${reason}) — the last verdict per scope is now at least one interval stale. One` +
+              ` pass holds a whole scope's chain, so if this repeats, the fold is outlasting` +
+              ` --integrity-proof's interval: raise it, narrow the scope set with` +
+              ` --integrity-proof-config, or lower the chain's sampleRate`,
+          ),
       });
     }
   }

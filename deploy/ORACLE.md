@@ -818,14 +818,25 @@ They are also not peers, and it is a three-way split rather than the two this se
   rotated-away key must stay registered or every entry it signed reads as unverifiable — and a chain
   whose key is lost cannot be proven intact, which is the one thing it exists for.
 
-  **It gates one of the three deletion surfaces and not all three**, and the difference decides what
-  you can turn on:
+  **The chain key gates one of the three deletion *surfaces* and not all three, and the capability
+  declaration gates a different two of the four flags** — so the two columns below do not agree, and
+  reading one as a proxy for the other is how row 2 came to be wrong. The difference decides what you
+  can turn on:
 
-  | Surface | Without a chain key | Needs the capability declaration? |
+  | Surface | Without a chain key | Refuses to mount without the capability declaration? |
   |---|---|---|
   | `--tenant-deletion-routes` (writes the tombstone) | **skipped**, naming the key | yes |
-  | `--deletion-request-routes` (the async handle) | **warns and mounts**, rows unanchored | yes |
+  | `--deletion-request-routes` (the async handle) | **warns and mounts**, rows unanchored | **no — it mounts** |
+  | `--deletion-runner-ms` (executes a verified request) | *(no chain gate of its own)* | yes |
   | `--tenant-erasure-routes` (`DROP SCHEMA`) | **warns and mounts** | **no gate at all** |
+
+  Row 2 read *yes* until it was measured: the `--deletion-request-routes` mount block is 169 lines
+  and names `deletionCapabilities` **zero** times, so the routes mount and a caller can submit and
+  verify a request with no declaration anywhere. *Yes* is true of the **flow** and false of the
+  **mounting** — without the declaration the runner never starts, so a verified request simply never
+  executes — and since this table's other column is about mounting, the two columns have to agree on
+  that axis. The flag that genuinely refuses is `--deletion-runner-ms`, which was missing from the
+  table altogether; it is the row to read if you want to know why a verified request sits still.
 
   That last row is deliberate rather than an oversight: ADR-0316's rule is that an erasure which
   succeeds and cannot be *recorded* is refused, and without a chain it is still recorded and merely

@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 21,380 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 21,384 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -1577,9 +1577,16 @@ report; `apps/operate-web` has none).
   injected verifier is `verifyChainFromCheckpoint` itself, which makes the induction self-healing: a
   new chain folds in full and anchors `verified_full`, every pass after folds only the new suffix and
   anchors `verified_suffix`, and a deployment whose legacy anchor carries no provenance pays one full
-  fold and is bounded from then on — **provided its chain gains an entry**, because `record` is
-  `ON CONFLICT … DO NOTHING` so a legacy row sitting *at* the tail is never replaced, which makes an
-  idle *tenant* chain re-fold every pass until something appends. Simply
+  fold and is bounded from then on — **provided the checkpoint scheduler is running**, which
+  ADR-0406's addendum measured and which narrows what this entry claimed twice. `record` is
+  `ON CONFLICT … DO NOTHING` per **sequence**, so a legacy row *at* the tail is never replaced and is
+  instead **superseded** by the next anchor at a higher sequence: with both flags on, a retired scope
+  reads `full:anchor_provenance_absent` twice and `from_checkpoint` after that (anchors 29 `<null>`,
+  30 `verified_full`, 31–35 `verified_suffix`). The re-fold-for-ever case is the proof running
+  **without** `--checkpoints`, where nothing ever anchors past the legacy row — and *"until
+  something appends"* is refuted, because the proof's own `recordVerdict` appends one entry per pass
+  (`sigs` 35 → 39, measured), so the fold grows under the stale anchor rather than escaping it.
+  Simply
   defaulting `fromCheckpoint` to `false` was refused on measurement — Ed25519 verify is **152 µs**
   here, so a full fold is 15.2 s of signature CPU per pass per scope at 100k entries and 152 s at 1M,
   with the whole chain in memory. That figure was also *understated* when it was taken, because
@@ -1612,8 +1619,9 @@ report; `apps/operate-web` has none).
   the skip the provenance exists to refuse. Both ordered reads carry `checkpointed_at DESC, id DESC`
   now (untiebroken `verified_full` 10/10 → tiebroken `verified_suffix` 10/10 on the same two rows),
   and it also **inverts the healing condition for that one scope**: the idle *tenant* chain re-folds
-  because its anchor is never replaced, while the idle *platform* chain heals and grows without
-  bound. Two opposite failures from one `DO NOTHING`. The constraint itself is the top open question
+  because its anchor is never replaced — true only while the checkpoint scheduler is off, per the
+  narrowing above — while the idle *platform* chain heals and grows without bound. Two opposite
+  failures from one `DO NOTHING`. The constraint itself is the top open question
   — `UNIQUE NULLS NOT DISTINCT` is PG15 against a floor of 14, and a partial unique index cannot be
   created while the duplicates every such deployment already holds are there.
   Three things were sharper than the defect. **Swapping two `start()` lines in `node.ts` would have
@@ -3683,6 +3691,34 @@ report; `apps/operate-web` has none).
   so an entry cannot be copied into another scope — while the stated reason for copying was itself
   false, because `--tenant-status-gate` is opt-in and not passed, so a `deleted` tenant **is**
   served, which is ADR-0334's own finding and the reason that flag exists.
+  **And defaulting the proof on made one thing live that the per-flag question's three clauses do
+  not reach, which is ADR-0406's addendum and a fourth clause: does the surface's own *concurrency*
+  forge the finding it reports?** `IntegrityProofScheduler.runOnce` had **no overlap guard** where
+  the sibling `CheckpointScheduler` has had one since ADR-0371, and `proveScopeIntegrity`'s
+  `loadChain` is unconditional — so a pass that outlasts its interval is joined by another and k
+  passes hold k whole chains, with `fromCheckpoint` bounding the Ed25519 CPU and **not** the heap.
+  The hazard on file was memory and a stale verdict; measured, it is neither. **The unguarded arm
+  produced 32 `compromised` verdicts of 38 — an 84% false-positive rate — on a chain
+  `verify-chain --full` then answered OK over at 278 signatures**, and `compromised` is the paging
+  `sev1`. The mechanism is ADR-0399's witness-memory axis meeting its own concurrency: each pass
+  loads the chain, then appends and anchors its verdict, so B loads before A's verdict lands, A
+  commits, and B finds a prior verdict anchored at a sequence its own chain does not hold →
+  `prior_verdict_contradicted`. **The axis is sound iff passes over one scope are serial, so the
+  guard establishes its premise rather than papering over a bug** — and neither increment could have
+  seen it alone, one having shipped the axis and the other having made the pass run hourly by
+  default over a widened scope set. A second measurement **refuted this increment's own
+  prediction**: I asserted the unguarded arm would out-run the guarded one and it produces *fewer*
+  (38 against 208), because `createNodePgConnection` sets no pool `max` so pg-pool defaults to 10
+  and k folds thrash on it — the guard is what makes the detector fast, by 5.5×. `onPassSkipped` is
+  **required** and reported on **every** skipped tick, departing from the sibling's silent return,
+  because for a scope whose fold never fits its interval that line is the only thing that ever
+  appears again and a silent guard is a falsely-true boot line. The reset is in a `finally` on a
+  measurement: of five callback-throw arms **only a throwing `onError` escapes `pass`**, and outside
+  the `finally` that one escape leaves `inFlight` set for the life of the process — one reporter
+  failure taking the detector down permanently. The residual is **cross-process and measured**: one
+  replica forges 0, two over one scope forge **19 of 240** (~8%), remedied by the
+  `advisoryKeyFor(scope)` lock the append path already takes, at the cost of holding it across a
+  whole fold; latent on the shipped stack, which sets no `replicas`.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -7053,6 +7089,23 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   record: a diagnostic belongs where diagnostics are read, and the verdict's bytes carry only what
   the digest covers (committing the reason would need a second domain tag beside
   `audit_integrity_proof`).
+  **And `IntegrityProofScheduler` has the sibling's overlap guard since ADR-0406's addendum**, which
+  it lacked while `--integrity-proof` was defaulted on. `runOnce` returns `[]` and reports
+  `pass_already_in_flight` through a **required** `onPassSkipped` rather than returning silently as
+  the sibling does, because a silent guard makes *the hourly proof is running* true of the timer and
+  false of the verification — required for ADR-0364's reason, and reported on **every** skipped tick
+  because for a scope whose fold never fits its interval that line is the only thing that ever
+  appears again. What it protects is not the heap the hazard predicted: **ADR-0399's witness-memory
+  axis is sound iff passes over one scope are serial**, since each pass loads the chain and then
+  appends and anchors its own verdict, so overlapping passes forge `prior_verdict_contradicted` —
+  measured at **32 false `compromised` of 38** against a chain that verifies by hand, where the
+  guarded arm forges 0. The guard also makes the detector **faster** (208 verdicts against 38 in one
+  window), because the pool defaults to 10 and k folds thrash on it; the prediction that the
+  unguarded arm would out-run it was this increment's own and was refuted. The reset is in a
+  `finally` because of five callback-throw arms **only a throwing `onError` escapes `pass`**, and
+  outside the `finally` that escape leaves the guard set for the life of the process. In-process
+  only, so two replicas over one scope still forge ~8% (ADR-0406's open question, with
+  `advisoryKeyFor` as the remedy).
   The escalator declares through the same
   `IncidentDeclarer` the SLO loop uses (ADR-0297), with `CountingIncidentDeclarer` as both the offline
   default and the fallback that keeps the page going out when the record cannot be stored.
@@ -12066,7 +12119,16 @@ third clause is not a flourish.
    of the three is on the compose either, so declaring capabilities for them would be inert),
    `--rate-limit-policy`, `--preference-routes`. So the request path is configured and **most** of
    what recurs still does not: no job fires, no timer fires, and nothing is rate-limited — while
-   notifications are delivered (ADR-0376), and audit rows are anchored and verified (ADR-0406). ~~One increment, and the only question is which
+   notifications are delivered (ADR-0376), and audit rows are anchored and verified (ADR-0406).
+   **`--preference-routes` was the one of the eleven that two increments both enumerated and neither
+   gave a verdict** — ADR-0406's open question 5 names four remaining flags and omits it — and the
+   verdict is **default-off, blocked on a surface**, on two measured grounds. `operate-web` holds
+   **0** files mentioning preferences, so there is no console consumer: the read-state shape ADR-0376
+   withdrew for the same reason. And the server **already reads the table** on every dispatch
+   (`computeDispatchEligibility`, reached from `delivery-plan.ts:58`), so with no rows the built-in
+   defaults apply and mounting the routes makes notification **consent** real for the first time —
+   which *withholds* a delivery that currently goes out. That is clause 6 and not clause 1: the flag
+   serves what it mounts, and turning it on changes the answer for a deployment that works today. ~~One increment, and the only question is which
    flags a reference deployment should default to.~~ — **that framing is false for 4 of the 9, and
    the per-flag map below says which.** **This entry's own count has gone stale three
    times in three increments** — 15 when it was written, a 16th from ADR-0364
@@ -12099,6 +12161,19 @@ third clause is not a flourish.
    one that is off, because an operator reads the first as covered. So the per-flag question has a
    third clause: *does it serve what it mounts*, *is what it records a claim*, and **does its own
    failure mode reach anybody**. All three now hold for this pair.
+   **ADR-0406's own addendum added a fourth and the batch-8 synthesis a fifth and sixth, and the
+   evidence that they were owed is that the chain flags passed all three and should still have been
+   weighed**: *(4) does its own **concurrency** forge the finding it reports* — the integrity proof
+   had no overlap guard, so overlapping passes manufactured 32 false `compromised` verdicts of 38 on
+   a chain that verifies by hand, and no clause above asks it; *(5) what does it cost, and can the
+   cost be reclaimed* — the chain's own growth is unreclaimable by construction (nothing in the
+   workspace deletes a chain entry and the Article 17 erasure retains the table), so a flag whose
+   cost compounds for ever passes a test that only asks whether it works; and *(6) does turning it on
+   change the answer for a deployment that works today* (ADR-0338's rule, already applied throughout
+   this register — making it a clause here states an existing rule rather than inventing one). Clause
+   6 is what correctly keeps `--rate-limit-policy` and `--preference-routes` off: both pass all of
+   1–3, and mounting the second makes notification **consent** real for the first time, which changes
+   what a working deployment delivers.
    **The remaining nine have now been asked both questions, and the answer refutes this entry's own
    framing: only 3 are a default decision.** *Default on* — `--tenant-status-gate` (`meta.tenants`
    carries zero policies and no `rls` in `META_TABLES`, so the directory read works for any role, and
@@ -12202,7 +12277,13 @@ third clause is not a flourish.
    (`AUDIT_CHAIN_SIGNING_KEY`, one variable with the public half derived), and the two chain flags
    have **booleans** — so of the four, only `--deletion-capabilities` still takes a file, and it has
    a repeatable `--deletion-capability <subsystem>=<disposition>` beside it. A mount would therefore
-   serve nothing a flag does not while still licensing a private seed in a mounted file. Three of
+   serve nothing a flag does not while still licensing a private seed in a mounted file. **The
+   surviving reason is stronger than that last clause and is worth stating separately, because
+   exactly 1 of the 4 file-taking flags was ever credential-bearing**: a mounted file's content is
+   read by **no workspace rule and no test**, so a malformed or falsely-true config in one is
+   invisible to all twelve rules and every test in the sweep — the tenth reading of the
+   fake-connection blind spot (`deploy/` is not typechecked, not linted and imported by nothing),
+   and the reason a mount is refused even for the three configs that carry no secret at all. Three of
    that measurement's own facts were sharpened by building it: the `{}` this entry recorded as
    merely parsing is a **falsely-true control** (platform-chain-only, discarded by ADR-0399's
    `isEmptyScope`, measured at 0 anchors / 0 verdicts / **0 log lines**), so the honest fix was to
@@ -12214,7 +12295,18 @@ third clause is not a flourish.
    Two further measurements an implementer needs: `--deletion-capabilities` is the one of
    the four with **no dedicated loader** (an inline `JSON.parse(await readFile(...))`, so a missing
    or malformed file names neither the flag nor the path, where the other three each produce a
-   "cannot read" and an "invalid JSON in" message), and `--deletion-runner-ms` has **five**
+   "cannot read" and an "invalid JSON in" message) — **and it is one of five such sites against ten
+   named loaders that already follow the house idiom**, which makes it a class rather than this
+   flag's omission: `node.ts` parses inline for `--jwks-file` (`:697`), `--plan-catalog` (`:1539`),
+   `--deletion-capabilities` (`:1798`), `--deletion-escalation-config` (`:2383`) and
+   `--workflow-worker-config` (`:4338`), while `loadCheckpointConfig` and nine siblings each wrap
+   both failures with the flag and the path. Measured live, a missing file reads `fatal: ENOENT …
+   '<path>'` (names the path, not the flag) and malformed JSON reads `fatal: Expected property name
+   or '}' …` (names **neither**) against 19 file-taking flags. One shared loader closes five, which
+   is cheaper than five increments and is the only part of this item that is still code rather than
+   prose — ADR-0406 narrowed its *reach* by making the inline `--deletion-capability` the primary
+   route, and a deployment holding a file still meets the unnamed error.
+   And `--deletion-runner-ms` has **five**
    requirements and not three — a Postgres store, a chain producer **and** an audit emitter, the
    capabilities, and `--deletion-subject-scope`, which ADR-0379 added and which appears 0 times in
    every compose file.

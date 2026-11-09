@@ -2628,12 +2628,15 @@ cases, not one: no checkpoint for this scope yet, an anchor recording no verifie
 prefix, an anchor predating the provenance column, and an anchor this binary cannot
 read. The header names which.
 
-Neither mode compares a checkpoint's root hash against the chain entry at its
-sequence: that needs the whole chain in hand, which neither fold hands back, and
-for --from-checkpoint it would mean reading the prefix a bounded verification is
-defined not to. The audit says so on its own line rather than going quiet. The
-hourly --integrity-proof-config pass does ask it, because it already loads the
-whole chain for the anchor half.
+Whether a checkpoint's root hash is compared against the chain entry at its
+sequence turns on one thing: was the prefix read? A fold from genesis reads it and
+asks, so the full mode asks — and so do all four of the --from-checkpoint fallbacks
+above, since each of them folds from genesis. The one path that does not ask is a
+bounded verify over an anchor it admitted, which by definition did not read the
+prefix. A full fold over a chain holding a row this binary cannot read does not ask
+either, because a correspondence computed from an incomplete chain would blame the
+wrong table (ADR-0375). The audit says which case it is on its own line rather than
+going quiet.
 
 Options:
   --tenant <uuid>      Tenant chain to verify (one of this or --platform)

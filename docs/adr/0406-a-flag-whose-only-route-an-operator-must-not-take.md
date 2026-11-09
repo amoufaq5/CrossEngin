@@ -169,9 +169,10 @@ private seed in a mounted file (ADR-0334: a remedy that cannot work is worse tha
 - **Negative:** `AUDIT_CHAIN_SIGNING_KEY` is a 32-byte secret an operator must generate, keep and
   back up — losing it means the chain's existing entries verify against a key the deployment no
   longer holds, and there is no rotation path (ADR-0371's open end). Widening the status set means a
-  deployment with many retired tenants pays one full fold per retired scope on first pass, at a
-  measured 107 µs per entry. `--deletion-capability` requires six entries on argv, which is verbose
-  by design.
+  deployment with many retired tenants pays a full fold per retired scope — **once** on the shipped
+  pairing and on **every** pass if the checkpoint scheduler is off; see the addendum's table, which
+  replaces the two contradicting accounts this ADR first gave, at a measured 107 µs per entry.
+  `--deletion-capability` requires six entries on argv, which is verbose by design.
 - **Neutral:** two new boolean flags beside two existing config flags; the compose `command:` grows
   from 26 to 28 flags. `loadAuditChainConfig` is deleted and replaced by a comment naming its
   successor (ADR-0337's test for a deletion).
@@ -272,9 +273,92 @@ private seed in a mounted file (ADR-0334: a remedy that cannot work is worse tha
 |---|---|---|
 | The chain seed has no rotation path: a new seed makes existing entries verify against a key the deployment no longer holds, and `provenance` records how a prefix was verified but not under which key. | platform | 2026-12-15 |
 | Should `AUDIT_CHAIN_SIGNING_KEY` carry the placeholder-prefix check `SECRET_PLACEHOLDER_PREFIX` gives the other three secrets? The 32-byte width refusal already rejects the obvious placeholder, so it is not owed — but that is an argument from a width and not from publication (ADR-0377). | platform | 2026-12-15 |
-| A full fold per retired scope on first pass is unbounded in the chain's length. ADR-0371's `DO NOTHING` means an **idle** retired tenant's anchor is never replaced, so such a scope re-folds every pass until something appends — and nothing ever will. | platform | 2026-12-15 |
+| A full fold per retired scope is unbounded in the chain's length, and on a deployment running the proof **without** `--checkpoints` it recurs on every pass (addendum's table, measured). The two sentences this row and the Consequences bullet first gave are replaced there; what is still open is whether a scope whose fold cannot fit its interval should be *dropped from the scope set* with a named reason rather than skipped on every tick for ever. | platform | 2026-12-15 |
 | `--deletion-capability` names six subsystems on argv and four of them can only be `absent` today, because their erasures do not exist (register P2.6). Whether the honest default is a shorter flag that names only what this deployment *has* is a contract question about `DeletionCapabilities`' totality. | platform | 2027-01-15 |
-| P0.3's remaining background flags — `--schedule-ms`, `--workflow-workers`, `--notification-template-routes`, `--rate-limit-policy` — are each still gated on their own answer to the three per-flag questions. | platform | 2027-01-15 |
+| The overlap guard is in-process, so ADR-0399's witness-memory axis loses its premise across replicas: one replica over one scope forges **0** false `compromised` verdicts and two forge **19 of 240** (~8%), measured, with the chain verifying by hand. The remedy exists — `advisoryKeyFor(scope)` + `pg_advisory_xact_lock`, which the append path already takes — and its cost is that the lock must span load-compute-append, i.e. a whole fold. Latent on the shipped stack: no compose file sets `replicas`. | platform | 2026-12-15 |
+| P0.3's remaining background flags — `--schedule-ms`, `--workflow-workers`, `--notification-template-routes`, `--rate-limit-policy` — are each still gated on their own answer to the per-flag questions, which this addendum gives a fourth: does the surface's own *concurrency* forge the finding it reports? | platform | 2027-01-15 |
+
+## Addendum: the hazard this increment created, and what it turned out to be
+
+Defaulting `--integrity-proof` on made one thing live that neither this ADR nor the register had:
+`IntegrityProofScheduler.runOnce` had **no overlap guard**, where the sibling `CheckpointScheduler`
+has had one since ADR-0371. `start()` fires `void this.runOnce()` and `setInterval` fires
+`void this.runOnce()` again, so a pass that outlasts its interval is joined by a second, a third, and
+so on — and `proveScopeIntegrity`'s `loadChain` is **unconditional** (`integrity-proof.ts:335`), so
+one pass holds one scope's whole chain and k overlapping passes hold k of them. `fromCheckpoint`
+bounds the Ed25519 CPU and **not** the heap, and `intervalMs` changes how often a pass starts rather
+than what one pass holds, so neither existing lever reaches it.
+
+**What it is was not what the hazard predicted.** The argument on file was about memory and about a
+stale verdict. Measured live, three arms over one cluster and one 40-entry chain, differing only in
+the config or the binary:
+
+| arm | skips | verdicts | `compromised` | contradictions |
+|---|---|---|---|---|
+| A1 guard present, `intervalMs: 1` | 2,646 | 208 | **0** | 0 |
+| A2 guard present, `intervalMs: 2000` (control) | **0** | 4 | 0 | — |
+| A3 guard **absent**, `intervalMs: 1` (the before) | 0 | 38 | **32** | 32 |
+
+The unguarded arm produced **32 `compromised` verdicts out of 38** — an 84% false-positive rate — on
+a chain that `verify-chain --full` then answered **OK** over, 278 signatures checked. `compromised`
+is the paging `sev1`. So the overlap does not merely consume memory: **it forges the finding the
+detector exists to report.**
+
+The mechanism is ADR-0399's witness-memory axis meeting its own concurrency. Each pass loads the
+chain, computes the verdict, then appends and anchors that verdict. With k concurrent passes, B loads
+the chain before A's verdict lands, A commits, and B's comparison then finds a prior verdict anchored
+at a sequence B's loaded chain does not hold → `prior_verdict_contradicted` → `compromised`. So the
+axis is sound **iff passes over one scope are serial**, and the guard does not paper over a bug in it
+— it establishes the axis's premise. Neither ADR-0399 nor this increment could have seen it alone:
+that one shipped the axis, this one made the pass run hourly by default over a widened scope set.
+
+A second measurement **refuted the prediction this increment wrote for it**. I asserted the unguarded
+arm would out-run the guarded one, because every tick starts a pass. It produces **fewer** — 38
+against 208. `createNodePgConnection` sets no pool `max`, so pg-pool defaults to 10 and k concurrent
+folds serialize on the pool and thrash. The guard does not pace a fast detector; it is what makes the
+detector fast, by a factor of 5.5 in the same window.
+
+**The fix** is the sibling's guard with one departure: `onPassSkipped` is a **required** callback and
+not a silent `return`. The sibling returns silently, and here that would be a falsely-true boot line —
+*the hourly proof is running* would be true of the timer and false of the verification. Required
+rather than optional, because an optional reporter defaulting to *say nothing* is the defect restated
+as a default (ADR-0364); and reported on **every** skipped tick rather than once, because for a scope
+whose fold never fits its interval that line is the only thing that ever appears again. The reset is
+in a `finally`, and that matters for a reason measured rather than assumed: of five callback-throw
+arms (`scopes`, `prove`, `onPass`, and `onError` reached from each of the first two), **only a
+throwing `onError` escapes `pass`** — and with the reset outside the `finally` that one escape leaves
+`inFlight` set, so every later pass reports `pass_already_in_flight` for the life of the process. One
+reporter failure would take the detector down permanently.
+
+**The residual is cross-process and is measured, not predicted.** The guard is in-process, so it
+establishes the axis's premise within one replica and says nothing across two. One replica over one
+scope at `intervalMs: 1` forges **0**; two replicas over the same scope forge **19** (10 + 9 of 240
+verdicts, ~8%), with the chain again verifying by hand at 457 signatures. The remedy is concrete and
+already in the repo — `advisoryKeyFor(scope)` plus `pg_advisory_xact_lock`, which the chain's append
+path already takes for linearity — and it is a genuine follow-up rather than an oversight, because
+the lock would have to span load-compute-append, i.e. a whole fold, which is exactly the duration
+this increment's own warn message tells an operator to avoid. No compose file sets `replicas` or
+`scale:`, so it is latent on the shipped stack and live for anyone scaling out.
+
+**And this ADR contradicted itself about what a retired scope costs**, which the same measurement
+settles. The Consequences bullet said *"one full fold per retired scope on first pass"* and the open
+question said *"re-folds every pass until something appends — and nothing ever will"*. Both are true,
+of different populations, read off the binary's own `chain=<mode>:<reason>` rendering:
+
+| population | config | fold |
+|---|---|---|
+| no prior anchor | both flags | `full:no_checkpoint` **once**, then `from_checkpoint` |
+| legacy anchor at the tail, provenance NULL | both flags (**shipped**) | `full:anchor_provenance_absent` twice, then `from_checkpoint` — **self-healing** |
+| legacy anchor at the tail, provenance NULL | proof **without** `--checkpoints` | `full:anchor_provenance_absent` on **every** pass, `sigs` 35 → 39 |
+
+So the Consequences clause describes the shipped pairing (modulo *one* being one or two) and the open
+question describes a deployment running the proof with the checkpoint scheduler off. `DO NOTHING` is
+per **sequence**, so once the checkpoint scheduler anchors at a *higher* sequence than the legacy row
+the stale anchor is superseded rather than replaced — measured, anchors at 29 `<null>`, 30
+`verified_full`, 31–35 `verified_suffix`. The open question's final clause is **refuted twice**:
+something does append, namely the proof's own `recordVerdict` (`sigs` growing 35 → 39 is that), and
+that growth makes the cost **worse** rather than curing it, because the anchor stays at N while the
+chain grows past it. Both sentences are replaced by the table.
 
 ## References
 
@@ -289,3 +373,5 @@ private seed in a mounted file (ADR-0334: a remedy that cannot work is worse tha
 - ADR-0338 — refusing breaks nothing that was right.
 - ADR-0362 — a type annotation standing in for a check.
 - Register P0.3, P2.6 — the deployment items this closes three of.
+- ADR-0364 — an optional reporter defaulting to *say nothing* is the defect restated as a default.
+- ADR-0337 — a falsely-false control costs a certification; here it costs a page.
