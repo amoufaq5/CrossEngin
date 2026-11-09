@@ -545,8 +545,18 @@ What the flag buys is the limit being *yours* and every decision being on the re
   paths are hardcoded anyway, and it is not expanded by your interactive shell.
 - **Logs:** `docker compose logs -f api` / `web` / `caddy`.
 - **Stop / start:** `docker compose down` (keeps volumes) / `docker compose up -d`.
-- **Scale the API:** the API is stateless — run several `api` replicas behind Caddy
-  and they share Postgres safely (idempotency, advisory locks, RLS all hold).
+- **Scale the API:** the **request path** is stateless — run several `api` replicas behind Caddy and
+  they share Postgres safely there (idempotency, advisory locks, RLS all hold). The **schedulers are
+  not**, and they run in the same process: every replica runs its own copy of each one, so the work
+  is duplicated rather than shared. Measured, **4 of 16 scheduler classes have an in-process overlap
+  guard and none has a cross-process one**, and the three mechanisms named above are all request-path
+  mechanisms that no scheduler goes through. What that costs today, with the two chain flags on by
+  default: the audit-integrity proof's *verdict* is sound across replicas since ADR-0407, but each
+  replica still folds the whole chain and appends its own verdict entry, which permanently enlarges
+  every later full fold; and the **platform** checkpoint anchor's `ON CONFLICT … DO NOTHING` never
+  fires for `tenant_id IS NULL` (ADR-0371), so those rows grow linearly in replica count and the
+  serving role cannot reclaim them. So scale the API for request throughput, and expect one
+  replica's worth of scheduled work to become N replicas' worth of duplicated scheduled work.
 
 ### Clearing the foreign-key drift after an upgrade
 

@@ -300,7 +300,8 @@ the config or the binary:
 | A3 guard **absent**, `intervalMs: 1` (the before) | 0 | 38 | **32** | 32 |
 
 The unguarded arm produced **32 `compromised` verdicts out of 38** — an 84% false-positive rate — on
-a chain that `verify-chain --full` then answered **OK** over, 278 signatures checked. `compromised`
+a chain that `verify-chain` then answered **OK** over, 278 signatures checked — the full fold is that
+command's default and there is no `--full` flag, which this ADR's own first text got wrong. `compromised`
 is the paging `sev1`. So the overlap does not merely consume memory: **it forges the finding the
 detector exists to report.**
 

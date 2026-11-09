@@ -34,6 +34,7 @@ import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
 import {
   compareWitnessMemory,
   formatWitnessMemory,
+  witnessMemoryShowsAnchors,
   witnessMemoryShowsHistory,
   witnessMemoryUnproven,
   type WitnessMemoryCheck,
@@ -316,6 +317,90 @@ export async function proveScopeIntegrity(
     readonly witnessMemory?: WitnessMemorySource;
   },
 ): Promise<IntegrityProofReport> {
+  // Read order is part of this proof, and the rule is **directional**: of two reads whose values
+  // are then compared, the side that must be the LARGER is read second.
+  //
+  // Every table read here is append-only for every writer that ships — and the premise is measured
+  // over all **four** tables this function reads rather than the two an earlier version of this
+  // parenthetical named, which were precisely the two the rule does *not* turn on. Through
+  // `scanWorkspaceSql()` over 940 files, `meta.forensic_chain_entries`,
+  // `meta.forensic_chain_checkpoints`, `meta.audit_log` and `meta.audit_integrity_verdicts` each
+  // carry **one `INSERT` and zero `UPDATE`/`conflict_update`** statements, with no `DELETE FROM`,
+  // `TRUNCATE` or `UPDATE <table>` anywhere in non-test source; both `record` methods are
+  // `ON CONFLICT … DO NOTHING`; all four carry `retainedRecordNoTenantDelete` and are
+  // `RETAINED_SHARED_TABLES` members, so the Article 17 erasure retains them and ADR-0400's fence
+  // denies a tenant-context `DELETE`. **The scope of the premise is "every writer that ships" and
+  // not "everything a tamperer can do"**: all four tables' isolation arm is `ALL`-scope with a NULL
+  // `WITH CHECK`, so a tenant-context `UPDATE` is reachable on each, and dropping that qualifier
+  // turns the premise into a claim it does not support (the harness in ADR-0407 measures 20.99%
+  // forging once it is relaxed).
+  //
+  // So an honest write landing between two reads can only ADD rows — which makes a containment or an
+  // inequality easier to satisfy when the containing side is read later, and MANUFACTURES a finding
+  // when it is read earlier. The comparisons, each with the read that must come second:
+  //
+  //   a prior verdict's chain entry  ∈   the chain        → the chain, after the baseline
+  //   each audit row's chain entry   ∈   the chain        → the chain, after the rows
+  //   a prior verdict's witness      ≤   the anchor scan  → the scan, after the baseline
+  //   the anchor witness             ≤   the tail         → the tail, after the anchor scan
+  //   each anchor                    ~   the chain        → order-free
+  //
+  // The fourth was already right and says so at its own read. The fifth is order-free because
+  // `disagreementFor` treats an anchor the chain does not reach as the truncation check's subject
+  // rather than as a disagreement — so a newer anchor than this snapshot is benign there by design,
+  // which is the same asymmetry the second comparison does **not** have.
+  //
+  // **The third pair is real, is the one an earlier version of this list omitted, and needs no
+  // fence of its own** — the omission mattered because it is a *second* false-positive class from
+  // the same inverted read: `compareWitnessMemory` compares `attestedWitness` against
+  // `current.checkpointSequence`, which comes from the anchor scan below, so the pre-fix order
+  // forged `witness_regressed` / `ANCHORS LOST` on an honest sibling replica anchoring one entry
+  // and recording the verdict attesting it (measured: OLD `witness_regressed` compromised at
+  // checkpointSequence 3 against NEW `consistent` verified at 7, every entry and every anchor
+  // present in both arms). It is satisfied **for free and structurally**: `auditAnchors` takes
+  // `correspondenceChain`, which is derived from `chainRead`, so the scan cannot be hoisted above
+  // the chain read without a compile error — therefore any order satisfying the first pair
+  // satisfies this one. That implication is the fence, which is why there is no test for it, and it
+  // is stated here because an edit giving `auditAnchors` its own chain read — which the comment at
+  // the `loadChain` below explicitly contemplates refusing — would re-open the forgery with every
+  // test green.
+  //
+  // The first three pairs were inverted — **three pairs over two reads**, which is why the count of
+  // moved statements understates the classes closed — and each was measured forging a paging `sev1`
+  // on a chain that verifies by hand. The two claim reads are here, first, for that reason; between
+  // themselves the order is free, because neither is compared against the other.
+  //
+  // What the reorder does **not** buy is a shorter detection latency, and the symmetry is worth
+  // stating because ADR-0407 claimed dominance for one comparison and then the other, and had to
+  // withdraw both. It does not: a persistent tamper is caught by the first pass whose relevant read
+  // follows it — the claim-side read for a row or verdict edit, the containing-side read for a chain
+  // edit — and there is exactly one such read per interval under **either** order, so the expected
+  // latency is half an interval both ways. Moving a read shifts *which* pass catches a given instant
+  // and nothing else. So the whole gain is the false positives, and the cost is that each order
+  // defers the other's class by one pass — with one asymmetry that is not in the reorder's favour:
+  // the deferred class (an edited audit row) has exactly **one** detector in the workspace, since
+  // `canonicalAuditEntryPayload` has two non-test call sites, the writer and `verifyAuditAnchors`'
+  // recompute, while a chain edit also fails `verifyChainIntegrity` as a sequence gap or
+  // `verifyChainSignatures` over bytes that cover `payloadSha256`.
+  const priorVerdict = deps.witnessMemory === undefined ? null : await deps.witnessMemory(scope);
+
+  // Read **before** the chain, which is the whole of the second fix. `verdictFor` answers
+  // `anchor_missing` for a row whose anchor sequence is absent from the chain it was handed,
+  // `anchor_missing` is in `TAMPERED`, and `audit_row_tampered` is a compromise cause — so a row
+  // committed between the chain read and this one was read as a tampered audit row. It is not a
+  // narrow window: `listAnchoredForScope` is `ORDER BY occurred_at DESC LIMIT n`, so it reads the
+  // NEWEST rows, which is exactly the population written while the pass runs, and the gap used to
+  // span the whole paged anchor scan. `emit` appends the chain entry and inserts the row in ONE
+  // transaction, so a row visible here has its entry visible too, and a chain read afterwards holds
+  // it — which is what makes this ordering a proof rather than a smaller window.
+  //
+  // Measured on one replica, one process, no tamper, with `--audit-read-routes` driving the emitter
+  // (every recorded read writes an anchored row): **90 of 140 verdicts `compromised`** while rows
+  // were being emitted against **0 of 84** on the same server with nothing emitting, zero audit
+  // rows whose anchor was really absent, and the report itself printing `integrity valid, signatures
+  // valid` one line above `COMPROMISED`.
+  const audit = await deps.audit.listAnchoredForScope(scope, { limit: deps.auditRowLimit });
+
   const chain = deps.fromCheckpoint
     ? await verifyChainFromCheckpoint(deps.logStore, deps.registry, deps.checkpoints, scope)
     : await verifyChainFull(deps.logStore, deps.registry, scope);
@@ -323,15 +408,26 @@ export async function proveScopeIntegrity(
   // The anchor check needs the entries the rows point at, which a checkpoint-bounded suffix may not
   // contain, so it always reads the whole chain. The chain *half* stays bounded — which is why this
   // read's own refusals are carried out separately rather than assumed to be the chain half's: see
-  // `chainRowsRefused`. An audit row pointing at a refused entry is `unanchored` to
-  // `verifyAuditAnchors`, and ADR-0286 deliberately does not page on that, so the fact has to reach
-  // the verdict by the axis that does.
+  // `chainRowsRefused`.
   //
-  // Read **here**, above the anchor audit, rather than two statements lower where it used to sit:
-  // the audit cross-checks every anchor against the chain, so it needs these entries, and this
-  // function already performed the read. A second read for the audit would be a second snapshot of
-  // the same table, and an anchor compared against a chain the report does not carry is a finding
-  // nobody can re-derive from the report.
+  // The sentence that used to end this paragraph — *"an audit row pointing at a refused entry is
+  // `unanchored` to `verifyAuditAnchors`, and ADR-0286 deliberately does not page on that, so the
+  // fact has to reach the verdict by the axis that does"* — is **false, and in the direction that
+  // understates**. `verdictFor` answers `unanchored` only for `anchor === null`; a row whose anchor
+  // sequence is absent from the entries that *parsed* answers `anchor_missing`, which is in
+  // `TAMPERED`, so it reaches the verdict as `audit_row_tampered` and does page. The verdict is
+  // unchanged, because `chain_row_refused` already answers `compromised` for such a chain — what is
+  // wrong is the **attribution**: an operator is sent to the audit row when the chain row is the
+  // one the reader refused. The targeted repair is the `correspondenceChain === null` rule applied
+  // to a third consumer, and it is not free (withholding the whole check would lose every other
+  // row's `hash_mismatch`), so it is named as a follow-up rather than guessed at here.
+  //
+  // Read **here**: below the two claim reads above, because the rows and the baseline are compared
+  // *against* these entries and the containing side is read second; and above the anchor audit,
+  // rather than two statements lower where it used to sit, because that audit cross-checks every
+  // anchor against the chain and this function already performed the read. A second read for the
+  // audit would be a second snapshot of the same table, and an anchor compared against a chain the
+  // report does not carry is a finding nobody can re-derive from the report.
   const chainRead = await deps.logStore.loadChain(scope);
 
   // `null` on a chain the reader refused a row of, and this is required rather than cautious. The
@@ -364,13 +460,20 @@ export async function proveScopeIntegrity(
   const anchorAudit = await auditAnchors(scope, deps.checkpoints, correspondenceChain);
 
   // After the audit, so the witness is read before the tail it is compared against — the order
-  // `latest()` and `tail()` were in. Widening the gap between them with a whole-table scan cannot
-  // manufacture a finding: `truncated` needs `tail < witness`, so an append in the window only ever
-  // clears the check and a delete in the window is a truncation that really happened.
+  // `latest()` and `tail()` were in. This is the third comparison in the rule at the top of this
+  // function, and the one that was already right: `truncated` needs `tail < witness`, so the tail
+  // is the side that must be the larger and is therefore read second. Widening the gap between them
+  // with a whole-table scan cannot manufacture a finding — an append in the window only ever clears
+  // the check and a delete in the window is a truncation that really happened.
+  //
+  // Reading them the other way round would forge `chain_truncated` **with honest writers only**,
+  // which is worth stating because the fix above moves two other reads and this one must not move
+  // with them: an anchor ahead of this pass's chain snapshot is deliberately not a disagreement
+  // (clause 4 of `disagreementFor`), so it counts toward the witness — and measured against a tail
+  // read one statement too early, `chainTruncation(7, 5)` answers `truncated: true`.
   const tail = await deps.logStore.tail(scope);
   const truncation = chainTruncation(anchorAudit.witnessSequence, tail?.sequenceNumber ?? null);
 
-  const audit = await deps.audit.listAnchoredForScope(scope, { limit: deps.auditRowLimit });
   const anchors: AuditAnchorReport = verifyAuditAnchors(
     scope,
     audit.rows,
@@ -378,14 +481,22 @@ export async function proveScopeIntegrity(
     audit.unreadable,
   );
 
-  // Read **after** the anchor audit and the tail, so the comparison is against figures this pass
-  // has already settled, and compared against `correspondenceChain` rather than `chainRead.entries`
-  // for the reason the audit is: over a chain the reader refused a row of, an entry the prior
-  // verdict names may be one of the refused ones, and calling that *the chain no longer holds it*
-  // would attribute a finding to the wrong table. `chain_row_refused` already answers
-  // `compromised` for such a chain, so withholding this costs no verdict.
+  // Compared against `correspondenceChain` rather than `chainRead.entries` for the reason the audit
+  // is: over a chain the reader refused a row of, an entry the prior verdict names may be one of
+  // the refused ones, and calling that *the chain no longer holds it* would attribute a finding to
+  // the wrong table. `chain_row_refused` already answers `compromised` for such a chain, so
+  // withholding this costs no verdict.
+  //
+  // The **comparison** is here, last, where it always was; the **read** is at the top of this
+  // function. The comment that used to stand here conflated the two — *"read after the anchor audit
+  // and the tail, so the comparison is against figures this pass has already settled"* — which is a
+  // reason for when the comparison is made and no reason at all for when the value is read, and it
+  // put the two sides of the comparison in the wrong temporal order: an attestation read LATER than
+  // this pass's chain can name an entry the chain was read too early to hold. Measured across two
+  // replicas over one scope: 19 of 240 verdicts `compromised` on a sound chain (ADR-0406), and the
+  // same inversion forges `witness_regressed` as well, which that ADR did not name.
   const witnessMemory = compareWitnessMemory({
-    read: deps.witnessMemory === undefined ? null : await deps.witnessMemory(scope),
+    read: priorVerdict,
     current: truncation,
     chain: correspondenceChain,
     currentScanComplete: anchorAudit.complete,
@@ -1057,8 +1168,22 @@ export function formatIntegrityProof(report: IntegrityProofReport): string {
     // for a row that is gone — which puts a fresh witness past the destroyed entries and makes the
     // truncation permanently unprovable. So the one arm that used to send an operator to the
     // scheduler is now the arm that tells them not to.
+    // `witnessMemoryShowsAnchors` and **not** `witnessMemoryShowsHistory`, which is what stood here
+    // and which is a wider question: history is *a tail or a witness*, and a prior verdict attesting
+    // only a tail belongs to a scope that has a chain, has been verified, and has never been
+    // anchored. For that scope the sentence below was false in both halves — it HAD no anchors, and
+    // running the scheduler is exactly the remedy — so the one arm written to stop an operator
+    // destroying the evidence was telling the one operator who should run the scheduler not to.
+    // The configuration that reaches it is **the two schedulers covering different scopes** — a
+    // deployment running the proof with no checkpoint scheduler, or two configs differing in
+    // `tenants`, `includePlatform` or `tenantStatuses` — and *not* a checkpoint pass that found
+    // nothing to anchor, which is what this comment claimed as a live measurement until ADR-0407's
+    // review: that pass skipped on `tail === null`, so its scope's chain was empty, so the baseline
+    // attests no tail either and this arm is never reached. See `witnessMemoryShowsAnchors` for the
+    // derivation and for the two residuals the narrowing leaves. The false arm falls through to the
+    // sentence below, which names the right remedy for it.
     lines.push(
-      witnessMemoryShowsHistory(report.witnessMemory)
+      witnessMemoryShowsAnchors(report.witnessMemory)
         ? "  truncation: not checkable, and this scope HAD anchors — do NOT run the checkpoint" +
           " scheduler, which would anchor past the gap and make this unprovable"
         : anchorAuditHasFindings(report.anchorAudit)
@@ -1070,8 +1195,14 @@ export function formatIntegrityProof(report: IntegrityProofReport): string {
   // only silent outcome.
   for (const line of formatWitnessMemory(report.witnessMemory)) lines.push(line);
   // Beside the chain and anchor refusals rather than inside the `anchors !== null` block, because
-  // this axis is answered on every pass: the anchor table is read before the audit rows are looked
-  // at, so a scope with no anchored rows at all still reports what its checkpoints say.
+  // this axis is answered on every pass: `anchorAudit` is a **required** field that
+  // `proveScopeIntegrity` computes unconditionally, so a scope with no anchored rows at all still
+  // reports what its checkpoints say. (The reason given here until ADR-0407 was *"the anchor table
+  // is read before the audit rows are looked at"*, which that increment **inverted** — the rows are
+  // read first now — in the one increment whose whole subject is read order. The conclusion was
+  // always right and the reason was always the wrong one: an ordering cannot establish that a field
+  // is present, only that its value is fresher than something, and what this placement needs is
+  // that the field exists.)
   //
   // Printed when there is something to act on **or** when the truncation check fired, which keeps
   // the unattended line count of a healthy scope exactly what it was — the block this replaces was

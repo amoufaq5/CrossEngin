@@ -94,11 +94,19 @@ export const WITNESS_MEMORY_OUTCOMES = [
   /**
    * A prior verdict attested a **higher** witness than this pass can find.
    *
-   * The finding this module exists for. Measured against the committed tree: no checkpoint reaper
-   * and no chain-entry prune exists anywhere in the workspace (the only reapers are the idempotency
-   * and design-job ones and the dangling-link pruner), and both forensic tables are
-   * `PLATFORM_RECORD_TABLES`, so the Article 17 erasure **retains** them. Nothing lawfully removes
-   * or lowers an anchor.
+   * The finding this module exists for. Measured against the committed tree with the workspace's
+   * own SQL scanner rather than a pattern: both forensic tables carry **one `INSERT` and no
+   * `UPDATE`, `DELETE` or `TRUNCATE` statement anywhere**, `record` is `ON CONFLICT … DO NOTHING`
+   * so no checkpoint row is ever modified, and both are `PLATFORM_RECORD_TABLES`, so the Article 17
+   * erasure **retains** them. Nothing lawfully removes or lowers an anchor.
+   *
+   * The parenthetical that used to stand here — *"the only reapers are the idempotency and
+   * design-job ones and the dangling-link pruner"* — is understated as a delete census: the scanner
+   * finds **8 `DELETE` references over 6 tables**, the three named plus
+   * `notification_fax_observations`, `notification_preferences` and `tenant_data_keys`. The three
+   * unnamed are request-driven rather than scheduled sweeps, so the clause survives as a census of
+   * *scheduled reapers* and read as a complete one, which it is not. What the argument needs is the
+   * first paragraph's claim about these two tables, which is exact.
    *
    * **`witnessSequence` is nonetheless not monotone, which an adversarial measurement found and
    * which this outcome is gated for.** `auditAnchors` excludes a contradicted anchor from the
@@ -365,6 +373,51 @@ export function witnessMemoryUnproven(check: WitnessMemoryCheck): boolean {
  */
 export function witnessMemoryShowsHistory(check: WitnessMemoryCheck): boolean {
   return check.attestedTail !== null || check.attestedWitness !== null;
+}
+
+/**
+ * Whether a prior verdict attested **anchors**, which is a narrower question than history and the
+ * one a remedy turns on.
+ *
+ * A scope can have a chain, a stored verdict and no checkpoint ever written, and such a verdict
+ * attests a `tailSequence` with a null `witnessSequence`. So `witnessMemoryShowsHistory` is true of
+ * it and *this* is false, which is the distinction `formatIntegrityProof`'s truncation arm needs:
+ * for a scope whose anchors were **destroyed**, running the checkpoint scheduler anchors past the
+ * gap and makes the truncation permanently unprovable, while for a scope that has simply never been
+ * anchored, running it is the remedy. The wider predicate sent both to the first sentence.
+ *
+ * **What reaches that state is the two schedulers covering different scopes, and not — as this
+ * comment said until ADR-0407's review — a checkpoint pass that "found nothing to anchor".** That
+ * mechanism is self-contradictory: `CheckpointScheduler` skips a scope on `tail === null` and on
+ * nothing else, so a pass with nothing to anchor saw an **empty** chain, which means
+ * `attestedTail === null` too and `witnessMemoryShowsHistory` is false — the arm is never reached.
+ * The reachable configurations are a deployment running the proof with no checkpoint scheduler at
+ * all, or the two configs differing in `tenants`, `includePlatform` or `tenantStatuses`, each an
+ * independent field on the two schemas; the other non-anchoring outcome, `refused_unverified`,
+ * cannot produce it either, because a failed verification makes the proof store `compromised` and
+ * `latestBaseline` admits only a `verified` row.
+ *
+ * Two residuals, both stated rather than closed, because **neither predicate is total over the
+ * question an operator is asking** — *did this scope ever have anchors?* — which cannot be answered
+ * from a baseline's own figures and needs the chain's memory of a prior witness (ADR-0375's open
+ * end 2). (1) `attestedWitness` is null for **three** outcomes and not one: `not_recorded`,
+ * `no_prior_verdict` and `prior_unreadable` all return through `noClaim`, so a scope whose newest
+ * baseline was *tampered* — itself a finding, graded `unproven` — gets the destructive remedy
+ * offered, and one edit suppresses both the witness figure and the predicate that reads it. Not a
+ * regression: `witnessMemoryShowsHistory` is null for the same three, so the wide predicate did the
+ * same. (2) The narrowing is **strict**, so it stops protecting one state the wide predicate
+ * covered by accident: a scope whose anchors were destroyed and whose newest verified, anchored
+ * baseline predates its first anchor now reads as never-anchored. Bounded, because every pass after
+ * a destruction answers `compromised` and so is not a baseline, which normally leaves the last
+ * pre-destruction pass — attesting a non-null witness — as the newest one.
+ *
+ * Kept as its own function rather than inlined, because the two questions have one shape and
+ * opposite consequences: `witnessMemoryShowsHistory` decides whether a report is **published**
+ * (ADR-0399's `isEmptyScope` gate, where any history refutes *this scope is new*, so the wide
+ * reading is the right one there) and this one decides which **remedy** is printed.
+ */
+export function witnessMemoryShowsAnchors(check: WitnessMemoryCheck): boolean {
+  return check.attestedWitness !== null;
 }
 
 const OUTCOME_PHRASES: Readonly<Record<WitnessMemoryOutcome, string>> = {

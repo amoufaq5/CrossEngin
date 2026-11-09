@@ -62,6 +62,7 @@ import {
   WITNESS_MEMORY_OUTCOMES,
   noWitnessMemory,
   witnessMemoryUnproven,
+  type WitnessMemoryCheck,
 } from "./witness-memory.js";
 
 const TENANT_A = "11111111-1111-1111-1111-111111111111";
@@ -1200,9 +1201,59 @@ describe("truncation in the verdict payload and format", () => {
     expect(text).toContain("run the checkpoint scheduler");
   });
 
+  /** A prior verdict that attested figures, for the one arm that reads them. */
+  const attesting = (over: {
+    readonly attestedWitness: number | null;
+    readonly attestedTail: number | null;
+  }): WitnessMemoryCheck => ({
+    ...noWitnessMemory(),
+    outcome: "consistent",
+    attestedAt: AT,
+    ...over,
+  });
+
+  it("offers the scheduler to a scope whose prior verdict attested a tail and no anchor", () => {
+    // `witnessMemoryShowsHistory` is `attestedTail !== null || attestedWitness !== null`, and a
+    // deployment running the proof with nothing anchored stores exactly that: a tail and a null
+    // witness. Keyed on history, this arm told such an operator "this scope HAD anchors — do NOT
+    // run the checkpoint scheduler": false in both halves, and it inverts the remedy for the one
+    // operator who should run it. Every pre-existing test of this arm passed `noWitnessMemory()`,
+    // so the branch ADR-0399 added had no coverage at all and the conflation was unobservable.
+    const text = formatIntegrityProof(
+      report({
+        verdict: "compromised",
+        truncation: noTruncation({ checkpointSequence: null, tailSequence: 2 }),
+        witnessMemory: attesting({ attestedWitness: null, attestedTail: 2 }),
+      }),
+    );
+    // On the OFFERING sentence and not on the bare phrase: the opposite arm reads "do NOT run the
+    // checkpoint scheduler", which contains it, so a negative assertion on the phrase alone is
+    // satisfied by neither arm and discriminates nothing.
+    expect(text).toContain("no checkpoint yet — run the checkpoint scheduler");
+    expect(text).not.toContain("HAD anchors");
+  });
+
+  it("withholds it from a scope whose prior verdict attested an anchor that is now gone", () => {
+    // The control, and what stops the assertion above being satisfiable by deleting the arm: here
+    // the anchors really were destroyed, so running the scheduler would anchor past the gap.
+    const text = formatIntegrityProof(
+      report({
+        verdict: "compromised",
+        truncation: noTruncation({ checkpointSequence: null, tailSequence: 9 }),
+        witnessMemory: attesting({ attestedWitness: 4, attestedTail: 9 }),
+      }),
+    );
+    expect(text).toContain("HAD anchors");
+    expect(text).toContain("do NOT run the checkpoint scheduler");
+    expect(text).not.toContain("no checkpoint yet");
+  });
+
   it("names a refused anchor on a scope with nothing anchored at all", () => {
-    // Printed outside the `anchors !== null` block, because the anchor table is read before the
-    // audit rows are looked at: a scope with no anchored rows still has to report its refusal.
+    // Printed outside the `anchors !== null` block, because `anchorAudit` is a required field the
+    // proof computes unconditionally: a scope with no anchored rows still has to report its
+    // refusal. (This said "the anchor table is read before the audit rows are looked at" until
+    // ADR-0407 reversed that order; the placement is unaffected, because what it depends on is the
+    // field's presence and not its freshness.)
     const refusedAnchor: UnreadableRow = { identity: "4", detail: "provenance: invalid_enum_value" };
     const text = formatIntegrityProof(
       report({ verdict: "compromised", anchors: null, anchorAudit: refusedAnchors(refusedAnchor) }),
@@ -2333,5 +2384,198 @@ describe("IntegrityProofScheduler — the overlap guard", () => {
 
   it("names its skip reasons as an enum with no unreachable member", () => {
     expect(INTEGRITY_PASS_SKIP_REASONS).toEqual(["pass_already_in_flight"]);
+  });
+});
+
+/**
+ * The read order inside `proveScopeIntegrity`, modelled as the race it is about rather than pinned
+ * as text.
+ *
+ * Each fake performs a concurrent **honest** write at the exact moment between the two reads whose
+ * values are then compared: the claim-producing read appends the entry its claim names to the array
+ * the next `loadChain` returns. So the entry is present iff the chain is read afterwards — which is
+ * the whole of what the ordering decides — and a reordered read fails these by manufacturing a
+ * finding rather than by throwing, which is how the defect presented.
+ *
+ * There are **four** such comparisons, not three, and three tests is the right number for a reason
+ * the first draft of this comment did not give. The fourth pair — a prior verdict's attested witness
+ * against the anchor scan, which `compareWitnessMemory` makes twice and which the pre-fix order was
+ * measured forging `witness_regressed` on — is satisfied **structurally**: `auditAnchors` takes
+ * `correspondenceChain`, derived from `chainRead`, so the scan cannot be hoisted above the chain
+ * read without a compile error, and therefore any order satisfying test 1 satisfies it too. The
+ * compiler is its fence. (A fifth, an anchor against the chain, is order-free by design.)
+ */
+describe("proveScopeIntegrity reads the larger side of each comparison second", () => {
+  const keypair = generateEd25519Keypair();
+  const FP = ed25519PublicKeyFingerprint(keypair.publicKeyBase64);
+
+  /** Appends one genuinely signed, linked entry, so `chain.ok` is the chain's own answer. */
+  async function append(into: ChainedLogEntry[], payload: string): Promise<ChainedLogEntry> {
+    const prior = into.length === 0 ? GENESIS_HASH : into[into.length - 1]!.entryHash;
+    const sealed = await buildChainEntry({
+      sequenceNumber: into.length,
+      priorEntryHash: prior,
+      entry: {
+        kind: "audit_event",
+        recordedAt: AT,
+        actorReference: "gateway",
+        payloadBytes: payload,
+      },
+      signingKeyFingerprint: FP,
+      sign: async (bytes) => signEd25519(keypair.privateKeyBase64, keypair.publicKeyBase64, bytes),
+    });
+    into.push(sealed.entry);
+    return sealed.entry;
+  }
+
+  async function chainOf(count: number): Promise<ChainedLogEntry[]> {
+    const out: ChainedLogEntry[] = [];
+    for (let n = 0; n < count; n += 1) await append(out, `event-${n.toString()}`);
+    return out;
+  }
+
+  const registry = {
+    getByFingerprint: async (fp: string) =>
+      fp === FP ? { publicKeyBase64: keypair.publicKeyBase64 } : null,
+  } as unknown as Parameters<typeof proveScopeIntegrity>[1]["registry"];
+
+  /** A live array, so every read reflects whatever has been appended by then. */
+  function logStore(entries: ChainedLogEntry[]): Record<string, unknown> {
+    return {
+      loadChain: async () => ({ entries: [...entries], unreadable: [] }),
+      tail: async () => {
+        const last = entries[entries.length - 1];
+        return last === undefined
+          ? null
+          : { sequenceNumber: last.sequenceNumber, entryHash: last.entryHash };
+      },
+    };
+  }
+
+  const noAudit = { listAnchoredForScope: async () => ({ rows: [], unreadable: [] }) };
+
+  it("reads a prior verdict before the chain, so a concurrent pass's verdict cannot contradict it", async () => {
+    // The race ADR-0406's addendum measured across two replicas at 19 of 240. The other replica's
+    // verdict lands between this pass's two reads: `record()` appends the chain entry and only then
+    // stores the row, so a baseline visible to this pass has its entry visible too — and that holds
+    // only if the chain is read second.
+    const entries = await chainOf(3);
+    const proof = await proveScopeIntegrity(TENANT_A, {
+      logStore: logStore(entries),
+      checkpoints: fakeCheckpoints({}),
+      registry,
+      audit: noAudit,
+      auditRowLimit: 500,
+      fromCheckpoint: false,
+      now: () => new Date(AT),
+      witnessMemory: async () => {
+        const landed = await append(entries, "the other replica's verdict");
+        return {
+          kind: "attested" as const,
+          attested: {
+            witnessSequence: null,
+            tailSequence: 2,
+            verifiedAt: AT,
+            payloadSha256: landed.payloadSha256,
+            chainEntryHash: landed.entryHash,
+            chainSequenceNumber: landed.sequenceNumber,
+          },
+        };
+      },
+    } as unknown as Parameters<typeof proveScopeIntegrity>[1]);
+
+    expect(proof.witnessMemory.outcome).toBe("consistent");
+    expect(proof.verdict).toBe("verified");
+  });
+
+  it("reads the audit rows before the chain, so a row written mid-pass is not a tampered row", async () => {
+    // Measured on ONE replica at 90 of 140. `emit` appends the chain entry and inserts the row in
+    // one transaction, so a visible row implies a visible entry; read the rows second and the row's
+    // anchor sequence is simply above the snapshot, which `verdictFor` calls `anchor_missing` — a
+    // `TAMPERED` verdict, so `audit_row_tampered`, so `compromised`.
+    const entries = await chainOf(3);
+    const row: AuditLogEntry = {
+      id: "aud-mid-pass",
+      tenantId: TENANT_A,
+      occurredAt: AT,
+      actor: { kind: "user", userId: "u1", apiKeyId: null, sessionId: null, systemId: null },
+      operation: "audit.entries.list",
+      entity: "audit_log",
+      entityId: null,
+      before: null,
+      after: null,
+      diff: null,
+    } as unknown as AuditLogEntry;
+
+    const proof = await proveScopeIntegrity(TENANT_A, {
+      logStore: logStore(entries),
+      checkpoints: fakeCheckpoints({}),
+      registry,
+      audit: {
+        listAnchoredForScope: async () => {
+          const landed = await append(entries, canonicalAuditEntryPayload(row));
+          return {
+            rows: [
+              {
+                entry: row,
+                anchor: {
+                  sequenceNumber: landed.sequenceNumber,
+                  entryHash: landed.entryHash,
+                },
+              },
+            ],
+            unreadable: [],
+          };
+        },
+      },
+      auditRowLimit: 500,
+      fromCheckpoint: false,
+      now: () => new Date(AT),
+    } as unknown as Parameters<typeof proveScopeIntegrity>[1]);
+
+    expect(proof.anchors?.tampered).toEqual([]);
+    expect(proof.anchors?.verified).toBe(1);
+    expect(proof.verdict).toBe("verified");
+  });
+
+  it("reads the tail after the anchor scan, so an anchor newer than the chain snapshot is no truncation", async () => {
+    // The comparison that was already right, pinned because the two fixes above move reads around
+    // it and this one must not move with them. The window is a real pair of honest events: traffic
+    // appends an entry and the checkpoint scheduler anchors it, so the anchor is visible to this
+    // pass's anchor scan. An anchor the chain snapshot does not reach is deliberately NOT a
+    // disagreement (it is this check's own subject), so it counts toward the witness — and
+    // `truncated` is `tail < witness`, so a tail read one statement too early answers true on
+    // honest appends alone. The concurrent event therefore has to land AT the anchor scan: a
+    // fixture that appends before the call reads the same tail under either ordering and pins
+    // nothing, which is how the first draft of this test passed under its own mutation.
+    const entries = await chainOf(3); // sequences 0..2, so the concurrent append is 3
+    const proof = await proveScopeIntegrity(TENANT_A, {
+      logStore: logStore(entries),
+      checkpoints: {
+        latest: async () => null,
+        scanCheckpoints: async (
+          _scope: string | null,
+          onPage: (page: RowRead<ChainCheckpoint>) => void,
+        ): Promise<CheckpointScanOutcome> => {
+          const landed = await append(entries, "appended and anchored during the pass");
+          onPage({
+            records: [checkpointAt(landed.sequenceNumber, landed.entryHash)],
+            unreadable: [],
+          });
+          return { scanned: 1, refusedCount: 0, complete: true };
+        },
+      },
+      registry,
+      audit: noAudit,
+      auditRowLimit: 500,
+      fromCheckpoint: false,
+      now: () => new Date(AT),
+    } as unknown as Parameters<typeof proveScopeIntegrity>[1]);
+
+    expect(entries).toHaveLength(4); // the side effect ran, so the window was exercised
+    expect(proof.anchorAudit.witnessSequence).toBe(3);
+    expect(proof.truncation.truncated).toBe(false);
+    expect(compromiseCauses(proof as unknown as CompromiseEvidence)).not.toContain("chain_truncated");
+    expect(proof.verdict).toBe("verified");
   });
 });

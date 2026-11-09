@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 21,384 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 21,389 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -3699,7 +3699,8 @@ report; `apps/operate-web` has none).
   passes hold k whole chains, with `fromCheckpoint` bounding the Ed25519 CPU and **not** the heap.
   The hazard on file was memory and a stale verdict; measured, it is neither. **The unguarded arm
   produced 32 `compromised` verdicts of 38 — an 84% false-positive rate — on a chain
-  `verify-chain --full` then answered OK over at 278 signatures**, and `compromised` is the paging
+  `verify-chain` then answered OK over at 278 signatures** (the full fold is that command's
+  default; there is no `--full` flag), and `compromised` is the paging
   `sev1`. The mechanism is ADR-0399's witness-memory axis meeting its own concurrency: each pass
   loads the chain, then appends and anchors its verdict, so B loads before A's verdict lands, A
   commits, and B finds a prior verdict anchored at a sequence its own chain does not hold →
@@ -3718,7 +3719,143 @@ report; `apps/operate-web` has none).
   failure taking the detector down permanently. The residual is **cross-process and measured**: one
   replica forges 0, two over one scope forge **19 of 240** (~8%), remedied by the
   `advisoryKeyFor(scope)` lock the append path already takes, at the cost of holding it across a
-  whole fold; latent on the shipped stack, which sets no `replicas`.
+  whole fold; latent on the shipped stack, which sets no `replicas`. **ADR-0407 closed that residual
+  without the lock and refuted the lock as the remedy** — see below.
+
+  ADR-0407 is what measuring that prescribed lock produced, and the class is **a read placed where
+  its value was needed**. `proveScopeIntegrity` takes five reads and compares pairs of them, and the
+  rule that decides a pair is *of two reads whose values are compared, the side that must be the
+  LARGER is read second* — sound rather than conventional because every table it reads is
+  append-only (nothing deletes a chain entry, the Article 17 erasure **retains**
+  `meta.forensic_chain_entries`, and ADR-0400 fenced its `DELETE`), so an honest write in the window
+  can only ADD rows: read the containing side second and such a write only ever *clears* the
+  comparison, read the contained side second and it *forges the finding*. **Three of five pairs were
+  inverted over two reads** — the count of moved statements understates the classes closed, and the
+  third pair is the one the increment's own header omitted (see the `IntegrityProofScheduler` entry)
+  — and **the bigger was in no register entry**. The audit rows were read **after** the
+  chain, and three facts compose: `emit` appends the chain entry and inserts `meta.audit_log` in one
+  transaction (so a visible row implies a visible entry), `listAnchoredForScope` is
+  `ORDER BY occurred_at DESC LIMIT n` (the **newest** rows, which is exactly the population written
+  during the pass's own window), and `verdictFor` answers `anchor_missing` — a `TAMPERED` verdict, so
+  `audit_row_tampered`, so `compromised` — for a row whose anchor sequence the loaded chain does not
+  hold. Measured live as a non-owner on **one replica, one process, no tamper**, with
+  `--audit-read-routes` as the emitter: **90 of 140 verdicts `compromised` (64%)** while rows were
+  emitted, **0 of 84** quiet, **0** rows whose anchor was really absent, `verify-chain` exit 0 over
+  the same chain, and the report printing *"integrity valid, signatures valid (64 checked)"* one line
+  above `COMPROMISED`.
+  **That is the decisive refutation of the prescribed remedy**: site 2 is not a race between passes
+  but between the pass and **ordinary request traffic**, which no lock over passes reaches — so the
+  advisory lock would have closed the 8% residual, left the 64% untouched, and the increment would
+  have reported success. The reorder closes both (site 1 measured **22 of 285** across two replicas
+  pre-fix against **0 of 303** post, independently agreeing with ADR-0406's 7.9% at 7.7%), because it
+  makes the axis sound **under** the interleaving where a lock makes it sound by **excluding** the
+  interleaving — at the same five reads, no extra round trip, no new interface.
+  **Neither comparison dominates, and two adversarial passes refuted this increment's dominance claim
+  twice — first for comparison 1 and then, after it had been rewritten to claim dominance for
+  comparison 2 alone, for that one too.** The directional rule is a **soundness** rule and says
+  nothing about completeness: it establishes that a baseline cannot attest anything this pass does not
+  also see, and *that same premise* reduces sensitivity, because a baseline read **earlier attests
+  less** while both memory detectors fire on the attestation exceeding the reading. The symmetry that
+  settles it: a persistent tamper is caught by the first pass whose **relevant** read follows it — the
+  claim-side read for a row or verdict edit, the containing-side read for a chain edit — and under
+  either order there is exactly one such read per interval, so **the expected detection latency is
+  half an interval both ways** and moving a read shifts only *which* pass catches a given instant. So
+  the entire gain is the removal of the false positives and the cost is that each order defers the
+  other's class by one pass — **four** genuine row-side tampers the old order reported this pass are
+  now clean, with the asymmetry running **against** the reorder on robustness, since
+  `canonicalAuditEntryPayload` has two non-test call sites so an edited audit row has exactly **one**
+  detector while a chain edit also fails the integrity fold or the signature check. The two
+  advantages offered for comparison 2's dominance **dissolve into that symmetry rather than surviving
+  it**, which is worth knowing because they read like gains: the `LIMIT` window slides at the same
+  rate under either order and only its phase differs, and a chain destruction is caught iff it
+  precedes the chain read, which is one interval either way — so what is left of the first is the 64%
+  itself, a row written during the fold being in the rows set while its entry is not in the chain set,
+  a state the new order makes unreachable. Still the right trade: a 64% false-positive rate on a
+  paging `sev1` destroys the detector where a one-interval deferral does not. **Comparison 1 is the
+  trade that costs a verdict**.
+  Measured through `dist` over ADR-0399's seven anchor arms with a newest against an older
+  baseline: four unchanged, A5 swaps one `disproves` cause for another, A2 keeps its verdict through
+  `chain_truncated` and loses one cause, and **A3 — truncation plus ADR-0375's two-column lowering —
+  flips `compromised [verdict_disagrees_with_chain]` → `verified [-]`**, because that is the one arm
+  of the eleven where the memory axis is the sole detector (the lowering suppresses `chain_truncated`
+  and `checkpoint_disagrees_with_chain` at once). Bounded: it needs **≥2 processes** (no shipped
+  compose sets `replicas`) and is ordinarily **one pass late** rather than lost, since the weakened
+  pass appends its verdict *below* the destroyed range so `latestBaseline` still returns the
+  concurrent row. The sharp sub-case is stated rather than fixed — where the cut removes exactly the
+  concurrent pass's entry the two verdicts land at one sequence, the tie is `verdict_id DESC` (a
+  content hash, so arbitrary), and a win for the weakened row makes the laundering **permanent**,
+  which the old order did not have because a `compromised` row is never a baseline.
+  **And the obvious improvement is refuted, which is why the trade is irreducible here**: firing only
+  when the attested sequence is *within* the snapshot's range separates nothing, because after a
+  truncation the destroyed sequences are **above the surviving tail** — the identical shape an honest
+  concurrent append produces. Separating them needs evidence the chain does not hold, which is
+  ADR-0375's own open end. So the honest line is that the reorder trades a 64%/8% false-positive rate
+  for a cross-process-only loss of one of eleven arms, latent on every shipped deployment — a trade
+  worth making, and a trade.
+  **It closes a concurrency window and not the axis**: an interleaving harness measured the old order
+  forging in **1,446 of 4,000** passes at two replicas and the new order in **0 of 8,000** across
+  four, while **one tenant-context `INSERT` into `meta.audit_integrity_verdicts` forges both memory
+  outcomes on either order** and a third payload disables the regression detector — that table's
+  isolation arm being `ALL`-scope with no reference from `chain_sequence_number` to the chain. That is
+  the top open end and needs the baseline to be *evidence* rather than a row.
+  **And the contract it shipped was itself an enumeration short by one, which a second adversarial
+  pass found and which is this increment's own class in its own header**: it listed four comparisons
+  and there are **three inverted pairs over two reads**, the omitted one being
+  `(priorVerdict, anchorAudit)` — `compareWitnessMemory` compares `attestedWitness` against the
+  anchor scan's witness, so the pre-fix order forged a **second** class, `witness_regressed` /
+  *"ANCHORS LOST"*, measured `compromised` at checkpointSequence 3 against `verified` at 7 on an
+  honest sibling replica with every entry and anchor present. It needs no fence, and the reason is
+  the reusable part: `auditAnchors` takes `correspondenceChain`, derived from `chainRead`, so **the
+  scan cannot be hoisted above the chain read without a compile error**, and any order satisfying the
+  first pair satisfies this one — the compiler is the fence, which was stated nowhere, so giving
+  `auditAnchors` its own chain read would have re-opened the forgery with every test green. The same
+  pass found the two placement comments whose stated reason this change **inverts** (*"the anchor
+  table is read before the audit rows"*, in the increment whose subject is read order — conclusion
+  intact, because the placement depends on the field being required rather than on any ordering), the
+  append-only premise substantiated for **two of the four** tables read and omitting precisely the two
+  claim sides that moved, and a stated population for the new predicate that was
+  **self-contradictory** (a checkpoint pass with "nothing to anchor" skipped on an empty chain, so
+  that scope attests no tail either and the arm is unreachable; the reachable configuration is the two
+  schedulers covering different scopes). **The one improvement it proposed is refused with
+  arithmetic**: moving `chainRead` above the fold reads as free and shrinks the wrong window, since
+  the claim-side deferral set is one interval wide whatever the gap while the gap is exactly where
+  comparison 2 catches a chain destruction the fold has already passed.
+  Three things were sharper than the defect. **The rule was known and applied inconsistently, and
+  not by forgetting**: the one comparison that was right carried a comment arguing exactly this rule,
+  the worse of the two wrong ones was a **bare statement with no comment** placed immediately above
+  its consumer (the natural place, and wrong for any value compared against a *later* read), and the
+  other was an **inline `await` inside an argument object** under a comment that argued the ordering
+  and argued it wrongly — *"Read after the anchor audit and the tail, so the comparison is against
+  figures this pass has already settled"*, which is **true of three of that call's four arguments**
+  and false of the one whose read it governs. *A comment justifying a statement's position justifies
+  the position of every value in it, and a statement that reads four values can be right about
+  three* — and an inline `await` leaves no statement to move and no line a comment could sit on.
+  **A third defect sat in the same report**: `formatIntegrityProof`'s truncation arm was gated on
+  `witnessMemoryShowsHistory` (`attestedTail !== null || attestedWitness !== null`), and a scope with
+  a chain, a stored verdict and **no checkpoint ever written** stores exactly that — so it printed
+  *"this scope HAD anchors — do NOT run the checkpoint scheduler"*, false in both halves, withholding
+  the remedy from the one operator whose remedy it is, in the arm reached from `onFinding` and the
+  escalation `detail` (i.e. **the sev1 incident an on-call engineer reads**). What reaches it is **the
+  two schedulers covering different scopes** — the proof running with no checkpoint scheduler, or the
+  two configs differing in `tenants`, `includePlatform` or `tenantStatuses` — a state this increment's
+  own harness hit by accident, seeding 40 entries and 0 anchors. The mechanism this entry gave until
+  an adversarial pass re-derived it (*"the first boot of any deployment that proves before anything is
+  anchored, which is every deployment, because `CheckpointScheduler` skips an empty chain"*) is
+  **self-contradictory**: that scheduler skips on `tail === null` and nothing else, so a skipped scope
+  had an empty chain, so its baseline attests no tail either and `showsHistory` is false — the arm is
+  never reached. One sentence, a true fact about the scheduler and a false consequence drawn from it,
+  which is why the *reachability* of a defect wants measuring as much as the defect does.
+  `witnessMemoryShowsAnchors` is the
+  narrower question that arm needs, and **why nothing caught it is that the branch had no coverage at
+  all**: `report()` defaults to `noWitnessMemory()`, so all five pre-existing truncation tests had
+  both attested figures null. And **the measurement defects cost more than the fix**, three of them
+  new: a fixture that creates the concurrent state *before* the call reads the same value under either
+  ordering and so **passed under its own mutation**; a negative assertion on a phrase the opposite
+  sentence also contains (`"do NOT run the checkpoint scheduler"` contains `"run the checkpoint
+  scheduler"`) discriminates nothing; and a mutation that left an unused `const` made `tsc` exit 2
+  **while emitting anyway**, so the first pre-fix arm ran on mutated output by accident — *a
+  measurement must not rest on a build that errored*, and the emitted path is `dist/src/` rather than
+  `dist/`, which the first grep for it got wrong and reported as absent.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -7019,6 +7156,34 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `noWitnessMemory()` is `not_recorded` and deliberately not `consistent`, for `noAnchorFindings`'
   reason: a fixture asserting about another axis needs a way to say *this one carries no claim*
   without asserting the clean answer.
+  **`witnessMemoryShowsAnchors` is a fourth predicate, narrower than `showsHistory`, and the two
+  answer questions with opposite consequences** (ADR-0407). History is *a tail **or** a witness*, and
+  a prior verdict attesting only a tail belongs to a scope that has a chain, has been verified and
+  has **never been anchored** — which is reached when the two schedulers cover different scopes (the
+  proof running with no checkpoint scheduler, or the two configs differing in `tenants`,
+  `includePlatform` or `tenantStatuses`) and **not**, as this entry said until an adversarial pass
+  re-derived it, on *"every deployment's first boot, because `CheckpointScheduler` skips an empty
+  chain"*: that scheduler skips on `tail === null` and nothing else, so a skipped scope's baseline
+  attests no tail either and the arm is never reached — a true fact about the scheduler with a false
+  consequence drawn from it, which is why reachability wants measuring as much as the defect does.
+  Two residuals are stated at the predicate and closed by neither it nor its sibling, because
+  *did this scope ever have anchors* cannot be answered from a baseline's own figures: `attestedWitness`
+  is null for **three** outcomes, so a scope whose newest baseline was *tampered* gets the destructive
+  remedy offered (no regression — `showsHistory` is null for the same three), and the narrowing is
+  strict, so a scope whose anchors were destroyed and whose newest verified baseline predates its
+  first anchor now reads as never-anchored. Keyed on history,
+  `formatIntegrityProof`'s truncation arm told such an operator *"this scope HAD anchors — do NOT run
+  the checkpoint scheduler"*: false in both halves, withholding the remedy from the one operator
+  whose remedy it is, in the arm reached from `onFinding` and the escalation `detail`. So
+  `showsAnchors` (`attestedWitness !== null`) is what that arm reads and `showsHistory` keeps its own
+  reader, where the question is whether a report is *published at all* (`isEmptyScope`'s gate). Why
+  the branch survived is the reusable half: `report()` defaults to `noWitnessMemory()`, so **all five
+  pre-existing truncation-line tests had both attested figures null** and the branch ADR-0399 added
+  was never reached with a realistic prior verdict. Its two tests now are the never-anchored scope and
+  the destroyed-anchors **control**, which is what stops the first being satisfiable by deleting the
+  arm — and both assert on the *discriminating halves* of the two sentences, because
+  `"do NOT run the checkpoint scheduler"` contains `"run the checkpoint scheduler"`, so a negative
+  assertion on the bare phrase is satisfied by neither arm.
   **And `CheckpointScheduler` verifies before it anchors, which it did not** (ADR-0371):
   `verifyChainFromCheckpoint`'s own doc comment said *"trust in the anchor comes from the earlier
   verification that produced it"*, and this scheduler — the **only** checkpoint writer in the
@@ -7105,7 +7270,49 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `finally` because of five callback-throw arms **only a throwing `onError` escapes `pass`**, and
   outside the `finally` that escape leaves the guard set for the life of the process. In-process
   only, so two replicas over one scope still forge ~8% (ADR-0406's open question, with
-  `advisoryKeyFor` as the remedy).
+  `advisoryKeyFor` as the remedy) — **closed by ADR-0407 without a lock, and the lock refuted.**
+  **`proveScopeIntegrity`'s five reads are ordered by one rule, stated once at the top of the
+  function** (ADR-0407): *of two reads whose values are then compared, the side that must be the
+  LARGER is read second.* It is sound because every table it reads is append-only, so an honest write
+  in the window can only ADD rows — the containing side read second is only ever *cleared* by one,
+  and the contained side read second is *forged* by one. The premise is measured over **all four**
+  tables the function reads (one `INSERT`, zero `UPDATE`, no delete reference, both `record`s
+  `ON CONFLICT … DO NOTHING`, all four fenced and retained) and its scope is *every writer that
+  ships* and **not** everything a tamperer can do — all four isolation arms are `ALL`-scope with a
+  NULL `WITH CHECK`, so a tenant-context `UPDATE` is reachable on each, and the harness forges 20.99%
+  once the qualifier is dropped. **Five pairs, of which three were inverted over two reads**: the
+  prior stored verdict and the anchored audit rows are both read **before** the chain (each names an
+  entry the chain must CONTAIN); the prior verdict's attested **witness** is read before the anchor
+  scan, which is the pair an earlier version of this entry and of the function's own header both
+  omitted and which forged a *second* class, `witness_regressed` / *"ANCHORS LOST"* — it needs no
+  fence because `auditAnchors` takes `correspondenceChain`, derived from the chain read, so the scan
+  **cannot be hoisted above it without a compile error**, and the compiler is therefore the fence;
+  the anchor-table witness is read before the tail (`truncated` is `tail < witness`, so the tail must
+  be the larger); and the anchors-vs-chain correspondence is order-free **by design**, because
+  `disagreementFor`'s clause 4 treats *the chain does not reach this anchor* as benign, that being
+  the truncation check's own subject. The inverted pairs forged `compromised` — a paging sev1 — on
+  honest writes, the worst at **64% on one replica** against ADR-0406's 8% across two.
+  **The rule is about soundness and not completeness, and neither comparison dominates** — two
+  adversarial passes refuted the dominance claim twice, once per comparison. The symmetry that
+  settles it: a persistent tamper is caught by the first pass whose *relevant* read follows it, there
+  is exactly one such read per interval under either order, so **expected latency is half an interval
+  both ways** and a moved read changes only which pass catches a given instant. The whole gain is the
+  false positives; the cost is that each order defers the other's class by one pass, with the
+  asymmetry running against the reorder on robustness, since an edited audit row has **one** detector
+  (`canonicalAuditEntryPayload`, two non-test call sites) where a chain edit also fails the integrity
+  fold or the signature check. The baseline additionally costs a verdict: over ADR-0399's seven anchor
+  arms exactly one weakens (**A3**, truncation plus a two-column lowering, `compromised` →
+  `verified`), cross-process only and ordinarily one pass late. The tail read must **not** move with
+  the other two, which is why it carries a test of its own; and moving the chain read **up**, which
+  reads as a free window shrink, is refused with arithmetic — the claim-side deferral is one interval
+  wide whatever the gap, and the gap is exactly where the audit comparison catches a chain
+  destruction the fold has already passed. `advisoryKeyFor` stays where it is for anything that
+  genuinely needs passes serialised; a lock cannot reach the audit-row site at all, because that race
+  is between the pass and **ordinary request traffic** rather than between passes. The pass still
+  takes **two** whole-chain snapshots in full mode (the fold's, discarded by the report-only wrapper,
+  and its own), and the entries-returning sibling `verifyChainForAudit` cannot be dropped in: it
+  hands back the entries rather than the `ChainRead`, so the refusal axis would be lost, and its
+  `null` means *this mode did not read the prefix* where this function's means *a row was refused*.
   The escalator declares through the same
   `IncidentDeclarer` the SLO loop uses (ADR-0297), with `CountingIncidentDeclarer` as both the offline
   default and the fallback that keeps the page going out when the record cannot be stored.
@@ -12009,8 +12216,10 @@ Everything above this line is a follow-up **named by the ADR that opened it**, w
 scoped by what the last increment happened to be about. In October 2026 a separate audit asked the
 other question — *what is left, ranked by harm, regardless of which ADR would own it* — across nine
 domains against the committed tree, with each finding verified before it was ranked and the
-over-stated ones demoted with their refuting measurement. **158 raw findings, deduplicated to the
-48 ranked items and 13 demotions below.** (The figure first reported for this was 145, which was
+over-stated ones demoted with their refuting measurement. **158 raw findings, deduplicated to 48
+ranked items and 13 demotions** — a figure about *that audit* and no longer a count of the list
+below, because later increments have added items of their own (P2.17 is the first), so **count the
+list rather than quoting this line**. (The figure first reported for the audit was 145, which was
 the eight-domain subtotal before the cross-domain pass added thirteen — carried forward once
 already, which is the subject of P3 item 1 and the reason it is corrected here rather than quietly.)
 The conclusion is one sentence:
@@ -13885,6 +14094,50 @@ land with or before it.
     and `compile.ts`' is `["erp_admin"]` for this grant. The two answer different questions and are
     both right to differ, but the fact that one of them **already named `platform_admin`** is the
     evidence that the settings default was an omission rather than a decision.
+17. **ADR-0407's read-order rule has three more members, and the structural root is that there is no
+    snapshot primitive.** Surveyed after that increment rather than assumed: 301 async bodies with
+    two or more awaited reads followed by a comparison, narrowed to the 34 comparing two distinct
+    awaited locals, plus a hand read of all six replayers, the deletion reconciler's four directions,
+    the reconciliation probe, the checkpoint scheduler, `verify-chain`, `anchor-audit`,
+    `witness-memory`, `certification`, `dr-readiness`, metering, the link sweep, the read-state store,
+    the shared-table erasure and the rekey. Every claim here was re-verified against the tree.
+    **Two sites are wrong by the rule and one cannot be fixed by it.**
+    `AccessReviewReplayer.replayCampaign` reads the item set *before* the decisions it must contain
+    and fails **open**, because `verifyDecisionRowShape` guards its cross-row block with
+    `if (item !== undefined)` — so a decision whose item the earlier read missed yields **no issue at
+    all** and both `decision_item_mismatch` and `decision_campaign_mismatch` go unasked; worse,
+    `undefined` is also what a *genuinely orphaned* decision looks like, so **that replayer can never
+    report an orphan**, and reading items second would make `undefined` conclusive (the `item_id`
+    foreign key licenses it). It is the one of the three that is **wired** —
+    `operate-server replay --access-reviews` has a runner. `DeletionReconciler.auditDeadlines` reads
+    the four non-terminal statuses before the absorbing `rejected` one and concatenates both lists
+    into one reporter, so a request rejected between the two reads is **reported twice and counted
+    twice in `examined`**, against the disjointness `auditCompleted`'s own comment claims as *"a
+    property of the two queries rather than of a filter either applies"* — true of one snapshot and
+    false of two. That one is a **partition rather than a containment**, so no order makes it exact:
+    reading the absorbing side first turns the duplicate into a one-pass miss, which is the better
+    error (`examined` is a coverage claim, ADR-0372, while the miss is caught next pass) — so it is a
+    trade needing its argument written down, not a free swap. And `WorkflowReplayer.verifyInstance`
+    compares `stored.sequence_cursor !== expected.sequenceCursor`, an **equality**, which forges in
+    *both* orders, compounded by `ProjectingEventLog.append` writing the event and its projection as
+    two statements with no transaction so the projection is *expected* to lag; latent, since that
+    replayer has no runner, and its honest fixes are a one-sided comparison or a real snapshot.
+    **Four sites are right with no comment saying so**, the highest-stakes being `pruneDanglingLinks`,
+    whose comparison drives a `DELETE` and whose inversion would delete links created in the window;
+    in three of the four the order is *forced* by a data dependency and the unstated premise is a
+    **writer's** ordering in another module (the gateway's stage-10 decision against end-of-request
+    capture, the deletion pipeline's in-transaction tombstone against its later status write) — the
+    role `emit`'s single transaction plays for the integrity proof, recorded nowhere.
+    **Five state the reason**, and `IncidentReplayer` **refuses** a second read with what is probably
+    the sharpest statement of the rule in the repo: *"a `count(*)` beside the read would be a second
+    question answered at another moment."*
+    **The root, measured**: `SET TRANSACTION ISOLATION LEVEL` and `REPEATABLE READ` appear **zero**
+    times across `apps` and `packages`, and `conn.transaction` is a bare `BEGIN` — so every
+    multi-read "transaction" is READ COMMITTED and **one transaction is not one snapshot**, which is
+    why read order is the only lever and why sites that look protected by a transaction are not.
+    `scanCheckpoints` is the one place that has measured and written this down, for one scan rather
+    than as a property of the primitive, and it names the blocker: the level must be set before
+    `set_config`, which `withTenantContext` issues first.
 
 ### P3 — debt and stale documentation
 
@@ -14320,6 +14573,58 @@ method is that a stale figure misleads.
    `INSERT`-scoped on `tenant_id IS NULL AND current_setting('app.platform_key_write', true) = 'on'`,
    which the non-owner had not claimed. **A probe table in which the accepted value is refused is not
    a measurement**, and the tell is free: assert a row landed before reporting that a row was refused.
+
+   **ADR-0407 adds five members and three of them are about the *instrument* rather than a sentence,
+   which is this entry's own subject one layer down.** The two ordinary members are **wrong when
+   written**, both introduced by ADR-0406's own commit (`git log -S`): `verify-chain --full` names a
+   flag that **has never existed** — the full fold is that command's default and `--from-checkpoint`
+   is the opt-in — in two places, so a reader pasting it gets `unknown argument`, and ADR-0406's
+   addendum recorded the cross-process residual's remedy as an advisory lock that **cannot reach the
+   larger of the two sites at all**, which is the costliest shape this entry records (a remedy is the
+   claim an increment spends itself on). Both corrected, the second by measurement rather than by
+   rewording. The three instrument members: **a fixture that creates the concurrent state before the
+   call reads the same value under either ordering**, so the test passed under its own mutation and
+   pinned nothing — caught by the non-vacuity floor, and the lesson is that the concurrent event has
+   to land *at* the read being moved; **a negative assertion on a phrase the opposite sentence also
+   contains discriminates nothing**, since `"do NOT run the checkpoint scheduler"` contains
+   `"run the checkpoint scheduler"` and `not.toContain` on the bare phrase is satisfied by neither
+   arm; and **a measurement must not rest on a build that errored** — a mutation leaving an unused
+   `const` made `tsc` exit 2 and it **emitted anyway**, so a live arm ran on mutated output by
+   accident, with the mutation's presence in the emitted file now grepped rather than assumed (and
+   the emitted path is `dist/src/`, not `dist/`, which the first grep for it got wrong and reported
+   as *absent* — a zero that reads as a clean result, this entry's own most-repeated shape).
+   **A second adversarial pass over that commit added four more and one of them is this entry's own
+   correction-of-a-correction clause paying out on the *same* claim twice in one increment**: the
+   dominance claim was refuted for comparison 1, rewritten to claim dominance for comparison 2
+   alone, and refuted again — with the second refutation producing the statement that should have
+   been there from the start (expected latency is half an interval under *either* order, so neither
+   dominates and the whole gain is the false positives). Two are enumerations: the function's own
+   header listed **four** order-sensitive comparisons where there are **five**, omitting the one pair
+   the increment's own prose claimed thirty lines below it, and the fence comment said *"the three
+   comparisons"* for the same reason — in the increment whose subject is that class. One is a
+   **reachability** claim rather than a figure, which is the shape this entry had not recorded: the
+   motivating population for the new predicate was given as *"a checkpoint pass that found nothing to
+   anchor"*, a true fact about the scheduler with a false consequence drawn from it, since such a pass
+   skipped on an empty chain and the arm is then unreachable — so a defect's *reachability* wants
+   measuring as much as the defect does, and it was carried into three files. And one is the premise
+   itself: *"every table read here is append-only"* was evidenced for **two of the four** tables read,
+   the two omitted being precisely the claim sides of the comparisons that moved, so the evidence
+   covered neither read the argument turns on.
+   **And the verify stage of that same pass produced a shape this entry had not recorded: a refuter
+   that cites the artifact under audit as its authority, and draws from its own argument the opposite
+   of what the argument shows.** One verifier refuted the deferral finding by quoting *"the repo
+   measured comparison 2 as strictly dominating"* — i.e. by citing the very claim that had already
+   been withdrawn twice as evidence that it holds — and then prescribed restoring it. Its own
+   reasoning says otherwise and is correct: *"the inter-read period is P under both orderings, so the
+   reorder is a **phase shift, not a window enlargement**… the distribution is identical on [0,P]"*,
+   which is exactly the symmetry that refutes dominance. So a refuter can be right about the
+   mechanism, right that the finding's artifact claim is stale, and wrong in its correction — which
+   is why its *correction* needs the same treatment as a claim (this entry's own rule, one layer
+   further in) and why the second verifier on the same finding, which separated *right about the
+   mechanism* from *wrong about the artifact* without proposing a restoration, is the one worth
+   following. A reviewer reading the tree while it is being edited also cannot cite it as fixed
+   ground: that verifier's own line citations were low by exactly 42, the width of the comment that
+   had grown underneath it.
 2. **Six concepts are modelled several times over, two with non-nesting member sets.** Data
    classification has five declarations — four identical and one, in `data-lineage`, **disjoint past
    two members**, so the moment anything bridges the kernel's classification into the lineage graph
@@ -14418,7 +14723,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 400 records; 321 Accepted, 79 Proposed (the
+title or status change cannot drift. 401 records; 322 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 
