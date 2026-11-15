@@ -21,9 +21,20 @@ import { JOB_KINDS, type JobDeclaration, type JobKind, type JobTrigger } from ".
  * the rule above, broken by granularity, in the one survey written to uphold it. The name-level
  * answer is `event_unproducible`, and it needs an input this map has no room for.
  */
-export const JOB_KIND_PRODUCERS: Readonly<
-  Record<JobKind, "event_emitter" | "cron_scheduler" | "invoke_route" | "none">
-> = Object.freeze({
+/**
+ * The three producers a deployment can mount, as a closed set.
+ *
+ * Typed rather than `string` — the opposite of `producibleEventNames` and `handledJobIds` beside it,
+ * and for the reason that separates them: an event name and a job id are open sets, where a producer
+ * is one of exactly these three, so a caller's typo should be a compile error rather than a silent
+ * "not mounted". `"none"` is deliberately absent: it is `JOB_KIND_PRODUCERS`' answer for a kind no
+ * producer exists for at all, which is a fact about this codebase and not something a deployment
+ * could mount.
+ */
+export const JOB_PRODUCERS = ["event_emitter", "cron_scheduler", "invoke_route"] as const;
+export type JobProducer = (typeof JOB_PRODUCERS)[number];
+
+export const JOB_KIND_PRODUCERS: Readonly<Record<JobKind, JobProducer | "none">> = Object.freeze({
   event: "event_emitter",
   /** Matched by `matchEventJobs` too — a `delayed` trigger fires off an event, after its delay. */
   delayed: "event_emitter",
@@ -67,6 +78,25 @@ export const JOB_SERVICE_VERDICTS = [
    */
   "event_unproducible",
   /**
+   * A producer for this kind exists in the codebase and **this deployment does not mount it**, so
+   * the job never becomes a run and no pending row accumulates either.
+   *
+   * Its own verdict because it is the one fact `handler_missing` was asserting the opposite of:
+   * that detail read *"`cron_scheduler` enqueues it — so every fire accumulates a pending run
+   * nothing can execute"*, which is false whenever the producer is off, and measured that is 7 of
+   * `erp-core`'s 14 declarations on any deployment that does not pass `--schedule-ms`. So the
+   * remedy it named — register a handler — was half of what is needed and the harm it described was
+   * not happening. This verdict names **both** halves, because mounting the producer alone enqueues
+   * work nothing can execute, which is the trap in the other direction.
+   *
+   * It outranks `event_unproducible` deliberately. With the emitter unmounted `producibleEventNames`
+   * is `[]` by its own documented contract, so *every* event declaration reads unproducible —
+   * including the ones whose names are perfectly addressable — and that verdict is then a statement
+   * about the empty producible set wearing the name's clothes. ADR-0362's granularity argument, one
+   * level out: the deployment fact has to be settled before a name-level answer means anything.
+   */
+  "producer_unmounted",
+  /**
    * A producer enqueues this job and no handler serves it. **This job will never run**, and every
    * tick/event accumulates a durable `pending` row. Reported rather than skipped: a skipped job is
    * one nothing would say anything about, which is exactly how 23 declared jobs went unexecuted
@@ -88,7 +118,7 @@ export interface ManifestJobFinding {
  *
  * A total map over `JOB_SERVICE_VERDICTS` rather than the two `||` chains it replaces, because those
  * chains were a hand-maintained list of the verdicts that mean "will never run" — ADR-0288's shape,
- * and the one place a new verdict falling out of *both* lists would be silent. A seventh verdict is
+ * and the one place a new verdict falling out of *both* lists would be silent. A new verdict is
  * a compile error here, which is where it has to be decided.
  */
 const VERDICT_DISPOSITION: Readonly<
@@ -99,9 +129,27 @@ const VERDICT_DISPOSITION: Readonly<
   /** Not running is what the declaration asked for, so it belongs on neither list. */
   deprecated: "as_declared",
   no_producer: "unservable",
+  producer_unmounted: "unservable",
   event_unproducible: "unservable",
   handler_missing: "unservable",
 });
+
+/**
+ * Whether a verdict means *this job will never run* — the one question a reporting caller asks.
+ *
+ * Derived from `VERDICT_DISPOSITION` and exported because its only consumer was spelling it as a
+ * hand-maintained list: `node.ts` printed `handler_missing || no_producer` and nothing else, so
+ * `event_unproducible` was computed, had its input threaded through two packages, was named in a
+ * comment one screen above the filter — and was **never printed**. Measured on the shipped
+ * `erp-core`, that is 7 of 14 declarations surveying unservable for a reason no operator ever saw.
+ * ADR-0288's maintained list, in the increment that created the verdict it dropped.
+ *
+ * A predicate over the total map rather than a second list, so a new verdict is reported by
+ * every caller the moment `VERDICT_DISPOSITION` says it is unservable.
+ */
+export function isUnservableJobVerdict(verdict: JobServiceVerdict): boolean {
+  return VERDICT_DISPOSITION[verdict] === "unservable";
+}
 
 export interface ManifestJobSurvey {
   readonly findings: readonly ManifestJobFinding[];
@@ -134,6 +182,17 @@ export interface SurveyManifestJobsInput {
    * default let a caller go on not naming one.
    */
   readonly producibleEventNames: Iterable<string>;
+  /**
+   * Which producers this deployment has actually mounted.
+   *
+   * **Required, with no default**, and the empty set is the claim *this deployment mounts no
+   * producer* — which is literally true of every shipped compose, since none passes `--schedule-ms`,
+   * `--emit-entity-events` or `--enable-job-invoke`. It is `producibleEventNames`' own argument one
+   * level out, and the argument is sharper here because the wrong default is the *pre-existing
+   * behaviour*: assuming every producer mounted is exactly what made `handler_missing` tell an
+   * operator that runs were accumulating when nothing was enqueueing them.
+   */
+  readonly mountedProducers: Iterable<JobProducer>;
 }
 
 /**
@@ -158,8 +217,9 @@ export function surveyManifestJobs(input: SurveyManifestJobsInput): ManifestJobS
   const handledIds = new Set(input.handledJobIds);
   const handledKinds = new Set(input.handledJobKinds ?? []);
   const producibleEvents = new Set(input.producibleEventNames);
+  const mounted = new Set<JobProducer>(input.mountedProducers);
   const findings = input.jobs.map((job) =>
-    classify(job, handledIds, handledKinds, producibleEvents),
+    classify(job, handledIds, handledKinds, producibleEvents, mounted),
   );
   const idsWhere = (disposition: "served" | "unservable"): readonly string[] =>
     findings.filter((f) => VERDICT_DISPOSITION[f.verdict] === disposition).map((f) => f.jobId);
@@ -220,6 +280,7 @@ function classify(
   handledIds: ReadonlySet<string>,
   handledKinds: ReadonlySet<string>,
   producibleEvents: ReadonlySet<string>,
+  mountedProducers: ReadonlySet<JobProducer>,
 ): ManifestJobFinding {
   const kind = job.trigger.kind;
   if (job.deprecated === true) {
@@ -230,7 +291,12 @@ function classify(
       detail: `'${job.id}' is deprecated, so no producer enqueues it and no handler is needed`,
     };
   }
-  if (JOB_KIND_PRODUCERS[kind] === "none") {
+  // Hoisted above its own test so the `"none"` arm narrows it for everything below: the alternative
+  // is to index the map twice and reach `mountedProducers.has()` with `JobProducer | "none"`, which
+  // only a cast gets past — a type annotation standing in for the check the compiler was offering
+  // to make (ADR-0362).
+  const producer = JOB_KIND_PRODUCERS[kind];
+  if (producer === "none") {
     return {
       jobId: job.id,
       kind,
@@ -238,6 +304,18 @@ function classify(
       detail:
         `nothing enqueues a '${kind}'-triggered job, so '${job.id}' never becomes a run. ` +
         "Registering a handler would not change that",
+    };
+  }
+  if (!mountedProducers.has(producer)) {
+    return {
+      jobId: job.id,
+      kind,
+      verdict: "producer_unmounted",
+      detail:
+        `'${job.id}' is enqueued by ${producer}, which this deployment does not mount — so it ` +
+        "never becomes a run, and no pending row accumulates either. Both halves are the remedy: " +
+        "mount the producer and register a handler for this id, because the producer alone would " +
+        "fill the queue with work nothing can execute",
     };
   }
   const eventName = triggerEventName(job.trigger);

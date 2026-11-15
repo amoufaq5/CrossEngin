@@ -1448,6 +1448,77 @@ describe("validateManifest — jobs", () => {
   });
 });
 
+/**
+ * `validateFiles` replaced a loop that could not fire, so these are its first assertions of any
+ * kind — the function had none, and was the only member of `validateManifest`'s sequence in that
+ * state. The two rules it enforces now each had a declaration site and no reader: `FileTypeIdSchema`
+ * occurred exactly once in the workspace (its own definition) while `manifest.files` keys on a bare
+ * `z.string()`, and `retention.compliancePackOverride` is a free string nothing compared against
+ * `meta.compliancePacks`.
+ *
+ * Both complements are asserted, which is the floor that matters here: a blanket refusal would pass
+ * the two rejection tests and is what the previous body effectively was from the other direction.
+ */
+describe("validateManifest — files", () => {
+  const fileFixture: NonNullable<Manifest["files"]>[string] = {
+    allowedMimeTypes: ["application/pdf"],
+    maxSize: "20MB",
+    storage: { bucket: "b", prefix: "p" },
+    virusScan: true,
+    ocr: { enabled: false, language: "eng" },
+    embedding: { enabled: false, scope: "tenant", chunkTokens: 1024, chunkOverlapTokens: 128 },
+    retention: { minYears: 0 },
+    lifecycle: [{ phase: "hot", durationDays: 180 }],
+    signedUrl: { defaultExpiry: "PT15M", maxExpiry: "P1D" },
+    dataClass: "internal",
+    generatedOnly: false,
+  };
+
+  const withFiles = (files: Manifest["files"], compliancePacks?: string[]): Manifest => ({
+    manifestVersion: "1.0",
+    meta: compliancePacks === undefined ? baseMetaC : { ...baseMetaC, compliancePacks },
+    files,
+  });
+
+  it("accepts a camelCase file type id", () => {
+    expect(() => validateManifest(withFiles({ patientRecord: fileFixture }))).not.toThrow();
+  });
+
+  it("rejects a file type id that is not camelCase", () => {
+    // `FileTypeIdSchema` is *called* rather than its regex respelled, so the rule and the message
+    // cannot drift from the declaration.
+    expect(() => validateManifest(withFiles({ "Patient Record": fileFixture }))).toThrow(
+      /must be camelCase/,
+    );
+    expect(() => validateManifest(withFiles({ Patient: fileFixture }))).toThrow(/must be camelCase/);
+    expect(() => validateManifest(withFiles({ patient_record: fileFixture }))).toThrow(
+      /must be camelCase/,
+    );
+  });
+
+  it("rejects a retention override naming an undeclared compliance pack", () => {
+    const files = {
+      patientRecord: { ...fileFixture, retention: { minYears: 7, compliancePackOverride: "hipaa" } },
+    };
+    expect(() => validateManifest(withFiles(files))).toThrow(/not declared in manifest.meta/);
+    expect(() => validateManifest(withFiles(files, ["pci"]))).toThrow(/not declared in manifest.meta/);
+  });
+
+  it("accepts a retention override naming a declared compliance pack", () => {
+    const files = {
+      patientRecord: { ...fileFixture, retention: { minYears: 7, compliancePackOverride: "hipaa" } },
+    };
+    expect(() => validateManifest(withFiles(files, ["hipaa"]))).not.toThrow();
+  });
+
+  it("is vacuous on every shipped pack, which is why refusing cost nothing", () => {
+    // Measured: `files` is absent — not empty — on all seven packs, so both refusals have a
+    // population of zero today (ADR-0348's rule: that is exactly when they are free to add).
+    expect(validateManifest(withFiles(undefined))).toBeUndefined();
+    expect(validateManifest(withFiles({}))).toBeUndefined();
+  });
+});
+
 describe("validateManifest — reports + dashboards", () => {
   const entityFixture = {
     name: "Prescription",

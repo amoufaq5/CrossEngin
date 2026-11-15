@@ -1,4 +1,9 @@
-import { JobDeclarationSchema, type JobDeclaration } from "@crossengin/jobs";
+import {
+  JOB_PRODUCERS,
+  JobDeclarationSchema,
+  type JobDeclaration,
+  type JobProducer,
+} from "@crossengin/jobs";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -39,20 +44,35 @@ const reorder = job("reorder-stock", CRON, { retry: { maxAttempts: 7 } });
 const onPayment = job("on-payment", EVENT);
 
 /**
- * `buildJobHandlerRegistry` with the emitter declared off.
+ * `buildJobHandlerRegistry` with the emitter declared off and all three producers mounted.
  *
  * `producibleEventNames` is required on the real input (ADR-0362) so no deployment can forget to
  * say what its emitter can produce, and defaulting it here does not weaken that: `[]` is the
  * *claim* a deployment without `--emit-entity-events` makes, and it is the right fixture default
  * because none of these fixtures mounts an emitter. A default of "assume producible" would be the
  * pre-ADR-0362 answer reintroduced in the one place that would never notice.
+ *
+ * `mountedProducers` is required for the same reason and its fixture default points the **other**
+ * way, which is worth stating because the two look like they should agree. These cases are about
+ * handler *registration*, which is downstream of mounting: defaulting to "nothing mounted" would
+ * make every one of them read `producer_unmounted` — the verdict that outranks every handler
+ * question — and they would stop testing what they are about while still passing their own
+ * assertions. So all three are mounted here, and the unmounted case is tested explicitly below.
  */
 function buildWith(
-  input: Omit<Parameters<typeof buildJobHandlerRegistry>[0], "producibleEventNames"> & {
+  input: Omit<
+    Parameters<typeof buildJobHandlerRegistry>[0],
+    "producibleEventNames" | "mountedProducers"
+  > & {
     readonly producibleEventNames?: Iterable<string>;
+    readonly mountedProducers?: Iterable<JobProducer>;
   },
 ): ReturnType<typeof buildJobHandlerRegistry> {
-  return buildJobHandlerRegistry({ producibleEventNames: [], ...input });
+  return buildJobHandlerRegistry({
+    producibleEventNames: [],
+    mountedProducers: JOB_PRODUCERS,
+    ...input,
+  });
 }
 
 
@@ -295,6 +315,51 @@ describe("buildJobHandlerRegistry", () => {
     });
     expect(off.survey.findings.map((f) => f.verdict)).toEqual(["event_unproducible"]);
     expect(on.survey.findings.map((f) => f.verdict)).toEqual(["handler_missing"]);
+  });
+
+  it("says the producer is unmounted rather than that runs are accumulating", () => {
+    // The defect this closes, on the shipped pack's own shape: with no producer mounted — which is
+    // every compose file in `deploy/`, none of which passes `--schedule-ms`, `--emit-entity-events`
+    // or `--enable-job-invoke` — `handler_missing` told an operator that `cron_scheduler` enqueues
+    // the job "so every fire accumulates a pending run nothing can execute". Nothing was enqueueing
+    // it, so the harm described was not happening and the remedy named was half of what is needed.
+    const unmounted = buildWith({ jobs: [sweep], providers: [], mountedProducers: [] });
+    expect(unmounted.survey.findings.map((f) => f.verdict)).toEqual(["producer_unmounted"]);
+    expect(unmounted.survey.findings[0]?.detail).toContain("does not mount");
+    expect(unmounted.survey.findings[0]?.detail).toContain("Both halves are the remedy");
+    expect(unmounted.survey.unservable).toEqual(["sweep-invoices"]);
+
+    // And mounting it alone does not make the job served — the other half of the same sentence.
+    const mountedOnly = buildWith({
+      jobs: [sweep],
+      providers: [],
+      mountedProducers: ["cron_scheduler"],
+    });
+    expect(mountedOnly.survey.findings.map((f) => f.verdict)).toEqual(["handler_missing"]);
+  });
+
+  it("mounting one producer leaves the others' jobs unmounted", () => {
+    // Per-producer and not a boolean: a deployment that passes `--schedule-ms` and not
+    // `--emit-entity-events` is the ordinary case, and the two declarations must read differently.
+    const build = buildWith({
+      jobs: [sweep, onPayment],
+      providers: [],
+      mountedProducers: ["cron_scheduler"],
+      producibleEventNames: ["billing.payment_received"],
+    });
+    expect(build.survey.findings.map((f) => f.verdict)).toEqual([
+      "handler_missing",
+      "producer_unmounted",
+    ]);
+  });
+
+  it("outranks event_unproducible, because an unmounted emitter produces no names at all", () => {
+    // With the emitter unmounted `producibleEventNames` is `[]` by its own contract, so every event
+    // declaration would read `event_unproducible` — including ones whose names are addressable —
+    // and that verdict would be a statement about the empty producible set wearing the name's
+    // clothes. ADR-0362's granularity argument one level out.
+    const build = buildWith({ jobs: [onPayment], providers: [], mountedProducers: [] });
+    expect(build.survey.findings.map((f) => f.verdict)).toEqual(["producer_unmounted"]);
   });
 
   it("builds from no declarations at all", () => {

@@ -98,9 +98,20 @@ export type ManifestSectionReach = (typeof MANIFEST_SECTION_REACHES)[number];
  * claim that went stale, and a named reader is checkable where an absence is not.
  * `validated_only`: `integrations`, `files`, `reports`, `dashboards` and `search` are each named by
  * one `validateManifest` call and by nothing on the request path. `unread`: `validateManifest`
- * names `customWidgets`, `theme` and `i18n` nowhere — it is a hand-written sequence of thirteen
+ * names `customWidgets`, `theme` and `i18n` nowhere — it is a hand-written sequence of twelve
  * calls and those three are not among them, which is why they are a reach of their own rather than
  * `validated_only`.
+ *
+ * That figure read **thirteen** and was 12 at `bc91803`, the commit that wrote it — wrong when
+ * written rather than drifted, which is the distinction register P3.1 draws because the remedies
+ * differ, and the register's own copy of the same quantity said **eleven** and was likewise 12 at
+ * `2b98f46`. One quantity, two hand-counted figures, wrong in opposite directions, neither stale.
+ *
+ * `files`' membership of `validated_only` was also only nominally true until ADR-0411: that
+ * section's validator built a `Set` from `Object.keys` and threw on a duplicate key, which
+ * `Object.keys` never yields, so it was the one structurally dead member of this sequence and the
+ * note a reviewer is shown asserted a coherence check that could not fire. It enforces two real
+ * rules now, so the classification is true rather than needing to be withdrawn.
  */
 export const MANIFEST_SECTION_REACH: Readonly<Record<ManifestSectionName, ManifestSectionReach>> = {
   meta: "served",

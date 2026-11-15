@@ -10,6 +10,7 @@ import {
 import type { DataClassification } from "@crossengin/types/meta-schema";
 import { requiresAuditTrail } from "@crossengin/types/meta-schema";
 import type { FileTypeDeclaration } from "@crossengin/files";
+import { FileTypeIdSchema } from "@crossengin/files";
 import type { IntegrationDeclaration } from "@crossengin/integrations";
 import type { JobDeclaration } from "@crossengin/jobs";
 import type { DashboardDeclaration, ReportDeclaration } from "@crossengin/reporting";
@@ -645,14 +646,51 @@ function validateJobs(manifest: Manifest, rolesMap: ReadonlyMap<string, RoleDefi
   }
 }
 
+/**
+ * A file type's key is a legal file type id, and its retention override names a declared pack.
+ *
+ * Both checks replace a loop that could not fire. The former body built a `Set` from
+ * `Object.keys(files)` and threw on a duplicate key, which `Object.keys` never yields — the only
+ * validator in `validateManifest`'s sequence that was structurally dead, so `files` read as
+ * `validated_only` in `MANIFEST_SECTION_REACH` while nothing about it was checked. ADR-0361 deleted
+ * the identical dead clause from `validateReports`; here there are two real rules to put in its
+ * place, so the honest move is to make the control true rather than to remove the claim.
+ *
+ * The key rule is `FileTypeIdSchema` **called** rather than a second spelling of its regex, and
+ * that schema's one occurrence in the workspace was its own declaration: `manifest.files` is
+ * `z.record(z.string(), …)`, a bare string key, so the camelCase id rule this repo wrote was
+ * enforced by nothing. `validateJobs`' `job.id !== key` idiom is unavailable because
+ * `FileTypeDeclaration` has no `id` field at all, which is why the key itself is the only thing
+ * there is to check.
+ *
+ * `retention.compliancePackOverride` is `z.string().min(1).optional()` with no reader anywhere, and
+ * `meta.compliancePacks` is the list this manifest declares — so this is `validateViews`' role
+ * check one section over, and the same gap ADR-0361 closed for a report's and a dashboard's roles
+ * on the stated ground that *a declaration is validated* was true of one surface and false of two
+ * that look identical from the manifest.
+ *
+ * Validation errors on ADR-0348's split: both are properties of the manifest alone, so they are
+ * decidable by a pack author, by `crossengin validate` and by the reviewer approving what the
+ * Architect designed. Measured cost zero — `files` is absent on all seven packs — which is exactly
+ * when refusing the incoherent case is free.
+ */
 function validateFiles(manifest: Manifest): void {
   const files: Record<string, FileTypeDeclaration> = manifest.files ?? {};
-  const seen = new Set<string>();
-  for (const key of Object.keys(files)) {
-    if (seen.has(key)) {
-      throw new ManifestValidationError(`files.${key}`, `duplicate file type id '${key}'`);
+  const declaredPacks = new Set<string>(manifest.meta.compliancePacks ?? []);
+  for (const [key, file] of Object.entries(files)) {
+    if (!FileTypeIdSchema.safeParse(key).success) {
+      throw new ManifestValidationError(
+        `files.${key}`,
+        `file type id '${key}' must be camelCase starting with a lowercase letter`,
+      );
     }
-    seen.add(key);
+    const override = file.retention.compliancePackOverride;
+    if (override !== undefined && !declaredPacks.has(override)) {
+      throw new ManifestValidationError(
+        `files.${key}.retention.compliancePackOverride`,
+        `retention override references compliance pack '${override}' which is not declared in manifest.meta.compliancePacks`,
+      );
+    }
   }
 }
 

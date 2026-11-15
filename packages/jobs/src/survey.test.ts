@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   JOB_KIND_PRODUCERS,
+  JOB_PRODUCERS,
   JOB_SERVICE_VERDICTS,
   surveyManifestJobs,
   unproducibleJobKinds,
+  type JobProducer,
   type JobServiceVerdict,
 } from "./survey.js";
 import { JOB_KINDS, JobDeclarationSchema, type JobDeclaration, type JobKind } from "./types.js";
@@ -43,28 +45,41 @@ const cdcJob = job("on-row", { kind: "cdc", table: "invoices", operation: "any" 
  */
 const EMITS_BOTH: readonly string[] = [EVENTED_NAME, DELAYED_NAME];
 
+/**
+ * A deployment that mounts all three producers, so every case below isolates the question it is
+ * about rather than tripping `producer_unmounted` first.
+ *
+ * Passed explicitly at every call for `EMITS_BOTH`'s stated reason, and derived from `JOB_PRODUCERS`
+ * rather than written out, so a fourth producer joins these cases instead of leaving them quietly
+ * testing three of four.
+ */
+const ALL_PRODUCERS: readonly JobProducer[] = JOB_PRODUCERS;
+
 interface SurveyCase {
   readonly verdict: JobServiceVerdict;
   readonly jobs: readonly JobDeclaration[];
   readonly ids: readonly string[];
   readonly kinds: readonly string[];
   readonly events: readonly string[];
+  readonly mounted: readonly JobProducer[];
 }
 
 /** One input per verdict, shared by the reachability and partition tests below. */
 const CASES: readonly SurveyCase[] = [
-  { verdict: "handler_registered", jobs: [scheduled], ids: [scheduled.id], kinds: [], events: EMITS_BOTH },
-  { verdict: "served_by_kind_handler", jobs: [scheduled], ids: [], kinds: ["scheduled"], events: EMITS_BOTH },
+  { verdict: "handler_registered", jobs: [scheduled], ids: [scheduled.id], kinds: [], events: EMITS_BOTH, mounted: ALL_PRODUCERS },
+  { verdict: "served_by_kind_handler", jobs: [scheduled], ids: [], kinds: ["scheduled"], events: EMITS_BOTH, mounted: ALL_PRODUCERS },
   {
     verdict: "deprecated",
     jobs: [job("old", { kind: "scheduled", cron: "0 6 * * *" }, { deprecated: true })],
     ids: [],
     kinds: [],
-    events: EMITS_BOTH,
+    events: EMITS_BOTH, mounted: ALL_PRODUCERS,
   },
-  { verdict: "no_producer", jobs: [workflowJob], ids: [], kinds: [], events: EMITS_BOTH },
-  { verdict: "event_unproducible", jobs: [evented], ids: [], kinds: [], events: [] },
-  { verdict: "handler_missing", jobs: [scheduled], ids: [], kinds: [], events: EMITS_BOTH },
+  { verdict: "no_producer", jobs: [workflowJob], ids: [], kinds: [], events: EMITS_BOTH, mounted: ALL_PRODUCERS },
+  { verdict: "event_unproducible", jobs: [evented], ids: [], kinds: [], events: [], mounted: ALL_PRODUCERS },
+  // The producer exists in the codebase and this deployment mounts none of the three.
+  { verdict: "producer_unmounted", jobs: [scheduled], ids: [], kinds: [], events: EMITS_BOTH, mounted: [] },
+  { verdict: "handler_missing", jobs: [scheduled], ids: [], kinds: [], events: EMITS_BOTH, mounted: ALL_PRODUCERS },
 ];
 
 function runCase(c: SurveyCase) {
@@ -73,6 +88,7 @@ function runCase(c: SurveyCase) {
     handledJobIds: c.ids,
     handledJobKinds: c.kinds,
     producibleEventNames: c.events,
+    mountedProducers: c.mounted,
   });
 }
 
@@ -137,6 +153,7 @@ describe("surveyManifestJobs", () => {
       jobs: [scheduled],
       handledJobIds: ["sweep-invoices"],
       producibleEventNames: EMITS_BOTH,
+      mountedProducers: ALL_PRODUCERS,
     });
     expect(survey.findings[0]?.verdict).toBe("handler_registered");
     expect(survey.unservable).toEqual([]);
@@ -148,6 +165,7 @@ describe("surveyManifestJobs", () => {
       jobs: [scheduled, evented],
       handledJobIds: [],
       producibleEventNames: EMITS_BOTH,
+      mountedProducers: ALL_PRODUCERS,
     });
     expect(survey.findings.map((f) => f.verdict)).toEqual(["handler_missing", "handler_missing"]);
     expect(survey.unservable).toEqual(["sweep-invoices", "on-payment"]);
@@ -159,6 +177,7 @@ describe("surveyManifestJobs", () => {
       jobs: [scheduled],
       handledJobIds: [],
       producibleEventNames: EMITS_BOTH,
+      mountedProducers: ALL_PRODUCERS,
     });
     expect(survey.findings[0]?.detail).toContain("cron_scheduler");
   });
@@ -169,6 +188,7 @@ describe("surveyManifestJobs", () => {
       handledJobIds: [],
       handledJobKinds: ["scheduled"],
       producibleEventNames: EMITS_BOTH,
+      mountedProducers: ALL_PRODUCERS,
     });
     expect(survey.findings[0]?.verdict).toBe("served_by_kind_handler");
     expect(survey.findings[0]?.detail).toContain("fallback");
@@ -181,6 +201,7 @@ describe("surveyManifestJobs", () => {
       handledJobIds: ["sweep-invoices"],
       handledJobKinds: ["scheduled"],
       producibleEventNames: EMITS_BOTH,
+      mountedProducers: ALL_PRODUCERS,
     });
     expect(survey.findings[0]?.verdict).toBe("handler_registered");
   });
@@ -191,6 +212,7 @@ describe("surveyManifestJobs", () => {
       handledJobIds: [],
       handledJobKinds: ["scheduled"],
       producibleEventNames: EMITS_BOTH,
+      mountedProducers: ALL_PRODUCERS,
     });
     expect(survey.findings[0]?.verdict).toBe("handler_missing");
   });
@@ -201,6 +223,7 @@ describe("surveyManifestJobs", () => {
       jobs: [old],
       handledJobIds: [],
       producibleEventNames: EMITS_BOTH,
+      mountedProducers: ALL_PRODUCERS,
     });
     expect(survey.findings[0]?.verdict).toBe("deprecated");
     expect(survey.unservable).toEqual([]);
@@ -213,6 +236,7 @@ describe("surveyManifestJobs", () => {
       jobs: [old],
       handledJobIds: ["old-sweep"],
       producibleEventNames: EMITS_BOTH,
+      mountedProducers: ALL_PRODUCERS,
     });
     expect(survey.findings[0]?.verdict).toBe("deprecated");
   });
@@ -222,6 +246,7 @@ describe("surveyManifestJobs", () => {
       jobs: [workflowJob, cdcJob],
       handledJobIds: [],
       producibleEventNames: EMITS_BOTH,
+      mountedProducers: ALL_PRODUCERS,
     });
     expect(survey.findings.map((f) => f.verdict)).toEqual(["no_producer", "no_producer"]);
     expect(survey.unservable).toEqual(["step-work", "on-row"]);
@@ -232,6 +257,7 @@ describe("surveyManifestJobs", () => {
       jobs: [cdcJob],
       handledJobIds: ["on-row"],
       producibleEventNames: EMITS_BOTH,
+      mountedProducers: ALL_PRODUCERS,
     });
     expect(survey.findings[0]?.verdict).toBe("no_producer");
     expect(survey.served).toEqual([]);
@@ -243,6 +269,7 @@ describe("surveyManifestJobs", () => {
       jobs: all,
       handledJobIds: [],
       producibleEventNames: EMITS_BOTH,
+      mountedProducers: ALL_PRODUCERS,
     });
     expect(survey.findings).toHaveLength(all.length);
     expect(survey.findings.map((f) => f.kind)).toEqual([
@@ -260,6 +287,7 @@ describe("surveyManifestJobs", () => {
       jobs: [evented, scheduled, delayed],
       handledJobIds: ["sweep-invoices"],
       producibleEventNames: EMITS_BOTH,
+      mountedProducers: ALL_PRODUCERS,
     });
     expect(survey.findings.map((f) => f.jobId)).toEqual(["on-payment", "sweep-invoices", "after-signup"]);
     expect(survey.unservable).toEqual(["on-payment", "after-signup"]);
@@ -270,6 +298,7 @@ describe("surveyManifestJobs", () => {
       jobs: [],
       handledJobIds: ["anything"],
       producibleEventNames: EMITS_BOTH,
+      mountedProducers: ALL_PRODUCERS,
     });
     expect(survey).toEqual({ findings: [], unservable: [], served: [] });
   });
@@ -279,6 +308,7 @@ describe("surveyManifestJobs", () => {
       jobs: [scheduled],
       handledJobIds: ["typo-in-the-wiring"],
       producibleEventNames: EMITS_BOTH,
+      mountedProducers: ALL_PRODUCERS,
     });
     expect(survey.findings[0]?.verdict).toBe("handler_missing");
   });
@@ -289,6 +319,7 @@ describe("surveyManifestJobs", () => {
       handledJobIds: new Set(["sweep-invoices"]),
       handledJobKinds: new Map([["scheduled", 1]]).keys(),
       producibleEventNames: new Set(EMITS_BOTH).values(),
+      mountedProducers: ALL_PRODUCERS,
     });
     expect(survey.findings.map((f) => f.verdict)).toEqual(["handler_registered", "handler_missing"]);
   });
@@ -300,6 +331,7 @@ describe("event_unproducible", () => {
       jobs: [evented],
       handledJobIds: [],
       producibleEventNames: ["billing.payment_settled"],
+      mountedProducers: ALL_PRODUCERS,
     });
     expect(survey.findings[0]?.verdict).toBe("event_unproducible");
     expect(survey.unservable).toEqual(["on-payment"]);
@@ -319,6 +351,7 @@ describe("event_unproducible", () => {
       jobs: [delayed],
       handledJobIds: [],
       producibleEventNames: [EVENTED_NAME],
+      mountedProducers: ALL_PRODUCERS,
     });
     expect(survey.findings[0]?.verdict).toBe("event_unproducible");
     expect(survey.findings[0]?.detail).toContain(DELAYED_NAME);
@@ -332,6 +365,7 @@ describe("event_unproducible", () => {
       jobs: [evented, delayed, scheduled, invoked],
       handledJobIds: [],
       producibleEventNames: [],
+      mountedProducers: ALL_PRODUCERS,
     });
     expect(survey.findings.map((f) => f.verdict)).toEqual([
       "event_unproducible",
@@ -353,6 +387,7 @@ describe("event_unproducible", () => {
         handledJobIds: handlers.ids,
         handledJobKinds: handlers.kinds,
         producibleEventNames: [],
+        mountedProducers: ALL_PRODUCERS,
       });
       expect(survey.findings[0]?.verdict).toBe("event_unproducible");
       expect(survey.served).toEqual([]);
@@ -365,6 +400,7 @@ describe("event_unproducible", () => {
       jobs: [old],
       handledJobIds: [],
       producibleEventNames: [],
+      mountedProducers: ALL_PRODUCERS,
     });
     expect(survey.findings[0]?.verdict).toBe("deprecated");
     expect(survey.unservable).toEqual([]);
@@ -389,6 +425,7 @@ describe("event_unproducible", () => {
         jobs: [byKind[kind]],
         handledJobIds: [],
         producibleEventNames: [],
+        mountedProducers: ALL_PRODUCERS,
       });
       expect(survey.findings[0]?.verdict).toBe("no_producer");
     }
@@ -399,12 +436,14 @@ describe("event_unproducible", () => {
       jobs: [evented],
       handledJobIds: [],
       producibleEventNames: [EVENTED_NAME],
+      mountedProducers: ALL_PRODUCERS,
     });
     expect(missing.findings[0]?.verdict).toBe("handler_missing");
     const served = surveyManifestJobs({
       jobs: [evented],
       handledJobIds: [evented.id],
       producibleEventNames: [EVENTED_NAME],
+      mountedProducers: ALL_PRODUCERS,
     });
     expect(served.findings[0]?.verdict).toBe("handler_registered");
   });

@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 21,400 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 21,439 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -4207,6 +4207,14 @@ packages exist at only one layer, noted below where that is true.
   provide, which is the same vacuity this file already records for `validateFiles`. Validation errors
   on ADR-0348's split, and vacuous today (0 reports and 0 dashboards in any pack), which is exactly
   when they cost nothing.
+  **And `validateFiles` enforces the two declarations that had a site and no reader** (ADR-0411),
+  where its whole body was a `seen.has(key)` test over `Object.keys` — a branch no input can reach,
+  so `files` was validated in name and merge-only in effect. A file type id must satisfy
+  `FileTypeIdSchema` (imported from `@crossengin/files`, whose only occurrence in the workspace had
+  been its own definition — never a local regex, which would be a second spelling), and a
+  `retention.compliancePackOverride` must name a pack `meta.compliancePacks` declares, which is
+  `validateViews`' role check one section across. Validation errors on ADR-0348's split, at a
+  measured cost of zero: `files` is absent on all seven packs.
   **And `validateEntities` refuses a field named `id` or `tenant_id`** (ADR-0388's addendum), own or
   trait-contributed, over `RESERVED_ENTITY_FIELD_NAMES` in `ddl/resolution.ts` — one spelling, read
   by the validator and by `ddl/diff.ts`'s `checkEntityFieldNames`. Not a style rule: the implicit
@@ -5565,9 +5573,9 @@ packages exist at only one layer, noted below where that is true.
   cancelling now and recording the request; `workflow-runtime-pg`'s `requestJobCancellation` re-asserts the
   premise *inside* the `UPDATE` predicate so a worker that claimed the run in between wins the row, and
   `COALESCE`-stamps so cancelling twice is a no-op on the record.
-  `survey.ts` (ADR-0334) is `surveyManifestWorkflows`' shape for jobs — **six** verdicts
+  `survey.ts` (ADR-0334) is `surveyManifestWorkflows`' shape for jobs — **seven** verdicts
   (`handler_registered` / `served_by_kind_handler` / `deprecated` / `no_producer` /
-  `event_unproducible` / `handler_missing`)
+  `producer_unmounted` / `event_unproducible` / `handler_missing`)
   over `JOB_KIND_PRODUCERS`, a **total map over `JOB_KINDS`** naming which producer enqueues each
   kind. `workflow` and `cdc` are `"none"`, so a job of those kinds reports `no_producer` **in
   preference to** `handler_missing`: naming a fix that would not work is worse than naming none.
@@ -5593,7 +5601,20 @@ packages exist at only one layer, noted below where that is true.
   depends on `@crossengin/jobs`, so `jobs → kernel` is a cycle. The same increment replaced the two
   hand-written `||` filter chains in `surveyManifestJobs` with a module-private total map over the
   verdict enum — they were a maintained list of "will never run" verdicts, and the one place a
-  seventh verdict falling out of **both** lists would have been silent.
+  new verdict falling out of **both** lists would have been silent.
+  **`producer_unmounted` is the seventh, and it is the same granularity defect one level out**
+  (ADR-0413): the survey was never told which of the three producers this *deployment* mounts, so
+  `handler_missing`'s detail asserted the enqueue as a fact — false on every deployment that passes
+  no producer flag, which is the shipped one, where nothing is enqueued and registering a handler
+  changes nothing. Checked after `no_producer` (a contract fact, and the stronger statement) and
+  `deprecated`, and **before** `event_unproducible` and both handler checks, since an unmounted
+  producer makes the name's producibility and the handler's absence facts about work that never
+  arrives; its detail names **both halves** of the remedy. `JOB_PRODUCERS` is the closed set
+  `JOB_KIND_PRODUCERS`' values are drawn from, `SurveyManifestJobsInput.mountedProducers` is
+  **required with no default** and the empty set is the claim (`producibleEventNames`' rule one
+  input across), and `isUnservableJobVerdict` is **derived from the disposition map** — exported
+  because the one place a verdict reaches an operator was filtering on a hand-written pair that
+  had dropped `event_unproducible`, so that verdict was never printed.
   `cron.ts`'s evaluator is complete and correct (5-/6-field, IANA zones via `Intl`, pure) and is what
   `scheduledJobsDue` has always used — and until ADR-0335 it **constructed an `Intl.DateTimeFormat`
   per stepped minute**, taking that path for any non-`undefined` zone including the literal `"UTC"`,
@@ -7645,6 +7666,17 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   claimed anyway is **dead-lettered** rather than only status-flipped. `retry.backoff.jitter: true` is
   declared on all 25 jobs and had never been applied; `onFailure` was declared on all 25 and read by
   nothing, and now gates the dead-letter write (`swallow-and-log` → suppressed).
+  **The job survey is built unconditionally and says its census either way** (ADR-0413). It was
+  gated on `conn !== undefined && (scheduleMs || workflowWorkers)` while `buildJobHandlerRegistry`
+  is pure — the gate was about the *engine* a hundred lines below — so on the shipped compose the
+  boot said nothing about 14 declarations that cannot run. `mountedProducers` is **derived from the
+  three producer flags**, each ANDed with `conn !== undefined` because that is where each producer
+  is constructed, and never declared (a declaration would be a second spelling of the flags); the
+  findings loop filters on `isUnservableJobVerdict` and names no verdict literal; and the `[jobs]`
+  line prints `N declaration(s): S served, U unservable; producers mounted: …` including when S is
+  zero. Four text fences in `node.test.ts` hold it, one of them a both-ways totality check that
+  every `JOB_PRODUCERS` member has a derivation — because a producer with none would read
+  `producer_unmounted` on a deployment that does mount it.
   **`probeJobQueueVisibility` is the loud half of a finding the fleet cannot report itself**
   (ADR-0334): `meta.job_runs`, `_dead_letter_jobs` and `_job_costs` each carry one `ALL`-scope
   isolation policy and no platform arm, while the fleet is deliberately cross-tenant — so as a
@@ -9132,7 +9164,8 @@ typechecks *something*, which is the dangerous outcome) and runs the one script.
 (`packages/config`, which is JSON only, and `apps/operate-web`, a Next app that already includes every
 `.ts`/`.tsx`) are spelled out as lines, so adding a third is visible in a diff.
 
-**`packages/testing/src/strategy/` holds the workspace-level rules**, and there are **twelve** now:
+**`packages/testing/src/strategy/` holds the workspace-level rules**, and there are **thirteen** now
+(the thirteenth, `test-runner-config.ts`, is described after the twelve):
 `typecheck-config.ts` (ADR-0307), `pg-column-coverage.ts` (ADR-0333), which reads `META_TABLES`
 and every store's SQL *as text* and asserts the two things a fake `PgConnection` structurally
 cannot — that every column a statement names exists, and that every `notNull`-with-no-default
@@ -9506,6 +9539,19 @@ verdict is refused. It reproduced its **own** under-reporting direction while be
 parse and 12 sites read `record_total` that end in one. Seven generalisations refused with their
 figures, the sharpest being that every *invocation* of a row mapper is 114 sites of which **63 are
 single-row reads where throwing is correct** — which is why the anchor is an array.
+The thirteenth is `test-runner-config.ts` (ADR-0412), and it is `typecheck-config.ts`' question one
+tool over: **a member that never runs a test never fails one.** A biconditional — *tracks
+TypeScript source ⟺ declares a vitest config and a `test` script* — and deliberately not
+`count === 0` over runnerless members, which would pin today's exemption as the specification
+(ADR-0372). The precondition is **tracked TypeScript** (`git ls-files`, never `find`, which counts
+`.next/types/**` and inflated `operate-web` from 58 files to 81) and not `src/`, because
+`apps/operate-web` has no `src/` and is the one member the rule exists to name; `packages/config`
+holds zero TypeScript and so is outside the population mechanically, and declaring it would be a
+dead exemption (ADR-0386). Six violation kinds so a half-wired runner cannot be silent
+(`config_without_script`, `script_without_config`, `tests_without_runner` reported *beside*
+`no_runner`, `exempt_but_wired`, `wrong_script`). Measured: 88 wired, 2 with none, 0 half-wired —
+a fence rather than a fix — and **one** exemption, `apps/operate-web`, whose consequence is
+required. Giving that app a runner means deleting the line in the same change.
 `workspace-sql-scan.ts` is the fs walk extracted out of the column-coverage test so one scan feeds
 both SQL rules, and it gained a **reference collector** (`from`/`join`/`into`/`update`/`delete`/
 `truncate`, 312 references across 862 files) — without which three tables read as writerless that are
@@ -13463,9 +13509,24 @@ three make the rest honest, cheap or verifiable.
    honest framing is ADR-0336's *modelled domain with no mechanism*, and it changes the deliverable:
    a census reporting "0 declared" is a different thing from one reporting "40 discarded".
    **(c)** Three of the eight are **not validated either** — `validateManifest` is a hand-written
-   sequence of eleven calls that never names `customWidgets`, `theme` or `i18n` — and `validateFiles`
-   is structurally vacuous (it tests `Object.keys()` for duplicates, which cannot occur), so `files`
-   is nominally validated and effectively merge-only too. **(d)** *"A reviewer approves eight
+   sequence of **twelve** calls that never names `customWidgets`, `theme` or `i18n` — and
+   `validateFiles` **was** structurally vacuous (it tested `Object.keys()` for duplicates, which
+   cannot occur), so `files` was nominally validated and effectively merge-only too. **ADR-0411
+   closed that half and refuted the remedy this entry's own measurement prescribed**, which was to
+   delete the dead loop and reclassify `files` as `unread` on the stated ground that
+   *"`FileTypeDeclaration` offers no cross-section rule to replace it with"*. There are two, and
+   each had a declaration site and **no reader**: `FileTypeIdSchema` occurred exactly once in the
+   workspace — its own definition — while `manifest.files` keys on a bare `z.string()`, so the
+   camelCase id rule this repo wrote was enforced by nothing; and `retention.compliancePackOverride`
+   is a free `z.string().min(1)` that nothing compared against `meta.compliancePacks`, which is
+   `validateViews`' role check one section over and the same gap ADR-0361 closed for a report's and
+   a dashboard's roles. So the control is **true** now rather than withdrawn, which is the direction
+   this register ranks higher: a falsely-true control *is* the failure (ADR-0337), and removing the
+   claim would have left `files` merge-only when two rules were available. Measured cost zero —
+   `files` is absent, not empty, on all seven packs. The *"eleven"* above was **12 at `2b98f46`, the
+   commit that wrote it**, and `sections.ts`' copy of the same quantity said **thirteen** and was
+   likewise 12 at `bc91803`: one quantity, two hand-counted figures, wrong in opposite directions,
+   neither drifted — P3.1's class, and the arithmetic was free to check. **(d)** *"A reviewer approves eight
    sections that are discarded"* is **backwards, and the truth is worse**: `ManifestDiffView`, which
    `design-review-routes.ts` shows the approving reviewer, covers **5 of 16** sections — so a
    reviewer is blind to **eleven**, and two of the eleven (`jobs`, `views`) **are served**, which
@@ -13494,13 +13555,31 @@ three make the rest honest, cheap or verifiable.
    comment. And `CI_STEP_KINDS` was **deleted** rather than tied to the union — a new export with
    one reader that asserted the constant equals its own literal, where ADR-0337's keep-it rule is
    about *pre-existing* symbols.
-   What is left is the part this entry bundled and that the increment deliberately did not take:
+   **ADR-0412 closed the third half — whether every member has a runner at all — and refuted two of
+   the measurement's own prescriptions.** Census over all 90 members: **88 wired** (vitest config +
+   `test` script + `src/`), **2 with none**, **zero** half-wired, so the biconditional already holds
+   and `test-runner-config.ts` is a fence rather than a fix — the cheapest moment to write one
+   (`pg-storeless-tables.ts`' own argument). The precondition **cannot be `hasSrcDirectory`**:
+   `apps/operate-web` has no `src/` and tracks **58** `.ts`/`.tsx` files, so that precondition would
+   exclude the one member the rule exists to name and the whole thing would be vacuous — it is
+   *tracks TypeScript source*. And `packages/config` **must not be declared exempt**: it holds
+   **zero** TypeScript files, so any such precondition excludes it mechanically and a declaration
+   would be a **dead exemption** (ADR-0386's seven `notForwarded` entries). A **biconditional and
+   not `count === 0`**, on ADR-0372's class: that form would pin the defect as the specification and
+   the natural fix for the red would be to delete the assertion, where this one reds a half-wired
+   runner and lands **green** on the first real test once the config, the script and the exemption's
+   removal arrive together. One exemption with its consequence required, and the figure in it was
+   nearly wrong: my first census used `find`, which counts `.next/types/**`, giving **81 files /
+   16,853 lines** against the tracked **58 / 14,318** — a census read off build output, one step
+   from a declaration.
+   What is left is the part this entry bundled and that neither increment took:
    **no smoke, e2e, load or migration test**, and `operate-web` still has **zero** tests against 18
    pages and its unfenced `fetch` sites — the serialized-body boundary that shipped a broken console
    button for an hour (ADR-0335), and which ADR-0385 measured again from the other side: commenting
    out that increment's one publish line leaves both `tsc` and `next build` green, because
    `operate-web` sets no `noUnusedLocals`, so **a UI fix there is fenced by nothing**. The honest
-   next step for this item is a test runner for that app, not more rules. ADR-0398 is the third
+   next step for this item is a test runner for that app, not more rules — and the exemption's
+   deletion is now what would prove it landed. ADR-0398 is the third
    measurement from inside it and sharpens what the absence costs: that increment's
    `forwardedResponseHeaders` is a pure function with an argued deny-list and **no unit test is
    possible**, because there is no runner to add one to — so it is fenced by a live probe against a
@@ -13548,6 +13627,37 @@ three make the rest honest, cheap or verifiable.
    handlers as a provider set, which would be the first non-empty `servedJobIds` in the repo's
    history. A work descriptor on `JobDeclaration` is **refused for now** — it carries ADR-0329's
    workspace-rebuild cost and unblocks neither the 8 nor the 12.
+   **ADR-0413 closed the *reporting* half and found two defects in it that this entry did not have,
+   one of them inside ADR-0362's own increment.** The survey **assumed every producer mounted**, so
+   `handler_missing`'s detail asserted the enqueue as a fact — *"`cron_scheduler` enqueues it — so
+   every fire accumulates a pending run"* — which on the shipped compose is false in its first clause
+   and half of its remedy, for **7 of `erp-core`'s 14**: nothing is enqueued, no row accumulates, and
+   registering a handler changes nothing because there is no run to serve. ADR-0334's own rule
+   (*naming a fix that would not work is worse than naming none*) broken in the function whose
+   comment states it, and ADR-0362's class one coarsening wider — the predicate decided from the
+   *kind's* producer without the fact of whether this deployment mounts it. And the survey was
+   **gated** on `conn !== undefined && (scheduleMs || workflowWorkers)` while
+   `buildJobHandlerRegistry` is **pure** (a job list, a provider list, an event-name set — no
+   connection, no store, no clock), the gate being about the *engine* a hundred lines below, so on
+   the shipped compose **the boot said nothing at all** about 14 declarations that cannot run.
+   Third, and in neither this entry nor any ADR: **`event_unproducible` was never printed**. Its only
+   appearance in `node.ts` was a *comment*, because the warn filter was the hand-maintained pair
+   `handler_missing || no_producer` — so 7 of the 14 surveyed unservable for a reason no operator
+   ever saw, ADR-0288's maintained list wrong a **fifth** time, in the increment that had just
+   created the verdict. `producer_unmounted` is the seventh verdict (checked after `no_producer` and
+   `deprecated`, before both handler checks, naming **both halves** of the remedy),
+   `mountedProducers` is **required with the empty set as the claim** (ADR-0331 —
+   optional-defaulting-to-every-producer *is* the defect kept as a default) and is **derived from the
+   three flags** rather than declared, and `isUnservableJobVerdict` is derived from
+   `VERDICT_DISPOSITION` so a new verdict cannot drop out of a reader. Live on PG 16 as a
+   non-owner, three arms that are an exact complement: no flag → `14 declaration(s): 0 served, 14
+   unservable; producers mounted: none` with 14 `producer_unmounted`; `--emit-entity-events` → 7
+   `producer_unmounted` + 4 `handler_missing` + **3 `event_unproducible`, printed for the first
+   time**; all three → **0** `producer_unmounted`. So mounting one producer moves exactly its 7 and
+   the verdict reaches zero exactly when every producer is mounted. The 4/3 split independently
+   confirms this file's corrected 27-of-55 figure rather than ADR-0362's prose. What is left is this
+   entry's own remainder: `JOB_HANDLER_PROVIDERS` is still empty, so **0 served** everywhere, and the
+   increment makes the platform honest about not running its jobs rather than running them.
 7. **No incident route exists**, so an auto-declared sev1 or sev2 is permanently uncloseable and
    `declared → cancelled` is the whole reachable lifecycle — **1 of 12 edges**, derived from the
    status writers. Re-measured: six of this item's supporting clauses were wrong and the
@@ -15206,7 +15316,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 403 records; 324 Accepted, 79 Proposed (the
+title or status change cannot drift. 407 records; 328 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

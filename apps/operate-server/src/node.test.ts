@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { resolve } from "node:path";
+import { JOB_PRODUCERS, JOB_SERVICE_VERDICTS } from "@crossengin/jobs";
 import { InMemoryEntityStore } from "@crossengin/operate-runtime";
 // The workspace's own comment stripper, shared by all twelve strategy rules. Not a local copy: a
 // `}` inside a doc comment unbalances the brace matcher below, and `stripComments` is the one
@@ -733,4 +734,98 @@ describe("the chain scheduler flags name the flag the operator passed", () => {
       expect(src).not.toContain(`[${pair}] ${configFlag} needs the chain signing key`);
     });
   }
+});
+
+describe("the job survey is unconditional, derived, and total over its own vocabulary", () => {
+  /**
+   * Three decisions, each pinned as text because all three live inside `serve()`, which needs a live
+   * Postgres and a bound port to reach — this app's own idiom for a wiring fact a unit test cannot
+   * hold (`unique-enforcement.test.ts`, the `buildOperateHttpServer` literal fence above).
+   *
+   * Stripped first, and that is **required rather than hygiene**: the comment above the warn filter
+   * quotes `handler_missing` and `no_producer` by name, as the record of what the filter used to be,
+   * so the no-verdict-literal assertion below would read that prose and fail on correct code
+   * (ADR-0390's class, where a fence resting on formatting is one the next author satisfies by
+   * changing the formatting).
+   */
+  const src = stripComments(readFileSync(resolve(import.meta.dirname, "./node.ts"), "utf8"));
+
+  /** The producer set's derivation block: from its declaration to the close of the `conn` guard. */
+  function derivationSpan(): string {
+    const at = src.indexOf("const mountedProducers");
+    expect(at, "mountedProducers declaration").toBeGreaterThan(-1);
+    const end = src.indexOf("buildJobHandlerRegistry(", at);
+    expect(end, "the registry call after the derivation").toBeGreaterThan(at);
+    return src.slice(at, end);
+  }
+
+  it("builds the survey with no gate, because it reads no connection", () => {
+    // `buildJobHandlerRegistry` takes four pure inputs and the engine below keeps its own `conn`
+    // check, so the old `conn !== undefined && (scheduleMs || workflowWorkers)` ternary silenced the
+    // survey on the shipped compose — which passes neither flag, and is therefore the one deployment
+    // that most needs to be told its job declarations cannot run.
+    const at = src.indexOf("const jobHandlers =");
+    expect(at, "the jobHandlers declaration").toBeGreaterThan(-1);
+    const head = src.slice(at, src.indexOf("buildJobHandlerRegistry(", at));
+    expect(head, "no ternary between the declaration and the call").not.toContain("?");
+    expect(head, "no conditional gate").not.toContain("conn !== undefined");
+  });
+
+  it("derives the mounted producer set from a flag per producer, and from nothing else", () => {
+    // Derived and never declared, so the set cannot come to disagree with what this process mounts.
+    // Each flag is the one the corresponding producer is constructed under.
+    const span = derivationSpan();
+    for (const [producer, flag] of [
+      ["cron_scheduler", "options.scheduleMs !== null"],
+      ["event_emitter", "options.emitEntityEvents"],
+      ["invoke_route", "options.enableJobInvoke"],
+    ] as const) {
+      expect(span, producer).toContain(`"${producer}"`);
+      expect(span, `${producer}'s flag`).toContain(flag);
+    }
+    // All three producers are built inside a `conn !== undefined` check — the scheduler, the
+    // entity-event effect and the invoke route — so without a store none is constructed and the
+    // conjunct is exact rather than defensive.
+    expect(span, "the conn conjunct").toContain("conn !== undefined");
+  });
+
+  it("covers every JOB_PRODUCERS member, so a fourth cannot arrive unmounted and unreported", () => {
+    // The both-ways half (`pg-record-retention.ts`' rule): a producer added to the contract with no
+    // derivation here would silently never be in the set, so every declaration of its kind would
+    // survey `producer_unmounted` on a deployment that does mount it — the reassuring direction
+    // inverted, which is worse than the defect this increment closed.
+    const span = derivationSpan();
+    expect(JOB_PRODUCERS.length, "a non-vacuous producer vocabulary").toBeGreaterThan(0);
+    const missing = JOB_PRODUCERS.filter((p) => !span.includes(`"${p}"`));
+    expect(missing, "JOB_PRODUCERS members with no derivation in node.ts").toEqual([]);
+  });
+
+  it("filters the warn by disposition and names no verdict", () => {
+    // `isUnservableJobVerdict` is derived from `VERDICT_DISPOSITION`, so a new verdict cannot
+    // drop out of the boot line. The two-member list it replaces dropped `event_unproducible`
+    // entirely: ADR-0362 created that verdict and threaded its input through two packages, and its
+    // only appearance in this file was a comment — ADR-0288's maintained list, wrong a fifth time.
+    const at = src.indexOf("for (const finding of jobHandlers.survey.findings)");
+    expect(at, "the findings loop").toBeGreaterThan(-1);
+    const span = src.slice(at, src.indexOf("\n  }", at));
+    expect(span, "the disposition predicate").toContain("isUnservableJobVerdict(finding.verdict)");
+    expect(JOB_SERVICE_VERDICTS.length, "a non-vacuous verdict vocabulary").toBeGreaterThan(0);
+    const named = JOB_SERVICE_VERDICTS.filter((v) => span.includes(v));
+    expect(named, "verdicts named by hand in the warn filter").toEqual([]);
+  });
+
+  it("says the declared and served counts either way", () => {
+    // Said even when nothing is served, because "0 of 14 served" is the sentence the gate withheld
+    // and `servedJobIds.length > 0` withheld after it. A boot that is silent about both is
+    // indistinguishable from a deployment whose jobs run.
+    const at = src.indexOf("[jobs] ${manifestJobs.length");
+    expect(at, "the unconditional [jobs] line").toBeGreaterThan(-1);
+    // Unconditional: the statement before it closes the derivation's `conn` guard, so nothing
+    // between the registry call and this line opens a condition.
+    const head = src.slice(src.indexOf("buildJobHandlerRegistry("), at);
+    expect(head, "no condition between the survey and its boot line").not.toContain("if (");
+    expect(src.slice(at, at + 400), "the served count").toContain("servedJobIds.length");
+    expect(src.slice(at, at + 400), "the unservable count").toContain("unservable.length");
+    expect(src.slice(at, at + 400), "the mounted producer set").toContain("mountedProducers");
+  });
 });

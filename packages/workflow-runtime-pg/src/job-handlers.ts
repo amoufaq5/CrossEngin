@@ -2,6 +2,7 @@ import {
   surveyManifestJobs,
   type JobDeclaration,
   type JobKind,
+  type JobProducer,
   type ManifestJobSurvey,
 } from "@crossengin/jobs";
 
@@ -90,6 +91,16 @@ export interface BuildJobHandlerRegistryInput {
    * function can detect that, because each is individually correct.
    */
   readonly producibleEventNames: Iterable<string>;
+  /**
+   * Which of the three producers this deployment has mounted, for the survey's `producer_unmounted`
+   * verdict.
+   *
+   * **Required, and the empty set is the claim** for `producibleEventNames`' reason one level out —
+   * and more sharply, because here the wrong default *was* the behaviour: assuming every producer
+   * mounted is what made the survey tell an operator that pending runs were accumulating for seven
+   * of `erp-core`'s fourteen declarations on a deployment that enqueues nothing at all.
+   */
+  readonly mountedProducers: Iterable<JobProducer>;
   /**
    * The `[0,1)` sampler backing a declared `retry.backoff.jitter`. Injected for determinism in
    * tests; `Math.random` by default, because `retryDelayMs` skips jitter entirely when no sampler is
@@ -208,6 +219,7 @@ export function buildJobHandlerRegistry(
     jobs: input.jobs,
     handledJobIds: handled,
     producibleEventNames: input.producibleEventNames,
+    mountedProducers: input.mountedProducers,
   });
   return { registry, survey, servedJobIds: survey.served };
 }

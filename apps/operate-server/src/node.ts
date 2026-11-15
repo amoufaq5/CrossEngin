@@ -531,7 +531,7 @@ import {
   type StripeUsageSync,
 } from "./stripe-usage-sync.js";
 import { PostgresJobInvoker, buildActionRoleMap, mergeActionRoleMaps } from "./job-invoke.js";
-import { invokeRolesByAction } from "@crossengin/jobs";
+import { invokeRolesByAction, isUnservableJobVerdict, type JobProducer } from "@crossengin/jobs";
 
 function firstHeader(v: string | readonly string[] | undefined): string | undefined {
   return v === undefined ? undefined : Array.isArray(v) ? v[0] : (v as string);
@@ -4244,28 +4244,59 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         options.eventPrefix !== null ? { eventPrefix: options.eventPrefix } : {},
       )
     : [];
-  const jobHandlers =
-    conn !== undefined && (options.scheduleMs !== null || options.workflowWorkers)
-      ? buildJobHandlerRegistry({
-          jobs: manifestJobs,
-          providers: JOB_HANDLER_PROVIDERS,
-          producibleEventNames,
-        })
-      : null;
-  if (jobHandlers !== null) {
-    // ADR-0331's rule applied to jobs: a declaration that will never run is named with the reason,
-    // never passed over. This is the sentence that was missing — an enqueue that succeeds is
-    // indistinguishable from work that happens.
-    if (jobHandlers.servedJobIds.length > 0) {
-      console.info(
-        `[jobs] ${jobHandlers.servedJobIds.length.toString()} job handler(s) registered: ` +
-          jobHandlers.servedJobIds.join(", "),
-      );
-    }
-    for (const finding of jobHandlers.survey.findings) {
-      if (finding.verdict === "handler_missing" || finding.verdict === "no_producer") {
-        console.warn(`[jobs] ${finding.jobId} (${finding.verdict}): ${finding.detail}`);
-      }
+  // Which of the three producers this process mounts, **derived from the flags and never declared**,
+  // so the set cannot come to disagree with what the binary does. Each of the three is built inside a
+  // `conn !== undefined` check — the cron scheduler below, the entity-event effect and the invoke
+  // route far above — so the `conn` conjunct is not belt-and-braces: without a Postgres store there
+  // is no `meta.job_runs` to enqueue into and none of the three is constructed at all.
+  //
+  // The empty set is the **claim** (`producibleEventNames`' rule one input across): it says this
+  // deployment enqueues nothing, which is literally true of the shipped compose, and it is what makes
+  // `producer_unmounted` reachable. The alternative — assuming every producer mounted — is what made
+  // the survey tell an operator that pending runs were accumulating for seven of `erp-core`'s
+  // fourteen declarations on a deployment that enqueues nothing at all (ADR-0362's class, measured).
+  const mountedProducers: JobProducer[] = [];
+  if (conn !== undefined) {
+    if (options.scheduleMs !== null) mountedProducers.push("cron_scheduler");
+    if (options.emitEntityEvents) mountedProducers.push("event_emitter");
+    if (options.enableJobInvoke) mountedProducers.push("invoke_route");
+  }
+  // **Unconditional, because the survey is pure.** `buildJobHandlerRegistry` takes a job list, a
+  // provider list, an event-name set and this producer set — no connection, no store, no clock — and
+  // the old `conn !== undefined && (scheduleMs || workflowWorkers)` gate was about the *engine*,
+  // which is constructed from `jobHandlers.registry` a hundred lines below and still carries its own
+  // `conn` check. So the gate silenced the survey on exactly the deployment that needs it: the
+  // shipped compose passes neither flag, so **nothing said that none of the manifest's job
+  // declarations can run**, which is the one fact an operator reading this boot cannot derive.
+  const jobHandlers = buildJobHandlerRegistry({
+    jobs: manifestJobs,
+    providers: JOB_HANDLER_PROVIDERS,
+    producibleEventNames,
+    mountedProducers,
+  });
+  // ADR-0331's rule applied to jobs: a declaration that will never run is named with the reason,
+  // never passed over. Said **either way, including when nothing is served**, because "0 of 14
+  // served" is the sentence the gate withheld and `servedJobIds.length > 0` withheld after it — an
+  // enqueue that succeeds is indistinguishable from work that happens, and so is a boot that says
+  // nothing about either.
+  console.info(
+    `[jobs] ${manifestJobs.length.toString()} declaration(s): ` +
+      `${jobHandlers.servedJobIds.length.toString()} served, ` +
+      `${jobHandlers.survey.unservable.length.toString()} unservable; producers mounted: ` +
+      `${mountedProducers.length > 0 ? mountedProducers.join(", ") : "none"}`,
+  );
+  if (jobHandlers.servedJobIds.length > 0) {
+    console.info(`[jobs] handlers registered: ${jobHandlers.servedJobIds.join(", ")}`);
+  }
+  for (const finding of jobHandlers.survey.findings) {
+    // `isUnservableJobVerdict` and never a list of verdict names. The hand-maintained
+    // `handler_missing || no_producer` pair this replaces dropped `event_unproducible` **entirely**:
+    // ADR-0362 created that verdict, threaded its input through two packages, and its only
+    // appearance in this file was a comment — so seven of `erp-core`'s fourteen declarations
+    // surveyed unservable for a reason no operator ever saw. ADR-0288's maintained list, wrong a
+    // fifth time, in the one place a verdict reaches a human.
+    if (isUnservableJobVerdict(finding.verdict)) {
+      console.warn(`[jobs] ${finding.jobId} (${finding.verdict}): ${finding.detail}`);
     }
   }
   // In-process cron scheduler: enqueue the manifest's scheduled jobs into job_runs per tenant, so the
@@ -4311,7 +4342,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     // while no job handler is registered in this process, which is still the case.
     // Two independent reasons the queue will not drain, and they need different fixes: no worker is
     // mounted at all, or one is mounted and no handler serves the jobs being enqueued.
-    const unservedJobs = jobHandlers?.survey.unservable ?? [];
+    const unservedJobs = jobHandlers.survey.unservable;
     if (!options.workflowWorkers) {
       console.warn(
         "[jobs] --schedule-ms enqueues job runs into meta.job_runs, and no worker in this process" +
@@ -4354,7 +4385,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       // `due` CTE names only the served job ids, so an unserved run is never claimed at all rather
       // than claimed and finalized `failed` with handler_not_found, and an unserved backlog cannot
       // starve served runs out of a batch.
-      ...(jobHandlers !== null && jobHandlers.servedJobIds.length > 0
+      ...(jobHandlers.servedJobIds.length > 0
         ? {
             jobEngine: new PostgresJobRunEngine(conn, jobHandlers.registry, {
               ...schemaOpt,
