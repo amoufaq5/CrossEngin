@@ -14551,6 +14551,42 @@ land with or before it.
     declaring a `transaction:` member, so a required fifth method is unshippable while an optional
     parameter is free by contravariance *and* makes the snapshot unobservable to every fake that
     ignores it (ADR-0389's discarded-callback class, one argument in).
+18. **On the typed store no invoice can be sent until the tenant's account codes resolve, and the
+    refusal names nothing.** ADR-0121's GL resolution is
+    `(await resolveAccountId(…)) ?? c.arAccountRef`, and the fallbacks are literals
+    (`"accounts_receivable"`, `"revenue"`, `"tax_payable"`, `"accounts_payable"`, `"expense"`,
+    `"tax_input"`, `"cash"`, the two FX names) written into `JournalLine.ledger_account_id` — which
+    `erp-core` declares a **required `reference` to `LedgerAccount`**. Measured live on PG 16 as a
+    non-owner, one tenant with no finance settings, the same three requests on both stores:
+    on `--store pg`, `POST /v1/invoices/{id}/send` answers **200** and the GL holds
+    `('accounts_receivable', 100.00, 0)` and `('revenue', 0, 100.00)` — two journal lines whose
+    account id is not an id, on the shipped compose's store, for every tenant until an admin
+    configures the codes; on `--store pg-columns` the identical request answers
+    **500 `write_failed`** with the invoice left `draft` and no journal line, because Postgres
+    refuses `fk_journal_line_ledger_account_id` (`23503`, `Key (tenant_id, ledger_account_id)=(…,
+    accounts_receivable) is not present in table "ledger_account"`). So the two stores answer one
+    request oppositely (ADR-0359's shape), the typed one with a body that names no cause
+    (`writeTxn`'s fixed sentence) and no log line, and **nothing at boot or in the settings surface
+    says the codes are a prerequisite of the first invoice**. ADR-0121 chose the fallback so posting
+    never blocks on configuration — true of the document store and false of the typed one. The fix
+    is a decision: refuse by name before the write (`gl_account_unresolved`, a 422 naming the code
+    and the settings key) on both stores, which makes the dangling-reference posting on
+    `--store pg` a refusal too and so changes what a working deployment does (ADR-0338 read the
+    other way), or keep the fallback and report it. **P2**: the wrong answer is live on
+    `--store pg` as a dangling reference rather than as a wrong figure, and the 500 needs the store
+    the shipped compose does not select.
+19. **The document store saves a body field the manifest does not declare, and the typed store drops
+    it.** `validateBody` iterates the entity's *rules* and never the body's keys, so an undeclared
+    key is neither refused nor stripped. Measured live on both stores:
+    `POST /v1/accounts {"name":…, "billing_email":…, "totally_undeclared":{"nested":[1,2,3]}}`
+    answers **201** on each; `--store pg` stores the key and returns it on every later read, while
+    `--store pg-columns` silently drops it (its `INSERT` names only planned columns). The
+    consequences are three and none is a wrong figure: any caller with `create`/`update` can store
+    arbitrary JSON beside a record on the default store; such a key is in no classification, so no
+    redaction and no write mask ever considers it; and a field *later* declared arrives already
+    populated with values no validation saw. `store-parity.test.ts` sends only declared fields, which
+    is why the divergence was never compared. Refusing an unknown key is not free (a client sending
+    an extra key works today — ADR-0338's premise), so the choice is 422, strip, or report.
 
 ### P3 — debt and stale documentation
 
@@ -15292,6 +15328,22 @@ method is that a stale figure misleads.
    just now (`npx prettier --check "packages/*/src/**/*.ts"` and `npx prettier --check .`), which
    is the point of the entry rather than the numbers: a figure carried forward without its scope
    drifts in two directions at once.
+8. **`ai-router` is reached by the CLI and not by the server.** `@crossengin/ai-router` has exactly
+   one importing member, `apps/architect-cli` (`commands.ts` builds `DefaultLlmRouter`);
+   `apps/operate-server` depends on `ai-providers`, the three provider packages and the two
+   `ai-architect-runtime` packages, and **not** on the router. So everything the router does —
+   per-task policy, residency filtering, retry with backoff, fallback to the next provider,
+   per-provider latency tracking — applies to `crossengin chat` and to **no** `--ai-design`
+   request, which builds one provider from `ai-model-source.ts` and calls it. The per-tenant cost
+   ceiling is unaffected (that is `ArchitectGuardRuntime`, which the server does wire). Not a wrong
+   answer: a design request against a failing provider fails where the CLI would fall back.
+9. **Four `erp-core` collections are served under an ungrammatical slug**, and every extending
+   pack inherits them: `resourceSlug` appends `s`, so `JournalEntry`, `Opportunity`,
+   `BillOfMaterials` and `Currency` are `/v1/journal-entrys`, `/v1/opportunitys`,
+   `/v1/bill-of-materialss` and `/v1/currencys` (measured over the 51 slugs of the built pack).
+   Cosmetic and **not free to fix**: the slugs are in every client's URLs, in the OpenAPI document
+   and in the console's routes, so correcting them is a breaking change that wants either an alias
+   period or an explicit per-entity slug on the manifest — a decision rather than a patch.
 
 ### Demoted, with the measurement that demoted them
 
