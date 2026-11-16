@@ -25,6 +25,7 @@ import {
   searchFunctionLine,
   type SearchFunctionState,
 } from "./search-function.js";
+import { listPageOp } from "./entity-ops.js";
 
 interface FnRow {
   readonly prosrc: string;
@@ -299,7 +300,7 @@ describe("searchFunctionLine", () => {
 
   it("says something in every state", () => {
     for (const state of STATES) {
-      const line = searchFunctionLine({ state, detail: null });
+      const line = searchFunctionLine({ state, detail: null }, "pg-columns");
       expect(line.startsWith("[search] ")).toBe(true);
       expect(line.length).toBeGreaterThan(40);
     }
@@ -307,14 +308,14 @@ describe("searchFunctionLine", () => {
 
   it("names the function in every state, so a log line identifies what it is about", () => {
     for (const state of STATES) {
-      expect(searchFunctionLine({ state, detail: null })).toContain(SEARCH_FUNCTION);
+      expect(searchFunctionLine({ state, detail: null }, "pg-columns")).toContain(SEARCH_FUNCTION);
     }
   });
 
   it("prints a runnable remedy in every state that is not already working", () => {
     for (const state of STATES) {
       if (SEARCH_FUNCTION_ANSWERS_TRUSTED[state] === true && state !== "volatility_differs") continue;
-      const line = searchFunctionLine({ state, detail: "x" });
+      const line = searchFunctionLine({ state, detail: "x" }, "pg-columns");
       // `unreadable` is the one state with nothing to name: the read failed, so the finding is that
       // nothing was established rather than a statement to run (ADR-0334 — a remedy that cannot
       // work is worse than none).
@@ -327,7 +328,7 @@ describe("searchFunctionLine", () => {
   });
 
   it("tells a body_differs deployment to reindex as well, and in that order", () => {
-    const line = searchFunctionLine({ state: "body_differs", detail: "SELECT $1" });
+    const line = searchFunctionLine({ state: "body_differs", detail: "SELECT $1" }, "pg-columns");
     expect(line).toContain(REPLACE_SEARCH_FUNCTION_SQL);
     expect(line).toContain("REINDEX");
     expect(line.indexOf(REPLACE_SEARCH_FUNCTION_SQL)).toBeLessThan(line.indexOf("REINDEX"));
@@ -339,7 +340,7 @@ describe("searchFunctionLine", () => {
     // function, so reindexing them repairs nothing; and that line is pushed *after* this one and is
     // `null` on a converged deployment, so on the deployments needing this repair there is no "line
     // above" (ADR-0334 — a remedy that cannot work is worse than none).
-    const line = searchFunctionLine({ state: "body_differs", detail: "SELECT $1" });
+    const line = searchFunctionLine({ state: "body_differs", detail: "SELECT $1" }, "pg-columns");
     expect(line).not.toContain("line above");
     expect(line).not.toContain("superseded");
     expect(line).toContain(`depends on ${SEARCH_FUNCTION_SIGNATURE}`);
@@ -349,16 +350,16 @@ describe("searchFunctionLine", () => {
   it("says existing answers are unaffected for volatility_differs, and prints no REINDEX", () => {
     // The body is unchanged, so the index entries are still correct — measured. Printing a REINDEX
     // here would ask for an ACCESS EXCLUSIVE lock to fix nothing.
-    const line = searchFunctionLine({ state: "volatility_differs", detail: "s" });
+    const line = searchFunctionLine({ state: "volatility_differs", detail: "s" }, "pg-columns");
     expect(line).toContain("unaffected");
     expect(line).not.toContain("REINDEX");
   });
 
   it("names the refusal when an absent function could not be created", () => {
-    expect(searchFunctionLine({ state: "absent", detail: "permission denied" })).toContain(
+    expect(searchFunctionLine({ state: "absent", detail: "permission denied" }, "pg-columns")).toContain(
       "creating it was refused: permission denied",
     );
-    expect(searchFunctionLine({ state: "absent", detail: null })).not.toContain("refused");
+    expect(searchFunctionLine({ state: "absent", detail: null }, "pg-columns")).not.toContain("refused");
   });
 
   it("names the privilege and a remedy the refused role can act on, and only when one was refused", () => {
@@ -367,36 +368,28 @@ describe("searchFunctionLine", () => {
     // `CREATE EXTENSION`s beside it establish no such floor: `IF NOT EXISTS` short-circuits on an
     // already-installed extension before any privilege check, measured as the non-superuser
     // `serving` role, which holds neither CREATE on the database nor CREATE on `public`.
-    const refused = searchFunctionLine({ state: "absent", detail: "permission denied for schema public" });
+    const refused = searchFunctionLine({ state: "absent", detail: "permission denied for schema public" }, "pg-columns");
     expect(refused).toContain(`CREATE on schema ${SEARCH_FUNCTION_SCHEMA}`);
     expect(refused).toContain("IF NOT EXISTS short-circuits");
     expect(refused).toContain(CREATE_SEARCH_FUNCTION_SQL);
     // Not said when nothing was attempted: there is no refused role to describe, and the plain
     // statement is the whole remedy.
-    const untried = searchFunctionLine({ state: "absent", detail: null });
+    const untried = searchFunctionLine({ state: "absent", detail: null }, "pg-columns");
     expect(untried).not.toContain("short-circuits");
     expect(untried).toContain(CREATE_SEARCH_FUNCTION_SQL);
   });
 });
 
 describe("searchFunctionLine — what the state reaches", () => {
-  it("attributes every consequence to --store pg-columns and exonerates --store pg", () => {
+  it("attributes every consequence to the column store and no longer claims --store pg is unaffected", () => {
     // The first version of the `absent` arm said "every ?q= and every [contains] filter will answer
-    // 500" with no store named, and that is false in both directions: `--store pg` names this
-    // function nowhere (`entity-ops.ts` declares its own fold), and on `--store pg-columns` it
-    // understates — the store cannot be provisioned at all.
+    // 500" with no store named; the second appended "--store pg is unaffected in every state", which
+    // is false of `dictionary_absent` (the document store's fold pins the same dictionary, measured).
+    // The line takes the store now, so the column store's line speaks about the column store only.
     for (const state of SEARCH_FUNCTION_STATES) {
-      const line = searchFunctionLine({ state, detail: "x" });
-      const healthy =
-        SEARCH_FUNCTION_ANSWERS_TRUSTED[state] === true && SEARCH_FUNCTION_ADMITS_INDEX[state] === true;
-      const unestablished =
-        SEARCH_FUNCTION_ANSWERS_TRUSTED[state] === null || SEARCH_FUNCTION_ADMITS_INDEX[state] === null;
-      if (healthy || unestablished) {
-        expect(line).not.toContain("--store pg-columns");
-        continue;
-      }
-      expect(line).toContain("--store pg-columns");
-      expect(line).toContain("--store pg is unaffected in every state");
+      const line = searchFunctionLine({ state, detail: "x" }, "pg-columns");
+      expect(line).not.toContain("unaffected in every state");
+      expect(line).not.toContain("--store pg ");
     }
   });
 
@@ -411,7 +404,7 @@ describe("searchFunctionLine — what the state reaches", () => {
     // "simplified" into a loop. Measured: flipping `volatility_differs` to `true` leaves this green
     // and fails the disagreement test by name.
     for (const state of SEARCH_FUNCTION_STATES) {
-      const line = searchFunctionLine({ state, detail: "x" });
+      const line = searchFunctionLine({ state, detail: "x" }, "pg-columns");
       if (SEARCH_FUNCTION_ADMITS_INDEX[state] === false) {
         expect(line).toContain("cannot apply the schema at all");
         expect(line).toContain("applyTenantManifestSchema aborts its transaction");
@@ -426,23 +419,134 @@ describe("searchFunctionLine — what the state reaches", () => {
     // trigram index can be created from it *either*" — there is nothing else broken for it to be
     // additional to. Two sentences in one line disagreeing is the same two-spellings hazard one
     // register down.
-    expect(searchFunctionLine({ state: "volatility_differs", detail: "s" })).not.toContain("either");
-    expect(searchFunctionLine({ state: "absent", detail: null })).toContain("either");
+    expect(searchFunctionLine({ state: "volatility_differs", detail: "s" }, "pg-columns")).not.toContain("either");
+    expect(searchFunctionLine({ state: "absent", detail: null }, "pg-columns")).toContain("either");
   });
 
   it("claims nothing about either dependent when the catalog could not be read", () => {
-    const line = searchFunctionLine({ state: "unreadable", detail: "boom" });
+    const line = searchFunctionLine({ state: "unreadable", detail: "boom" }, "pg-columns");
     expect(line).toContain("nothing is claimed");
     expect(line).not.toContain("--store pg-columns");
     expect(line).not.toContain("creatable");
   });
 
-  it("adds no clause to a healthy line, so the normal boot says one sentence", () => {
+  it("adds no clause to a healthy column-store line, so the normal boot says one sentence", () => {
     for (const state of ["created", "matches"] as const) {
-      const line = searchFunctionLine({ state, detail: null }, "every_table");
+      const line = searchFunctionLine({ state, detail: null }, "pg-columns", "every_table");
       expect(line).not.toContain("--store");
       expect(line).toContain("RLS-exempt");
     }
+  });
+});
+
+describe("searchFunctionLine — on --store pg, whose predicate does not call the function", () => {
+  it("never asserts the column store's index on a healthy boot, in any reach", () => {
+    // The shipped default printed "the predicate and the trigram index are one expression, and this
+    // role is RLS-exempt" — false three ways on this store: its predicate folds through
+    // `rawFoldCall`, no trigram index exists for it, and `pg_trgm` is never created for it.
+    for (const state of ["created", "matches"] as const) {
+      for (const reach of SEARCH_INDEX_REACHES) {
+        const line = searchFunctionLine({ state, detail: null }, "pg", reach);
+        expect(line).not.toContain("trigram index are one expression");
+        expect(line).not.toContain("RLS-exempt");
+        expect(line).not.toContain("LEAKPROOF");
+        expect(line).toContain("unused by --store pg");
+        expect(line).toContain("reads every row the tenant holds for that entity");
+      }
+    }
+  });
+
+  it("differs from the column store's healthy line, so the store argument is not decorative", () => {
+    const pg = searchFunctionLine({ state: "matches", detail: null }, "pg", "every_table");
+    const columns = searchFunctionLine({ state: "matches", detail: null }, "pg-columns", "every_table");
+    expect(pg).not.toBe(columns);
+    expect(columns).toContain("trigram index are one expression");
+  });
+
+  it("says a fault in the unused function changes no answer here, and prints no remedy for it", () => {
+    for (const state of ["absent", "body_differs", "volatility_differs"] as const) {
+      const line = searchFunctionLine({ state, detail: "permission denied" }, "pg");
+      expect(line).toContain("unused by --store pg");
+      expect(line).toContain("matters only to --store pg-columns");
+      expect(line).not.toContain("answer 500");
+      expect(line).not.toMatch(/CREATE (OR REPLACE )?FUNCTION|REINDEX/);
+    }
+  });
+
+  it("says dictionary_absent breaks this store too, because its fold pins the same dictionary", () => {
+    const line = searchFunctionLine({ state: "dictionary_absent", detail: SEARCH_DICTIONARY }, "pg");
+    expect(line).toContain("will answer 500");
+    expect(line).toContain("That includes --store pg");
+    expect(line).not.toContain("unused by --store pg");
+  });
+
+  it("gives dictionary_absent the remedy that works when unaccent lives in another schema", () => {
+    // That is the one way this state survives the boot's own CREATE EXTENSION, and for it
+    // `CREATE EXTENSION IF NOT EXISTS unaccent SCHEMA public` is a no-op — measured on PG 16.15:
+    // `NOTICE: extension "unaccent" already exists, skipping`, dictionary still absent, while
+    // `ALTER EXTENSION unaccent SET SCHEMA public` restored the fold on the same cluster.
+    for (const store of ["pg", "pg-columns"] as const) {
+      const line = searchFunctionLine({ state: "dictionary_absent", detail: SEARCH_DICTIONARY }, store);
+      expect(line).toContain(`CREATE EXTENSION IF NOT EXISTS unaccent SCHEMA ${SEARCH_FUNCTION_SCHEMA};`);
+      expect(line).toContain(`ALTER EXTENSION unaccent SET SCHEMA ${SEARCH_FUNCTION_SCHEMA};`);
+    }
+  });
+
+  it("claims nothing when the catalog could not be read, on either store", () => {
+    for (const store of ["pg", "pg-columns"] as const) {
+      const line = searchFunctionLine({ state: "unreadable", detail: "boom" }, store);
+      expect(line).toContain("nothing is claimed");
+      expect(line).not.toContain("unused by");
+    }
+  });
+
+  it("says one line in every state on both stores, each naming the function", () => {
+    for (const store of ["pg", "pg-columns"] as const) {
+      for (const state of SEARCH_FUNCTION_STATES) {
+        const line = searchFunctionLine({ state, detail: null }, store);
+        expect(line.startsWith(`[search] ${SEARCH_FUNCTION}: `)).toBe(true);
+        expect(line.includes("\n")).toBe(false);
+      }
+    }
+  });
+});
+
+describe("the store map against the SQL each store really issues", () => {
+  // `STORE_PREDICATE_CALLS_SEARCH_FUNCTION` is module-private, so it is fenced through what it
+  // decides: the --store pg line says "names this function nowhere" exactly when the real
+  // document-store adapter's SQL does not name it, and both stores' SQL pins the dictionary that
+  // makes `dictionary_absent` reach the document store. Driven through `listPageOp`, never a
+  // synthetic adapter, for the reason `list-sql.test.ts` gives.
+  async function documentStoreSql(): Promise<string> {
+    let seen = "";
+    const tx: PgConnection = {
+      query: (async (sql: string, params?: readonly unknown[]) => {
+        assertBindArity(sql, params);
+        seen = sql;
+        return { rows: [], rowCount: 0 };
+      }) as PgConnection["query"],
+      transaction: (async <T,>(fn: (t: PgConnection) => Promise<T>) => fn(tx)) as PgConnection["transaction"],
+      withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
+      close: vi.fn() as PgConnection["close"],
+    };
+    await listPageOp(tx, "meta.operate_entity_records", "t1", "Vendor", {
+      limit: 10,
+      cursor: null,
+      sort: [],
+      filters: [{ field: "name", op: "contains", value: "x" }],
+      search: { term: "y", fields: ["notes"] },
+    });
+    return seen;
+  }
+
+  it("matches the document store's predicate: it names neither the wrapper nor an unpinned dictionary", async () => {
+    const sql = await documentStoreSql();
+    const line = searchFunctionLine({ state: "matches", detail: null }, "pg");
+    expect(sql.includes(SEARCH_FUNCTION)).toBe(false);
+    expect(line).toContain("names this function nowhere");
+    // Not a vacuous absence: the surfaces are there, folded through the pinned dictionary.
+    expect(sql).toContain(`'${SEARCH_DICTIONARY}'::regdictionary`);
+    expect(sql).toContain("ILIKE");
   });
 });
 

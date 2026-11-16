@@ -769,6 +769,24 @@ export interface CompiledOperateServer {
    * emits, but that each is covered with the shape its own action produces.
    */
   readonly redactionOperationIds: ReadonlyMap<string, readonly RedactedOperation[]>;
+  /**
+   * Every server-side report this compile mounted, with what its handler reads and whom it admits.
+   *
+   * Read off the objects the handlers were built with rather than re-derived, because the role set
+   * here is chosen independently of the manifest's entity grants (`financeRoles ?? the default`) and
+   * a survey that re-spelled that `??` would describe the handler only until the option gained a
+   * producer. Empty when the manifest models none of the entities a report needs.
+   */
+  readonly reportSurfaces: readonly ReportSurface[];
+}
+
+/** One mounted report route, as built. See {@link CompiledOperateServer.reportSurfaces}. */
+export interface ReportSurface {
+  readonly operationId: string;
+  /** Every entity the handler reads records of, the documents first. */
+  readonly reads: readonly string[];
+  /** The roles the handler admits — the same set object the handler holds. */
+  readonly viewerRoles: ReadonlySet<RoleName>;
 }
 
 /**
@@ -996,16 +1014,25 @@ export function compileOperateServer(
 
   // AR/AP aging report, when the manifest models invoices/bills + payments.
   const agingNames = new Set((manifest.entities ?? []).map((e) => e.name));
+  // One set for both report handlers and for `reportSurfaces`, so what the survey says is the set
+  // each handler enforces rather than a second spelling of this `??`.
+  const financeRoles: ReadonlySet<RoleName> = new Set(options.financeRoles ?? DEFAULT_FINANCE_ROLES);
+  const reportSurfaces: ReportSurface[] = [];
+  // Passed to the handlers explicitly rather than left to their defaults, so the entities a surface
+  // says it reads are the ones the handler was told to read.
+  const paymentEntity = "Payment";
+  const invoiceEntity = "Invoice";
+  const certificateEntity = "WhtCertificate";
   const agingSections: Record<string, AgingSpec> = {};
-  if (agingNames.has("Invoice") && agingNames.has("Payment")) {
+  if (agingNames.has(invoiceEntity) && agingNames.has(paymentEntity)) {
     agingSections["ar"] = {
-      entity: "Invoice",
+      entity: invoiceEntity,
       openStates: ["sent", "overdue"],
       paymentRefField: "invoice_id",
       numberField: "invoice_number",
     };
   }
-  if (agingNames.has("Bill") && agingNames.has("Payment")) {
+  if (agingNames.has("Bill") && agingNames.has(paymentEntity)) {
     agingSections["ap"] = {
       entity: "Bill",
       openStates: ["approved", "overdue"],
@@ -1015,13 +1042,19 @@ export function compileOperateServer(
   }
   if (Object.keys(agingSections).length > 0) {
     routes.register(literalRoute("meta.aging.read", "GET", ["v1", "meta", "aging"]));
+    reportSurfaces.push({
+      operationId: "meta.aging.read",
+      reads: [...Object.values(agingSections).map((s) => s.entity), paymentEntity],
+      viewerRoles: financeRoles,
+    });
     handlers.register(
       "meta.aging.read",
       gate(
         buildAgingHandler({
           store,
           principalRoles: options.principalRoles,
-          viewerRoles: new Set(options.financeRoles ?? DEFAULT_FINANCE_ROLES),
+          viewerRoles: financeRoles,
+          paymentEntity,
           sections: agingSections,
           ...(options.clock !== undefined ? { clock: options.clock } : {}),
         }),
@@ -1032,15 +1065,22 @@ export function compileOperateServer(
 
   // WHT reconciliation report: withheld (invoice withholding_total) vs certified
   // (confirmed WhtCertificate amounts), when the manifest models both.
-  if (agingNames.has("Invoice") && agingNames.has("WhtCertificate")) {
+  if (agingNames.has(invoiceEntity) && agingNames.has(certificateEntity)) {
     routes.register(literalRoute("meta.whtReconciliation.read", "GET", ["v1", "meta", "wht-reconciliation"]));
+    reportSurfaces.push({
+      operationId: "meta.whtReconciliation.read",
+      reads: [invoiceEntity, certificateEntity],
+      viewerRoles: financeRoles,
+    });
     handlers.register(
       "meta.whtReconciliation.read",
       gate(
         buildWhtReconciliationHandler({
           store,
           principalRoles: options.principalRoles,
-          viewerRoles: new Set(options.financeRoles ?? DEFAULT_FINANCE_ROLES),
+          viewerRoles: financeRoles,
+          invoiceEntity,
+          certificateEntity,
         }),
         "read",
       ),
@@ -1102,6 +1142,7 @@ export function compileOperateServer(
     redactionRegistry,
     routeSpecs,
     redactionOperationIds: operationIdsByEntity,
+    reportSurfaces,
   };
 }
 

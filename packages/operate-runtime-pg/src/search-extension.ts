@@ -6,6 +6,7 @@ import {
   searchFunctionLine,
   type SearchFunctionProbe,
   type SearchIndexReach,
+  type SearchStoreKind,
 } from "./search-function.js";
 import {
   auditSupersededTrigramIndexes,
@@ -153,14 +154,14 @@ async function ensureUnaccentExtension(
  * binary is: "we checked and search works" cannot be inferred from the absence of a line, and this
  * is a capability whose failure mode was an empty dropdown that looks like empty data.
  */
-export function searchExtensionLine(result: SearchExtensionResult): string {
+export function searchExtensionLine(result: SearchExtensionResult, store: SearchStoreKind): string {
   // One joined block rather than three call sites, so a `console.info` in the binary need not know
   // how many facts this pass established — which is what kept the wrapper and the superseded-index
   // audit out of `apps/operate-server/src/node.ts` entirely. The superseded line is absent on a
   // converged deployment, so the normal boot is two lines.
   const lines = [
     extensionLine(result),
-    searchFunctionLine(result.searchFunction, result.indexReach),
+    searchFunctionLine(result.searchFunction, store, result.indexReach),
   ];
   const superseded = supersededTrigramLine(result.supersededIndexes);
   if (superseded !== null) lines.push(superseded);
@@ -169,10 +170,16 @@ export function searchExtensionLine(result: SearchExtensionResult): string {
 
 function extensionLine(result: SearchExtensionResult): string {
   switch (result.outcome) {
+    // No serveability claim on these two arms, which there used to be ("?q= and [contains] are
+    // serveable"): with unaccent installed in some other schema this line read `present` while
+    // both stores' folds raised for want of `public.unaccent` (measured, the `dictionary_absent`
+    // state), and on --store pg-columns it read `present` while the next line said ABSENT. Whether
+    // search is served is a fact about the dictionary, the wrapper and the store together, and the
+    // next line is the one that holds all three.
     case "present":
-      return "[search] unaccent: present — ?q= and [contains] are serveable";
+      return "[search] unaccent: present";
     case "created":
-      return "[search] unaccent: created — ?q= and [contains] are serveable";
+      return "[search] unaccent: created";
     case "refused":
       return (
         "[search] unaccent: REFUSED — ?q= and every [contains] filter will answer 500, and a" +

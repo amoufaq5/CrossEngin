@@ -433,6 +433,8 @@ import { JobScheduler, PostgresTenantSource, StaticTenantSource, type TenantSour
 import { PostgresEntityEventSink } from "./entity-events.js";
 import { buildSloEnforcement, loadSloConfig } from "./slo-config.js";
 import { formatSloRollbackSurvey, surveySloRollbacks } from "./slo-rollback-survey.js";
+import { formatManifestSectionSurvey, surveyManifestSections } from "./manifest-section-survey.js";
+import { formatReportSurfaceSurvey, surveyReportSurfaces } from "./report-surface-survey.js";
 import {
   deriveSloConfig,
   loadSloDefaultsOverride,
@@ -888,7 +890,7 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
   // store because the dependency belongs to the query builder they share, which is the level at
   // which attaching it to one store's DDL is what made it absent from the other.
   const searchExt = await ensureSearchExtension(conn);
-  console.info(searchExtensionLine(searchExt));
+  console.info(searchExtensionLine(searchExt, options.store));
   if (options.store === "pg-columns") {
     const store = new ColumnMappedEntityStore(conn, manifest, {
       ...(options.schema !== null ? { schema: options.schema } : {}),
@@ -1093,6 +1095,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // above, the answer does not depend on `--store`. Reports and never refuses, and said either way
   // including when the count is zero — which it is on all seven packs, 132 views every one of them
   // `"inherit"`, and that is precisely when it costs nothing to start saying.
+  // Which of the manifest's sections no request path reads (ADR-0388's census) and whether this
+  // manifest declares a member in any of them — said either way, a pure function of the manifest.
+  console.info(formatManifestSectionSurvey(surveyManifestSections(manifest)));
   const viewPermissions = surveyViewPermissionOverrides(manifest);
   const viewPermissionLine = formatViewPermissionSurvey(viewPermissions);
   if (viewPermissionsAreSuspect(viewPermissions)) {
@@ -4185,6 +4190,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   console.info(
     `[auth] ${formatAuthSchemeSurvey(gateway.runtime.authSchemeServing, options.defaultScheme)}`,
   );
+  // The server-side reports are gated on a finance role list chosen independently of the entity
+  // grants; read off the compiled gateway so the survey reports the set each handler enforces
+  // rather than a second spelling of its default.
+  console.info(formatReportSurfaceSurvey(surveyReportSurfaces(gateway.reportSurfaces, manifest)));
   // ADR-0386. Said either way, including when nothing is relaxed, because the thing an operator has
   // to be able to confirm is a *requirement* -- and before this every one of these guards was
   // `present && wrong`, so a token carrying none of the three verified as `authenticated`. A relaxed

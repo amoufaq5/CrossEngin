@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 
 import type { IncomingRequest, ResolvedPrincipal } from "@crossengin/api-gateway";
+import type { RoleName } from "@crossengin/auth";
 import {
   InMemoryPrincipalResolver,
   buildIncomingRequest,
@@ -1105,5 +1106,83 @@ describe("compileOperateServer — settlement coverage is wired for the real pac
     const r = await callOperation(compiled, "invoice.mark_paid", { id: String(inv["id"]) }, null);
     expect(r.status).toBe(422);
     expect(r.body["error"]).toBe("uncovered_settlement");
+  });
+});
+
+describe("compileOperateServer — report surfaces are the handlers' own", () => {
+  function reportServer(financeRoles?: readonly RoleName[]) {
+    return compileOperateServer(buildErpCorePack(), {
+      store: new InMemoryEntityStore(),
+      principalRoles: (p) => ({ primaryRole: p?.grantedScopes[0] ?? "anonymous" }),
+      ...(financeRoles !== undefined ? { financeRoles } : {}),
+    });
+  }
+
+  async function statusAs(
+    compiled: ReturnType<typeof compileOperateServer>,
+    operationId: string,
+    role: string,
+  ): Promise<number> {
+    const handler = compiled.handlers.resolve(operationId);
+    if (handler === null) throw new Error(`no handler for ${operationId}`);
+    const out = await handler({
+      request: req("GET", "/x", "unused"),
+      route: {} as never,
+      principal: { ...coveragePrincipal(), grantedScopes: [role] },
+      params: {},
+      parsedBody: null,
+    });
+    if (out.kind !== "json") throw new Error("expected json");
+    return out.status;
+  }
+
+  it("names both mounted reports on erp-core, with every entity each reads", () => {
+    const surfaces = reportServer().reportSurfaces;
+    expect(surfaces.map((s) => [s.operationId, s.reads])).toEqual([
+      ["meta.aging.read", ["Invoice", "Bill", "Payment"]],
+      ["meta.whtReconciliation.read", ["Invoice", "WhtCertificate"]],
+    ]);
+    expect([...(surfaces[0]?.viewerRoles ?? [])].sort()).toEqual(
+      ["ap_clerk", "controller", "erp_accountant", "erp_admin"],
+    );
+  });
+
+  it("says only what is registered: every surface is a route and a handler", () => {
+    const compiled = reportServer();
+    const routeIds = new Set(compiled.routes.list().map((r) => r.operationId));
+    for (const s of compiled.reportSurfaces) {
+      expect(routeIds.has(s.operationId)).toBe(true);
+      expect(compiled.handlers.resolve(s.operationId)).not.toBeNull();
+    }
+  });
+
+  it("carries the set each handler enforces: admitted exactly when the surface says so", async () => {
+    // A test of agreement between the surface and the live handler, over roles inside and outside
+    // the set — the property that a survey reading `reportSurfaces` describes what a request meets.
+    const compiled = reportServer();
+    for (const s of compiled.reportSurfaces) {
+      for (const role of ["erp_admin", "controller", "ap_clerk", "erp_viewer", "tax_manager"]) {
+        const status = await statusAs(compiled, s.operationId, role);
+        expect(status === 403).toBe(!s.viewerRoles.has(role as RoleName));
+      }
+    }
+  });
+
+  it("follows the financeRoles option, so the surface cannot describe a default the handler dropped", async () => {
+    const compiled = reportServer(["auditor" as RoleName]);
+    for (const s of compiled.reportSurfaces) {
+      expect([...s.viewerRoles]).toEqual(["auditor"]);
+      expect(await statusAs(compiled, s.operationId, "auditor")).not.toBe(403);
+      expect(await statusAs(compiled, s.operationId, "erp_admin")).toBe(403);
+    }
+  });
+
+  it("is empty for a manifest that models none of a report's entities", () => {
+    const compiled = compileOperateServer(PAYMENTLESS as unknown as Manifest, {
+      store: new InMemoryEntityStore(),
+      principalRoles: () => ({ primaryRole: "erp_admin" }),
+    });
+    expect(compiled.reportSurfaces).toEqual([]);
+    expect(compiled.routes.list().some((r) => r.operationId.startsWith("meta.aging"))).toBe(false);
   });
 });

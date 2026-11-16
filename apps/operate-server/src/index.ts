@@ -9,6 +9,8 @@ export * from "./slo.js";
 export * from "./slo-config.js";
 export * from "./slo-defaults.js";
 export * from "./slo-rollback-survey.js";
+export * from "./manifest-section-survey.js";
+export * from "./report-surface-survey.js";
 export * from "./dr-readiness.js";
 export * from "./access-reviews-lifecycle.js";
 export * from "./live-grants.js";

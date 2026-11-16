@@ -624,9 +624,11 @@ describe("the real document-store adapter's fold", () => {
    * Driven through `listPageOp` rather than through a synthetic adapter, because the claim being
    * fenced is about the adapter `entity-ops.ts` really builds — and before this, every `foldText`
    * test used a hand-written one, so the shipped `--store pg` fold was asserted by nothing. The
-   * claim is load-bearing twice over: `searchFunctionLine`'s dependents clause tells an operator
-   * that `--store pg` is unaffected in every state of `public.ce_unaccent`, and `ADR-0383` calls the
-   * declaration the one thing without which the increment is incomplete.
+   * claim is load-bearing twice over: `searchFunctionLine` tells an operator that `--store pg` names
+   * `public.ce_unaccent` nowhere and is unaffected by six of its seven states — in
+   * `dictionary_absent` this fold, which pins `'public.unaccent'::regdictionary`, raises exactly as
+   * the wrapper would — and `ADR-0383` calls the declaration the one thing without which the
+   * increment is incomplete.
    */
   async function documentStoreWhere(q: ListQuery): Promise<string> {
     let seen = "";

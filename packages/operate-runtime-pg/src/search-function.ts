@@ -433,6 +433,32 @@ export async function probeSearchIndexReach(conn: PgConnection): Promise<SearchI
   }
 }
 
+/**
+ * The two stores `ensureSearchExtension` runs under (`--store memory` opens no connection).
+ *
+ * A **required** argument of every line below, because the healthy sentence is a claim about how
+ * `?q=` is served and the two stores serve it by different predicates. It was absent, so the column
+ * store's sentence -- *"the predicate and the trigram index are one expression"* -- was printed on
+ * `--store pg`, the shipped default, whose predicate names a different function, whose table has no
+ * trigram index and for which `pg_trgm` is never created. An optional argument defaulting to the
+ * column store would be that defect kept as a default.
+ */
+export type SearchStoreKind = "pg" | "pg-columns";
+
+/**
+ * Whether the store's substring predicate calls {@link SEARCH_FUNCTION}.
+ *
+ * `false` for the document store because `entity-ops.ts` declares `foldText: (sql) => rawFoldCall(sql)`.
+ * Both stores pin {@link SEARCH_DICTIONARY} either way, which is why `dictionary_absent` is the one
+ * state that reaches the document store too. `search-function.test.ts` checks this against the SQL
+ * the real `listPageOp` emits, so deleting that declaration fails a test rather than leaving the boot
+ * line describing a predicate the store no longer issues.
+ */
+const STORE_PREDICATE_CALLS_SEARCH_FUNCTION: Readonly<Record<SearchStoreKind, boolean>> = Object.freeze({
+  pg: false,
+  "pg-columns": true,
+});
+
 /** The clause appended to a healthy boot line, so it states a reach rather than claiming a plan. */
 function reachClause(reach: SearchIndexReach): string {
   switch (reach) {
@@ -461,7 +487,12 @@ function reachClause(reach: SearchIndexReach): string {
  *   `ce_unaccent` **nowhere**. Asserted in `list-sql.test.ts` by driving the real `listPageOp` with a
  *   recording connection -- not a synthetic adapter, which is what every earlier `foldText` test used
  *   -- and in both directions, so the claim cannot go stale silently. Every `?q=` and every
- *   `[contains]` on the shipped compose default works in all seven states.
+ *   `[contains]` on the shipped compose default works in **six** of the seven states: the document
+ *   store's fold pins the same dictionary, so `dictionary_absent` raises there too -- measured on PG
+ *   16.15 with `unaccent` installed in another schema, `text search dictionary "public.unaccent" does
+ *   not exist`. The clause this function used to end with, *"--store pg is unaffected in every
+ *   state"*, was false of exactly that one, and is gone: the line now takes the store and says what
+ *   is true of it ({@link documentStoreLine}).
  * - On `--store pg-columns` it understates by a category. `entity-ddl.ts`'s index expression names
  *   the same function the predicate does, so a state that blocks the index does not make search slow
  *   or absent -- it makes the store **unprovisionable**: `ensureSchema`'s trigram loop is uncaught,
@@ -493,10 +524,7 @@ function dependentsClause(state: SearchFunctionState): string | null {
       " ColumnMappedEntityStore.ensureSchema cannot apply the schema at all (its trigram loop is not" +
       " caught) and applyTenantManifestSchema aborts its transaction, leaving that tenant served" +
       " from the JSONB document store rather than its own schema.";
-  return (
-    `${ddl} Everything above is about --store pg-columns: --store pg is unaffected in every state,` +
-    " because the document store declares its own accent fold and names this function nowhere."
-  );
+  return ddl;
 }
 
 /**
@@ -519,11 +547,60 @@ function dependentsClause(state: SearchFunctionState): string | null {
  */
 export function searchFunctionLine(
   probe: SearchFunctionProbe,
+  store: SearchStoreKind,
   reach: SearchIndexReach = "unknown",
 ): string {
+  if (!STORE_PREDICATE_CALLS_SEARCH_FUNCTION[store]) return documentStoreLine(probe, store);
   const sentence = stateSentence(probe, reach);
   const dependents = dependentsClause(probe.state);
   return dependents === null ? sentence : `${sentence} ${dependents}`;
+}
+
+/**
+ * The line for a store whose predicate does not call the function -- today the document store.
+ *
+ * Every state but two is a fact about an object this store does not use, so the line says *that*
+ * rather than the column store's sentence: on a healthy boot the old line asserted that "the
+ * predicate and the trigram index are one expression", which on `--store pg` is false three ways --
+ * the predicate folds through {@link rawFoldCall}, no index exists for it to meet, and `pg_trgm` is
+ * never created for this store. What is true instead is the cost: the fold is not IMMUTABLE, so no
+ * index can serve it, and every `?q=` and `[contains]` reads every row the tenant holds for that
+ * entity -- measured on PG 16.15 over the real `listPageOp` SQL, as the owner and as a non-owner
+ * with tenant context alike: `Index Scan` on the `(tenant_id, entity)` btree, `Rows Removed by
+ * Filter: 10000` of 10000.
+ *
+ * The two exceptions keep {@link stateSentence}: `dictionary_absent` breaks this store's fold as
+ * well (it pins the same dictionary), and `unreadable` established nothing about either.
+ */
+function documentStoreLine(probe: SearchFunctionProbe, store: SearchStoreKind): string {
+  const state = probe.state;
+  if (state === "dictionary_absent") {
+    return (
+      `${stateSentence(probe, "unknown")} That includes --store ${store}: its own accent fold pins` +
+      ` the same dictionary, so it raises exactly as this function would.`
+    );
+  }
+  if (state === "unreadable") return stateSentence(probe, "unknown");
+  const cost =
+    `unused by --store ${store}, whose predicate folds through ${SEARCH_DICTIONARY} directly and` +
+    " names this function nowhere. That fold is not IMMUTABLE, so no index can serve it: every ?q=" +
+    " and [contains] reads every row the tenant holds for that entity.";
+  // Healthy states end there. The other three describe a fault in an object this store never calls,
+  // so their remedy is for `--store pg-columns` and is printed there; printing it here would ask an
+  // operator to repair something that changes no answer they can observe (ADR-0334).
+  const elsewhere = " Its state matters only to --store pg-columns, whose boot line names the remedy.";
+  switch (state) {
+    case "created":
+      return `[search] ${SEARCH_FUNCTION}: created — ${cost}`;
+    case "matches":
+      return `[search] ${SEARCH_FUNCTION}: present — ${cost}`;
+    case "absent":
+      return `[search] ${SEARCH_FUNCTION}: absent — ${cost}${elsewhere}`;
+    case "body_differs":
+      return `[search] ${SEARCH_FUNCTION}: present with a body this binary did not write — ${cost}${elsewhere}`;
+    case "volatility_differs":
+      return `[search] ${SEARCH_FUNCTION}: present and not IMMUTABLE — ${cost}${elsewhere}`;
+  }
 }
 
 function stateSentence(probe: SearchFunctionProbe, reach: SearchIndexReach): string {
@@ -564,7 +641,16 @@ function stateSentence(probe: SearchFunctionProbe, reach: SearchIndexReach): str
       return (
         `[search] ${SEARCH_FUNCTION}: the text search dictionary ${SEARCH_DICTIONARY} it names does` +
         " NOT exist, so every ?q= and every [contains] filter will answer 500. Install it as a" +
-        ` superuser once: CREATE EXTENSION IF NOT EXISTS unaccent SCHEMA ${SEARCH_FUNCTION_SCHEMA};`
+        ` superuser once: CREATE EXTENSION IF NOT EXISTS unaccent SCHEMA ${SEARCH_FUNCTION_SCHEMA};` +
+        // The only way this state survives the boot's own `CREATE EXTENSION IF NOT EXISTS unaccent`
+        // is an extension that is installed in another schema (a managed provider's `extensions`
+        // schema is the usual one), and for that deployment the statement above is a no-op --
+        // measured: `NOTICE: extension "unaccent" already exists, skipping`, dictionary still absent.
+        // So the remedy that works for it is said too (ADR-0334: a remedy that cannot work is worse
+        // than none), and it was verified to restore the fold on the same cluster.
+        " If unaccent is already installed in another schema that statement only says it already" +
+        ` exists and changes nothing; move it instead: ALTER EXTENSION unaccent SET SCHEMA` +
+        ` ${SEARCH_FUNCTION_SCHEMA};`
       );
     case "body_differs":
       return (

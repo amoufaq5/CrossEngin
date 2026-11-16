@@ -110,7 +110,7 @@ export async function ensureColumnStoreExtensions(
   // `SEARCH_FUNCTION_ANSWERS_TRUSTED`'s finding rather than a DDL refusal.
   const search = await ensureSearchFunction(conn);
   if (SEARCH_FUNCTION_ADMITS_INDEX[search.state] === false) {
-    throw new Error(searchFunctionLine(search));
+    throw new Error(searchFunctionLine(search, "pg-columns"));
   }
 }
 

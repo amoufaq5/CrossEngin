@@ -170,7 +170,7 @@ function result(over: Partial<SearchExtensionResult> = {}): SearchExtensionResul
 
 describe("searchExtensionLine", () => {
   it("is two lines on a healthy converged deployment", () => {
-    const lines = searchExtensionLine(result()).split("\n");
+    const lines = searchExtensionLine(result(), "pg-columns").split("\n");
     expect(lines).toHaveLength(2);
     expect(lines[0]).toContain("unaccent: present");
     expect(lines[1]).toContain(`${SEARCH_FUNCTION}: present`);
@@ -179,6 +179,7 @@ describe("searchExtensionLine", () => {
   it("adds the superseded line only when there is one", () => {
     const lines = searchExtensionLine(
       result({ supersededIndexes: { indexes: [{ schema: "public", table: "e", index: "e_x_trgm" }], detail: null } }),
+      "pg-columns",
     ).split("\n");
     expect(lines).toHaveLength(3);
     expect(lines[2]).toContain("superseded");
@@ -189,6 +190,7 @@ describe("searchExtensionLine", () => {
     // an operator who fixed their privileges unable to see whether the wrapper then landed.
     const line = searchExtensionLine(
       result({ outcome: "refused", detail: "permission denied", searchFunction: { state: "absent", detail: null } }),
+      "pg-columns",
     );
     expect(line).toContain("unaccent: REFUSED");
     expect(line).toContain(`${SEARCH_FUNCTION}: ABSENT`);
@@ -202,6 +204,7 @@ describe("searchExtensionLine", () => {
         searchFunction: { state: "body_differs", detail: "SELECT $1" },
         supersededIndexes: { indexes: [{ schema: "public", table: "e", index: "e_x_trgm" }], detail: null },
       }),
+      "pg-columns",
     );
     expect(line.split("\n").every((l) => l.startsWith("[search] "))).toBe(true);
     expect(line.split("\n")).toHaveLength(3);
@@ -216,7 +219,7 @@ describe("the RLS reach caveat", () => {
     // cannot evaluate the predicate before the policy. Claiming the plan would be ADR-0337's
     // falsely-true control inside the increment that exists to close one.
     const { conn } = mockConn({ functionBody: SEARCH_FUNCTION_BODY, rlsExempt: false });
-    const line = searchExtensionLine(await ensureSearchExtension(conn));
+    const line = searchExtensionLine(await ensureSearchExtension(conn), "pg-columns");
     expect(line).toContain("tables this role owns");
     expect(line).toContain("texticlike is not LEAKPROOF");
     expect(line).not.toContain("index-accelerated");
@@ -226,7 +229,7 @@ describe("the RLS reach caveat", () => {
     const { conn } = mockConn({ functionBody: SEARCH_FUNCTION_BODY, rlsExempt: true });
     const result = await ensureSearchExtension(conn);
     expect(result.indexReach).toBe("every_table");
-    expect(searchExtensionLine(result)).toContain("RLS-exempt");
+    expect(searchExtensionLine(result, "pg-columns")).toContain("RLS-exempt");
   });
 
   it("asks the role facts table-free, because no entity table exists yet at this point in the boot", async () => {
@@ -236,5 +239,33 @@ describe("the RLS reach caveat", () => {
     expect(q).toContain("rolname = current_user");
     // Deliberately not `row_security_active`, which kernel-pg exposes and which needs a table.
     expect(sql.some((s) => s.includes("row_security_active"))).toBe(false);
+  });
+});
+
+describe("searchExtensionLine — the store the boot is serving", () => {
+  it("does not tell --store pg about a trigram index it does not have, on the RLS-exempt shipped shape", async () => {
+    // The shipped compose connects as the database superuser, so this is the exact boot: before
+    // the store was an argument, its second line read "the predicate and the trigram index are one
+    // expression, and this role is RLS-exempt".
+    const { conn } = mockConn({ functionBody: SEARCH_FUNCTION_BODY, rlsExempt: true });
+    const block = searchExtensionLine(await ensureSearchExtension(conn), "pg");
+    expect(block).not.toContain("trigram index are one expression");
+    expect(block).not.toContain("RLS-exempt");
+    expect(block).toContain("unused by --store pg");
+    expect(block).toContain("reads every row the tenant holds for that entity");
+  });
+
+  it("claims serveability on no extension line, because the dictionary, the wrapper and the store decide it", () => {
+    // With unaccent in another schema the extension is `present` and both folds raise; this line
+    // used to say "?q= and [contains] are serveable" beside a second line saying they answer 500.
+    for (const store of ["pg", "pg-columns"] as const) {
+      const block = searchExtensionLine(
+        result({ searchFunction: { state: "dictionary_absent", detail: null } }),
+        store,
+      );
+      const [first, second] = block.split("\n");
+      expect(first).toBe("[search] unaccent: present");
+      expect(second).toContain("will answer 500");
+    }
   });
 });
