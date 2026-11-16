@@ -14,6 +14,7 @@ import {
   type Tenant,
   type TenantAction,
 } from "@/lib/platform";
+import { detailNamesNoRoute } from "@/lib/request-failure";
 import {
   grantMembership,
   listMembers,
@@ -263,7 +264,7 @@ export default function TenantDetailPage({ params }: { params: { id: string } })
         if (e instanceof PlatformError && e.status === 404) {
           // `throwProblem` keeps `detail` over `error`, so the gateway's own
           // `no route for <method> <path>` is what arrives when nothing is mounted.
-          setAbsent(e.message.startsWith("no route for ") ? "route" : "row");
+          setAbsent(detailNamesNoRoute(e.message) ? "route" : "row");
         }
         else setError(e instanceof Error ? e.message : String(e));
       })

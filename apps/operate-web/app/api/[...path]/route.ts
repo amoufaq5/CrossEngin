@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { UPSTREAM_UNREACHABLE } from "@/lib/request-failure";
 import { SESSION_COOKIE } from "@/lib/session";
 import { UPSTREAM_BASE_URL } from "@/lib/upstream";
 
@@ -54,7 +55,7 @@ async function proxy(req: NextRequest, path: string[]): Promise<Response> {
   } catch (err) {
     return Response.json(
       {
-        error: "upstream_unreachable",
+        error: UPSTREAM_UNREACHABLE,
         detail: String(err),
         hint: `Is operate-server running at ${UPSTREAM_BASE_URL}?`,
       },

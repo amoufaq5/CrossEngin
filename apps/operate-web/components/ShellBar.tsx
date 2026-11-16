@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useState } from "react";
 
-import { roleLabel, useSchema } from "@/lib/schema";
+import { roleLabel, useSchema, viewerLabel } from "@/lib/schema";
 import { LOGIN_PATH } from "@/lib/session";
 
 /**
@@ -16,7 +16,9 @@ export function ShellBar() {
   const [signingOut, setSigningOut] = useState(false);
   const viewer = schema?.viewer ?? null;
   const roleName = viewer ? roleLabel(schema, viewer.primaryRole) : null;
-  const initial = (roleName ?? "A").trim().charAt(0).toUpperCase();
+  // The person, else the role: a role-derived initial gave every `erp_admin` the same letter.
+  const label = viewerLabel(schema);
+  const initial = (label ?? "A").trim().charAt(0).toUpperCase();
 
   /**
    * The only caller of `/api/auth/logout`. A full document load afterwards for the same
@@ -57,12 +59,12 @@ export function ShellBar() {
           <span className="h-1.5 w-1.5 rounded-full bg-brand" />
           Workspace
         </span>
-        {roleName ? (
-          <span className="hidden text-xs font-medium text-ink-faint lg:inline">{roleName}</span>
+        {label ? (
+          <span className="hidden text-xs font-medium text-ink-faint lg:inline">{label}</span>
         ) : null}
         <span
           className="flex h-8 w-8 items-center justify-center rounded-full bg-brand/10 text-xs font-bold text-brand-700 ring-1 ring-brand/20"
-          title={roleName ?? "Account"}
+          title={label === null ? "Account" : roleName === null || label === roleName ? label : `${label} · ${roleName}`}
         >
           {initial}
         </span>

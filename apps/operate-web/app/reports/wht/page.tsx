@@ -7,6 +7,7 @@ import { Topbar } from "@/components/Topbar";
 import { boundedReadNotice } from "@/lib/bounded-read";
 import { fetchWhtReconciliation } from "@/lib/api";
 import { formatCell } from "@/lib/format";
+import { requestFailureSentence } from "@/lib/request-failure";
 import { slugForEntityName, useSchema } from "@/lib/schema";
 import type { WhtCurrencySubtotal, WhtReconciliation, WhtStatus } from "@/lib/wht";
 
@@ -42,7 +43,7 @@ export default function WhtReportPage() {
         if (!alive) return;
         const msg = e instanceof Error ? e.message : String(e);
         if (msg.startsWith("403")) setForbidden(true);
-        else setError(msg);
+        else setError(requestFailureSentence(e));
         setLoading(false);
       });
     return () => {
@@ -103,7 +104,7 @@ export default function WhtReportPage() {
         )}
         {error && (
           <div className="rounded-lg border border-brand-200 bg-brand-50 px-4 py-3 text-sm text-brand-700">
-            Could not load the report: {error}. Is operate-server running?
+            Could not load the report: {error}
           </div>
         )}
 

@@ -20,6 +20,7 @@ import {
   groupByModule,
   roleLabel,
   useSchema,
+  viewerLabel,
   viewerName,
 } from "@/lib/schema";
 
@@ -137,7 +138,7 @@ export function Sidebar() {
             }`}
             title="Your account"
           >
-            {viewerName(schema) ?? roleLabel(schema, primaryRole)}
+            {viewerLabel(schema)}
           </Link>
           {viewerName(schema) !== null && (
             <div className="text-[11px] text-ink-faint">{roleLabel(schema, primaryRole)}</div>

@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState, type ReactElement } from "react";
 import { Badge } from "@/components/Badge";
 import { Topbar } from "@/components/Topbar";
 import { formatCell } from "@/lib/format";
+import { detailNamesNoRoute } from "@/lib/request-failure";
 import {
   getUser,
   PlatformError,
@@ -70,7 +71,7 @@ const MAX_PASSWORD_LENGTH = 1024;
  * no route answered is all this can establish.
  */
 function routeNotMounted(message: string): boolean {
-  return message.startsWith("no route for ");
+  return detailNamesNoRoute(message);
 }
 
 /**

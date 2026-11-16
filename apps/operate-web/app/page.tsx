@@ -42,7 +42,7 @@ export default function DashboardPage() {
         {loading && <p className="text-sm text-ink-muted">Loading schema…</p>}
         {error && (
           <div className="rounded-lg border border-brand-200 bg-brand-50 px-4 py-3 text-sm text-brand-700">
-            Could not load schema: {error}. Is operate-server running?
+            Could not load schema: {error}
           </div>
         )}
 

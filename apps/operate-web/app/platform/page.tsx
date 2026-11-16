@@ -13,6 +13,7 @@ import {
   type Tenant,
   type TenantCounts,
 } from "@/lib/platform";
+import { requestFailureSentence } from "@/lib/request-failure";
 
 const STATUS_FILTERS: ReadonlyArray<{ value: string; label: string }> = [
   { value: "all", label: "All" },
@@ -38,7 +39,7 @@ export default function PlatformConsolePage() {
         setTenants(page.data);
         setNextCursor(page.nextCursor);
       })
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+      .catch((e: unknown) => setError(requestFailureSentence(e)))
       .finally(() => setBusy(false));
   }, [status]);
 
@@ -62,7 +63,7 @@ export default function PlatformConsolePage() {
         setTenants((prev) => [...prev, ...page.data]);
         setNextCursor(page.nextCursor);
       })
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+      .catch((e: unknown) => setError(requestFailureSentence(e)))
       .finally(() => setLoadingMore(false));
   }, [status, nextCursor]);
 
@@ -118,7 +119,7 @@ export default function PlatformConsolePage() {
 
         {error && (
           <div className="mb-4 rounded-lg border border-brand-200 bg-brand-50 px-4 py-3 text-sm text-brand-700">
-            Could not load tenants: {error}. Is operate-server running?
+            Could not load tenants: {error}
           </div>
         )}
 

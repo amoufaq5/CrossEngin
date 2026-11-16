@@ -112,6 +112,8 @@ export class DesignError extends Error {
   readonly attempts: number | undefined;
   readonly spentUsd: number | undefined;
   readonly limitUsd: number | undefined;
+  /** The body's `error` code, when it carried one — what tells a role refusal from another 403. */
+  readonly code: string | null;
 
   constructor(
     kind: DesignErrorKind,
@@ -120,6 +122,7 @@ export class DesignError extends Error {
     issues: ReadonlyArray<string> = [],
     attempts?: number,
     details: DesignErrorDetails = {},
+    code: string | null = null,
   ) {
     super(message);
     this.name = "DesignError";
@@ -129,6 +132,7 @@ export class DesignError extends Error {
     this.attempts = attempts;
     this.spentUsd = details.spentUsd;
     this.limitUsd = details.limitUsd;
+    this.code = code;
   }
 }
 
@@ -147,6 +151,7 @@ async function throwDesignError(res: Response): Promise<never> {
   let issues: string[] = [];
   let attempts: number | undefined;
   let details: DesignErrorDetails = {};
+  let code: string | null = null;
   try {
     const text = await res.text();
     if (text !== "") {
@@ -161,6 +166,7 @@ async function throwDesignError(res: Response): Promise<never> {
           title?: unknown;
           message?: unknown;
         };
+        if (typeof body.error === "string" && body.error.trim() !== "") code = body.error;
         if (res.status === 422 && body.error === "design_failed") {
           kind = "design_failed";
           if (Array.isArray(body.issues)) {
@@ -199,7 +205,7 @@ async function throwDesignError(res: Response): Promise<never> {
   } catch {
     // keep the status-line fallback
   }
-  throw new DesignError(kind, res.status, message, issues, attempts, details);
+  throw new DesignError(kind, res.status, message, issues, attempts, details, code);
 }
 
 export async function designSystem(input: DesignInput): Promise<DesignResult> {

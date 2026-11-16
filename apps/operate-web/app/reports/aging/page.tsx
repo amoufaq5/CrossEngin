@@ -7,6 +7,7 @@ import { boundedReadNotice } from "@/lib/bounded-read";
 import { fetchAging } from "@/lib/api";
 import { AGING_BUCKETS, type AgingReport, type AgingResponse } from "@/lib/aging";
 import { formatCell } from "@/lib/format";
+import { requestFailureSentence } from "@/lib/request-failure";
 
 export default function AgingPage() {
   const [data, setData] = useState<AgingResponse | null>(null);
@@ -31,7 +32,7 @@ export default function AgingPage() {
         if (!alive) return;
         const msg = e instanceof Error ? e.message : String(e);
         if (msg.startsWith("403")) setForbidden(true);
-        else setError(msg);
+        else setError(requestFailureSentence(e));
         setLoading(false);
       });
     return () => {
@@ -90,7 +91,7 @@ export default function AgingPage() {
         )}
         {error && (
           <div className="rounded-lg border border-brand-200 bg-brand-50 px-4 py-3 text-sm text-brand-700">
-            Could not load the aging report: {error}. Is operate-server running?
+            Could not load the aging report: {error}
           </div>
         )}
 

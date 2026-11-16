@@ -3,6 +3,7 @@
 
 import type { AgingResponse } from "@/lib/aging";
 import type { TenantEntitlement, TenantUsage } from "@/lib/entitlement";
+import { ApiError } from "@/lib/request-failure";
 import { reportSubscriptionProblem } from "@/lib/subscription";
 import { handleUnauthorized } from "@/lib/unauthorized";
 import type { WhtReconciliation } from "@/lib/wht";
@@ -49,7 +50,7 @@ async function checkResponse(res: Response): Promise<void> {
 export async function listRecords(slug: string, query = ""): Promise<ListResult> {
   const res = await fetch(apiPath(slug, query), { headers: { accept: "application/json" } });
   await checkResponse(res);
-  if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
+  if (!res.ok) throw new ApiError(res.status, await safeText(res));
   const json = (await res.json()) as unknown;
   if (Array.isArray(json)) {
     return { data: json as Array<Record<string, unknown>>, nextCursor: null };
@@ -77,7 +78,7 @@ export async function listAssociations(
   const suffix = `/${encodeURIComponent(id)}/${relatedSlug}${qs ? `?${qs}` : ""}`;
   const res = await fetch(apiPath(ownerSlug, suffix), { headers: { accept: "application/json" } });
   await checkResponse(res);
-  if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
+  if (!res.ok) throw new ApiError(res.status, await safeText(res));
   const json = (await res.json()) as {
     data?: Array<Record<string, unknown>>;
     page?: { nextCursor?: string | null };
@@ -90,7 +91,7 @@ export async function countAssociation(ownerSlug: string, id: string, relatedSlu
   const suffix = `/${encodeURIComponent(id)}/${relatedSlug}/count`;
   const res = await fetch(apiPath(ownerSlug, suffix), { headers: { accept: "application/json" } });
   await checkResponse(res);
-  if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
+  if (!res.ok) throw new ApiError(res.status, await safeText(res));
   const json = (await res.json()) as { count?: number };
   return json.count ?? 0;
 }
@@ -100,7 +101,7 @@ export async function linkAssociation(ownerSlug: string, id: string, relatedSlug
   const suffix = `/${encodeURIComponent(id)}/${relatedSlug}/${encodeURIComponent(relatedId)}`;
   const res = await fetch(apiPath(ownerSlug, suffix), { method: "PUT", headers: { accept: "application/json" } });
   await checkResponse(res);
-  if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
+  if (!res.ok) throw new ApiError(res.status, await safeText(res));
 }
 
 /** Unlinks a related record via a m2m relation: `DELETE /v1/<ownerSlug>/<id>/<relatedSlug>/<relatedId>`. */
@@ -108,7 +109,7 @@ export async function unlinkAssociation(ownerSlug: string, id: string, relatedSl
   const suffix = `/${encodeURIComponent(id)}/${relatedSlug}/${encodeURIComponent(relatedId)}`;
   const res = await fetch(apiPath(ownerSlug, suffix), { method: "DELETE", headers: { accept: "application/json" } });
   await checkResponse(res);
-  if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
+  if (!res.ok) throw new ApiError(res.status, await safeText(res));
 }
 
 export async function createRecord(
@@ -121,7 +122,7 @@ export async function createRecord(
     body: JSON.stringify(payload),
   });
   await checkResponse(res);
-  if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
+  if (!res.ok) throw new ApiError(res.status, await safeText(res));
   return (await res.json()) as Record<string, unknown>;
 }
 
@@ -130,7 +131,7 @@ export async function getRecord(slug: string, id: string): Promise<Record<string
     headers: { accept: "application/json" },
   });
   await checkResponse(res);
-  if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
+  if (!res.ok) throw new ApiError(res.status, await safeText(res));
   return (await res.json()) as Record<string, unknown>;
 }
 
@@ -145,14 +146,14 @@ export async function updateRecord(
     body: JSON.stringify(patch),
   });
   await checkResponse(res);
-  if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
+  if (!res.ok) throw new ApiError(res.status, await safeText(res));
   return (await res.json()) as Record<string, unknown>;
 }
 
 export async function deleteRecord(slug: string, id: string): Promise<void> {
   const res = await fetch(apiPath(slug, `/${encodeURIComponent(id)}`), { method: "DELETE" });
   await checkResponse(res);
-  if (!res.ok && res.status !== 204) throw new Error(`${res.status}: ${await safeText(res)}`);
+  if (!res.ok && res.status !== 204) throw new ApiError(res.status, await safeText(res));
 }
 
 export async function runTransition(
@@ -166,14 +167,14 @@ export async function runTransition(
     body: "{}",
   });
   await checkResponse(res);
-  if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
+  if (!res.ok) throw new ApiError(res.status, await safeText(res));
   return (await res.json()) as Record<string, unknown>;
 }
 
 export async function getSettings(): Promise<Record<string, unknown>> {
   const res = await fetch("/api/v1/admin/settings", { headers: { accept: "application/json" } });
   await checkResponse(res);
-  if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
+  if (!res.ok) throw new ApiError(res.status, await safeText(res));
   return (await res.json()) as Record<string, unknown>;
 }
 
@@ -184,7 +185,7 @@ export async function putSettings(settings: Record<string, unknown>): Promise<Re
     body: JSON.stringify(settings),
   });
   await checkResponse(res);
-  if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
+  if (!res.ok) throw new ApiError(res.status, await safeText(res));
   return (await res.json()) as Record<string, unknown>;
 }
 
@@ -192,21 +193,21 @@ export async function fetchAging(asOf?: string): Promise<AgingResponse> {
   const query = asOf ? `?asOf=${encodeURIComponent(asOf)}` : "";
   const res = await fetch(`/api/v1/meta/aging${query}`, { headers: { accept: "application/json" } });
   await checkResponse(res);
-  if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
+  if (!res.ok) throw new ApiError(res.status, await safeText(res));
   return (await res.json()) as AgingResponse;
 }
 
 export async function fetchEntitlement(): Promise<TenantEntitlement> {
   const res = await fetch("/api/v1/meta/entitlement", { headers: { accept: "application/json" } });
   await checkResponse(res);
-  if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
+  if (!res.ok) throw new ApiError(res.status, await safeText(res));
   return (await res.json()) as TenantEntitlement;
 }
 
 export async function fetchUsage(): Promise<TenantUsage> {
   const res = await fetch("/api/v1/meta/usage", { headers: { accept: "application/json" } });
   await checkResponse(res);
-  if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
+  if (!res.ok) throw new ApiError(res.status, await safeText(res));
   return (await res.json()) as TenantUsage;
 }
 
@@ -216,7 +217,7 @@ export async function createBillingPortalSession(): Promise<{ url: string }> {
     headers: { accept: "application/json" },
   });
   await checkResponse(res);
-  if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
+  if (!res.ok) throw new ApiError(res.status, await safeText(res));
   return (await res.json()) as { url: string };
 }
 
@@ -229,7 +230,7 @@ export async function fetchWhtReconciliation(from?: string, to?: string): Promis
     headers: { accept: "application/json" },
   });
   await checkResponse(res);
-  if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
+  if (!res.ok) throw new ApiError(res.status, await safeText(res));
   return (await res.json()) as WhtReconciliation;
 }
 

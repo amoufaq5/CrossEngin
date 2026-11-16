@@ -71,10 +71,13 @@ export interface CreateTenantBody {
  */
 export class PlatformError extends Error {
   readonly status: number;
-  constructor(status: number, message: string) {
+  /** The body's `error` code, when it carried one — what tells a role refusal from another 403. */
+  readonly code: string | null;
+  constructor(status: number, message: string, code: string | null = null) {
     super(message);
     this.name = "PlatformError";
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -98,6 +101,7 @@ export async function throwProblem(res: Response): Promise<never> {
   // The single error path of every request in this module and in lib/users.ts.
   handleUnauthorized(res);
   let message = res.statusText || `Request failed (${res.status})`;
+  let code: string | null = null;
   try {
     const text = await res.text();
     if (text !== "") {
@@ -108,6 +112,7 @@ export async function throwProblem(res: Response): Promise<never> {
           message?: unknown;
           error?: unknown;
         };
+        if (typeof body.error === "string" && body.error.trim() !== "") code = body.error;
         const picked = body.detail ?? body.title ?? body.message ?? body.error;
         message = typeof picked === "string" && picked.trim() !== "" ? picked : text;
       } catch {
@@ -117,7 +122,7 @@ export async function throwProblem(res: Response): Promise<never> {
   } catch {
     // keep the status-line fallback
   }
-  throw new PlatformError(res.status, message);
+  throw new PlatformError(res.status, message, code);
 }
 
 async function getJson<T>(suffix: string): Promise<T> {

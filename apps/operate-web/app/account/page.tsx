@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 
 import { Topbar } from "@/components/Topbar";
+import { detailNamesNoRoute } from "@/lib/request-failure";
 import { roleLabel, useSchema, viewerIsPerson, viewerName, viewerRoles } from "@/lib/schema";
 import { redirectToLogin } from "@/lib/unauthorized";
 import type { PasswordChangeResult } from "@/lib/users";
@@ -143,7 +144,7 @@ function refusalMessage(status: number, code: string | null, detail: string): st
   // on `--store memory`, which that flag refuses) the route is not mounted at all, and the remedy
   // is a deployment flag rather than anything the viewer can do. The users console separates the
   // two 404s the same way.
-  if (status === 404 && detail.startsWith("no route for ")) {
+  if (status === 404 && detailNamesNoRoute(detail)) {
     return (
       "This deployment serves no password-change route, so there is nothing to change here. It " +
       "arrives with --credential-login on the API."
@@ -226,6 +227,33 @@ export default function AccountPage() {
           ) : (
             <>
               <dl className="mt-4 grid grid-cols-1 gap-x-8 gap-y-5 md:grid-cols-2">
+                {/* Rendered exactly when the server resolved the person (`viewerName` answers, which
+                    needs at least the email, and `meta.users.email` is NOT NULL). A null name is
+                    the row carrying none, so it reads as a dash rather than as the role. */}
+                {viewerName(schema) !== null && (
+                  <>
+                    <div>
+                      <dt className="mb-1 text-xs font-medium uppercase tracking-wide text-ink-faint">
+                        Name
+                      </dt>
+                      <dd className="text-ink">
+                        {typeof viewer.displayName === "string" ? (
+                          viewer.displayName
+                        ) : (
+                          <span className="text-ink-muted">—</span>
+                        )}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="mb-1 text-xs font-medium uppercase tracking-wide text-ink-faint">
+                        Email
+                      </dt>
+                      <dd className="text-ink">
+                        {viewer.email ?? <span className="text-ink-muted">—</span>}
+                      </dd>
+                    </div>
+                  </>
+                )}
                 <div>
                   <dt className="mb-1 text-xs font-medium uppercase tracking-wide text-ink-faint">
                     Primary role

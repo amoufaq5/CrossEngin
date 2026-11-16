@@ -6,6 +6,7 @@ import { Badge } from "@/components/Badge";
 import { DiffView } from "@/components/DiffView";
 import { SchemaView } from "@/components/SchemaView";
 import { Topbar } from "@/components/Topbar";
+import { requestFailureSentence } from "@/lib/request-failure";
 import {
   approveReview,
   getReview,
@@ -75,7 +76,7 @@ export default function DesignReviewsPage() {
         setItems(page.data);
         setNextCursor(page.nextCursor);
       })
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+      .catch((e: unknown) => setError(requestFailureSentence(e)))
       .finally(() => setBusy(false));
   }, [reviewStatus, tenantId]);
 
@@ -97,7 +98,7 @@ export default function DesignReviewsPage() {
         setItems((prev) => [...prev, ...page.data]);
         setNextCursor(page.nextCursor);
       })
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+      .catch((e: unknown) => setError(requestFailureSentence(e)))
       .finally(() => setLoadingMore(false));
   }, [reviewStatus, tenantId, nextCursor]);
 
@@ -235,7 +236,7 @@ export default function DesignReviewsPage() {
         )}
         {error && (
           <div className="mb-4 rounded-lg border border-brand-200 bg-brand-50 px-4 py-3 text-sm text-brand-700">
-            Could not load design reviews: {error}. Is operate-server running?
+            Could not load design reviews: {error}
           </div>
         )}
 

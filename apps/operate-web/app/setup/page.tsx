@@ -26,6 +26,7 @@ import {
   type TenantNotification,
   digestNotices,
 } from "@/lib/notifications";
+import { requestFailureSentence } from "@/lib/request-failure";
 
 const MAX_DESCRIPTION = 4000;
 const POLL_INTERVAL_MS = 1200;
@@ -67,7 +68,7 @@ export default function SetupPage() {
     setListError(null);
     listProposals()
       .then((page) => setProposals(page.data))
-      .catch((e: unknown) => setListError(e instanceof Error ? e.message : String(e)))
+      .catch((e: unknown) => setListError(requestFailureSentence(e)))
       .finally(() => setListBusy(false));
   }, []);
 
@@ -571,7 +572,7 @@ export default function SetupPage() {
           )}
           {listError && (
             <div className="mt-3 rounded-lg border border-brand-200 bg-brand-50 px-4 py-3 text-sm text-brand-700">
-              Could not load proposals: {listError}. Is operate-server running?
+              Could not load proposals: {listError}
             </div>
           )}
 

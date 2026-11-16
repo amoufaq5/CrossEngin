@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { Topbar } from "@/components/Topbar";
 import { createBillingPortalSession, fetchEntitlement, fetchUsage } from "@/lib/api";
 import type { EntityUsage, TenantEntitlement, TenantUsage } from "@/lib/entitlement";
+import { classifyRequestFailure, requestFailureSentence } from "@/lib/request-failure";
 
 type Badge = { label: string; className: string };
 
@@ -67,6 +68,7 @@ export default function BillingPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [inactive, setInactive] = useState(false);
+  const [unserved, setUnserved] = useState(false);
   const [portalBusy, setPortalBusy] = useState(false);
   const [portalError, setPortalError] = useState<string | null>(null);
 
@@ -94,6 +96,7 @@ export default function BillingPage() {
     setLoading(true);
     setError(null);
     setInactive(false);
+    setUnserved(false);
     setUsage(null);
     fetchEntitlement()
       .then((res) => {
@@ -108,9 +111,15 @@ export default function BillingPage() {
       .catch((e: unknown) => {
         if (!alive) return;
         const msg = e instanceof Error ? e.message : String(e);
-        // The endpoint is ungated, so this shouldn't normally happen — but be defensive.
-        if (msg.startsWith("402") || msg.startsWith("403")) setInactive(true);
-        else setError(msg);
+        // The endpoint is ungated, so this shouldn't normally happen — but be defensive. Only a
+        // 402 is the subscription gate's answer; a 403 here is a tenant-state or gateway refusal,
+        // and calling it an inactive subscription would be a diagnosis nothing supports.
+        if (msg.startsWith("402")) setInactive(true);
+        // The entitlement routes are registered only when the API has a subscription source (a
+        // licence or the Stripe webhook), so on a deployment with neither the gateway's matcher
+        // answers 404 — the shipped stack's state, not an outage.
+        else if (classifyRequestFailure(e).kind === "not_served") setUnserved(true);
+        else setError(requestFailureSentence(e));
         setLoading(false);
       });
     return () => {
@@ -132,9 +141,19 @@ export default function BillingPage() {
           </div>
         )}
 
+        {/* Names no flag on purpose: this page is shown to every signed-in user, none of whom can
+            act on one, and the Stripe source gates every request of a tenant with no subscription
+            row — a remedy this sentence must not invite. */}
+        {unserved && (
+          <div className="rounded-xl border border-line bg-surface-soft px-4 py-10 text-center text-sm text-ink-muted">
+            This deployment has no subscription source configured, so no plan applies to this workspace
+            and nothing is limited by one. There is no plan or usage to show.
+          </div>
+        )}
+
         {error && (
           <div className="rounded-lg border border-brand-200 bg-brand-50 px-4 py-3 text-sm text-brand-700">
-            Could not load your subscription: {error}. Is operate-server running?
+            Could not load your subscription: {error}
           </div>
         )}
 

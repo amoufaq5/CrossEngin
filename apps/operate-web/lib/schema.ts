@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 
+import { ApiError, requestFailureSentence } from "@/lib/request-failure";
 import { handleUnauthorized } from "@/lib/unauthorized";
 
 export type UiInputType =
@@ -120,6 +121,18 @@ export function viewerName(schema: UiSchema | null): string | null {
   return v.displayName ?? v.email ?? null;
 }
 
+/**
+ * What the chrome calls the viewer: the person when the server resolved one, else the role they
+ * signed in with — still the right answer for a machine credential and for a deployment with no user
+ * directory. `null` only when the schema carries no viewer. The one spelling of that fallback, because
+ * the shell bar and the sidebar each spelled it once and only one of them was updated for ADR-0396.
+ */
+export function viewerLabel(schema: UiSchema | null): string | null {
+  const v = schema?.viewer;
+  if (v === undefined) return null;
+  return viewerName(schema) ?? roleLabel(schema, v.primaryRole);
+}
+
 /** Whether a person is signed in, as opposed to a machine credential. */
 export function viewerIsPerson(schema: UiSchema | null): boolean {
   return typeof schema?.viewer?.userId === "string";
@@ -160,7 +173,10 @@ export async function fetchSchema(): Promise<UiSchema> {
     // This module's only request, and the one the whole app waits on — so a 401 here is the
     // first thing an expired session hits, and the redirect has to start from here too.
     handleUnauthorized(res);
-    if (!res.ok) throw new Error(`schema ${res.status}: ${await res.text().catch(() => res.statusText)}`);
+    if (!res.ok) {
+      const body = await res.text().catch(() => res.statusText);
+      throw new ApiError(res.status, body, `schema ${res.status}: ${body}`);
+    }
     const schema = (await res.json()) as UiSchema;
     cache = schema;
     activeFormatting = schema.formatting ?? {};
@@ -176,6 +192,7 @@ export async function fetchSchema(): Promise<UiSchema> {
 export interface SchemaState {
   readonly schema: UiSchema | null;
   readonly loading: boolean;
+  /** Already a sentence (`requestFailureSentence`), so a reader renders it rather than diagnosing it. */
   readonly error: string | null;
 }
 
@@ -200,7 +217,7 @@ export function useSchema(): SchemaState {
       })
       .catch((e: unknown) => {
         if (alive) {
-          setError(e instanceof Error ? e.message : String(e));
+          setError(requestFailureSentence(e));
           setLoading(false);
         }
       });
