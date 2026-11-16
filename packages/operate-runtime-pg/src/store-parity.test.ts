@@ -11,6 +11,7 @@ import {
 import type { Entity, PrimitiveFieldType } from "@crossengin/types/meta-schema";
 import { describe, expect, it } from "vitest";
 
+import { columnPlansForManifest } from "./column-plan.js";
 import { ColumnMappedEntityStore } from "./column-store.js";
 import { PostgresEntityStore } from "./entity-store.js";
 import { VALUE_TYPE_COMPARABLE } from "./list-sql.js";
@@ -257,5 +258,62 @@ describe("the two Postgres stores agree about ordering", () => {
     // would be unindexable and `DateStyle`-dependent for no ordering gain.
     expect(FIELD_LIST_VALUE_TYPES.date).toBe("text");
     expect(FIELD_LIST_VALUE_TYPES.time).toBe("text");
+  });
+});
+
+/**
+ * The write half, which nothing compared: the ordering tests above drive only `listPage`, so a field
+ * the two stores *stored* differently was invisible here. And the three JSONB-typed kinds were
+ * stored differently — the JSONB store binds the whole document as JSON text, while the column store
+ * bound a JSONB column's value raw, which node-postgres sends as bare text for a string and as a
+ * Postgres array literal for an array, so both raised 22P02 (measured live, and through
+ * `POST /v1/expenses` as a 500 on `Expense.receipt`).
+ *
+ * Compared on the bound parameters, which is what a fake can see: each store's bound text parsed
+ * back must be the value the caller sent. The JSONB fields are read off the column plan rather than
+ * listed, so a fourth JSONB-typed kind lands here when the kernel maps one.
+ */
+describe("the two Postgres stores agree about what a JSONB-typed field stores", () => {
+  const JSONB_FIELDS = (columnPlansForManifest(MANIFEST, { schema: "tenant_app" }).get("Probe")?.columns ?? [])
+    .filter((c) => c.sqlType === "JSONB")
+    .map((c) => c.field);
+
+  const SHAPES: readonly unknown[] = [
+    "t_abc/receipts/f1.pdf",
+    "",
+    '{"a":1}',
+    42,
+    true,
+    ["a", 1],
+    { key: "k", n: [1] },
+    [{ a: "x" }],
+  ];
+
+  it("finds the three JSONB-typed kinds, so the comparison below is not over nothing", () => {
+    expect([...JSONB_FIELDS].sort()).toEqual(["f_currency_amount", "f_file", "f_json"]);
+  });
+
+  it("binds every JSON value shape so it parses back to what the caller sent, in both stores", async () => {
+    for (const field of JSONB_FIELDS) {
+      for (const value of SHAPES) {
+        const jsonbCap = capturePg();
+        const colCap = capturePg();
+        const record = { id: "r01", [field]: value };
+        await new PostgresEntityStore(jsonbCap.conn).create(TENANT, "Probe", record);
+        await new ColumnMappedEntityStore(colCap.conn, MANIFEST, { schema: "tenant_app" }).create(
+          TENANT,
+          "Probe",
+          record,
+        );
+        const docInsert = jsonbCap.calls.find((c) => c.sql.includes("INSERT INTO"))!;
+        const colInsert = colCap.calls.find((c) => c.sql.includes("INSERT INTO"))!;
+        const document = JSON.parse(docInsert.params[3] as string) as Record<string, unknown>;
+        // One placeholder for the one field, after the tenant and the id.
+        expect(colInsert.sql).toContain("$3::jsonb");
+        const columnValue: unknown = JSON.parse(colInsert.params[2] as string);
+        expect(columnValue).toEqual(value);
+        expect(document[field]).toEqual(value);
+      }
+    }
   });
 });

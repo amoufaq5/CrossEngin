@@ -66,6 +66,22 @@ describe("FIELD_RESPONSE_SCHEMAS / FIELD_REQUEST_SCHEMAS", () => {
     expect(new RegExp(s?.pattern ?? "").test("10.5")).toBe(false);
   });
 
+  it("publishes no wire type for a file field, the shape json and currency_amount already have", () => {
+    // `FIELD_TYPE_CHECKS.file` is acceptAny and both stores keep any JSON value, so the old
+    // `type: "string"` was a constraint only a generated client enforced — and "A file reference"
+    // promised a resolution this binary has no storage to perform. The three JSONB-typed kinds now
+    // share one shape: a description and no type.
+    for (const kind of ["file", "json", "currency_amount"] as const) {
+      for (const s of [fieldResponseSchema({ kind } as Field["type"]), fieldRequestSchema({ kind } as Field["type"])]) {
+        expect(s?.type, kind).toBeUndefined();
+        expect(Object.keys(s ?? {}), kind).toEqual(["description"]);
+      }
+    }
+    const file = fieldResponseSchema({ kind: "file" } as Field["type"]);
+    expect(file?.description).not.toMatch(/file reference/i);
+    expect(file?.description).toMatch(/does not resolve it to stored file content/);
+  });
+
   it("accepts a decimal as either a string or a number on the request, because the server does", () => {
     // Measured through the real converter: toDecimalWire accepts 10.5, "1e3", " 10.25 ", "+10.25"
     // and the over-precise "10.555", emitting "10.50" / "1000.00" / "10.56". One schema for both

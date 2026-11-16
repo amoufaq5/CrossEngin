@@ -122,7 +122,14 @@ export const FIELD_RESPONSE_SCHEMAS: {
     description: `The id of a ${t.target} record. Record ids are generated \`rec_\` + base36, and a caller-supplied id is kept as given, so no pattern is enforced.`,
   }),
   json: () => ({ description: "An arbitrary JSON document." }),
-  file: () => ({ type: "string", description: "A file reference." }),
+  // No `type`: the value is unconstrained (`FIELD_TYPE_CHECKS.file` is `acceptAny`) and both stores
+  // keep any JSON value, so `type: "string"` was a constraint only a generated client enforced.
+  // "A file reference" claimed what this binary cannot honour — it has no object storage and nothing
+  // resolves a value to file content — and what a file value *is* stays undecided, so this says less.
+  file: () => ({
+    description:
+      "Any JSON value. Its shape is not validated, and the server does not resolve it to stored file content.",
+  }),
   email: () => ({ type: "string", format: "email" }),
   phone: () => ({ type: "string" }),
   url: () => ({ type: "string", format: "uri" }),

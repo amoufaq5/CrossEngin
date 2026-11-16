@@ -671,6 +671,99 @@ describe("ColumnMappedEntityStore — a DATE column", () => {
   });
 });
 
+describe("ColumnMappedEntityStore — a JSONB column", () => {
+  // `json`, `file` and `currency_amount` all plan as JSONB. Before, the store bound the raw JS value,
+  // and node-postgres serialises by JS type: a string went as bare text and an array as a Postgres
+  // array literal, so `"a"`, `""` and `["a", 1]` each raised 22P02 (measured on PG 16, and through
+  // `POST /v1/expenses` as a 500 on `Expense.receipt`). These pin the bind, which is the half a fake
+  // can see; the round trip itself is the live check.
+  const DOC = {
+    name: "Doc",
+    fields: [
+      { name: "label", type: { kind: "text" } },
+      { name: "payload", type: { kind: "json" } },
+      { name: "attachment", type: { kind: "file" } },
+      { name: "fee", type: { kind: "currency_amount" } },
+      { name: "parts", type: { kind: "array", element: { kind: "json" } } },
+      { name: "secret_blob", type: { kind: "json" }, classification: "phi" },
+    ],
+  };
+  const DOC_MANIFEST = { entities: [DOC] } as unknown as Manifest;
+  const docStore = (cap: Captured): ColumnMappedEntityStore =>
+    new ColumnMappedEntityStore(cap.conn, DOC_MANIFEST, { schema: "tenant_app", encryptionKey: () => KEY });
+
+  const SHAPES: readonly [string, unknown][] = [
+    ["a string", "t_abc/receipts/f1.pdf"],
+    ["an empty string", ""],
+    ["a string that is itself JSON text", '{"a":1}'],
+    ["a number", 42],
+    ["a boolean", false],
+    ["an array", ["a", 1]],
+    ["an object", { key: "k", n: [1] }],
+    ["an array of objects", [{ a: "x" }]],
+  ];
+
+  for (const field of ["payload", "attachment", "fee"] as const) {
+    for (const [label, value] of SHAPES) {
+      it(`create binds ${label} into ${field} as JSON text with a ::jsonb cast, and echoes it unchanged`, async () => {
+        const cap = capturePg();
+        const created = await docStore(cap).create(TENANT, "Doc", { id: "d1", [field]: value });
+        const insert = cap.calls.find((c) => c.sql.includes("INSERT INTO"))!;
+        expect(insert.sql).toContain("VALUES ($1, $2, $3::jsonb)");
+        expect(insert.params).toEqual([TENANT, "d1", JSON.stringify(value)]);
+        // The bound text parses back to the value the caller sent — a string stays a string, which
+        // is the case the raw bind turned into an object (`'{"a":1}'`) or a 22P02 (everything else).
+        expect(JSON.parse(insert.params[2] as string)).toEqual(value);
+        expect(created).toEqual({ id: "d1", [field]: value });
+      });
+
+      it(`update binds ${label} into ${field} as JSON text with a ::jsonb cast`, async () => {
+        const cap = capturePg([{ id: "d1", [field]: value }]);
+        const updated = await docStore(cap).update(TENANT, "Doc", "d1", { [field]: value });
+        const upd = cap.calls.find((c) => c.sql.includes("UPDATE"))!;
+        expect(upd.sql).toContain(`"${field}" = $3::jsonb`);
+        expect(upd.params).toEqual([TENANT, "d1", JSON.stringify(value)]);
+        expect(updated).toEqual({ id: "d1", [field]: value });
+      });
+    }
+  }
+
+  it("binds a JS null into a JSONB column as SQL NULL, not as JSON null", async () => {
+    const cap = capturePg();
+    await docStore(cap).create(TENANT, "Doc", { id: "d1", payload: null });
+    const insert = cap.calls.find((c) => c.sql.includes("INSERT INTO"))!;
+    expect(insert.sql).toContain("VALUES ($1, $2, $3)");
+    expect(insert.sql).not.toContain("::jsonb");
+    expect(insert.params).toEqual([TENANT, "d1", null]);
+  });
+
+  it("binds a JSONB[] column one JSON text per element, so a string element survives", async () => {
+    const cap = capturePg();
+    const parts = ["a", { b: 2 }, 3, null];
+    await docStore(cap).create(TENANT, "Doc", { id: "d1", parts });
+    const insert = cap.calls.find((c) => c.sql.includes("INSERT INTO"))!;
+    expect(insert.sql).toContain("$3::jsonb[]");
+    expect(insert.params).toEqual([TENANT, "d1", ['"a"', '{"b":2}', "3", "null"]]);
+  });
+
+  it("leaves a non-JSONB column in the same write bound raw — the control", async () => {
+    const cap = capturePg();
+    await docStore(cap).create(TENANT, "Doc", { id: "d1", label: "plain", payload: "plain" });
+    const insert = cap.calls.find((c) => c.sql.includes("INSERT INTO"))!;
+    expect(insert.sql).toContain("VALUES ($1, $2, $3, $4::jsonb)");
+    expect(insert.params).toEqual([TENANT, "d1", "plain", '"plain"']);
+  });
+
+  it("leaves an encrypted json column on the pgcrypto path: BYTEA, not JSONB", async () => {
+    const cap = capturePg();
+    await docStore(cap).create(TENANT, "Doc", { id: "d1", secret_blob: "s" });
+    const insert = cap.calls.find((c) => c.sql.includes("INSERT INTO"))!;
+    expect(insert.sql).toContain(`pgp_sym_encrypt($3::text, ${KEY_REF})`);
+    expect(insert.sql).not.toContain("::jsonb");
+    expect(insert.params).toEqual([TENANT, "d1", "s"]);
+  });
+});
+
 describe("ColumnMappedEntityStore — decimal wire type", () => {
   it("recovers a column's declaration from the NUMERIC type the kernel emitted", () => {
     expect(decimalSpecFromSqlType("NUMERIC(12, 2)")).toEqual({ precision: 12, scale: 2 });

@@ -847,10 +847,43 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
       params.push(String(bound));
       return pgpSymEncryptExpr(`$${params.length.toString()}::text`, this.keyRef);
     }
+    const json = jsonbBinding(mapping, bound);
+    if (json !== null) {
+      params.push(json.param);
+      return `$${params.length.toString()}::${json.cast}`;
+    }
     params.push(bound);
     return `$${params.length.toString()}`;
   }
 }
+
+/**
+ * How a value is bound into a plaintext `JSONB` or `JSONB[]` column, or `null` when the column is
+ * neither or the value is SQL NULL.
+ *
+ * node-postgres serialises a parameter by its JS type, not by the column's: an object becomes JSON
+ * text, but a string is sent as bare text and an array as a Postgres array literal — so against a
+ * `JSONB` column `"a"`, `""` and `["a", 1]` all raised `22P02` (measured on PG 16 through this store
+ * and through `POST /v1/expenses` as a 500), while JSON-shaped string text such as `'{"a":1}'` was
+ * silently re-read as an object. The document store accepts all of them and hands each back
+ * unchanged. Serialising every value as JSON text is what makes a JSON value round-trip whatever its
+ * shape; a JSONB array column binds one JSON text per element so a string element survives too.
+ * A JS `null` stays SQL NULL rather than becoming JSON `null`, which is what it bound to before.
+ */
+function jsonbBinding(
+  mapping: ColumnMapping,
+  bound: unknown,
+): { readonly param: unknown; readonly cast: "jsonb" | "jsonb[]" } | null {
+  if (bound === null) return null;
+  if (mapping.sqlType === JSONB_SQL_TYPE) return { param: JSON.stringify(bound), cast: "jsonb" };
+  if (mapping.sqlType === `${JSONB_SQL_TYPE}[]` && Array.isArray(bound)) {
+    return { param: bound.map((element: unknown) => JSON.stringify(element)), cast: "jsonb[]" };
+  }
+  return null;
+}
+
+/** The SQL type the kernel's `fieldTypeToPostgresType` emits for `json`, `file` and `currency_amount`. */
+const JSONB_SQL_TYPE = "JSONB";
 
 /**
  * `Entity.field (classification)` for every planned column stored as ciphertext,
