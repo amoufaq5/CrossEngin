@@ -13,11 +13,13 @@ export interface SloRollbackSurvey {
   /** Whether a breach stores its kill switch (`--store pg`) or only plans it. */
   readonly persisted: boolean;
   /**
-   * Whether anything in this binary applies a kill switch to a flag — read from
-   * `KILL_SWITCH_ENFORCEMENT_GAP`, the one place that fact is written, and typed `false` so the day
-   * that constant flips this module stops compiling, which is the day the line below stops being
-   * true. Not a branch: the honest sentence once enforcement exists is a per-deployment one (is the
-   * evaluator mounted here?) that a workspace-level constant cannot answer.
+   * Whether anything in this binary applies a kill switch to a flag — assigned from
+   * `KILL_SWITCH_ENFORCEMENT_GAP.enforced`, the one place that fact is written, and typed `false` so
+   * the day that constant flips this module stops compiling. That fences the *constant*, not the
+   * sentence: `formatSloRollbackSurvey` reads neither this field nor the constant, and its "nothing
+   * applies it" clause is a fixed string, so rewording the clause is caught by nothing here
+   * (ADR-0415). Not a branch: the honest sentence once enforcement exists is a per-deployment one
+   * (is the evaluator mounted here?) that a workspace-level constant cannot answer.
    */
   readonly killSwitchApplied: false;
 }

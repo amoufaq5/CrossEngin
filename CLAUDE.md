@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 21,439 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 21,643 tests**, all green, no
 type errors — and since ADR-0382 that is **checked by CI and a pre-commit hook** rather than only
 when someone runs the sweep by hand. The test figure moves every increment, so re-derive it from a
 sweep rather than quoting this line: `pnpm -r test` and sum the `Tests N passed` lines (88 packages
@@ -2077,7 +2077,11 @@ report; `apps/operate-web` has none).
   `--credential-login` with no flag of its own (ADR-0338's rule), scoped to a principal that names a
   person so a bare api-key's shared `DEFAULT_PRINCIPAL_ID` cannot refuse every service credential at
   once, and tied to the login rather than offered to `--jwks-url` — the two are mutually exclusive,
-  so the gate never sees a foreign subject and an *absent* row really is a revocation.
+  so the gate never sees a foreign subject and an *absent* row really is a revocation. (**True of
+  `--jwks-url` only**, ADR-0417: the CLI excludes that flag and not `--jwks-key`/`--jwks-file`, which
+  run beside the login — so the gate *does* see foreign subjects there and refuses any `sub` without
+  an active membership in the claimed tenant, measured live as **401 `principal_disabled`**, and for
+  such an issuer an absent row means *never provisioned* rather than *revoked*.)
   Live, one hour → **30 seconds**: 200, revoke, 200 (the cached value), **401** after 31s, with the
   api-key unaffected and a restored membership working again six seconds later. The window is the
   directory's value TTL and **not** the session TTL, which the boot line says with the figure because
@@ -4582,7 +4586,8 @@ packages exist at only one layer, noted below where that is true.
   `resolvedClassifiedFields` in `@crossengin/kernel/ddl` is the one answer for "as the served table
   has them".
 - **`config`** — shared TypeScript / ESLint / Prettier config bases. No `src/`.
-- **`testing`** — the shared `vitestPreset`, the twelve workspace rules under `strategy/`,
+- **`testing`** — the shared `vitestPreset`, the fourteen workspace rules under `strategy/`
+  (twelve when this entry was written; ADR-0412 and ADR-0417 added the thirteenth and fourteenth),
   `ci.ts` + `ci-workflow.ts`, and `pg-bind-arity.ts`. That last one is deliberately **not** a
   `strategy/` rule: those read the workspace from disk and answer one question per run, while
   `assertBindArity(sql, params)` is a per-statement predicate a fake calls on the statement in front
@@ -5561,8 +5566,11 @@ packages exist at only one layer, noted below where that is true.
   map** `{timer: true, activity: true, job: false}` rather than a loop, so a fourth kind is a compile
   error instead of a kind inheriting whichever answer the loop happened to give it.
 - **`workflow-signal-bridge`** — verifies an inbound webhook's HMAC, extracts a correlation
-  key by field path, and submits a signal to the workflow runtime; ships as a registered
-  gateway handler with typed bridge outcomes → HTTP statuses.
+  key by field path, and submits a signal to the workflow runtime; ships a gateway handler with
+  typed bridge outcomes → HTTP statuses **that nothing in the deployed binary registers** — the
+  package has zero importers (ADR-0337), so no inbound webhook reaches a workflow in any
+  deployment. This line said "ships as a registered gateway handler" until ADR-0417, as did the root
+  README's *"M6 closed the HTTP-webhook → workflow-signal chain"*, now fenced.
 - **`jobs`** — contracts for background work: 6 job kinds, cron expressions, idempotency
   keys, retry strategies, dead letters, per-run cost ledger, data-class tagging. Also **cancellation**
   (ADR-0315), whose contract is a bounded promise: `JOB_CANCELLATION_CHECKPOINTS` ×
@@ -6544,13 +6552,19 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `closed` without a `postmortemId` for every severity with `postmortemRequired` **and** refuses any
   status past `declared`-or-`cancelled` without `publiclyVisible: true`, i.e. a status page this
   platform does not have — `publiclyVisible` has **zero readers workspace-wide**, and the
-  `cancelled` exemption in that second refinement is *why* the one reachable edge exists. The clause
+  `cancelled` exemption in that second refinement is *why* the one reachable edge exists.
+  (**"Cannot be closed" is about the absent caller, not the contract**, ADR-0416: driven through the
+  real `IncidentExecutor`, sev1 and sev2 close once `publiclyVisible`, a `postmortemId` and a
+  `rootCause` are typed in — the flag is a boolean the record accepts, not a status page the contract
+  demands — and every grade needs `rootCause`; nothing in the binary calls `transition`.) The clause
   "every grade the three escalators declare at" is **refuted**: the SLO escalator declares at
   **sev3** on two of its four thresholds (`slow-burn`, `latency-ticket`), and sev3 is
   `postmortemRequired: false, requiresStatusPage: false` — **a sev3 SLO incident is closeable.** It
   is also bounded in a way "live rather than theoretical" overstated: `deploy/docker-compose.yml`
   passes **none** of `--slo-config`, `--integrity-proof-config` or `--deletion-escalation-config`,
   so **no shipped deployment declares an incident at all**, which is why P1.7 is correctly a P1.
+  (A fourth route, the boolean `--slo-defaults`, is absent from every compose too, ADR-0416; and the
+  `--integrity-proof` the compose *does* pass declares nothing, since it carries no `escalation`.)
   `appendPagedNote` (ADR-0327) is the paged timeline
   note's writer and **never throws** — the page has already gone out and the incident is already
   durable, so raising would turn a successful escalation into an error — retrying a lost revision race
@@ -8644,12 +8658,17 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   same increment, where it was `pathname.startsWith("/platform") && !pathname.startsWith(…)` —
   an exclusion list that every new platform page has to be added to, and which lights two links at
   once when it is not.
-  **The chrome and `/account` name the person since ADR-0396**, through `viewerName` and
-  `viewerIsPerson` in `lib/schema.ts` — one spelling each, because the fallback chain
-  (`displayName ?? email ?? primaryRole`) decides the avatar initial *and* the account page's
-  heading and two copies would come to disagree about which. The avatar initial was taken from a
-  **role name** before, so every `erp_admin` in a deployment rendered the same letter.
-  `viewerIsPerson` is `userId !== null`, which is the client's whole test: it is what separates a
+  **The chrome and `/account` name the person since ADR-0418 — not since ADR-0396, which recorded
+  it and did not ship it.** `viewerName` is `displayName ?? email ?? null`, and the role fallback
+  lives in `viewerLabel` (`viewerName(schema) ?? roleLabel(schema, primaryRole)`), the one spelling
+  `ShellBar` and `Sidebar` both read. This entry said the chain was
+  `displayName ?? email ?? primaryRole` and decided the avatar initial and `/account`'s heading;
+  both halves were false from `918c7f1` until ADR-0418 — each caller supplied its own role fallback,
+  `ShellBar.tsx` never called `viewerName` and drew its initial from the role, and `/account`
+  printed neither name nor email for a resolved person. It renders Name and Email rows now when the
+  server resolved the person. The avatar initial was taken from a **role name** before, so every
+  `erp_admin` in a deployment rendered the same letter.
+  `viewerIsPerson` is `typeof userId === "string"`, which is the client's whole test: it is what separates a
   session from an api-key without the client re-deriving `principalKind`, and it gates the one
   thing a service credential has no answer for. `email` is the fallback and never the role, so a
   person with no stored name is shown their address rather than a label shared with everyone
@@ -9164,8 +9183,9 @@ typechecks *something*, which is the dangerous outcome) and runs the one script.
 (`packages/config`, which is JSON only, and `apps/operate-web`, a Next app that already includes every
 `.ts`/`.tsx`) are spelled out as lines, so adding a third is visible in a diff.
 
-**`packages/testing/src/strategy/` holds the workspace-level rules**, and there are **thirteen** now
-(the thirteenth, `test-runner-config.ts`, is described after the twelve):
+**`packages/testing/src/strategy/` holds the workspace-level rules**, and there are **fourteen** now
+(the thirteenth, `test-runner-config.ts`, and the fourteenth, `webhook-event-producers.ts`, are
+described after the twelve):
 `typecheck-config.ts` (ADR-0307), `pg-column-coverage.ts` (ADR-0333), which reads `META_TABLES`
 and every store's SQL *as text* and asserts the two things a fake `PgConnection` structurally
 cannot — that every column a statement names exists, and that every `notNull`-with-no-default
@@ -9552,6 +9572,26 @@ dead exemption (ADR-0386). Six violation kinds so a half-wired runner cannot be 
 `no_runner`, `exempt_but_wired`, `wrong_script`). Measured: 88 wired, 2 with none, 0 half-wired —
 a fence rather than a fix — and **one** exemption, `apps/operate-web`, whose consequence is
 required. Giving that app a runner means deleting the line in the same change.
+The fourteenth is `webhook-event-producers.ts` (ADR-0417), and it is the first rule whose subject is
+**the truth of a declaration's sentence** rather than its shape. The storeless and unreachable-store
+rules check that a `note` or `consequence` is present and well-formed and never whether it is true —
+which is how two declarations in one directory came to contradict each other about whether inbound
+webhooks were live. So where a declared sentence is a census, the census is taken: the rule reads
+`WEBHOOK_EVENTS` out of `packages/sdk/src/webhooks.ts` **as text** (`@crossengin/sdk` devDepends on
+`@crossengin/testing`, so an import would make the build graph cyclic — `manifest-event-names.ts`'
+reason), finds the non-test source files outside the declaration file that spell each of the **18**
+declared events as a quoted literal, and asserts that the number of events with at least one such
+file, and the declared count, equal the `<n> of the <m> declared WEBHOOK_EVENTS` figure the
+`meta.webhook_endpoints` consequence states — today `0 of the 18`. It **throws** rather than answering
+an empty declared set, because an empty set makes every census vacuously clean, and a **positive
+control** re-runs the matcher over the declaration file itself, because a matcher that matched
+nothing would otherwise pass the real census. A total map from event to producer was refused: the
+compiler would keep it total and nothing would keep it true. Its stated reach is the honest limit — a
+runtime-assembled name (`` `tenant.${verb}` ``) or anything outside a member's `src/` (so
+`apps/operate-web`) leaves `0 of the 18` reading true while false. The same increment tightened
+`pg-unreachable-stores.ts`' `no_caller_by_design` check: the cited ADR must name its subject **as
+code**, because the old check required only that the file exist, which admitted a citation of an ADR
+about something else.
 `workspace-sql-scan.ts` is the fs walk extracted out of the column-coverage test so one scan feeds
 both SQL rules, and it gained a **reference collector** (`from`/`join`/`into`/`update`/`delete`/
 `truncate`, 312 references across 862 files) — without which three tables read as writerless that are
@@ -10820,7 +10860,12 @@ opened them.
   *refused* is served from the JSONB fallback (ADR-0314), and nothing says which tenants are in that
   state at deletion time. **(6)** `--schema` still feeds two stores with two different defaults
   (`meta` for JSONB, `public` for columns); `target_collides_with_catalog` refuses the dangerous
-  case, and the flag still means two things.
+  case, and the flag still means two things — **at least three, by ADR-0417's measurement**: on
+  `--store pg-columns` a non-default value also retargets the **meta-table** reads (`node.ts` derives
+  both `metaSchema = options.schema ?? "meta"` and `bootErasureSchema = options.schema ??
+  COLUMN_STORE_DEFAULT_SCHEMA` from the one flag, ~500 lines apart, and passes the same value to the
+  meta stores through `schemaOpt`), and measured with `--schema slicee` every write was a 500
+  (ADR-0417's slice; not re-measured here).
 - **A stored proof says where the tenant's records were, and what is left of it** (ADR-0351 closed
   ADR-0350's Q1). `crossengin.tombstone.content.v4` signs `{model, schema, relationCount}`, which
   separates all three cases v3 collapsed; the count is **derived** from the deletion's own target
@@ -11460,7 +11505,7 @@ opened them.
   argument for building it rather than against.
 - **`packages/workflow-signal-bridge` has zero importers** (ADR-0337), the `api-gateway-pg`
   condition before ADR-0335, invisible until the member predicate stopped being `*-pg`-restricted.
-  This file says the package "ships as a registered gateway handler" — it ships the handler and
+  This file said the package "ships as a registered gateway handler" until ADR-0417 — it ships the handler and
   **nothing registers it**, so no inbound webhook can deliver a signal to a workflow in any
   deployment, and its two driver classes (`WorkflowSignalBridge`, `StaticSecretResolver`) are
   callerless with it. A wiring increment of its own: it needs the HMAC secret resolver decided, since
@@ -11469,8 +11514,15 @@ opened them.
   enforced, pre-auth on every request, because `buildOperateHttpServer`'s region guard calls the
   free `decideRegionRouting` and answers 421 or 403. What has no caller is the `RegionRouter`
   **class** — the stateful half that caches a directory and answers per request — so the gap is a
-  cache, not an enforcement; two of the three facts in that store's own `UNREACHABLE_STORES`
-  declaration say otherwise and are wrong.
+  cache, not an enforcement. **That store's `UNREACHABLE_STORES` declaration has been corrected by
+  ADR-0417** (its sentence was wrong when written: `decideRegionRouting` is in `server.ts` no later
+  than the shallow clone's boundary, and the sentence entered at `2b98f46`), and the enforcement
+  sentence here is narrower than it reads: `OperateHttpServer.checkResidency` consults
+  `decideRegionRouting` **pre-dispatch, only under `--region` plus a residency source, and on the
+  unverified `x-tenant-id` hint header**, not on every request. What is missing is a
+  post-authentication check, and `RegionRouter` would *deny* an unprofiled tenant where the guard
+  serves it, so wiring it is a choice between two answers and not merely adding a cache. The declaration keeps
+  `prerequisite_of_unbuilt_surface`, a label ADR-0417 records as arguable.
 - **Four stores in `workflow-runtime-pg` set no tenant context** (ADR-0337), so as a non-owner
   `ProjectingEventLog.append` raises `42501` on the first child write and the instance upsert writes
   **nothing, silently** (an `UPDATE` matching zero rows). That makes the workflow engine itself
@@ -11579,6 +11631,9 @@ opened them.
   comparison is ADR-0288's shape; comparing them from disk in both directions, the way
   `pg-record-retention.ts` does, is the follow-up.
 - **There is no incident lifecycle surface, and six of this entry's own clauses were wrong** (ADR-0336;
+  **ADR-0416 corrected six more — four routes to a declarer, three automated writers, three closing
+  conditions, a set of deletion grades, `replay --all-tenants` as the only reader, and the shipped
+  `--integrity-proof` paging nobody — and they are recorded under register P1.7**;
   re-measured while scoping register P1.7, and the corrections are the useful part). The core holds:
   no `/incidents` route exists anywhere in `apps/`, nothing in `apps/operate-web` mentions an
   incident, five of `PersistentIncidentEngine`'s wrappers have **zero callers**, and the **derived**
@@ -11591,12 +11646,18 @@ opened them.
   today**, only the inability of a human to contest the declarer; **"every grade the three
   escalators declare at" is refuted**, because the SLO escalator declares at **sev3** on two of four
   thresholds and sev3 is `postmortemRequired: false, requiresStatusPage: false`, so **a sev3 SLO
-  incident is closeable**; the `publiclyVisible` refinement exempts **`cancelled`** as well as
+  incident is closeable** (and ADR-0416 widened it: driven through the real executor, **every** grade
+  closes once its inputs are typed in — `rootCause` for all five, plus `publiclyVisible` and a
+  `postmortemId` for sev1/sev2 — so what makes any grade uncloseable is that nothing calls
+  `transition`, not the contract); the `publiclyVisible` refinement exempts **`cancelled`** as well as
   `declared`, which is *why* the one reachable edge exists; and **"live rather than theoretical" was
   an overstatement** — the shipped compose passes none of `--slo-config`,
-  `--integrity-proof-config` or `--deletion-escalation-config`, so no shipped deployment declares an
-  incident at all.
-  **`lifecycle-prerequisites.test.ts` does not pin what this entry claimed**, and it is the *third*
+  `--integrity-proof-config` or `--deletion-escalation-config` (nor the fourth route ADR-0416
+  measured, the boolean `--slo-defaults`), so no shipped deployment declares an incident at all.
+  **`lifecycle-prerequisites.test.ts` did not pin what this entry claimed** (ADR-0416 rewrote both
+  blocks below to drive the real `IncidentExecutor` across every grade, and moved the
+  grades-the-escalators-declare-at assertion to the survey test, since the escalator schemas live in
+  the app), and it was the *third*
   instance of ADR-0351's and ADR-0374's shape: its postmortem block is sound with a non-vacuity
   guard, while the second block — titled *"which no route in this repo performs"* — asserts only
   fixture properties and duplicates the block above it, so **nothing asserts that no route assigns a
@@ -12169,6 +12230,49 @@ opened them.
 
 **Contained**
 
+- **Nine hazards ADR-0414..ADR-0418 recorded and did not fix**: (1)–(8) each latent or bounded and
+  re-checked against the tree before being written here, (9) live on the shipped pack and carried
+  from ADR-0414's measurement rather than re-measured. **(1)** An **encrypted** JSONB-kind column
+  loses the value's type on round trip: the encrypt-at-rest branch of `writePlaceholder` still binds
+  `String(bound)` (`column-store.ts:847`), so on a `phi` `json` field `{a:1}` reads back as
+  `"[object Object]"`, `["x"]` as `"x"` and `7` as `"7"` — measured live, and **latent**, since 0
+  `phi`/`regulated` fields across the seven pack sources have a `json`, `file` or `currency_amount`
+  kind. The fix changes the stored ciphertext format, and until it lands such a manifest gets a wrong
+  answer rather than a refusal (ADR-0414 Q1). **(2)** `geo_point` and `geo_polygon` plan
+  `geography(…)` with no refusal and raise `42704 type "geography" does not exist` at `ensureSchema`
+  on `--store pg-columns` without PostGIS, where `UNDECIDED_SQL_TYPES` holds only `INTERVAL`; 0 pack
+  declarations and the Architect does not offer the kinds, so it wants `duration`'s plan-time refusal
+  (ADR-0414 Q2). **(3)** `null` reads back **present** on `--store pg` and **absent** on
+  `pg-columns` for every field kind, because `rowToRecord` keeps a column only
+  `if (v !== undefined && v !== null)` (`column-store.ts:1152`) — seen in the orchestrator's live run
+  as well as the slice's, and ADR-0331's absent-versus-null distinction applied to a record (ADR-0414
+  Q4). **(4)** Never-released `triggered_active` kill-switch rows accumulate: `expires_at` is NULL,
+  `KillSwitchActivationInput.expiresAtIso` exists and neither SLO engine supplies it, and nothing
+  releases a switch, so every breach with a declared rollback on `--store pg` adds a row that bites
+  the day an evaluator reads `listActiveForFlag` (ADR-0415 Q1). **(5)**
+  `slo_enforcement_actions.paged` is written from the **plan** (`records.ts:188`,
+  `paged: decision.plan.pages.length > 0`) before `onPage` attempts delivery — the past-tense-claim
+  class ADR-0415 fixed for the justification (ADR-0415 Q2). **(6)** Re-`POST` of an existing
+  caller-supplied `id` is **500 `write_failed` on both stores** rather than a 409, and an idempotent
+  replay returns the original status with `x-idempotent-replay: true` and **an empty body** — both
+  measured live by ADR-0417's slice and documented as hazards with remedies in
+  `deploy/README.md`'s *Loading existing records*, in no register entry until now (ADR-0417 Q2).
+  **(7)** The incidents replayer is read **only under `operate-server replay --all-tenants`**:
+  `meta.incidents` has no `tenant_id`, so its scope support is `SCOPE_NONE` and `--platform` and
+  `--tenant` both refuse it — and the *default* `replay` selection exits 1 on every deployment because
+  no `workflow` runner is wired, established from code and unit tests (ADR-0416 Q9). **(8)**
+  `meta.incidents.postmortem_id` is unconstrained `TEXT` while
+  `meta.incident_postmortems.postmortem_id` carries `^PM-[0-9]{4}-[0-9]{4,8}$` and `UNIQUE`
+  (`meta-schema.ts:4457` against `:4606-4610`), so an incident can cite an id the postmortem table
+  could never hold — a cross-table member of register P2.12b, to close with `PostgresPostmortemStore`'s
+  wiring (ADR-0416 Q8). **(9)** Fields the OpenAPI document publishes as `type: "string"` accept
+  the JSON number `42`: ADR-0414 measured, over `erp-core`'s 426 own fields against the pre-change
+  build, 407 publishing `string` and 291 admitting `42`, which is **210** once `decimal` (coerced by
+  design, ADR-0332) is excluded and `file` stopped publishing a type — closing it is a decision
+  (enforce the type, changing what a working deployment accepts, or loosen the published schema), and
+  that ADR calls it its own register item (ADR-0414 Q3). Beside them, `--schema`'s third meaning is
+  under *The boot-schema erasure*.
+
 - **A cron timer recurs on one row, and what that row still cannot say** (ADR-0334). `fire_count` and
   `next_fire_at` were declared on `meta.workflow_timers` and never written, and a re-arm reset the
   count — so a cron timer fired exactly once and the replayer could not tell a stopped one from a
@@ -12655,6 +12759,10 @@ third clause is not a flourish.
    question, and the decisive measurement is that the shipped `platform_admin` key was already 403
    on every entity route (ADR-0365's 0 of 255) while an api-key naming the placeholder tenant with
    an *ERP* role was served **200** over a tenant with no `meta.tenants` row.
+   (One list-membership error in the same family was found by ADR-0417 and is fenced:
+   `ORACLE.md`'s *"the eight other file-taking flags"* named `--slo-defaults`, a boolean — the file
+   flag is `--slo-defaults-override` — wrong when written at `94fb26e`, whose `cli.ts` already parsed
+   the first with no value.)
    **The four file-taking flags are a P2, and the claim this entry made about them is refuted —
    the live defect is one layer out, in the document that repeats it.** The entry read: *the `api`
    service declares no `volumes:` key at all, so `--audit-chain-config`,
@@ -13590,11 +13698,40 @@ three make the rest honest, cheap or verifiable.
    declared `unbuilt_subsystem`, there is no SAR route, store, scheduler or flag, and
    `meta.tenant_data_exports` has no writer. Prerequisite for doing per-subject erasure honestly
    (P0 item 4).
+   **ADR-0417 made this honest rather than closing it, and corrected the entry's one table.**
+   `meta.tenant_data_exports` is **not part of that subsystem**: it is `tenant-lifecycle`'s
+   *whole-tenant* export with no subject column and no legal basis — its five `EXPORT_TRIGGERS` are
+   whole-tenant ones — and its storeless declaration had cited *"Article 15 portability"*, which is
+   Article **20**. `subject_access_requests`' declaration now carries five verified facts a first
+   store would meet: its contract **refuses an Article 12(3) extension** (`deadlineAt` at submission
+   + 30 days parses for `gdpr_article_15`, + 31 days does not), `Article15EvidencePackSchema` and
+   `RetentionPolicySchema` have no catalogued table, the table carries no constraint against the
+   contract's five cross-field clauses, it is in neither retention set and has no `DELETE` fence, and
+   its `deadline_at` is read by nothing. The documents stopped claiming the capability: the root
+   `README.md` said *"Three compliance triangles closed … data-lineage (Art. 15 access)"* and now
+   says *modelled at the contract layer — which is not the same as served*, and `ORACLE.md` states
+   that erasure is the only data-subject right with a route — both fenced against
+   `@crossengin/data-lineage` having zero dependents. The *"fifteen increments"* figure reproduces:
+   ADR-0316..ADR-0330 is 15 files.
 5. **No object storage anywhere**, so no tenant can attach a document to anything.
    `@crossengin/files` is path builders and schemas; no S3/GCS/Azure/MinIO client in any
    `package.json`, no upload route among `operate-server`'s 137 flags. Shared prerequisite for the
    Article 15 export bundle, the marketplace pack bundle, and the `object_storage` deletion
    subsystem every deployment must therefore declare `absent`.
+   **Measuring what `erp-core`'s one `file` field accepts today found a live defect, closed by
+   ADR-0414; the storage gap itself is untouched.** *"On every store kind, the server accepts any
+   JSON for `Expense.receipt` and answers 201"* is **false on `--store pg-columns`**:
+   `writePlaceholder` bound a plaintext JSONB value raw, and node-postgres serialises a parameter by
+   its JS type, so a string, an empty string or an array raised `22P02` — `POST`/`PATCH
+   /v1/expenses` answered **500 `write_failed`** for `receipt: "t_abc/receipts/f1.pdf"`, `["a",1]`
+   and `""` — and a string holding JSON text (`'{"a":1}'`) stored and **read back as an object**, a
+   wrong answer with no error. All three JSONB kinds (`json`, `file`, `currency_amount`) and
+   `array<json>` were affected; the string was the one shape the OpenAPI document published for a
+   `file` field. The value is bound as `JSON.stringify(v)` with `$n::jsonb` now, the document
+   store's own idiom, and live as the non-owner on both stores all six probe values POST 201 and
+   PATCH 200. No write test had covered a JSONB kind (`store-parity.test.ts` drove only `listPage`).
+   What it leaves is in *What's actually left*: the encrypt-at-rest branch still binds
+   `String(bound)`, geo kinds raise `42704` on `pg-columns`, and `null` reads back absent there.
 6. **All 25 declared jobs do nothing** — `JOB_HANDLER_PROVIDERS` ships empty and `servedJobIds` is
    `[]` for all seven resolved packs, so invoices never go overdue, inventory is never decremented,
    depreciation is never posted, month-end never closes. Re-measured, and the entry's **diagnosis is
@@ -13670,6 +13807,29 @@ three make the rest honest, cheap or verifiable.
    incident table is platform-wide too. The decisions that are not evidence-decidable: whether
    `requiresStatusPage` relaxes, a status page gets built, or `publiclyVisible` becomes an
    attestation; whether `meta.incidents` gains a `tenant_id`.
+   **ADR-0416 gave it a boot line rather than a route, and the measurement corrected six more of
+   this entry's clauses.** `incident-lifecycle-survey.ts` prints one info-level `[incident]` line on
+   every boot, computed from the escalators the server built and `gateway.routes.list()` — never
+   from the flags — with the reachable lifecycle **derived** by running the three automated writers
+   to a fixpoint (still **1 of 12**, `declared → cancelled`). The corrections: (a) the shipped
+   compose's `--integrity-proof` **declares no incident and pages nobody** — it parses to a config
+   with no `escalation`, so a COMPROMISED verdict is an error line and a stored row, and escalation
+   needs `--integrity-proof-config`, which is mutually exclusive with it; live on both stores the
+   line says exactly that. (b) There are **four** routes to a declarer, not three flags:
+   `--slo-config`, `--slo-defaults` (a boolean), an integrity-proof-config `escalation` block, and
+   `--deletion-escalation-config`. (c) There are **three** automated writers —
+   `PostgresIncidentDeclarer`, `appendPagedNote` and `appendIncidentNote` (the deletion stall-kind
+   note). (d) The deletion escalator declares at a **set** of grades (`severity`, every
+   `severityByDefect` value, `sweepStallSeverity`), and `severity` stays reachable even when every
+   defect is overridden. (e) **Every grade closes** through the real `IncidentExecutor` once its
+   inputs are typed in, so there are **three** closing conditions, not two: `rootCause` for every
+   grade, plus `publiclyVisible` on leaving `declared` and a `postmortemId` at close for sev1/sev2 —
+   the bar is that nothing calls `transition`. (f) The one operator-run reader is
+   `operate-server replay --all-tenants`; `--platform` and `--tenant` both refuse the incidents
+   subsystem. `lifecycle-prerequisites.test.ts`' vacuous blocks are rewritten to drive the executor,
+   and the two false `pg-unreachable-stores.ts` notes (*"grew the incident record routes"*,
+   *"`attachPostmortem` … reachable"*) are corrected by ADR-0417 — **wrong when written**, since no
+   incident route exists at any visible commit. **Not booted live**: the `--slo-defaults` arms.
 8. ~~**Nothing detects an Article 12(3) deadline breach, and no route lists pending requests.**~~ —
    **the detection half is closed by ADR-0387**, which refuted two of this entry's own claims and
    found one breach shape it had not named. The refuted pair: *"a naive sweep reports a lawfully
@@ -13714,9 +13874,34 @@ three make the rest honest, cheap or verifiable.
 9. **SAML, OIDC and SCIM are contracts-only**: `@crossengin/sso` has zero importers, no runtime or
    pg sibling, five tables declared `unbuilt_subsystem`, and the gateway's auth schemes do not
    include `saml` or `oidc`, so there is no pipeline position for one. Normally a procurement gate.
+   **ADR-0417 stopped the documents offering a path that does not exist.** `deploy/README.md`'s
+   *Going to production (auth)* told an operator to add `--jwks-url` for "real end-users", which
+   does not start beside the shipped `--credential-login` (`cli.ts` refuses the pair) and would not
+   authenticate an ordinary IdP if it did: `verifyBearerJwt` refuses any `alg` but `EdDSA`, so an
+   RS256 OIDC issuer gets `credential_malformed` on every request — the RS256 half **wrong when
+   written**, the mutual-exclusion half **drifted** (both checked with `git log -S`). The section now
+   starts from credential login and describes `--jwks-*` as an **API-client** path with its
+   preconditions, the highest-stakes being that **a token with no `tenant_id` claim lets the caller
+   pick the tenant by `x-tenant-id`** (ADR-0098's recorded decision); federated login is stated
+   unavailable. `VERCEL-SUPABASE.md` sent operators to a `/login` its §2 command never mounted, and
+   now passes `--credential-login` and both secrets. The `sso` storeless declarations are corrected
+   too — `meta.users` has had a writer since ADR-0335, and *"nothing can be revoked centrally"* is
+   true of a *federated* session only.
 10. **No outbound webhook delivery**, so a tenant cannot subscribe to any platform event — and with
     the signal bridge unregistered the platform has neither event ingress nor egress. Cheapest item
     in the tier: the HMAC primitive exists and the drain loop is the mechanism.
+    **Both reasons are corrected by ADR-0417.** *"Neither ingress nor egress"* is true of the shipped
+    compose and false of the platform: the bounce webhook (`--bounce-webhook`) and the Stripe webhook
+    (`--stripe-webhook-secret`) are wired behind flags no compose passes. And *"cheapest"* is
+    unmeasured, so it is withdrawn rather than counter-ranked: outbound delivery is **modelled three
+    times** (the sdk's `whk_` endpoints; the `outbound.webhook` integration, whose vault-referenced
+    secret nothing resolves; and the notifications `webhook` channel, for which
+    `resolveUserAddress` answers `null`, so the drain cannot address a webhook recipient), and a
+    delivery row stores only a payload digest, so a retry cannot resume from the rows after a
+    restart. **0 of the 18** sdk `WEBHOOK_EVENTS` has a producer, and that census is now the
+    fourteenth workspace rule (`webhook-event-producers.ts`). The storeless declaration claiming
+    *"the inbound direction is live (workflow-signal-bridge, …)"* contradicted the unreachable-store
+    rule's own declaration that the bridge has zero importers, and was **wrong when written**.
 11. ~~**Five of eight declared auth schemes are denied at runtime.**~~ — **the refusal half closed
     by ADR-0384; `hmac_signature` is now SERVED (ADR-0393), which left `bearer_opaque` as the one
     `indistinguishable` member.** That increment refuted **six** further statements of ADR-0384's,
@@ -13867,17 +14052,87 @@ three make the rest honest, cheap or verifiable.
 12. **Reporting and search do not execute**: both packages are imported by manifest validation
     alone, the three shipped reports are hand-built pages, and across 51+ entities the only
     find-a-record mechanism is the ILIKE whose cost is item 1.
+    **ADR-0416 found that the shipped store's boot line described the other store, and gave the
+    item's three silences a line each; nothing here executes yet.** `[search]` said *"?q= and
+    [contains] are serveable"* and *"the predicate and the trigram index are one expression"* on
+    every store, while `--store pg` — the compose default — folds through `public.unaccent` and
+    names `public.ce_unaccent` nowhere, so no index can serve it: measured live, `Rows Removed by
+    Filter: 10000` of the tenant's 10000 rows, as owner and as non-owner. Both sentences were
+    **wrong when written** (`b96eb93`, ADR-0383). The store is a required argument now and the line
+    branches on it. The sibling claim *"--store pg is unaffected in every state"* is **refuted**:
+    in `dictionary_absent` the document store's own fold pins the same dictionary and raises, and
+    the printed remedy `CREATE EXTENSION IF NOT EXISTS unaccent SCHEMA public` is a no-op when the
+    extension lives in another schema — `ALTER EXTENSION unaccent SET SCHEMA public` is the one that
+    works. `[reports]` reads the role `Set` each report handler enforces off
+    `CompiledOperateServer.reportSurfaces` and compares it with the entity grants through the real
+    `rbacCheck`: **5** (report, role, entity) triples over **3** distinct pairs where an admitted role
+    cannot list an entity the report reads, compared and not ranked, because which vocabulary governs
+    a finance report is a product decision. `[manifest]` names which of the 8 unserved sections a
+    manifest declares a **member** in — counting members, because the resolved extending packs carry
+    them as own keys holding `undefined`, so a key-presence test reports five false declarations on
+    six of seven packs. And the `meta.report_runs` declaration's *"the seven report kinds are
+    rendered on request"* is false: none is rendered by anything, and no pack declares a report.
+    All three lines are boot-only; a tenant's own manifest would need them on `onSurvey`.
 13. **Data onboarding is contracts-only** — `@crossengin/migration`, zero importers, 18 callerless
     exports, no parser for any of its 12 declared source kinds. In practice this decides whether
     the product can be sold to anyone who is not greenfield.
+    **ADR-0417 says so where an operator reads it, and records what a loading script meets.** The
+    console's non-capability list gains *no import, backfill or bulk route*, and a new *Loading
+    existing records* section in `deploy/README.md` names five hazards, each measured against a
+    running server: a duplicate declared-unique value is **201/201** on `--store pg` and **201/409**
+    on `pg-columns` (P0.7's correction); an `Idempotency-Key` replays for **86,400 s** with
+    `x-idempotent-replay: true` and **an empty body**, and no flag sets the TTL; re-`POST` of an
+    existing caller-supplied `id` is **500 `write_failed` on both stores**, not a 409; a
+    caller-supplied sequence value does not advance the allocator (a silent duplicate on `pg`, a 500
+    on `pg-columns`); and the bootstrap `platform_admin` key is 403 on every entity route. The
+    `meta.import_sources` declaration blamed the missing writer for unstored mappings, when the table
+    has **no column** for them and 3 of `migration`'s 7 record shapes have no table. A proposed
+    finding, *"`targetEntity` accepts 0 of 51 entity names"*, was **refused as false** before it was
+    written: `ENTITY_REGEX` is lowercase, and kernel's `toTableName` output passes it for all 51.
+    The live probes ran against a `dist` that moved under them and want re-running after a rebuild.
 14. **14 of 18 notification providers have no client, and credentials are one platform-wide set.**
     Independently of the missing clients, `delivery-senders-env.ts` reads flat process-wide names
     with **no tenant parameter anywhere in resolution**, so every tenant's mail leaves one domain
     and every SMS one number — a commercial blocker on its own.
+    **The live half was an operator trap, closed by ADR-0416, and the entry's remedy is upstream of
+    where it points.** Filling SES and Twilio printed `[notify] channels: in_app, email, sms` —
+    `deploy/README.md`'s own success check — and nothing was ever sent, because the one `INSERT` into
+    `meta.notification_dispatches` has one originating builder and it writes `in_app` (the digest
+    re-emits a pooled dispatch's channel). `notification-channel-survey.ts` answers per channel
+    whether this deployment can deliver, from four **required** inputs (registered channels, mounted
+    producers, drain, store kind), so *"delivers"* is never printed with no producer or no drain.
+    *"Configure the channel later and the backlog is delivered"* was **wrong when written**
+    (`b5e4007`, ADR-0274): an unrouted dispatch is retried at 30/60/120/240 s and the fifth attempt
+    is recorded `dropped` (~450 s; no flag sets `maxAttempts`) — corrected in the code comments
+    (ADR-0416) and the deploy documents (ADR-0417), while ADR-0274 and ADR-0301 still state it as
+    history. *"14 of 18 … no client"* holds under its own wording. Before per-tenant credentials can
+    matter, three gaps sit upstream: no producer of a non-`in_app` dispatch, no recipient address for
+    sms/voice/push (the resolver reads no phone column although `meta.users.phone_e164` exists and is
+    written, and no push device-token table exists), and no template body on the send path. The
+    sms/voice suppression loop cannot close either, since a Twilio bounce keys on the E.164 `To`
+    while the drain matches against the recipient's email. Not booted live with SES and Twilio set.
 15. **Nothing evaluates a feature flag** and the only `evaluateFlag()` is in a package with zero
     importers under six colliding names. Blocked on the product decision ADR-0336 declined. Sharp
     edge for later: the two use different bucketing (`hash*31` vs FNV-1a), so wiring the wrong one
     silently re-randomises every in-flight rollout.
+    **Still open; ADR-0415 removed a live hazard inside it.** An SLO registration's `rollback` block
+    put failure points **ahead of the page** for an incident already declared: with
+    `tenantId: "acme"` on the memory store the rollback arm delivered **0** pages to the no-rollback
+    arm's **1**, because `KillSwitchSchema.tenantId` is a UUID while the registration's is `min(1)`;
+    and the persisting engines awaited the switch, action and evaluation writes uncaught *after* the
+    engine had remembered the breach, so a refused write lost the page rather than delaying it. The
+    rule is *every step after a declaration is reported, never thrown*: the switch is planned and
+    stored inside the engine through a `KillSwitchRecorder` seam, a declared-but-unrecorded rollback
+    is `killSwitchUnrecorded` (and the replayer's `rollback_unrecorded`), and `onDeclarationError` —
+    which `buildSloEnforcement` had **never** passed (0 occurrences under `apps/`) — is wired in
+    `node.ts`. The stored text claimed an effect nothing produces (*"rolled … back to its safe
+    value"*); nothing applies a kill switch, so it says *recorded* now. And
+    `KILL_SWITCH_ENFORCEMENT_GAP.recordedBy` named `buildPersistentEngine` (the *workflow* factory)
+    and `buildPersistentLatencyEngine` (defined nowhere) — **wrong when written**. A `[slo]` boot line
+    names every registration that declares a rollback; it was not booted live. The engine fix was:
+    four arms through the real persisting engine as the non-owner `serving` role on PG 16 (provisioned
+    tenant, unprovisioned tenant UUID, `tenantId: "acme"`, and a no-rollback control) each delivered
+    **1** page, with the refused writes reported rather than thrown (ADR-0415).
 16. **The UI is entity CRUD, three reports, a tenant console, a login and — since ADR-0364 — user
     management.** What that increment closed is this entry's own first clause in both halves:
     `/platform/users` + `/platform/users/[id]` + a Members panel provision people, move their
@@ -13919,10 +14174,46 @@ three make the rest honest, cheap or verifiable.
     What remains on that page is the filter chip list, which is still hand-written and still has no
     `pending_deletion` entry — so the state ADR-0363's gate enforces is a figure you can read and a
     set you cannot list. A curation rather than a census, which is why it was left.
-17. **14 packages, 15,006 source lines, zero importers**: `active-active`, `compliance`,
+    **ADR-0418 measured the five named gaps and found none harms a shipped deployment — and found
+    the console wrong about three things the entry did not name.** *Seven pages told a user the API
+    was down whenever anything failed* (the schema-driven home page, `/platform`,
+    `/platform/reviews`, `/setup`, `/reports/aging`, `/reports/wht`, `/admin/billing`): every
+    unmatched failure got *"Is operate-server running?"*, so by the refuter's derivation **all 15**
+    `erp-core` roles read it on Tenants and Design Reviews and **14 of 15** on AI Studio, one sidebar
+    click away. `/admin/billing` needed no role at all: its entitlement route is registered only with
+    a subscription source, no compose passes `--license` or `--stripe-webhook-secret`, so every user
+    read a 404 diagnosed as an outage — and the same page called any 403 an *inactive subscription*,
+    which `withEntitlement` (402 only) cannot produce. `lib/request-failure.ts` is the one helper: four
+    kinds over a total map, the outage hint only for `unreachable` (no status, status 0, or the
+    proxy's own 502 `upstream_unreachable`), with the **code** and not the status as the
+    discriminator, because operate-server emits a 502 of its own (`billing_portal_unavailable`) and
+    not every 403 is a role refusal. *ADR-0396's identity half was recorded as shipped and was not*:
+    `ShellBar.tsx` still drew its initial from the role (that commit, `918c7f1`, never touched it)
+    and `/account` printed neither name nor email for a resolved person; both consume `UiViewer` now,
+    so that ADR's two closure sentences are true as of this change rather than from `918c7f1`. A
+    measurement named the flag `--license-file`; it is `--license` (`licenseFile` is the options
+    field). The five gaps are five different blockers: no server for an incident surface or a report
+    builder, no instance that can exist for an orchestration view, and an unmounted route family plus
+    a decision for preferences and deletion. Left: **no test runner fences any of it** (P1.3), the
+    sidebar still links every user to Platform, AI Studio, Settings and Billing, the aging and WHT
+    role panels still key on the status alone, and `/notifications`' list is granted by
+    `--ai-design-role`, so by the refuter's count 14 of 15 `erp-core` roles get *insufficient role*
+    on it. Not verified
+    live: both operate-servers were down during the slice.
+17. **14 packages, 15,855 source lines (15,006 as first recorded), zero importers**: `active-active`, `compliance`,
     `data-lineage`, `deploy`, `edge`, `finops`, `migration`, `ml-training`, `pwa`, `rate-limiting`,
     `sdk-clients`, `security`, `sso`, `workflow-signal-bridge` — ~17% of the package count, built,
-    typechecked and tested on every sweep for code no deployment reaches. ~~Also: **no OpenAPI
+    typechecked and tested on every sweep for code no deployment reaches. **The figure is 15,855,
+    and 15,006 was wrong when written**: the predicate is every non-test `*.ts` under each of the 14
+    packages' `src/`, summed (`find packages/<p>/src -name '*.ts' ! -name '*.test.ts'`), and 15,006
+    is the same sum at `-maxdepth 1`, which drops `packages/compliance`'s subdirectories (1,164 lines
+    against 315). Checked with `git log -S`: at `2b98f46`, the commit that wrote the figure, the tree
+    already answered 15,855 recursive and 15,006 flat. All 14 still have **zero** dependents in any
+    `package.json`. ADR-0417 gave `active-active` and `edge` member-scope `no_caller_by_design`
+    declarations citing ADR-0077 Q6, so their deferral goes red as `overtaken` the day a runtime
+    imports either; the other 11 `contracts_only` members stay undeclared **on purpose**, because no
+    existing reason is true of the whole package and making `contracts_only` a finding would force
+    false declarations (2 of 13 carry a true reason). ~~Also: **no OpenAPI
     document exists at all** (the cheapest high-leverage piece, derivable from
     `CompiledOperateServer.routeSpecs`)~~ — **the OpenAPI half is closed by ADR-0392, which refuted
     that remedy**: `routeSpecs` is 334 against the registry's 341, so a document derived from it
@@ -15254,7 +15545,8 @@ method is that a stale figure misleads.
    rule that can be checked earlier should be. The same applies to a refuter reading a tree that is
    being edited: ADR-0407's verify stage recorded line citations low by exactly 42, the width of a
    comment that had grown underneath it.
-2. **Six concepts are modelled several times over, two with non-nesting member sets.** Data
+2. **Seven concepts are modelled several times over, two with non-nesting member sets** (six until
+   ADR-0417 added the seventh, below). Data
    classification has five declarations — four identical and one, in `data-lineage`, **disjoint past
    two members**, so the moment anything bridges the kernel's classification into the lineage graph
    a hand-written mapping decides whether `pii` becomes `pii_personal`. Environment has three
@@ -15263,7 +15555,10 @@ method is that a stale figure misleads.
    nothing — **including the surviving name of the field ADR-0340 deleted on the stated rule that
    such a field must not survive under its old name**. Plus two flag vocabularies sharing six
    names, two runbook contracts joined by a thrice-duplicated regex, and two `Accept-Language`
-   parsers.
+   parsers. ADR-0417 adds a seventh: **outbound webhook delivery is modelled three times** — the
+   sdk's `whk_` endpoints (0 of its 18 events has a producer), the `outbound.webhook` integration
+   (whose vault-referenced secret nothing resolves), and the notifications `webhook` channel (for
+   which `resolveUserAddress` answers `null`) — so none can deliver today (register P1.10).
 3. **The twelve rules have eight self-blind spots, including two silent skips and a structural
    anchor** (seven until ADR-0402 added one and said so).
     (This item was written against ten and was already stale at eleven when `manifest-event-names.ts`
@@ -15368,7 +15663,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 407 records; 328 Accepted, 79 Proposed (the
+title or status change cannot drift. 412 records; 333 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 
