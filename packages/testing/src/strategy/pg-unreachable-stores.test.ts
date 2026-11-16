@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
@@ -1045,6 +1045,38 @@ describe("the real workspace", () => {
     }
   });
 
+  it("every by-design declaration cites an ADR that names what it declares", () => {
+    // An ADR merely existing is the weak half of the check above: a member declared deliberate on the
+    // strength of an ADR about something else would pass it. So the cited text must name the subject
+    // as code — the class in backticks, or the member as `name` or `@crossengin/name` — and a bare
+    // English word does not count, because `edge` is also a word every gateway ADR uses.
+    const adrDir = join(REPO_ROOT, "docs", "adr");
+    const adrs = readdirSync(adrDir);
+    const byDesign = UNREACHABLE_STORES.filter((d) => d.decidedIn !== undefined);
+    // The member half is the one that matters: a `contracts_only` member is exempt whether or not it is
+    // declared, so a wrong citation there would sit unread for ever.
+    expect(byDesign.filter((d) => d.scope === "member").length).toBeGreaterThanOrEqual(2);
+    for (const d of byDesign) {
+      const number = (d.decidedIn ?? "").slice("ADR-".length);
+      const file = adrs.find((f) => f.startsWith(`${number}-`));
+      expect(file, `${d.decidedIn ?? ""} has no file`).toBeDefined();
+      const text = readFileSync(join(adrDir, file ?? ""), "utf8");
+      const token =
+        d.symbol ?? (d.module !== undefined ? d.entrypoint ?? "" : d.pkg.split("/")[1] ?? "");
+      expect(adrNamesSubject(text, token), `${subjectOf(d)} cites ${d.decidedIn ?? ""}`).toBe(true);
+    }
+  });
+
+  it("an ADR names a subject only as code, never as a bare word or a longer name", () => {
+    expect(adrNamesSubject("the `edge` contracts", "edge")).toBe(true);
+    expect(adrNamesSubject("imports @crossengin/edge for routing", "edge")).toBe(true);
+    expect(adrNamesSubject("the HTTP edge of the gateway", "edge")).toBe(false);
+    // A sibling runtime package is not the contracts package.
+    expect(adrNamesSubject("lands @crossengin/active-active-runtime", "active-active")).toBe(false);
+    expect(adrNamesSubject("`PostgresTargetingRuleStore` has no caller", "PostgresTargetingRuleStore")).toBe(true);
+    expect(adrNamesSubject("anything", "")).toBe(false);
+  });
+
   it("every declared table is catalogued, and the two SQL rules agree about it", () => {
     // The join between this rule and `pg-storeless-tables.ts`, and the reason both are needed: that
     // rule reads a store's SQL as a writer, so a store with no caller makes its table read as
@@ -1295,3 +1327,10 @@ describe("the callerless flag-store list", () => {
     expect([...reached].sort()).toEqual([...FLAG_LIST_FINDING_KINDS].sort());
   });
 });
+
+/** Whether an ADR's text names a declaration's subject as code, which is what makes a citation evidence. */
+function adrNamesSubject(text: string, token: string): boolean {
+  if (token === "") return false;
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\`${escaped}\`|@crossengin/${escaped}(?![a-z0-9-])`).test(text);
+}

@@ -526,8 +526,10 @@ export type MemberReachability = (typeof MEMBER_REACHABILITIES)[number];
  * Three buckets are exemptions and four are findings. The exemptions are read from `package.json`
  * and from the class scan rather than from a list of member names: `entrypoint` is a declared `bin`,
  * `not_importable` is the absence of `main` and of a `"."` export, and `contracts_only` is the
- * absence of any exported driver class. That last one is what keeps the thirteen contracts packages
- * out of the declaration list, and it is also this classification's own blind spot — see
+ * absence of any exported driver class. That last one is what spares the thirteen contracts packages
+ * a *required* declaration — one may still be declared, and is then audited for `overtaken`, which
+ * is how `active-active` and `edge` carry ADR-0077's deferral — and it is also this classification's
+ * own blind spot — see
  * `packages/deploy` in the module's header, where a complete function-shaped flag subsystem with the
  * workspace's only `evaluateFlag()` is excused as declarative because it exports no class.
  *
@@ -1637,6 +1639,17 @@ export function scanWorkspaceStores(
  * surface.
  */
 export const UNREACHABLE_STORES: readonly UnreachableDeclaration[] = Object.freeze([
+  /* --------------------------------------------------------- active-active (1) */
+  {
+    scope: "member",
+    pkg: "packages/active-active",
+    reason: "no_caller_by_design",
+    decidedIn: "ADR-0077",
+    consequence:
+      "No deployment replicates a tenant across regions: the six CRDT kinds, vector-clock conflict detection and the split-brain lifecycle are applied to nothing, and meta.aa_topology, meta.aa_conflicts and meta.aa_split_brain_events are declared `unbuilt_subsystem` in pg-storeless-tables.ts.",
+    note: "ADR-0077 (status Proposed) records under Q6 the current direction for its P6 milestone: built when the first residency-bound customer is in the pipeline, the `residency`, `active-active` and `edge` contracts being ready so the runtime slots in on demand. CLAUDE.md records P6 as deliberately thin. The member is `contracts_only`, which exempts it whether or not it is declared; the declaration carries the decision and goes red as `overtaken` the day a runtime imports it.",
+  },
+
   {
     scope: "symbol",
     pkg: "packages/api-gateway-pg",
@@ -1659,6 +1672,17 @@ export const UNREACHABLE_STORES: readonly UnreachableDeclaration[] = Object.free
     consequence:
       "Nothing is lost by this class having no caller. What its absence of a *production* counterpart costs is separate and real: `auditKeyManagement`'s findings have no durable sink in any deployment, because no `CryptoAuditSink` implementation outside this one exists anywhere in the workspace.",
     note: "The in-memory implementation of the `CryptoAuditSink` seam, constructed by three of its own tests and offered to a caller that injects it. Declared rather than excused by the `test_surface` bucket because no *other* member's tests construct it, so this rule cannot tell it from a dead driver without the declaration — which is the honest state: it is an offline implementation of a seam with no live implementation beside it.",
+  },
+
+  /* ------------------------------------------------------------------ edge (1) */
+  {
+    scope: "member",
+    pkg: "packages/edge",
+    reason: "no_caller_by_design",
+    decidedIn: "ADR-0077",
+    consequence:
+      "Region routing strategies, per-route latency budgets, autoscaling policies, edge cache strategies and throttling verdicts are evaluated by nothing, so meta.autoscaling_events (declared `unbuilt_subsystem` in pg-storeless-tables.ts) has no producer. The one region decision a deployment makes is residency-runtime's `decideRegionRouting`, not this package.",
+    note: "The same ADR-0077 Q6 direction as `packages/active-active`, which names this package's contracts among those ready for an on-demand runtime. `contracts_only` exempts it either way; the declaration carries the decision and goes red as `overtaken` when a runtime imports it.",
   },
 
   /* ------------------------------------------------------ feature-flags-pg (2) */
@@ -1695,7 +1719,7 @@ export const UNREACHABLE_STORES: readonly UnreachableDeclaration[] = Object.free
     tables: ["meta.incident_runbook_executions"],
     consequence:
       "A runbook execution and its per-step outcomes are never recorded, so a postmortem opens on an incident whose remediation is not reconstructible from the database, and the revision guard this store carries has never guarded a row.",
-    note: "ADR-0296 built this and the two below — `the three stores that were dead since Phase 1` — each with its own revision guard. `operate-server` grew the incident *record* routes (ADR-0293, ADR-0294) and no runbook surface, so nothing has ever constructed it outside `runbook-store.test.ts`.",
+    note: "ADR-0296 built this and the two below — `the three stores that were dead since Phase 1` — each with its own revision guard. No HTTP route over incidents exists in any commit of this repository: `meta.incidents` is written only by the automated declarer (`PostgresIncidentDeclarer`, ADR-0293, ADR-0294) and the paged/observation note writers, and read only by `operate-server replay`. So there is no incident surface for a runbook route to join, and nothing has ever constructed this store outside `runbook-store.test.ts`.",
   },
   {
     scope: "symbol",
@@ -1703,10 +1727,10 @@ export const UNREACHABLE_STORES: readonly UnreachableDeclaration[] = Object.free
     symbol: "PostgresPostmortemStore",
     reason: "prerequisite_of_unbuilt_surface",
     blockedBy:
-      "a postmortem route on the incident surface. `IncidentExecutor.attachPostmortem` exists and is reachable, so the only missing piece is the HTTP edge and the store beside it — the narrowest of these three.",
+      "a postmortem route, and the incident surface it would sit on, which does not exist. `IncidentExecutor.attachPostmortem` exists and nothing reaches it — `PersistentIncidentEngine.attachPostmortem` has no non-test caller — so the missing pieces are the HTTP edge and the store beside it, with no contract change: the narrowest of these three.",
     tables: ["meta.incident_postmortems"],
     consequence:
-      "`attachPostmortem` has no durable sink, so a blameless postmortem and its prioritized action items live only in the in-memory incident record — and the four-eyes rule on review (`author ∉ reviewers`) is enforced against a value that is never stored.",
+      "A blameless postmortem and its prioritized action items are stored nowhere: the incident record can carry only a `postmortemId`, and nothing reaches the method that sets one — so the four-eyes rule on review (`author ∉ reviewers`) is enforced against a value that is never stored.",
     note: "ADR-0296's reasoning for the revision guard here was that `a postmortem is edited by humans over days`, which is also the clearest statement of why this store is wanted rather than redundant.",
   },
   {
@@ -1767,10 +1791,10 @@ export const UNREACHABLE_STORES: readonly UnreachableDeclaration[] = Object.free
     symbol: "RegionRouter",
     reason: "prerequisite_of_unbuilt_surface",
     blockedBy:
-      "a routing decision on the request path. `operate-server`'s residency routes read and write a tenant's profile through `residency-runtime-pg`'s directory, and nothing consults `decideRegionRouting` before serving a request — so the router, which is the stateful half that caches a directory and answers per request, has no position in the pipeline to occupy. ADR-0077's Q6 gates multi-region on demand, which is why this is ordering rather than a defect: the surface is deliberately thin.",
+      "a residency decision keyed on the authenticated tenant. The request path already consults the pure `decideRegionRouting`: `OperateHttpServer.checkResidency` runs before dispatch whenever `--region` and a residency source are configured, answering 421 or 403 — but it reads the unverified `x-tenant-id` hint, never grants on it, and treats a tenant with no profile as unconstrained. This class resolves by the tenant id and **denies** a tenant with no profile, so its place is after authentication, where nothing consults residency today; wiring it is also a choice between those two answers to an unprofiled tenant. ADR-0077's Q6 gates multi-region on demand.",
     tables: [],
     consequence:
-      "A residency profile is stored and never enforced: a tenant whose profile forbids a serving region is served from it anyway, because nothing asks the router before dispatch.",
+      "Residency is enforced only on the pre-authentication hint: a request whose tenant comes from its credential and that carries no `x-tenant-id` hint is not residency-checked at all, and a tenant with no profile is served where this class would deny.",
     note: "`decideRegionRouting` (the pure half, in the same module) *is* reachable; the class is constructed only by `router.test.ts`. CLAUDE.md calls this package `small: a tenant→region directory interface, decideRegionRouting and serving-region affinity selection`, which is accurate about what exists and silent about what runs.",
   },
 

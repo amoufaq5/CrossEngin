@@ -80,7 +80,7 @@ export const TENANT_SCOPE_COLUMN = "tenant_id";
  * The line that defines this set: an auditor or a regulator reads these *after* the tenant is gone,
  * and a deletion must not be able to destroy them. They are not the tenant's data and not an Article
  * 17 subject at all, which is what lets them sit outside the erasure without the attestation
- * claiming a retention. That is why `tenant_data_exports` — a copy of the subject's own data behind
+ * claiming a retention. That is why `tenant_data_exports` — a copy of the tenant's whole data behind
  * a TTL'd link — is erased while `audit_log` is not.
  *
  * It is deliberately **not** the place for a lawful retention of the tenant's own records. ADR-0329

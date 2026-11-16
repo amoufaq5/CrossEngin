@@ -472,7 +472,7 @@ export const STORELESS_TABLES: readonly StorelessDeclaration[] = Object.freeze([
     owner: "rate-limiting",
     consequence:
       "A policy's governance lifecycle — the five states, the four-eyes activation, supersedence — cannot be exercised: a limit can be declared and applied but not authored, reviewed or retired through the platform. What a decision row records is the identifier the deployment declared on argv, not a row here.",
-    note: "Deliberate. meta.rate_limit_decisions.policy_id is TEXT carrying the rlp_ id --rate-limit-policy declares, matching meta.gateway_routes.rate_limit_policy_id, so there is no longer a RESTRICT reference into this table to satisfy. A store becomes wanted when meta.rate_limit_exceptions is built, whose policy_id is NOT NULL — and when meta.users has a writer, since created_by is NOT NULL into it.",
+    note: "Deliberate. meta.rate_limit_decisions.policy_id is TEXT carrying the rlp_ id --rate-limit-policy declares, matching meta.gateway_routes.rate_limit_policy_id, so there is no longer a RESTRICT reference into this table to satisfy. A store becomes wanted when meta.rate_limit_exceptions is built, whose policy_id is NOT NULL. Its created_by is NOT NULL into meta.users, which has had a writer since ADR-0335, so that reference no longer blocks one.",
   },
   {
     table: "meta.quota_definitions",
@@ -542,8 +542,8 @@ export const STORELESS_TABLES: readonly StorelessDeclaration[] = Object.freeze([
     reason: "unwritten_table",
     owner: "tenant-lifecycle",
     consequence:
-      "A TTL-bounded data export cannot be issued, so Article 15 portability has no implementation and the erasure's reasoning about erasing exports covers nothing.",
-    note: "Named in shared-table-erasure.ts as erased rather than retained, which is the right decision about a table with no rows.",
+      "A TTL-bounded tenant data export cannot be issued, and the erasure's reasoning about erasing exports covers nothing. It is not the missing GDPR Article 15 (access) or Article 20 (portability) answer either: the table has no subject column and no legal basis — its triggers are customer_request, pre_deletion_archive, scheduled_backup_certified, regulatory_subpoena and tenant_migration — so it exports a whole tenant and cannot hold a one-subject bundle without a schema change. Its `format` (tenant-lifecycle's EXPORT_FORMATS: json, ndjson, csv, parquet, sql_dump) and meta.subject_access_requests.requested_format (data-lineage's DELIVERY_FORMATS: json, ndjson, csv, pdf_report, machine_readable_archive) share three members and each holds two the other lacks.",
+    note: "Named in shared-table-erasure.ts as erased rather than retained, which is the right decision about a table with no rows. Owned by tenant-lifecycle, not data-lineage, so it is a second model beside meta.subject_access_requests rather than part of that subsystem.",
   },
   {
     table: "meta.tenant_credits",
@@ -623,7 +623,7 @@ export const STORELESS_TABLES: readonly StorelessDeclaration[] = Object.freeze([
     reason: "unbuilt_subsystem",
     owner: "sso",
     consequence:
-      "Federated login does not exist: no SAML or OIDC provider can be configured, which is why meta.users has no writer either. Four catalogued tables carry a RESTRICT foreign key into this one.",
+      "Federated login does not exist: no SAML or OIDC provider can be configured, so meta.users is populated only by --platform-user-routes' operator provisioning (PostgresUserStore, ADR-0335) and never by a federated or just-in-time login. Four catalogued tables carry a RESTRICT foreign key into this one.",
     note: "`sso` is contracts-only — there is no sso-runtime and no sso-pg.",
   },
   {
@@ -637,7 +637,8 @@ export const STORELESS_TABLES: readonly StorelessDeclaration[] = Object.freeze([
     table: "meta.sso_sessions",
     reason: "unbuilt_subsystem",
     owner: "sso",
-    consequence: "Session lifecycle is modelled and not stored, so nothing can be revoked centrally.",
+    consequence:
+      "Federated session lifecycle is modelled and not stored, so a federated session has no row to revoke centrally. The credential login's sessions are a different mechanism that does not use this table — a signed token whose membership is re-checked through the attribute directory (ADR-0381).",
     note: "Contracts-only package.",
   },
   {
@@ -645,7 +646,7 @@ export const STORELESS_TABLES: readonly StorelessDeclaration[] = Object.freeze([
     reason: "unbuilt_subsystem",
     owner: "sso",
     consequence:
-      "SCIM 2.0 provisioning has no client registry, so the JIT user policy and claim transforms have no caller — this is the mechanism that would populate meta.users.",
+      "SCIM 2.0 provisioning has no client registry, so the JIT user policy and claim transforms have no caller — this is the automated mechanism that would populate meta.users, which today only an operator populates by hand.",
     note: "Contracts-only package.",
   },
   {
@@ -742,7 +743,7 @@ export const STORELESS_TABLES: readonly StorelessDeclaration[] = Object.freeze([
     reason: "unbuilt_subsystem",
     owner: "data-lineage",
     consequence:
-      "An Article 15 request has no handle, in contrast to the Article 17 request, which got one in ADR-0321.",
+      "An Article 15 request has no handle, in contrast to the Article 17 request, which got one in ADR-0321. Five facts a first store would meet: (1) the contract cannot represent an Article 12(3) extension — SubjectAccessRequestSchema refuses a deadlineAt past submittedAt + SUBJECT_DEADLINE_DAYS[legalBasis] (30 days for gdpr_article_15) and the table has no extension columns; (2) Article15EvidencePackSchema and RetentionPolicySchema have no catalogued table, so a pack sealed over nodeIds/edgeIds/provenanceRecordIds could be neither persisted nor re-verified from these rows, which carry only the bundle's sha256, storage URI and key fingerprint; (3) the table carries no table-level constraint while the contract's superRefine has five cross-field clauses (the deadline cap, rejected → rejectedAt + rejectedReason, deferred → deferredUntil + deferralReason, complete → completedAt + the bundle trio, downloadCount <= maxDownloads); (4) it is in neither retention set and has one ALL-scope isolation policy and no DELETE fence, so the first store written for it would produce answered-access records a tenant can delete and a tenant erasure destroys — unlike meta.gdpr_deletion_requests, which is retained and fenced; (5) its deadline_at is read by nothing, so the access clock is swept by no equivalent of ADR-0387's deletion-deadline sweep.",
     note: "Contracts-only package.",
   },
   {
@@ -808,8 +809,8 @@ export const STORELESS_TABLES: readonly StorelessDeclaration[] = Object.freeze([
     reason: "unbuilt_subsystem",
     owner: "migration",
     consequence:
-      "Data onboarding is contract-only: none of the twelve source kinds can be registered, so the inferred schema and its field mappings are never stored and a migration cannot be resumed.",
-    note: "`migration` is contracts-only.",
+      "Data onboarding is contract-only: none of the twelve source kinds can be registered. The inferred schema and the field mappings have no storage anywhere, independently of this table having no writer: it has no column for either, and three of the package's seven record shapes — InferredSchema, EntityMapping and PreviewRun — have no catalogued table. So meta.backfill_jobs.mapping_id is unreferenced TEXT naming a record nothing can hold, and a store over the four catalogued tables could not resume a migration.",
+    note: "`migration` is contracts-only. The seven record shapes are ImportSourceSpec, InferredSchema, EntityMapping, PreviewRun, BackfillJob, BackfillLedgerEntry and OnboardingRun, against four tables.",
   },
   {
     table: "meta.backfill_jobs",
@@ -838,7 +839,7 @@ export const STORELESS_TABLES: readonly StorelessDeclaration[] = Object.freeze([
     reason: "unbuilt_subsystem",
     owner: "reporting",
     consequence:
-      "The seven report kinds are rendered on request and never recorded, so `report_runs` as a quota target counts nothing.",
+      "None of reporting's seven REPORT_KINDS is rendered by anything — no pack declares a report and nothing executes a ReportDeclaration — so there is no run to record, and `report_runs` as a quota target counts nothing. The three reports a deployment does serve (AR/AP aging, WHT reconciliation, period close) are hand-built handlers and pages, not report kinds.",
     note: "`reporting` is contracts-only; operate-web's reports are computed by operate-runtime on the fly.",
   },
   {
@@ -862,15 +863,15 @@ export const STORELESS_TABLES: readonly StorelessDeclaration[] = Object.freeze([
     reason: "unbuilt_subsystem",
     owner: "sdk",
     consequence:
-      "Outbound webhooks cannot be subscribed: the HMAC-SHA256 delivery signing and the event catalog have no endpoint to deliver to. The *inbound* direction is live (workflow-signal-bridge, the bounce webhook).",
-    note: "`sdk` is contracts-only.",
+      "Outbound webhooks cannot be subscribed: the HMAC-SHA256 delivery signing has no endpoint to deliver to, and 0 of the 18 declared WEBHOOK_EVENTS has a producer anywhere in the workspace. Outbound delivery is modelled three times — this sdk model (`whk_` endpoints, the 18-event enum), the manifest's `outbound.webhook` integration in @crossengin/integrations (free-string events, a vault-referenced secret nothing resolves) and the notification stack's `webhook` channel (`webhook_http`, for which resolveUserAddress answers null) — so which model is real is a decision before it is a store.",
+    note: "`sdk` is contracts-only. Inbound, the bounce and Stripe webhooks are wired behind flags no shipped compose passes; @crossengin/workflow-signal-bridge has zero importers (pg-unreachable-stores.ts declares it).",
   },
   {
     table: "meta.webhook_deliveries",
     reason: "unbuilt_subsystem",
     owner: "sdk",
     consequence:
-      "And so no delivery attempt is recorded, which makes `webhook_deliveries` a quota target over nothing.",
+      "And so no delivery attempt is recorded, which makes `webhook_deliveries` a quota target over nothing. A delivery row stores only the payload's SHA-256 and the endpoint row only the secret's, so a retry cannot be resumed from the rows after a restart; an in-process retry needs no new column, and the secret can be derived per endpoint rather than stored.",
     note: "Contracts-only package.",
   },
   {
