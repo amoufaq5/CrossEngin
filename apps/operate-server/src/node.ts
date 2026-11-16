@@ -405,6 +405,12 @@ import {
 } from "./read-state-routes.js";
 import { PostgresFaxObservationStore } from "./fax-observation-store.js";
 import { appendIncidentNote } from "./incident-note.js";
+import {
+  formatIncidentLifecycle,
+  surveyIncidentLifecycle,
+  type DeletionEscalationWiring,
+  type IntegrityProofWiring,
+} from "./incident-lifecycle-survey.js";
 import { PostgresReadStateStore } from "./read-state-store.js";
 import { buildWorkflowCancellationRoutes } from "./workflow-cancellation-routes.js";
 import {
@@ -2389,10 +2395,13 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // `auditCompleted` already declared; one no request names keys on `tombstone:<id>`, namespaced so
   // it cannot collide with a request id. `findOpen` is what enforces it.
   let deletionEscalator: DeletionEvidenceEscalator | null = null;
+  // What the `[incident]` boot line reads: the built escalator, its declarer and its parsed config.
+  let deletionEscalation: DeletionEscalationWiring | null = null;
   if (options.deletionEscalationConfig !== null && conn !== undefined) {
     const parsed = DeletionEscalationConfigSchema.parse(
       JSON.parse(await readFile(options.deletionEscalationConfig, "utf8")) as unknown,
     );
+    const deletionDeclarer = new PostgresIncidentDeclarer({ conn });
     deletionEscalator = new DeletionEvidenceEscalator({
       config: parsed,
       // The escalation leaves its own anchored row, as the integrity escalator's does (ADR-0326):
@@ -2433,7 +2442,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       // (ADR-0304), this one is re-derived from the same two rows on the next pass, so a failed
       // declaration is retried rather than lost and an in-process id cannot collide with a stored
       // one for no gain (ADR-0293's reasoning for the SLO loop).
-      declarer: new PostgresIncidentDeclarer({ conn }),
+      declarer: deletionDeclarer,
       page: async (page, incident): Promise<void> => {
         // Delivered, or loudly undelivered. The incident is already durable by here, so a failed
         // page is reported rather than thrown (ADR-0325). The incident is also where the tenant
@@ -2450,6 +2459,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       onError: (err, subjectId) =>
         console.error(`[deletion-evidence] escalation error for ${subjectId}`, err),
     });
+    deletionEscalation = { escalator: deletionEscalator, declarer: deletionDeclarer, config: parsed };
   }
   // The handle (ADR-0321). ADR-0320 left the deletion synchronous and named the cost: a large
   // tenant's deletion can outlast a proxy timeout, after which the client never learns the receipt it
@@ -3822,6 +3832,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // against the chain entry that commits to it, and the chain's own links + signatures — and append the
   // verdict to the chain. A check nobody performs proves nothing; this is the thing that performs it.
   let integrityProof: IntegrityProofLifecycle | null = null;
+  let integrityWiring: IntegrityProofWiring | null = null;
   if (options.integrityProofConfig !== null || options.integrityProof) {
     // The checkpoint block's reason, one flag over.
     const proofFlag =
@@ -3867,13 +3878,16 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       // incident declarer persists the `IncidentRecord` so its lifecycle outlives this process
       // and its id is allocated from the rows that exist rather than a restarting counter
       // (ADR-0289).
+      const escalationConfig = proofConfig.escalation;
+      const integrityDeclarer =
+        escalationConfig === undefined ? null : new PostgresIncidentDeclarer({ conn });
       const escalator =
-        proofConfig.escalation === undefined
+        escalationConfig === undefined || integrityDeclarer === null
           ? null
           : new IntegrityEscalator({
-              config: proofConfig.escalation,
+              config: escalationConfig,
               ...(auditEmitter !== null ? { audit: auditEmitter } : {}),
-              declarer: new PostgresIncidentDeclarer({ conn }),
+              declarer: integrityDeclarer,
               page: async (page, incident): Promise<void> => {
                 // `affectedTenantIds` is empty for the platform chain, which is the genuinely
                 // unrecordable case the integrity escalator already documents.
@@ -3892,6 +3906,14 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
               },
               onError: (err) => console.error("[integrity-proof] escalation error", err),
             });
+      integrityWiring = {
+        flag: proofFlag,
+        proof: proofConfig,
+        escalation:
+          escalator === null || integrityDeclarer === null || escalationConfig === undefined
+            ? null
+            : { escalator, declarer: integrityDeclarer, config: escalationConfig },
+      };
       integrityProof = buildIntegrityProofLifecycle(conn, proofConfig, {
         signer: ed25519ChainSigner(auditConfig),
         registry: new PostgresKeyRegistry(conn),
@@ -5505,6 +5527,18 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // Placed here rather than beside the gateway because the mounted set is only complete once every
   // interceptor above has recorded itself, which is the same ordering `openApiCoverage`'s thunk
   // exists for.
+  // What becomes of an incident this deployment declares, read off the escalators it built and the
+  // live registry — said either way, including when nothing declares one (P1.7).
+  console.info(
+    formatIncidentLifecycle(
+      surveyIncidentLifecycle({
+        slo: sloEnforcement,
+        integrity: integrityWiring,
+        deletion: deletionEscalation,
+        routes: gateway.routes.list(),
+      }),
+    ),
+  );
   {
     const surface = servedSurface({
       registered: gateway.routes.list(),

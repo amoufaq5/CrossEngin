@@ -91,6 +91,7 @@ export * from "./gateway-execution-capture.js";
 export * from "./replay.js";
 export * from "./fax-observation-store.js";
 export * from "./incident-note.js";
+export * from "./incident-lifecycle-survey.js";
 export * from "./workflow-workers.js";
 export * from "./cli.js";
 export * from "./node.js";
