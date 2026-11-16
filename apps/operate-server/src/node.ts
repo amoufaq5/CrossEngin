@@ -217,6 +217,11 @@ import { DeliveryScheduler } from "./delivery-scheduler.js";
 import { PostgresDeliveryStore } from "./delivery-store.js";
 import { PostgresRecipientResolver } from "./recipient-resolver.js";
 import { buildSenderRegistryFromEnv } from "./delivery-senders-env.js";
+import {
+  formatNotificationChannelSurvey,
+  surveyNotificationChannels,
+  type DispatchProducer,
+} from "./notification-channel-survey.js";
 import { buildBounceSecretResolverFromEnv } from "./bounce-webhook-env.js";
 import {
   BOUNCE_WEBHOOK_PATH_PREFIX,
@@ -3419,12 +3424,30 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       ? { region: options.region as Region, directory: residencyDirectory }
       : undefined;
   // Channel senders come from the environment, not from flags: all but the sender identity are
-  // credentials and a process's argv is readable by anyone who can run `ps`. `in_app` is always
-  // registered, so a delivery for an unconfigured channel is refused as `no_sender_configured`,
-  // which the drain treats as retryable — configure the channel and re-drain and it goes out
-  // (ADR-0274).
+  // credentials and a process's argv is readable by anyone who can run `ps`. A registered sender is
+  // only the last hop, so the boot line is a survey of whether each channel can deliver at all:
+  // something must write a dispatch on it, there must be a store to write it into and a drain to
+  // hand it on. An unrouted delivery is retried on the drain's ladder and then recorded `dropped`,
+  // so a sender configured later does not deliver the backlog (ADR-0274's retryability, bounded).
   const senderWiring = buildSenderRegistryFromEnv();
-  console.info(`[notify] channels: ${senderWiring.report.channels.join(", ")}`);
+  for (const { level, line } of formatNotificationChannelSurvey(
+    surveyNotificationChannels({
+      registeredChannels: senderWiring.registry.channels(),
+      // The one producer that originates a dispatch is the design-review notifier, wired inside
+      // `options.designReview && conn !== undefined` and only when the notification store exists.
+      // The digest summary re-emits a pooled dispatch's channel and so originates none.
+      mountedProducers: new Set<DispatchProducer>(
+        options.designReview && conn !== undefined && notificationStore !== null
+          ? ["design_review_decision"]
+          : [],
+      ),
+      drainMounted: options.notificationDrainMs !== null && conn !== undefined,
+      storeKind: options.store,
+    }),
+  )) {
+    if (level === "warn") console.warn(line);
+    else console.info(line);
+  }
   for (const skipped of senderWiring.report.skipped) {
     console.warn(`[notify] ${skipped}`);
   }
@@ -3436,7 +3459,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     // The gate used to be `channels.length > 1`, which made this warning **unreachable on every
     // deployment that ships**: `in_app` is registered unconditionally and the compose sets no SES or
     // Twilio variable, so `channels` is exactly `["in_app"]` — length 1 — and boot printed
-    // `[notify] channels: in_app` and nothing else. That line reads as "in-app notices work" and
+    // `[notify] channels: in_app` and nothing else. That line read as "in-app notices work" and
     // they do not: `DeliveryScheduler` is the *only* delivery path in this binary, so with no drain
     // nothing is delivered on any channel, `in_app` included. So `in_app` is not an exception to the
     // rule this warning states, it is the shipped instance of it — which is precisely the

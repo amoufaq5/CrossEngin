@@ -53,6 +53,7 @@ export * from "./audit-log-store.js";
 export * from "./notification-routes.js";
 export * from "./delivery-plan.js";
 export * from "./delivery-senders.js";
+export * from "./notification-channel-survey.js";
 export * from "./delivery-store.js";
 export * from "./recipient-resolver.js";
 export * from "./delivery-throttle.js";

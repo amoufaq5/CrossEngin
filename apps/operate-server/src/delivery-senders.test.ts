@@ -213,7 +213,9 @@ describe("unroutedResult", () => {
     expect(unroutedResult("push_mobile").errorMessage).toContain("push_mobile");
   });
 
-  it("is retryable — configuring the sender and re-draining should deliver", () => {
+  // Retryable buys the drain's backoff ladder and no more: the delivery is recorded `dropped` once it
+  // is spent (delivery-drain.test.ts walks it), so a sender configured after that delivers nothing.
+  it("is a retryable outcome", () => {
     expect(RETRYABLE_DELIVERY_OUTCOMES.has(unroutedResult("sms").outcome)).toBe(
       true,
     );

@@ -175,7 +175,10 @@ describe("delivery-drain — addressFor", () => {
     expect(addressFor("email", recipient(USER_A, "a@x.test"))).toBe("a@x.test");
   });
 
-  it("uses the email for sms and webhook (no other address exists)", () => {
+  // `meta.users.phone_e164` exists and has a writer (platform-users.ts); the resolver does not
+  // select it, so an sms is handed the recipient's email. Pinned as the current behaviour, not as
+  // a specification.
+  it("uses the email for sms and webhook, because the resolver reads no phone column", () => {
     expect(addressFor("sms", recipient(USER_A, "a@x.test"))).toBe("a@x.test");
     expect(addressFor("webhook", recipient(USER_A, "a@x.test"))).toBe("a@x.test");
   });
@@ -437,6 +440,40 @@ describe("delivery-drain — drainTenant", () => {
     expect(store.attempts[0]?.errorCode).toBe("no_sender_configured");
     expect(store.attempts[0]?.nextRetryAt).not.toBeNull();
     expect(() => DeliveryAttemptSchema.parse(store.attempts[0])).not.toThrow();
+  });
+
+  it("drops an unrouted delivery once the default ladder is spent, so a sender configured later delivers none of it", async () => {
+    const d = dispatch({ channel: "email" });
+    const resolver = new FakeResolver([recipient(USER_A, "a@x.test")]);
+    const first = new FakeStore();
+    first.claims = [{ rowId: "row-1", dispatch: d }];
+    await drainTenant(opts(first, resolver, new SenderRegistry()), TENANT);
+    const attempts: DeliveryAttempt[] = [...first.attempts];
+    // Each pass is a due retry of the previous attempt, at the drain's defaults (no `maxAttempts`,
+    // which is how node.ts builds it). Bounded so a ladder that stopped ending fails rather than hangs.
+    for (let pass = 0; pass < 10; pass += 1) {
+      const previous = attempts[attempts.length - 1];
+      if (previous === undefined || previous.nextRetryAt === null) break;
+      const store = new FakeStore();
+      store.retries = [
+        {
+          rowId: "row-1",
+          dispatch: { ...d, status: "sending" },
+          recipientAddressSha256: previous.recipientAddressSha256,
+          attemptNumber: previous.attemptNumber,
+        },
+      ];
+      await drainTenant(opts(store, resolver, new SenderRegistry()), TENANT);
+      attempts.push(...store.attempts);
+    }
+
+    expect(attempts.map((a) => a.outcome)).toEqual(["failed", "failed", "failed", "failed", "dropped"]);
+    expect(new Set(attempts.map((a) => a.errorCode))).toEqual(new Set(["no_sender_configured"]));
+    const backoffSeconds = attempts
+      .slice(0, 4)
+      .map((a) => (Date.parse(a.nextRetryAt ?? "") - NOW.getTime()) / 1000);
+    expect(backoffSeconds).toEqual([30, 60, 120, 240]);
+    expect(attempts[4]?.nextRetryAt).toBeNull();
   });
 
   it("addresses an email dispatch by email, not user id", async () => {

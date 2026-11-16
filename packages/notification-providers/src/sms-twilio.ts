@@ -83,7 +83,9 @@ export const TWILIO_PERMANENT_RECIPIENT_CODES: readonly number[] = [
 /**
  * Twilio error codes that mean our own configuration is wrong — bad credentials, a `From` we do
  * not own, a region we have not enabled. Retryable `failed`, following ADR-0274's rule for
- * `no_sender_configured`: the dispatch must survive so that fixing the configuration delivers it.
+ * `no_sender_configured`: the dispatch survives the drain's retry ladder, so a configuration fixed
+ * within it delivers — and only within it, since the drain records the last attempt `dropped`
+ * (about 450s of backoff at operate-server's defaults).
  */
 export const TWILIO_CONFIGURATION_CODES: readonly number[] = [
   20003, 20404, 21219, 21408, 21606, 21611, 21659, 30002,

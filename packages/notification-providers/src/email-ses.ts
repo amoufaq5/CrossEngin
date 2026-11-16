@@ -280,8 +280,9 @@ export const SES_PERMANENT_RECIPIENT_TYPES: readonly string[] = [
 
 /**
  * SES exception names that mean *our* configuration is wrong, not the recipient's address. These
- * become retryable `failed`, following ADR-0274's rule for `no_sender_configured`: fixing the
- * configuration and re-draining should deliver, so the dispatch must still be alive to deliver.
+ * become retryable `failed`, following ADR-0274's rule for `no_sender_configured`: the dispatch stays
+ * alive for the drain's retry ladder, so a configuration fixed within it delivers. Only within it —
+ * the drain records the last attempt `dropped` (about 450s of backoff at operate-server's defaults).
  */
 export const SES_CONFIGURATION_TYPES: readonly string[] = [
   "AccountSuspendedException",

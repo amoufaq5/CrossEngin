@@ -24,8 +24,11 @@ import { InAppSender, SenderRegistry, type ChannelSender } from "./delivery-send
  *
  * Absent configuration is not an error. A deployment that wants only in-app notices is the default,
  * and `in_app` is always registered — so the registry never comes back empty and a delivery for an
- * unconfigured channel is refused by `unroutedResult` with `no_sender_configured`, which
- * the drain already treats as retryable so that configuring the channel and re-draining delivers.
+ * unconfigured channel is refused by `unroutedResult` with `no_sender_configured`. That outcome is
+ * retryable, which buys the drain's backoff ladder and nothing more: the fifth attempt is recorded
+ * `dropped` (about 450s of backoff at the drain's defaults), so a sender configured after that
+ * delivers none of the backlog. And a registered sender is not a working channel: whether anything
+ * produces a dispatch on it is `notification-channel-survey.ts`' question, not this module's.
  */
 export interface SenderWiringReport {
   readonly channels: readonly string[];

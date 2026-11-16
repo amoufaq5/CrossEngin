@@ -271,8 +271,9 @@ export const FCM_PERMANENT_RECIPIENT_CODES: readonly string[] = [
 
 /**
  * FCM error codes meaning *our* credentials or project are wrong rather than the token. Retryable
- * `failed`, per ADR-0274's `no_sender_configured` rule: fixing the configuration and re-draining
- * must still deliver, so the dispatch has to survive.
+ * `failed`, per ADR-0274's `no_sender_configured` rule: the dispatch survives the drain's retry
+ * ladder, so a configuration fixed within it delivers — and only within it, since the drain records
+ * the last attempt `dropped` (about 450s of backoff at operate-server's defaults).
  *
  * `SENDER_ID_MISMATCH` sits here rather than with the permanent codes, where its literal meaning
  * ("this token was minted for a different Firebase project") would put it. If the project id is
