@@ -23,17 +23,19 @@ import {
   type LatencyVerdict,
 } from "./latency.js";
 import {
+  activateKillSwitch,
   closeOutEnforcementIncident,
   declareEnforcementIncident,
   findAdoptedKillSwitch,
   findOpenEnforcementIncident,
   killSwitchIdForIncident,
-  planKillSwitchActivation,
   planPageDirective,
   type DeclarationErrorSink,
   type EnforcementPlan,
+  type KillSwitchActivation,
   type FlagRollback,
   type KillSwitchLookup,
+  type KillSwitchRecorder,
 } from "./enforcement.js";
 
 export interface LatencyRegistration {
@@ -58,8 +60,10 @@ export interface LatencySloEngineOptions {
    * `CountingIncidentDeclarer`.
    */
   readonly declarer?: IncidentDeclarer;
-  /** Recovers which flag an adopted incident rolled back — see the availability engine's option. */
+  /** Recovers which kill switch an adopted incident recorded — see the availability engine's. */
   readonly killSwitches?: KillSwitchLookup;
+  /** Stores the kill switch a declared rollback plans — see the availability engine's option. */
+  readonly killSwitchRecorder?: KillSwitchRecorder;
   readonly onDeclarationError?: DeclarationErrorSink;
 }
 
@@ -111,6 +115,7 @@ export class LatencySloEngine {
   private readonly latencyWindowMs: number;
   private readonly declarer: IncidentDeclarer;
   private readonly killSwitches: KillSwitchLookup | undefined;
+  private readonly killSwitchRecorder: KillSwitchRecorder | undefined;
   private readonly onDeclarationError: DeclarationErrorSink | undefined;
   private readonly active: Map<string, ActiveBreach> = new Map();
   /**
@@ -130,6 +135,7 @@ export class LatencySloEngine {
     this.latencyWindowMs = parseDurationMs(options.latencyWindow ?? "5m");
     this.declarer = options.declarer ?? new CountingIncidentDeclarer({ clock: this.clock });
     this.killSwitches = options.killSwitches;
+    this.killSwitchRecorder = options.killSwitchRecorder;
     this.onDeclarationError = options.onDeclarationError;
   }
 
@@ -282,21 +288,27 @@ export class LatencySloEngine {
     const page = planPageDirective(this.alertPolicy, severity, incidentId);
     const pages = page === null ? [] : [page];
 
-    let killSwitch: EnforcementPlan["killSwitch"] = null;
-    let killSwitchId: string | null = null;
-    if (reg.rollback !== undefined) {
-      killSwitchId = killSwitchIdForIncident(incidentId);
-      killSwitch = planKillSwitchActivation({
-        killSwitchId,
-        flagId: reg.rollback.flagId,
-        safeValueJson: reg.rollback.safeValueJson,
-        tenantId: reg.tenantId ?? null,
-        systemActorUserId: this.systemActorUserId,
-        incidentId,
-        nowIso,
-        justification: `Latency enforcement rolled ${reg.rollback.flagId} back to its safe value after a ${verdict.worstThresholdId} breach on ${surface}.`,
-      });
-    }
+    // After the declaration, so nothing here may throw: a refused plan or a failed write is
+    // reported and carried on the plan, and the incident keeps its page.
+    const activation: KillSwitchActivation =
+      reg.rollback === undefined
+        ? { killSwitch: null, unrecorded: null }
+        : await activateKillSwitch(
+            {
+              killSwitchId: killSwitchIdForIncident(incidentId),
+              flagId: reg.rollback.flagId,
+              safeValueJson: reg.rollback.safeValueJson,
+              tenantId: reg.tenantId ?? null,
+              systemActorUserId: this.systemActorUserId,
+              incidentId,
+              nowIso,
+              justification: `Latency enforcement recorded a kill switch for ${reg.rollback.flagId} after a ${verdict.worstThresholdId} breach on ${surface}.`,
+            },
+            this.killSwitchRecorder,
+            { surface, sloId: reg.slo.id },
+            this.onDeclarationError,
+          );
+    const killSwitchId = activation.killSwitch?.id ?? null;
 
     this.active.set(surface, { incidentId, killSwitchId, severity });
 
@@ -306,7 +318,12 @@ export class LatencySloEngine {
       sloId: reg.slo.id,
       severity,
       verdict,
-      plan: { incident, pages, killSwitch },
+      plan: {
+        incident,
+        pages,
+        killSwitch: activation.killSwitch,
+        killSwitchUnrecorded: activation.unrecorded,
+      },
     };
   }
 }

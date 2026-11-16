@@ -367,3 +367,115 @@ describe("buildPersistentSloEnforcementEngine", () => {
     expect(capture.filter((c) => c.sql.includes("INSERT INTO"))).toHaveLength(0);
   });
 });
+
+describe("buildPersistentSloEnforcementEngine — a write that fails never costs the page", () => {
+  /** `mockConnection`, except that any statement naming `refused` throws. */
+  function refusingConnection(
+    capture: Array<{ sql: string; params: readonly unknown[] | undefined }>,
+    refused: string,
+  ): PgConnection {
+    const inner = mockConnection(capture);
+    const conn: PgConnection = {
+      ...inner,
+      query: (async (sql: string, params?: readonly unknown[]) => {
+        if (sql.includes(refused)) {
+          capture.push({ sql, params });
+          throw new Error(`refused: ${refused}`);
+        }
+        return inner.query(sql, params);
+      }) as PgConnection["query"],
+      transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) => fn(conn)) as
+        PgConnection["transaction"],
+    };
+    return conn;
+  }
+
+  function buildWith(
+    conn: PgConnection,
+    phases: string[],
+    tenantId: string = TENANT,
+  ): ReturnType<typeof buildPersistentSloEnforcementEngine> {
+    return buildPersistentSloEnforcementEngine(conn, {
+      alertPolicy: policy,
+      systemActorUserId: SYSTEM_ACTOR,
+      registrations: [
+        {
+          slo,
+          category: "availability",
+          tenantId,
+          rollback: { flagId: "ff_checkout01", safeValueJson: "false" },
+        },
+      ],
+      clock: new FixedClock(BASE),
+      onDeclarationError: (_err, failure) => phases.push(failure.phase),
+    });
+  }
+
+  it("keeps the page and writes an action naming the flag and no switch when the switch insert fails", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const phases: string[] = [];
+    const persistent = buildWith(
+      refusingConnection(capture, "feature_flag_kill_switches"),
+      phases,
+    );
+    burst(persistent, 25, BASE.getTime());
+    const decision = (await persistent.evaluate(BASE))[0];
+    if (decision?.kind !== "breach_opened") throw new Error("expected breach");
+    expect(decision.plan.pages).toHaveLength(1);
+    expect(decision.plan.killSwitch).toBeNull();
+    expect(phases).toEqual(["record_kill_switch"]);
+    const action = capture.find((c) => c.sql.includes("slo_enforcement_actions"));
+    expect(bound(action, "kill_switch_id")).toBeNull();
+    expect(bound(action, "flag_id")).toBe("ff_checkout01");
+  });
+
+  it("names no unstored switch on the recovery either", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const persistent = buildWith(
+      refusingConnection(capture, "feature_flag_kill_switches"),
+      [],
+    );
+    burst(persistent, 25, BASE.getTime());
+    await persistent.evaluate(BASE);
+    const recovered = (await persistent.evaluate(new Date(BASE.getTime() + 2 * 3_600_000)))[0];
+    expect(recovered?.kind === "recovered" && recovered.killSwitchId).toBeNull();
+  });
+
+  it("keeps the page when the action row cannot be written", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const phases: string[] = [];
+    const persistent = buildWith(refusingConnection(capture, "slo_enforcement_actions"), phases);
+    burst(persistent, 25, BASE.getTime());
+    const decision = (await persistent.evaluate(BASE))[0];
+    if (decision?.kind !== "breach_opened") throw new Error("expected breach");
+    expect(decision.plan.pages).toHaveLength(1);
+    expect(phases).toEqual(["record_enforcement_action"]);
+    // The evaluation snapshot is a separate write and is still attempted.
+    expect(capture.some((c) => c.sql.includes("INSERT INTO meta.slo_evaluations"))).toBe(true);
+  });
+
+  it("keeps the page when the evaluation snapshot cannot be written", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const phases: string[] = [];
+    const persistent = buildWith(refusingConnection(capture, "INSERT INTO meta.slo_evaluations"), phases);
+    burst(persistent, 25, BASE.getTime());
+    const decision = (await persistent.evaluate(BASE))[0];
+    if (decision?.kind !== "breach_opened") throw new Error("expected breach");
+    expect(decision.plan.pages).toHaveLength(1);
+    expect(phases).toEqual(["record_evaluation"]);
+  });
+
+  it("keeps the page for a registration whose tenant id is not a UUID, reporting both refusals", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const phases: string[] = [];
+    const persistent = buildWith(mockConnection(capture), phases, "acme");
+    burst(persistent, 25, BASE.getTime());
+    const decision = (await persistent.evaluate(BASE))[0];
+    if (decision?.kind !== "breach_opened") throw new Error("expected breach");
+    expect(decision.plan.pages).toHaveLength(1);
+    expect(decision.plan.killSwitchUnrecorded?.phase).toBe("plan_kill_switch");
+    // The switch's contract and the action row's both refuse "acme"; the evaluation row too.
+    expect(phases).toEqual(["plan_kill_switch", "record_enforcement_action", "record_evaluation"]);
+    expect(capture.some((c) => c.sql.includes("feature_flag_kill_switches"))).toBe(false);
+  });
+});

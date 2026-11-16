@@ -327,3 +327,64 @@ describe("buildPersistentLatencySloEngine", () => {
     expect(capture.filter((c) => c.sql.includes("INSERT INTO"))).toHaveLength(0);
   });
 });
+
+describe("buildPersistentLatencySloEngine — a write that fails never costs the page", () => {
+  it("keeps the page and writes an action naming the flag and no switch when the switch insert fails", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const inner = mockConnection(capture);
+    const conn: PgConnection = {
+      ...inner,
+      query: (async (sql: string, params?: readonly unknown[]) => {
+        if (sql.includes("feature_flag_kill_switches")) throw new Error("refused");
+        return inner.query(sql, params);
+      }) as PgConnection["query"],
+      transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) => fn(conn)) as
+        PgConnection["transaction"],
+    };
+    const phases: string[] = [];
+    const persistent = buildPersistentLatencySloEngine(conn, {
+      alertPolicy: policy,
+      systemActorUserId: SYSTEM_ACTOR,
+      registrations: [
+        { slo, tenantId: TENANT, rollback: { flagId: "ff_catalogv2", safeValueJson: "false" } },
+      ],
+      clock: new FixedClock(BASE),
+      onDeclarationError: (_err, failure) => phases.push(failure.phase),
+    });
+    recordLatencies(persistent, 900, 30, BASE.getTime());
+    const decision = (await persistent.evaluate(BASE))[0];
+    if (decision?.kind !== "breach_opened") throw new Error("expected breach");
+    expect(decision.plan.pages).toHaveLength(1);
+    expect(phases).toEqual(["record_kill_switch"]);
+    const action = capture.find((c) => c.sql.includes("slo_enforcement_actions"));
+    expect(bound(action, "kill_switch_id")).toBeNull();
+    expect(bound(action, "flag_id")).toBe("ff_catalogv2");
+  });
+
+  it("keeps the page when the action row cannot be written", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const inner = mockConnection(capture);
+    const conn: PgConnection = {
+      ...inner,
+      query: (async (sql: string, params?: readonly unknown[]) => {
+        if (sql.includes("slo_enforcement_actions")) throw new Error("refused");
+        return inner.query(sql, params);
+      }) as PgConnection["query"],
+      transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) => fn(conn)) as
+        PgConnection["transaction"],
+    };
+    const phases: string[] = [];
+    const persistent = buildPersistentLatencySloEngine(conn, {
+      alertPolicy: policy,
+      systemActorUserId: SYSTEM_ACTOR,
+      registrations: [{ slo, tenantId: TENANT }],
+      clock: new FixedClock(BASE),
+      onDeclarationError: (_err, failure) => phases.push(failure.phase),
+    });
+    recordLatencies(persistent, 900, 30, BASE.getTime());
+    const decision = (await persistent.evaluate(BASE))[0];
+    if (decision?.kind !== "breach_opened") throw new Error("expected breach");
+    expect(decision.plan.pages).toHaveLength(1);
+    expect(phases).toEqual(["record_enforcement_action"]);
+  });
+});

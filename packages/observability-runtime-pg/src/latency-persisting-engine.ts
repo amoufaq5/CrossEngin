@@ -6,7 +6,7 @@ import {
   type LatencyEnforcementDecision,
   type LatencySloEngineOptions,
 } from "@crossengin/observability-runtime";
-import { killSwitchLookup } from "./persisting-engine.js";
+import { killSwitchLookup, persistReported } from "./persisting-engine.js";
 import { PostgresSloEnforcementActionStore } from "./enforcement-action-store.js";
 import { PostgresSloLatencyEvaluationStore } from "./latency-evaluation-store.js";
 import {
@@ -48,11 +48,13 @@ export function buildPersistentLatencySloEngine(
     ...options,
     declarer: options.declarer ?? new PostgresIncidentDeclarer({ conn }),
     killSwitches: options.killSwitches ?? killSwitchLookup(killSwitchStore),
+    killSwitchRecorder: options.killSwitchRecorder ?? killSwitchStore,
   });
   const latencyEvaluationStore = new PostgresSloLatencyEvaluationStore(conn);
   const enforcementStore = new PostgresSloEnforcementActionStore(conn);
   const tenantBySurface = buildTenantMap(options);
   const clock = options.clock;
+  const onError = options.onDeclarationError;
 
   function tenantFor(surface: string, fallback: string | null): string | null {
     const fromReg = tenantBySurface.get(surface) ?? null;
@@ -73,29 +75,29 @@ export function buildPersistentLatencySloEngine(
           : null;
       const tenantId = tenantFor(decision.surface, killSwitchTenant);
 
-      if (decision.kind === "breach_opened" && decision.plan.killSwitch !== null) {
-        // Before the action row that names it — see the availability engine.
-        await killSwitchStore.record(decision.plan.killSwitch);
-      }
-
-      await enforcementStore.record(
-        enforcementActionFromDecision({
-          decision,
-          tenantId,
-          occurredAt,
-          signal: "latency",
-        }),
+      // The kill switch is stored by the engine, before the action row — see the availability engine.
+      await persistReported(decision, "record_enforcement_action", onError, () =>
+        enforcementStore.record(
+          enforcementActionFromDecision({
+            decision,
+            tenantId,
+            occurredAt,
+            signal: "latency",
+          }),
+        ),
       );
 
       if (decision.kind === "breach_opened") {
-        await latencyEvaluationStore.record(
-          latencyEvaluationRecordFromVerdict({
-            sloId: decision.sloId,
-            surface: decision.surface,
-            tenantId,
-            verdict: decision.verdict,
-            evaluatedAt: occurredAt,
-          }),
+        await persistReported(decision, "record_evaluation", onError, () =>
+          latencyEvaluationStore.record(
+            latencyEvaluationRecordFromVerdict({
+              sloId: decision.sloId,
+              surface: decision.surface,
+              tenantId,
+              verdict: decision.verdict,
+              evaluatedAt: occurredAt,
+            }),
+          ),
         );
       }
     }

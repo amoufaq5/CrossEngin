@@ -181,7 +181,10 @@ export function enforcementActionFromDecision(
       severity: decision.severity,
       incidentId: decision.plan.incident.id,
       killSwitchId: decision.plan.killSwitch?.id ?? null,
-      flagId: decision.plan.killSwitch?.flagId ?? null,
+      // A rollback that was declared and could not be recorded keeps its flag and names no switch:
+      // the row says which flag the registration wanted a kill switch for, and that none exists.
+      flagId:
+        decision.plan.killSwitch?.flagId ?? decision.plan.killSwitchUnrecorded?.flagId ?? null,
       paged: decision.plan.pages.length > 0,
       pageChannelCount: channelCount,
       thresholdId: input.thresholdId ?? decision.verdict.worstThresholdId,

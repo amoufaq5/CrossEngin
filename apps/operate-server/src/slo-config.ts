@@ -10,6 +10,7 @@ import {
   LatencySloEngine,
   SloEnforcementEngine,
   type Clock,
+  type DeclarationErrorSink,
   type EnforcementDecision,
   type LatencyEnforcementDecision,
   planPageDirective,
@@ -137,6 +138,12 @@ export interface BuildSloEnforcementOptions {
   ) => Promise<readonly PageDirective[]>;
   readonly onError?: (err: unknown) => void;
   /**
+   * Where an enforcement step that is reported rather than thrown goes: a failed lookup, declaration
+   * or close-out, a rollback whose kill switch could not be planned or stored, and a projection row
+   * that could not be written. Unwired, all of them are silent.
+   */
+  readonly onDeclarationError?: DeclarationErrorSink;
+  /**
    * With a connection the engines persist: each evaluation, each enforcement action, and the
    * declared `IncidentRecord` itself, whose id is allocated from the stored rows. Without one they
    * run in memory and mint ids from a per-process counter, which restarts at `INC-YYYY-0001`.
@@ -187,6 +194,8 @@ export function buildSloEnforcement(
     opts.declarer ??
     (opts.conn !== undefined ? new PostgresIncidentDeclarer({ conn: opts.conn }) : undefined);
   const declarerOpt = declarer !== undefined ? { declarer } : {};
+  const errorOpt =
+    opts.onDeclarationError !== undefined ? { onDeclarationError: opts.onDeclarationError } : {};
 
   const availabilityOptions = {
     alertPolicy: config.alertPolicy,
@@ -194,6 +203,7 @@ export function buildSloEnforcement(
     registrations: availabilityRegs,
     ...clockOpt,
     ...declarerOpt,
+    ...errorOpt,
   };
   const latencyOptions = {
     alertPolicy: config.alertPolicy,
@@ -201,6 +211,7 @@ export function buildSloEnforcement(
     registrations: latencyRegs,
     ...clockOpt,
     ...declarerOpt,
+    ...errorOpt,
   };
 
   let availability: SloEnforcementEngine | null = null;

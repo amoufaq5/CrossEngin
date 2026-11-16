@@ -54,7 +54,7 @@ export function formatKillSwitchId(seq: number): string {
  * re-inventing it. Measured: a counter here reissued `fks_auto00000001` from a second engine
  * instance, the insert was refused by `feature_flag_kill_switches_kill_switch_id_key`, and the
  * failure arrived *after* the incident had been declared — leaving a declared incident with no
- * enforcement action naming it. One episode rolls back one flag, so one id per incident is the right
+ * enforcement action naming it. One episode records one switch, so one id per incident is the right
  * granularity as well as the safe one.
  */
 export function killSwitchIdForIncident(incidentId: string): string {
@@ -118,27 +118,44 @@ export function planIncidentDeclaration(input: IncidentDeclarationInput): Incide
   });
 }
 
-/** Which surface's declaration failed, and at which end of the incident's life. */
+/**
+ * The steps of an enforcement pass a failure can be reported from, rather than thrown out of it.
+ *
+ * Every phase after `declare` happens to an incident that already exists, so a throw there would
+ * cost the page for a declared incident: the engine has already remembered the breach as active,
+ * and the next pass answers `breach_ongoing` with no pages. A rollback, its kill switch, and the
+ * persisted projections are all worth less than the page, so each is reported and given up.
+ */
+export type EnforcementFailurePhase =
+  | "find_open"
+  | "declare"
+  | "close_out"
+  | "find_kill_switch"
+  | "plan_kill_switch"
+  | "record_kill_switch"
+  | "record_enforcement_action"
+  | "record_evaluation";
+
+/** Which surface's enforcement step failed, and which step. */
 export interface DeclarationFailure {
   readonly surface: string;
   readonly sloId: string;
-  readonly phase: "find_open" | "declare" | "close_out" | "find_kill_switch";
+  readonly phase: EnforcementFailurePhase;
 }
 
 /**
  * Where an adopted breach's kill switch comes from.
  *
- * The engine activates a kill switch when it opens a breach, but it holds the id in memory, so a
- * restart that adopts the incident has no idea which flag was rolled back — and the operator is left
- * with a flag held at its safe value and nothing naming it. Structural on purpose: the Postgres
- * implementation lives beside the store, and the engine must not depend on it.
+ * The engine records a kill switch when it opens a breach, but it holds the id in memory, so a
+ * restart that adopts the incident has no idea which switch it recorded. Structural on purpose: the
+ * Postgres implementation lives beside the store, and the engine must not depend on it.
  */
 export interface KillSwitchLookup {
   findForIncident(incidentId: string): Promise<string | null>;
 }
 
 /**
- * The kill switch an adopted incident rolled a flag back with, or null.
+ * The kill switch recorded for an adopted incident, or null.
  *
  * A failed lookup is reported and read as "none recorded". The alternative — refusing to adopt
  * because the kill switch could not be read — would re-declare the incident over a detail that is
@@ -285,6 +302,13 @@ export interface KillSwitchActivationInput {
   readonly expiresAtIso?: string | null;
 }
 
+/**
+ * A kill switch built for a declared incident. `justification` and `impactScopeNotes` are written
+ * once and kept for as long as the row is, so they say only what happened when it was written:
+ * nothing in this workspace applies a kill switch to a flag (`KILL_SWITCH_ENFORCEMENT_GAP`), and a
+ * sentence claiming the flag was rolled back — or claiming that nothing applies the row — would be
+ * false on some day of that row's life.
+ */
 export function planKillSwitchActivation(input: KillSwitchActivationInput): KillSwitch {
   return KillSwitchSchema.parse({
     id: input.killSwitchId,
@@ -306,12 +330,74 @@ export function planKillSwitchActivation(input: KillSwitchActivationInput): Kill
     expiredAt: null,
     relatedIncidentId: input.incidentId,
     overriddenValueJson: input.safeValueJson,
-    impactScopeNotes: `Auto-rollback triggered by SLO enforcement for incident ${input.incidentId}.`,
+    impactScopeNotes: `Kill switch recorded by SLO enforcement for incident ${input.incidentId}.`,
   });
+}
+
+/**
+ * Where a planned kill switch is stored. Structural for `KillSwitchLookup`'s reason, and called by
+ * the engine itself rather than after it returns, so a switch that could not be stored is never
+ * remembered as the breach's switch — a later recovery would otherwise name an id with no row
+ * behind it.
+ */
+export interface KillSwitchRecorder {
+  record(killSwitch: KillSwitch): Promise<void>;
+}
+
+/** A rollback the registration declared and for which no kill switch was recorded. */
+export interface UnrecordedKillSwitch {
+  readonly flagId: string;
+  readonly phase: Extract<EnforcementFailurePhase, "plan_kill_switch" | "record_kill_switch">;
+}
+
+export interface KillSwitchActivation {
+  /** The switch, planned — and stored, when a recorder was given. Null when none was. */
+  readonly killSwitch: KillSwitch | null;
+  /** Non-null exactly when a rollback was declared and `killSwitch` is null. */
+  readonly unrecorded: UnrecordedKillSwitch | null;
+}
+
+/**
+ * Plans the declared rollback's kill switch and stores it, reporting either failure rather than
+ * throwing.
+ *
+ * Runs after the incident is declared, so a throw here would cost that incident its page: the
+ * plan's parse refuses, for one, a registration `tenantId` that is not a UUID, which a registration
+ * with no rollback is never asked to be. The failure is carried on the plan as `unrecorded` so the
+ * decision says a rollback was declared and nothing was recorded, which a null switch alone cannot
+ * tell apart from no rollback at all.
+ */
+export async function activateKillSwitch(
+  input: KillSwitchActivationInput,
+  recorder: KillSwitchRecorder | undefined,
+  failure: Omit<DeclarationFailure, "phase">,
+  onError?: DeclarationErrorSink,
+): Promise<KillSwitchActivation> {
+  let killSwitch: KillSwitch;
+  try {
+    killSwitch = planKillSwitchActivation(input);
+  } catch (err) {
+    onError?.(err, { ...failure, phase: "plan_kill_switch" });
+    return { killSwitch: null, unrecorded: { flagId: input.flagId, phase: "plan_kill_switch" } };
+  }
+  if (recorder !== undefined) {
+    try {
+      await recorder.record(killSwitch);
+    } catch (err) {
+      onError?.(err, { ...failure, phase: "record_kill_switch" });
+      return {
+        killSwitch: null,
+        unrecorded: { flagId: input.flagId, phase: "record_kill_switch" },
+      };
+    }
+  }
+  return { killSwitch, unrecorded: null };
 }
 
 export interface EnforcementPlan {
   readonly incident: IncidentRecord;
   readonly pages: readonly PageDirective[];
   readonly killSwitch: KillSwitch | null;
+  /** See `KillSwitchActivation.unrecorded`. Null when no rollback was declared or it was recorded. */
+  readonly killSwitchUnrecorded: UnrecordedKillSwitch | null;
 }

@@ -3,7 +3,9 @@ import { PostgresIncidentDeclarer } from "@crossengin/incident-response-runtime-
 import { PostgresKillSwitchStore } from "@crossengin/feature-flags-pg";
 import {
   SloEnforcementEngine,
+  type DeclarationErrorSink,
   type EnforcementDecision,
+  type EnforcementFailurePhase,
   type KillSwitchLookup,
   type SloEnforcementEngineOptions,
 } from "@crossengin/observability-runtime";
@@ -13,6 +15,11 @@ import {
   enforcementActionFromDecision,
   evaluationRecordFromVerdict,
 } from "./records.js";
+
+// Re-exported, not restated: whether anything applies the kill switches these engines write is
+// `feature-flags-pg`'s one fact, and the boot line that says so lives in operate-server, which
+// depends on this package and not on that one.
+export { KILL_SWITCH_ENFORCEMENT_GAP } from "@crossengin/feature-flags-pg";
 
 export interface PersistentSloEnforcementEngineOptions
   extends SloEnforcementEngineOptions {
@@ -55,18 +62,20 @@ export function buildPersistentSloEnforcementEngine(
   // The declarer defaults to the incident store on this connection: an engine whose evaluations and
   // actions are written must not name incidents that are not. A caller may pass its own to share one
   // store with the latency engine and anything else that declares.
-  // The kill switch is written when a breach opens and read back when a restart adopts it, so the
-  // flag an incident rolled back survives the process that rolled it back.
+  // The kill switch is written by the engine as the breach opens — so one it could not store is
+  // never remembered as the breach's — and read back when a restart adopts the incident.
   const killSwitchStore = new PostgresKillSwitchStore(conn);
   const engine = new SloEnforcementEngine({
     ...options,
     declarer: options.declarer ?? new PostgresIncidentDeclarer({ conn }),
     killSwitches: options.killSwitches ?? killSwitchLookup(killSwitchStore),
+    killSwitchRecorder: options.killSwitchRecorder ?? killSwitchStore,
   });
   const evaluationStore = new PostgresSloEvaluationStore(conn);
   const enforcementStore = new PostgresSloEnforcementActionStore(conn);
   const surfaceMeta = buildSurfaceMeta(options);
   const clock = options.clock;
+  const onError = options.onDeclarationError;
 
   function tenantFor(surface: string, fallback: string | null): string | null {
     const fromReg = surfaceMeta.get(surface)?.tenantId ?? null;
@@ -87,31 +96,33 @@ export function buildPersistentSloEnforcementEngine(
           : null;
       const tenantId = tenantFor(decision.surface, killSwitchTenant);
 
-      if (decision.kind === "breach_opened" && decision.plan.killSwitch !== null) {
-        // Before the action row that names it, so a reader never sees a `kill_switch_id` with no
-        // switch behind it.
-        await killSwitchStore.record(decision.plan.killSwitch);
-      }
-
-      const action = enforcementActionFromDecision({
-        decision,
-        tenantId,
-        occurredAt,
-      });
-      await enforcementStore.record(action);
+      // The engine stored any kill switch this decision names before returning it, so the action
+      // row never names a switch with no row behind it.
+      await persistReported(decision, "record_enforcement_action", onError, () =>
+        enforcementStore.record(
+          enforcementActionFromDecision({
+            decision,
+            tenantId,
+            occurredAt,
+          }),
+        ),
+      );
 
       if (decision.kind === "breach_opened") {
         const meta = surfaceMeta.get(decision.surface);
         if (meta !== undefined) {
-          const record = evaluationRecordFromVerdict({
-            sloId: decision.sloId,
-            surface: decision.surface,
-            tenantId,
-            target: meta.target,
-            verdict: decision.verdict,
-            evaluatedAt: occurredAt,
-          });
-          await evaluationStore.record(record);
+          await persistReported(decision, "record_evaluation", onError, () =>
+            evaluationStore.record(
+              evaluationRecordFromVerdict({
+                sloId: decision.sloId,
+                surface: decision.surface,
+                tenantId,
+                target: meta.target,
+                verdict: decision.verdict,
+                evaluatedAt: occurredAt,
+              }),
+            ),
+          );
         }
       }
     }
@@ -127,6 +138,27 @@ export function buildPersistentSloEnforcementEngine(
     recordOutcome: (outcome) => engine.recordOutcome(outcome),
     evaluate,
   };
+}
+
+/**
+ * Writes one projection of a decision, reporting a failure instead of throwing it.
+ *
+ * Every decision here is about an incident that is already declared, and the engine has already
+ * remembered its breach as active — so a throw would reject the pass the scheduler pages from, and
+ * the next pass answers `breach_ongoing` with nothing to page. The page is worth more than the row:
+ * the row is lost and reported, the page goes out.
+ */
+export async function persistReported(
+  decision: { readonly surface: string; readonly sloId: string },
+  phase: Extract<EnforcementFailurePhase, "record_enforcement_action" | "record_evaluation">,
+  onError: DeclarationErrorSink | undefined,
+  write: () => Promise<void>,
+): Promise<void> {
+  try {
+    await write();
+  } catch (err) {
+    onError?.(err, { surface: decision.surface, sloId: decision.sloId, phase });
+  }
 }
 
 /**

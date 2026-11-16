@@ -264,3 +264,63 @@ describe("LatencySloEngine — a restart adopts the incident it already opened",
     expect(declarer.declared).toHaveLength(1);
   });
 });
+
+describe("LatencySloEngine — a rollback that cannot be recorded never costs the page", () => {
+  it("pages and reports plan_kill_switch when the switch's tenant id is not a UUID", async () => {
+    const clock = new FixedClock(BASE);
+    const phases: string[] = [];
+    const engine = new LatencySloEngine({
+      alertPolicy: policy,
+      systemActorUserId: SYSTEM_ACTOR,
+      registrations: [{ ...registration, tenantId: "acme" }],
+      clock,
+      onDeclarationError: (_err, failure) => phases.push(failure.phase),
+    });
+    recordLatencies(engine, 700, 30, BASE.getTime());
+    const decision = (await engine.evaluate())[0];
+    if (decision?.kind !== "breach_opened") throw new Error("expected breach");
+    expect(decision.plan.pages).toHaveLength(1);
+    expect(decision.plan.killSwitch).toBeNull();
+    expect(decision.plan.killSwitchUnrecorded).toEqual({
+      flagId: "ff_catalogv2",
+      phase: "plan_kill_switch",
+    });
+    expect(phases).toEqual(["plan_kill_switch"]);
+  });
+
+  it("pages, reports record_kill_switch, and remembers no switch when the store refuses it", async () => {
+    const clock = new FixedClock(BASE);
+    const phases: string[] = [];
+    const engine = new LatencySloEngine({
+      alertPolicy: policy,
+      systemActorUserId: SYSTEM_ACTOR,
+      registrations: [registration],
+      clock,
+      onDeclarationError: (_err, failure) => phases.push(failure.phase),
+      killSwitchRecorder: {
+        record: async (): Promise<void> => {
+          throw new Error("insert refused");
+        },
+      },
+    });
+    recordLatencies(engine, 700, 30, BASE.getTime());
+    const decision = (await engine.evaluate())[0];
+    if (decision?.kind !== "breach_opened") throw new Error("expected breach");
+    expect(decision.plan.pages).toHaveLength(1);
+    expect(decision.plan.killSwitchUnrecorded?.phase).toBe("record_kill_switch");
+    expect(phases).toEqual(["record_kill_switch"]);
+    expect(engine.activeBreaches()[0]?.breach.killSwitchId).toBeNull();
+  });
+
+  it("writes a justification that claims no effect on the flag", async () => {
+    const clock = new FixedClock(BASE);
+    const engine = makeEngine(clock);
+    recordLatencies(engine, 700, 30, BASE.getTime());
+    const decision = (await engine.evaluate())[0];
+    if (decision?.kind !== "breach_opened") throw new Error("expected breach");
+    expect(decision.plan.killSwitch?.justification).toMatch(
+      /^Latency enforcement recorded a kill switch for ff_catalogv2 after a /,
+    );
+    expect(decision.plan.killSwitch?.justification).not.toMatch(/rolled|safe value/i);
+  });
+});

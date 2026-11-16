@@ -92,6 +92,34 @@ describe("verifyEnforcementActionShape", () => {
     expect(issues.map((i) => i.kind)).toContain("kill_switch_without_flag");
   });
 
+  it("flags a declared rollback whose kill switch was not recorded", () => {
+    const issues = verifyEnforcementActionShape(
+      action({
+        actionId: "sloa_a0000013",
+        incidentId: "INC-2026-0013",
+        decision: "breach_opened",
+        occurredAt: iso(0),
+        killSwitchId: null,
+        flagId: "ff_checkout01",
+      }),
+    );
+    expect(issues.map((i) => i.kind)).toEqual(["rollback_unrecorded"]);
+  });
+
+  it("does not flag a breach that declared no rollback", () => {
+    const issues = verifyEnforcementActionShape(
+      action({
+        actionId: "sloa_a0000014",
+        incidentId: "INC-2026-0014",
+        decision: "breach_opened",
+        occurredAt: iso(0),
+        killSwitchId: null,
+        flagId: null,
+      }),
+    );
+    expect(issues.map((i) => i.kind)).not.toContain("rollback_unrecorded");
+  });
+
   it("accepts a clean action", () => {
     expect(
       verifyEnforcementActionShape(

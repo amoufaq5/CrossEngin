@@ -18,6 +18,12 @@ export const SLO_DRIFT_ISSUE_KINDS = [
   "paged_without_channels",
   "channels_without_paged",
   "kill_switch_without_flag",
+  /**
+   * A breach whose registration declared a flag rollback and for which no kill switch was recorded:
+   * the action names the flag and no switch, which is how the engine stores a refused plan or a
+   * failed switch write rather than letting either cost the page.
+   */
+  "rollback_unrecorded",
   "recovered_close_out_failed",
   "ongoing_without_open",
   "recovered_without_open",
@@ -76,6 +82,12 @@ export function verifyEnforcementActionShape(
   }
   if (action.killSwitchId !== null && action.flagId === null) {
     at("kill_switch_without_flag", "kill switch recorded without the flag it overrides");
+  }
+  if (action.decision === "breach_opened" && action.flagId !== null && action.killSwitchId === null) {
+    at(
+      "rollback_unrecorded",
+      `a rollback of ${action.flagId} was declared and no kill switch was recorded for it`,
+    );
   }
   // The signal cleared but the store refused the close-out, so the incident row is still open and
   // nothing paged again to say so. Only the stored close-out can tell this apart from a clean

@@ -23,17 +23,19 @@ import {
   type BurnRateVerdict,
 } from "./burn-rate.js";
 import {
+  activateKillSwitch,
   closeOutEnforcementIncident,
   declareEnforcementIncident,
   findAdoptedKillSwitch,
   findOpenEnforcementIncident,
   killSwitchIdForIncident,
-  planKillSwitchActivation,
   planPageDirective,
   type DeclarationErrorSink,
   type EnforcementPlan,
+  type KillSwitchActivation,
   type FlagRollback,
   type KillSwitchLookup,
+  type KillSwitchRecorder,
 } from "./enforcement.js";
 
 export interface SloRegistration {
@@ -58,10 +60,15 @@ export interface SloEnforcementEngineOptions {
    */
   readonly declarer?: IncidentDeclarer;
   /**
-   * Recovers which flag an adopted incident rolled back. Without it an adopted breach reports no
-   * kill switch, because the id was only ever in the memory of the process that activated it.
+   * Recovers which kill switch an adopted incident recorded. Without it an adopted breach reports
+   * none, because the id was only ever in the memory of the process that recorded it.
    */
   readonly killSwitches?: KillSwitchLookup;
+  /**
+   * Stores the kill switch a declared rollback plans. Absent, the switch is planned and carried on
+   * the decision but stored nowhere — the in-memory engine's meaning of a kill switch.
+   */
+  readonly killSwitchRecorder?: KillSwitchRecorder;
   readonly onDeclarationError?: DeclarationErrorSink;
 }
 
@@ -115,6 +122,7 @@ export class SloEnforcementEngine {
   private readonly declaredBy: string;
   private readonly declarer: IncidentDeclarer;
   private readonly killSwitches: KillSwitchLookup | undefined;
+  private readonly killSwitchRecorder: KillSwitchRecorder | undefined;
   private readonly onDeclarationError: DeclarationErrorSink | undefined;
   private readonly active: Map<string, ActiveBreach> = new Map();
   /**
@@ -133,6 +141,7 @@ export class SloEnforcementEngine {
     this.window = options.window ?? new RollingWindow();
     this.declarer = options.declarer ?? new CountingIncidentDeclarer({ clock: this.clock });
     this.killSwitches = options.killSwitches;
+    this.killSwitchRecorder = options.killSwitchRecorder;
     this.onDeclarationError = options.onDeclarationError;
   }
 
@@ -296,21 +305,27 @@ export class SloEnforcementEngine {
     const page = planPageDirective(this.alertPolicy, severity, incidentId);
     const pages = page === null ? [] : [page];
 
-    let killSwitch: EnforcementPlan["killSwitch"] = null;
-    let killSwitchId: string | null = null;
-    if (reg.rollback !== undefined) {
-      killSwitchId = killSwitchIdForIncident(incidentId);
-      killSwitch = planKillSwitchActivation({
-        killSwitchId,
-        flagId: reg.rollback.flagId,
-        safeValueJson: reg.rollback.safeValueJson,
-        tenantId: reg.tenantId ?? null,
-        systemActorUserId: this.systemActorUserId,
-        incidentId,
-        nowIso,
-        justification: `SLO enforcement rolled ${reg.rollback.flagId} back to its safe value after ${thresholdId} burn on ${surface}.`,
-      });
-    }
+    // After the declaration, so nothing here may throw: a refused plan or a failed write is
+    // reported and carried on the plan, and the incident keeps its page.
+    const activation: KillSwitchActivation =
+      reg.rollback === undefined
+        ? { killSwitch: null, unrecorded: null }
+        : await activateKillSwitch(
+            {
+              killSwitchId: killSwitchIdForIncident(incidentId),
+              flagId: reg.rollback.flagId,
+              safeValueJson: reg.rollback.safeValueJson,
+              tenantId: reg.tenantId ?? null,
+              systemActorUserId: this.systemActorUserId,
+              incidentId,
+              nowIso,
+              justification: `SLO enforcement recorded a kill switch for ${reg.rollback.flagId} after ${thresholdId} burn on ${surface}.`,
+            },
+            this.killSwitchRecorder,
+            { surface, sloId: reg.slo.id },
+            this.onDeclarationError,
+          );
+    const killSwitchId = activation.killSwitch?.id ?? null;
 
     this.active.set(surface, { incidentId, killSwitchId, severity, thresholdId });
 
@@ -320,7 +335,12 @@ export class SloEnforcementEngine {
       sloId: reg.slo.id,
       severity,
       verdict,
-      plan: { incident, pages, killSwitch },
+      plan: {
+        incident,
+        pages,
+        killSwitch: activation.killSwitch,
+        killSwitchUnrecorded: activation.unrecorded,
+      },
     };
   }
 }

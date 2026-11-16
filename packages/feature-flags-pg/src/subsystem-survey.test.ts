@@ -98,8 +98,9 @@ describe("KILL_SWITCH_ENFORCEMENT_GAP", () => {
   });
 
   it("names the two engines that do write one", () => {
-    expect(KILL_SWITCH_ENFORCEMENT_GAP.recordedBy).toContain("buildPersistentEngine");
-    expect(KILL_SWITCH_ENFORCEMENT_GAP.recordedBy).toContain("buildPersistentLatencyEngine");
+    // By their real names: `buildPersistentEngine` is workflow-runtime-pg's and writes no switch.
+    expect(KILL_SWITCH_ENFORCEMENT_GAP.recordedBy).toContain("buildPersistentSloEnforcementEngine");
+    expect(KILL_SWITCH_ENFORCEMENT_GAP.recordedBy).toContain("buildPersistentLatencySloEngine");
   });
 });
 

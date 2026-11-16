@@ -56,8 +56,8 @@ export interface CallerlessStoreDeclaration {
  * left that way.
  *
  * The third, `PostgresKillSwitchStore`, is **not** here: `observability-runtime-pg`'s
- * `buildPersistentEngine` and `buildPersistentLatencyEngine` both construct it, so the SLO loop
- * writes a kill switch when it rolls a flag back. That contrast is what makes the question sharp
+ * `buildPersistentSloEnforcementEngine` and `buildPersistentLatencySloEngine` both construct it, so
+ * the SLO loop writes a kill switch when a breach with a declared rollback opens. That contrast is what makes the question sharp
  * and it is also sharper than it looks — see `KILL_SWITCH_ENFORCEMENT_GAP`. One store in this
  * package is constructed; none of the three has a reader that acts on what it stores.
  */
@@ -120,7 +120,8 @@ export const CALLERLESS_FLAG_STORES: readonly CallerlessStoreDeclaration[] = Obj
 export const KILL_SWITCH_ENFORCEMENT_GAP = Object.freeze({
   recorded: true,
   enforced: false,
-  recordedBy: "observability-runtime-pg: buildPersistentEngine, buildPersistentLatencyEngine",
+  recordedBy:
+    "observability-runtime-pg: buildPersistentSloEnforcementEngine, buildPersistentLatencySloEngine",
   enforcedBy: null,
   detail:
     "An SLO breach writes a KillSwitch naming a flagId. Nothing reads it back to withhold a flag, " +
@@ -159,9 +160,11 @@ export interface FlagSubsystemSurvey {
  * against — one fact, one home. The other two are declarations with the evidence beside them.
  *
  * Deliberately **not** wired to a boot line. ADR-0334 warned at boot about an unserved job queue
- * because the deployment was already filling it; nothing here is filling anything, so a line on
- * every boot of every deployment saying a subsystem nobody asked for is absent would be noise where
- * that one was signal. The survey exists so the absence is a value a caller can hold the day one
+ * because the deployment was already filling it. Here the one thing filled is the kill-switch table,
+ * and only by a deployment whose SLO registrations declare a rollback — so that fact is said by
+ * operate-server's `[slo]` rollback line, for exactly those deployments, from
+ * `KILL_SWITCH_ENFORCEMENT_GAP` above; a line on every boot of every deployment saying a subsystem
+ * nobody asked for is absent would be noise where that one is signal. The survey exists so the absence is a value a caller can hold the day one
  * wants it — an admin route, a readiness report, or the dependency-graph rule this package's
  * `CALLERLESS_FLAG_STORES` is written for.
  */

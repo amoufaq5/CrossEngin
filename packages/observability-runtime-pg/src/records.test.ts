@@ -111,6 +111,7 @@ function breachOpened(): EnforcementDecision {
       relatedIncidentId: "INC-2026-0001",
       overriddenValueJson: "false",
     },
+    killSwitchUnrecorded: null,
   };
   return {
     kind: "breach_opened",
@@ -185,6 +186,39 @@ describe("latencyEvaluationRecordFromVerdict", () => {
     expect(record.worstPercentile).toBe("p95");
     expect(record.sampleCount).toBe(30);
     expect(record.breaches).toHaveLength(1);
+  });
+});
+
+describe("enforcementActionFromDecision — an unrecorded rollback", () => {
+  it("names the declared flag and no switch", () => {
+    const opened = breachOpened();
+    if (opened.kind !== "breach_opened") throw new Error("unreachable");
+    const action = enforcementActionFromDecision({
+      decision: {
+        ...opened,
+        plan: {
+          ...opened.plan,
+          killSwitch: null,
+          killSwitchUnrecorded: { flagId: "ff_checkout01", phase: "record_kill_switch" },
+        },
+      },
+      tenantId: TENANT,
+      occurredAt: NOW,
+    });
+    expect(action.killSwitchId).toBeNull();
+    expect(action.flagId).toBe("ff_checkout01");
+  });
+
+  it("names neither when no rollback was declared", () => {
+    const opened = breachOpened();
+    if (opened.kind !== "breach_opened") throw new Error("unreachable");
+    const action = enforcementActionFromDecision({
+      decision: { ...opened, plan: { ...opened.plan, killSwitch: null } },
+      tenantId: TENANT,
+      occurredAt: NOW,
+    });
+    expect(action.killSwitchId).toBeNull();
+    expect(action.flagId).toBeNull();
   });
 });
 

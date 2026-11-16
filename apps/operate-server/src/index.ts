@@ -8,6 +8,7 @@ export * from "./prune-scheduler.js";
 export * from "./slo.js";
 export * from "./slo-config.js";
 export * from "./slo-defaults.js";
+export * from "./slo-rollback-survey.js";
 export * from "./dr-readiness.js";
 export * from "./access-reviews-lifecycle.js";
 export * from "./live-grants.js";

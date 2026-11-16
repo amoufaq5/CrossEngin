@@ -432,6 +432,7 @@ import { OperateHttpServer, buildOperateHttpServer, type WebhookRoute } from "./
 import { JobScheduler, PostgresTenantSource, StaticTenantSource, type TenantSource } from "./scheduler.js";
 import { PostgresEntityEventSink } from "./entity-events.js";
 import { buildSloEnforcement, loadSloConfig } from "./slo-config.js";
+import { formatSloRollbackSurvey, surveySloRollbacks } from "./slo-rollback-survey.js";
 import {
   deriveSloConfig,
   loadSloDefaultsOverride,
@@ -3492,12 +3493,25 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             for (const directive of pages) await resolveAndNote(sloPager, directive, "slo");
           },
           onError: (err) => console.error("[slo] evaluation error", err),
+          // A step the engines report rather than throw, so a failure after the declaration cannot
+          // cost the page. Which of them change what is declared is per phase; this only names it.
+          onDeclarationError: (err, failure) =>
+            console.error(
+              `[slo] ${failure.phase} failed for slo=${failure.sloId} surface=${failure.surface}`,
+              err,
+            ),
         })
       : null;
   if (sloEnforcement !== null && !sloEnforcement.persisted) {
     console.warn(
       "[slo] no Postgres store (--store pg): incidents are declared in memory only and their ids restart at 0001",
     );
+  }
+  if (sloConfig !== null && sloEnforcement !== null) {
+    const rollbackLine = formatSloRollbackSurvey(
+      surveySloRollbacks(sloConfig, sloEnforcement.persisted),
+    );
+    if (rollbackLine !== null) console.info(rollbackLine);
   }
   // Periodic DR-readiness assessment: fold the failover/drill executions recorded through the API into
   // the config's declared infra, assess readiness, and persist a snapshot. Enabled by

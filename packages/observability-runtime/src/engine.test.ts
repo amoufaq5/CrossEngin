@@ -472,3 +472,113 @@ describe("SloEnforcementEngine — an adopted breach can recover its kill switch
     expect(killSwitchId).toBeNull();
   });
 });
+
+describe("SloEnforcementEngine — a rollback that cannot be recorded never costs the page", () => {
+  interface Seen {
+    readonly phases: string[];
+    readonly recorded: string[];
+  }
+
+  function engineFor(
+    clock: FixedClock,
+    reg: SloRegistration,
+    seen: Seen,
+    record?: (id: string) => Promise<void>,
+  ): SloEnforcementEngine {
+    return new SloEnforcementEngine({
+      alertPolicy: policy,
+      systemActorUserId: SYSTEM_ACTOR,
+      registrations: [reg],
+      clock,
+      onDeclarationError: (_err, failure) => seen.phases.push(failure.phase),
+      ...(record !== undefined
+        ? {
+            killSwitchRecorder: {
+              record: async (ks): Promise<void> => {
+                await record(ks.id);
+                seen.recorded.push(ks.id);
+              },
+            },
+          }
+        : {}),
+    });
+  }
+
+  it("pages and reports plan_kill_switch when the switch's tenant id is not a UUID", async () => {
+    const clock = new FixedClock(BASE);
+    const seen: Seen = { phases: [], recorded: [] };
+    const engine = engineFor(clock, { ...registration, tenantId: "acme" }, seen);
+    burst(engine, 25, BASE.getTime());
+    const decision = (await engine.evaluate())[0];
+    if (decision?.kind !== "breach_opened") throw new Error("expected breach");
+    expect(decision.plan.pages).toHaveLength(1);
+    expect(decision.plan.killSwitch).toBeNull();
+    expect(decision.plan.killSwitchUnrecorded).toEqual({
+      flagId: "ff_checkout01",
+      phase: "plan_kill_switch",
+    });
+    expect(seen.phases).toEqual(["plan_kill_switch"]);
+  });
+
+  it("pages and reports record_kill_switch when the store refuses the switch", async () => {
+    const clock = new FixedClock(BASE);
+    const seen: Seen = { phases: [], recorded: [] };
+    const engine = engineFor(clock, registration, seen, async () => {
+      throw new Error("insert refused");
+    });
+    burst(engine, 25, BASE.getTime());
+    const decision = (await engine.evaluate())[0];
+    if (decision?.kind !== "breach_opened") throw new Error("expected breach");
+    expect(decision.plan.pages).toHaveLength(1);
+    expect(decision.plan.killSwitch).toBeNull();
+    expect(decision.plan.killSwitchUnrecorded?.phase).toBe("record_kill_switch");
+    expect(seen.phases).toEqual(["record_kill_switch"]);
+    // The switch that was not stored is not remembered either, so the recovery names none.
+    clock.advance(2 * 3_600_000);
+    const recovered = (await engine.evaluate(clock.now()))[0];
+    expect(recovered?.kind === "recovered" && recovered.killSwitchId).toBeNull();
+  });
+
+  it("stores the switch before reporting it, and names it on the recovery", async () => {
+    const clock = new FixedClock(BASE);
+    const seen: Seen = { phases: [], recorded: [] };
+    const engine = engineFor(clock, registration, seen, async () => undefined);
+    burst(engine, 25, BASE.getTime());
+    const decision = (await engine.evaluate())[0];
+    if (decision?.kind !== "breach_opened") throw new Error("expected breach");
+    expect(seen.recorded).toEqual([decision.plan.killSwitch?.id]);
+    expect(decision.plan.killSwitchUnrecorded).toBeNull();
+    expect(seen.phases).toEqual([]);
+    clock.advance(2 * 3_600_000);
+    const recovered = (await engine.evaluate(clock.now()))[0];
+    expect(recovered?.kind === "recovered" && recovered.killSwitchId).toBe(
+      decision.plan.killSwitch?.id,
+    );
+  });
+
+  it("carries no unrecorded rollback for a registration that declares none", async () => {
+    const clock = new FixedClock(BASE);
+    const seen: Seen = { phases: [], recorded: [] };
+    const { rollback: _omitted, ...noRollback } = registration;
+    const engine = engineFor(clock, { ...noRollback, tenantId: "acme" }, seen);
+    burst(engine, 25, BASE.getTime());
+    const decision = (await engine.evaluate())[0];
+    if (decision?.kind !== "breach_opened") throw new Error("expected breach");
+    expect(decision.plan.killSwitch).toBeNull();
+    expect(decision.plan.killSwitchUnrecorded).toBeNull();
+    expect(seen.phases).toEqual([]);
+  });
+
+  it("writes a time-invariant justification that claims no effect on the flag", async () => {
+    const clock = new FixedClock(BASE);
+    const engine = makeEngine(clock);
+    burst(engine, 25, BASE.getTime());
+    const decision = (await engine.evaluate())[0];
+    if (decision?.kind !== "breach_opened") throw new Error("expected breach");
+    const ks = decision.plan.killSwitch;
+    expect(ks?.justification).toMatch(/^SLO enforcement recorded a kill switch for ff_checkout01 after /);
+    for (const text of [ks?.justification, ks?.impactScopeNotes]) {
+      expect(text).not.toMatch(/rolled|rollback|safe value|nothing applies|applied/i);
+    }
+  });
+});
