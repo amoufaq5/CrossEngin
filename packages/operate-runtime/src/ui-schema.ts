@@ -308,7 +308,12 @@ export function buildUiSchema(manifest: Manifest, now: Date = new Date()): UiSch
       singular: titleCase(entity.name.replace(/([a-z0-9])([A-Z])/g, "$1 $2")),
       module: entity.module ?? "General",
       access: accessFor(manifest, entity.name),
-      fields: entity.fields.map(uiField),
+      // A lifecycle state field with a default is read-only to a form: an update may not change it
+      // and a create lands in the initial state, so offering it as an input invites a 422. One with
+      // no default stays editable, because a create must then be able to name the initial state.
+      fields: entity.fields.map((f) =>
+        f.name === stateField && f.default !== undefined ? { ...uiField(f), readOnly: true } : uiField(f),
+      ),
       listColumns: pickListColumns(entity, []),
       sortableFields: [...config.sortableFields],
       filterableFields: [...config.filterableFields],

@@ -27,14 +27,25 @@
 #
 # It also does not narrow by path, and that is a correctness point rather than
 # laziness: every rule in `packages/testing/src/strategy/` reads the *whole*
-# workspace from disk, so a change anywhere — the catalog, a store's SQL, a
-# pack's manifest, `deploy/docker-compose.yml` — can break one. A path filter
+# workspace (from disk, or from the index for the one named below), so a change
+# anywhere — the catalog, a store's SQL, a pack's manifest,
+# `deploy/docker-compose.yml` — can break one. A path filter
 # would skip exactly the edits the rules exist to catch.
 #
-# What it checks is the WORKING TREE, not the index. For the ordinary
+# What most rules check is the WORKING TREE, not the index. For the ordinary
 # `git add -A && git commit` that is the same thing; for a partial stage it is
-# not, and the CI sweep is the backstop. Checking the index honestly would mean
-# materialising it in a temporary worktree, which costs more than the hook does.
+# not, and the CI sweep is the backstop. Checking the index honestly for those
+# rules would mean materialising it in a temporary worktree, which costs more
+# than the hook does.
+#
+# One rule is the exception and reads the INDEX: `secret-values.ts` takes its
+# paths from `git ls-files --stage` and its content from the staged blobs
+# (`git cat-file --batch`), not from disk. For a credential the partial-stage gap
+# is the case that matters — stage a file holding a key, delete it from the
+# working copy, commit — so that rule refuses what is about to be committed
+# rather than what happens to be on disk (ADR-0420). The others still read the
+# working tree, so a partial stage can still hide a non-secret finding from
+# them until CI.
 #
 # Installed by `sh .githooks/install-hooks.sh`, which the root `prepare` script
 # runs. That script declines rather than overwriting a `core.hooksPath` pointing

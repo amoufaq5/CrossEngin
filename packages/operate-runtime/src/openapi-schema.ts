@@ -1,4 +1,5 @@
 import { resolvedFields } from "@crossengin/kernel/ddl";
+import type { Manifest } from "@crossengin/kernel/manifest";
 import type { Entity, Field, FieldType, PrimitiveFieldType, Trait } from "@crossengin/types/meta-schema";
 
 /**
@@ -30,6 +31,7 @@ export interface JsonSchema {
   readonly oneOf?: readonly JsonSchema[];
   readonly minimum?: number;
   readonly maximum?: number;
+  readonly readOnly?: boolean;
   readonly $ref?: string;
 }
 
@@ -267,6 +269,25 @@ export const omittableOnCreate = (field: Field): boolean => {
   return kind === "literal" || kind === "expression" || kind === "sequence";
 };
 
+/** The lifecycle facts the request schemas need: which field holds the state and where a record starts. */
+export interface EntityLifecycleShape {
+  readonly stateField: string;
+  readonly initialState: string;
+}
+
+/**
+ * An entity's lifecycle shape, or `null` for an entity with none. The first `entityLifecycle` wins,
+ * which is `lifecycleStateField`'s reading and the guard compile's: one entity, one lifecycle.
+ */
+export function entityLifecycleShape(manifest: Manifest, entityName: string): EntityLifecycleShape | null {
+  for (const wf of Object.values(manifest.workflows ?? {})) {
+    if (wf.kind === "entityLifecycle" && wf.entity === entityName) {
+      return { stateField: wf.stateField, initialState: wf.initialState };
+    }
+  }
+  return null;
+}
+
 export interface EntitySchemas {
   readonly response: JsonSchema;
   readonly create: JsonSchema;
@@ -306,7 +327,17 @@ export interface EntitySchemas {
  * per compiled server and serves it to every tenant that reaches it, so a schema varying with
  * anything *but* the manifest cannot be right for all of them at once.
  */
-export const entitySchemas = (entity: Entity, customTraits: readonly Trait[]): EntitySchemas => {
+export const entitySchemas = (
+  entity: Entity,
+  customTraits: readonly Trait[],
+  /**
+   * Required and nullable rather than optional: a lifecycle state field is not freely writable, and
+   * a caller that forgot to say so would publish it as one — the omission indistinguishable from an
+   * entity that has no lifecycle (ADR-0386's rule that an optional input defaulting to the
+   * permissive answer makes its own omission unobservable).
+   */
+  lifecycle: EntityLifecycleShape | null,
+): EntitySchemas => {
   const fields = resolvedFields(entity, customTraits);
   const responseProps: Record<string, JsonSchema> = {
     id: {
@@ -331,8 +362,30 @@ export const entitySchemas = (entity: Entity, customTraits: readonly Trait[]): E
       continue;
     }
     responseProps[field.name] = resp;
-    createProps[field.name] = req;
-    updateProps[field.name] = req;
+    if (lifecycle !== null && field.name === lifecycle.stateField) {
+      // The server refuses every create value but the initial state and every update value but the
+      // stored one (`lifecycleStateGuard`), so publishing the field's full enum as writable told a
+      // generated client it could do what each request then answered 422 to. On create the property
+      // is an enum of one; on update it is `readOnly`, which a client should not send — re-sending the
+      // stored value is admitted, which is why it stays described rather than removed.
+      createProps[field.name] = {
+        ...req,
+        enum: [lifecycle.initialState],
+        description:
+          `Every record is created in '${lifecycle.initialState}'; omit it or send that value. ` +
+          `'${field.name}' moves only through this entity's lifecycle transition routes.`,
+      };
+      updateProps[field.name] = {
+        ...req,
+        readOnly: true,
+        description:
+          `Not changeable by an update: '${field.name}' moves only through this entity's lifecycle ` +
+          `transition routes. Re-sending the stored value is accepted; any other value is refused 422.`,
+      };
+    } else {
+      createProps[field.name] = req;
+      updateProps[field.name] = req;
+    }
     if (field.required === true && !omittableOnCreate(field)) {
       createRequired.push(field.name);
     }

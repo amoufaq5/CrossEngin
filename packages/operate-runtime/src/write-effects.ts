@@ -1058,7 +1058,9 @@ const SETTLEMENT_FALLBACKS = {
  * document reaches this state by being transitioned* and is false: a lifecycle state is an ordinary
  * `enum` field with a **literal** default, carries no field-level permissions in any shipped pack,
  * and `lockedDocumentGuard` answers `null` first when the *before* state is unlocked — so a caller
- * may POST the state directly and no transition is involved. Measured live on the shipped pack and
+ * may POST the state directly and no transition is involved (for an entity with a lifecycle this is
+ * refused by `lifecycleStateGuard` now; the edge keying stays for a state that is not a lifecycle
+ * field and for a deployment passing its own `writeGuards`). Measured live on the shipped pack and
  * store (`--store pg`, `erp-core`), as `erp_admin`, two ordinary POSTs:
  *
  * - `POST /v1/invoices {…,"state":"sent"}` → **201**, and **no journal entry at all**: revenue was

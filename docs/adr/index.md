@@ -1,10 +1,10 @@
 # ADR index
 
-412 records. Generated from the ADR files themselves — regenerate rather than
+414 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 333  **Proposed:** 79
+- **Accepted:** 335  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -424,3 +424,5 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0416](0416-a-boot-line-that-read-as-working.md) | A boot line that read as working | — | Accepted | 2026-11-16 |
 | [0417](0417-a-path-the-documents-describe-and-nothing-serves.md) | A path the documents describe and nothing serves | — | Accepted | 2026-11-16 |
 | [0418](0418-a-diagnosis-the-console-had-not-measured.md) | A diagnosis the console had not measured | — | Accepted | 2026-11-16 |
+| [0419](0419-a-documents-lock-and-its-state-are-one-rule.md) | A document's lock and its state are one rule | — | Accepted | 2026-11-16 |
+| [0420](0420-a-committed-secret-and-the-reader-that-was-missing.md) | A committed secret, and the reader that was missing | — | Accepted | 2026-11-16 |

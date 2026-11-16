@@ -655,11 +655,20 @@ async function applyTransition(
       const refused = resolveObligation(record);
       if (refused !== null) return refused;
     }
-    const current = record[t.stateField];
-    if (typeof current === "string" && !t.fromStates.includes(current)) {
+    // An unset state is the lifecycle's initial state — the create guard admits an omitted state as
+    // exactly that — so it is checked like any other. It used to skip the check (`typeof current ===
+    // "string" && …`), which let a stateless record fire any transition from anywhere. A stored value
+    // that is set and is not a string is no state of this lifecycle at all, so it is refused rather
+    // than read as either.
+    const stored = record[t.stateField];
+    const current = stored === undefined || stored === null ? t.initialState : stored;
+    if (typeof current !== "string" || !t.fromStates.includes(current)) {
       return json(409, {
         error: "invalid_transition",
-        detail: `'${t.name}' cannot fire from '${current}'`,
+        detail:
+          typeof current === "string"
+            ? `'${t.name}' cannot fire from '${current}'`
+            : `'${t.name}' cannot fire: '${t.stateField}' holds no state of this lifecycle`,
         allowedFrom: t.fromStates,
       });
     }

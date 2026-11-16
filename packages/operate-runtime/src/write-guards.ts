@@ -403,20 +403,35 @@ function onlyChange(
  * while the parent entry is posted. The accounting rule is "post then reverse,
  * never edit". Implemented on the generic `lockedDocumentGuard`.
  */
-export function postedEntryImmutabilityGuard(config: JournalPostingGuardConfig = {}): WriteGuard {
+export function postedEntryImmutabilityGuard(
+  config: JournalPostingGuardConfig = {},
+  hintByState?: Readonly<Record<string, string>>,
+): WriteGuard {
   const c = { ...DEFAULTS, ...config };
   return lockedDocumentGuard({
     entity: c.entryEntity,
     stateField: c.stateField,
-    lockedStates: [c.postedState],
+    // `reversed` too: a reversal leaves the original's lines in the ledger beside a mirror entry that
+    // negates exactly those lines, so editing, moving or deleting one afterwards — or deleting the
+    // original — unbalances the pair as surely as doing it while the entry was `posted`.
+    lockedStates: [c.postedState, c.reversedState],
     allowedUpdateTransitions: { [c.postedState]: [c.reversedState] },
     ignoredFields: ["posted_at"],
     childEntity: c.lineEntity,
     childParentField: c.lineEntryRefField,
     lockedError: "posted_entry_immutable",
     childLockedError: "posted_entry_locked_lines",
-    noun: "posted journal entry",
-    reverseHint: "reverse it instead",
+    noun: "journal entry",
+    // The noun follows the state, and so does the remedy. A single `posted journal entry` /
+    // `reverse it instead` pair was false of a `reversed` entry in both halves — it is not posted any
+    // more, and it cannot be reversed a second time — so a reversed entry's refusal named an
+    // impossible fix. `reversed` carries no hint: no declared transition leaves it, and naming none
+    // is better than naming one that cannot work (ADR-0334).
+    nounByState: {
+      [c.postedState]: "posted journal entry",
+      [c.reversedState]: "reversed journal entry",
+    },
+    hintByState: hintByState ?? { [c.postedState]: "reverse it instead" },
   });
 }
 
@@ -442,8 +457,40 @@ export interface LockedDocumentConfig {
   readonly childLockedError?: string;
   /** Human noun for the detail message, e.g. "issued invoice", "filed tax return". */
   readonly noun?: string;
+  /** A noun per locked state, where one noun would be false of some of them (a `reversed` entry is not posted). */
+  readonly nounByState?: Readonly<Record<string, string>>;
   /** Suffix appended to the "cannot be edited" detail (e.g. "reverse it instead"). */
   readonly reverseHint?: string;
+  /**
+   * The remedy per locked state, which **replaces** `reverseHint` when given: a state absent from it
+   * gets no remedy at all. A remedy is a declared transition out of the state the document is in,
+   * and one sentence for every locked state named transitions that cannot fire from some of them —
+   * `void it instead` to a paid invoice, `amend it instead` to a paid tax return.
+   */
+  readonly hintByState?: Readonly<Record<string, string>>;
+}
+
+/**
+ * `a` or `an` before a noun, by its first letter. The two lifecycle refusals interpolate a noun the
+ * manifest or a config supplies, and a hardcoded `a` read "a Invoice", "a issued invoice", "a
+ * approved purchase order". By letter rather than by sound, so "an uuid" is possible and nothing
+ * here spells one; every noun these guards build starts with its entity or state name.
+ */
+export function withArticle(noun: string): string {
+  return `${/^[aeiou]/i.test(noun) ? "an" : "a"} ${noun}`;
+}
+
+/**
+ * The distinct parent ids a child write touches: the stored record's parent, then the written one.
+ * The one place a child arm reads its parent reference, so the before-parent cannot be checked on
+ * one child entity and forgotten on another — every child config `defaultWriteGuards` builds reads this.
+ */
+export function childParentRefs(input: WriteGuardInput, parentField: string): readonly string[] {
+  const refs: string[] = [];
+  for (const v of [input.before?.[parentField], input.after[parentField]]) {
+    if (typeof v === "string" && v.length > 0 && !refs.includes(v)) refs.push(v);
+  }
+  return refs;
 }
 
 /**
@@ -462,16 +509,31 @@ export function lockedDocumentGuard(config: LockedDocumentConfig): WriteGuard {
   const childLockedError = config.childLockedError ?? "document_locked_lines";
   const noun = config.noun ?? "document";
   const lockedStates = new Set(config.lockedStates);
-  const editHint = config.reverseHint !== undefined ? `; ${config.reverseHint}` : "";
+  const nounFor = (state: string): string => withArticle(config.nounByState?.[state] ?? noun);
+  const hintFor = (state: string): string => {
+    const hint = config.hintByState !== undefined ? config.hintByState[state] : config.reverseHint;
+    return hint !== undefined ? `; ${hint}` : "";
+  };
 
   return async (input) => {
     if (config.childEntity !== undefined && config.childParentField !== undefined && input.entity === config.childEntity) {
-      const ref = input.after[config.childParentField] ?? input.before?.[config.childParentField];
-      if (typeof ref !== "string" || ref.length === 0) return null;
-      const parent = await input.store.get(input.tenantId, config.entity, ref);
-      const parentState = parent?.[stateField];
-      if (typeof parentState === "string" && lockedStates.has(parentState)) {
-        return { status: 422, error: childLockedError, detail: `cannot modify the lines of a ${noun}` };
+      // Every parent the write touches, not only the one the line ends up under. `after` is the
+      // merged record on an update, so reading it alone checked only the *new* parent and a line
+      // could be moved out of a posted entry by re-pointing its reference — the entry it left then
+      // read 500 debit / 0 credit with nothing refusing it.
+      for (const ref of childParentRefs(input, config.childParentField)) {
+        const parent = await input.store.get(input.tenantId, config.entity, ref);
+        const parentState = parent?.[stateField];
+        if (typeof parentState === "string" && lockedStates.has(parentState)) {
+          const leaving = ref === input.before?.[config.childParentField] && ref !== input.after[config.childParentField];
+          return {
+            status: 422,
+            error: childLockedError,
+            detail: leaving
+              ? `cannot move a line out of ${nounFor(parentState)}`
+              : `cannot modify the lines of ${nounFor(parentState)}`,
+          };
+        }
       }
       return null;
     }
@@ -484,7 +546,7 @@ export function lockedDocumentGuard(config: LockedDocumentConfig): WriteGuard {
     if (input.operation === "transition") return null;
 
     if (input.operation === "delete") {
-      return { status: 422, error: lockedError, detail: `a ${noun} cannot be deleted${editHint}` };
+      return { status: 422, error: lockedError, detail: `${nounFor(beforeState)} cannot be deleted${hintFor(beforeState)}` };
     }
 
     if (input.operation === "update") {
@@ -497,10 +559,121 @@ export function lockedDocumentGuard(config: LockedDocumentConfig): WriteGuard {
       ) {
         return null;
       }
-      return { status: 422, error: lockedError, detail: `a ${noun} cannot be edited${editHint}` };
+      return { status: 422, error: lockedError, detail: `${nounFor(beforeState)} cannot be edited${hintFor(beforeState)}` };
     }
 
     return null;
+  };
+}
+
+// ---- Lifecycle state guard --------------------------------------------------
+
+export interface LifecycleTransitionShape {
+  readonly name: string;
+  readonly from: readonly string[];
+  readonly to: string;
+}
+
+export interface LifecycleStateConfig {
+  readonly entity: string;
+  readonly stateField: string;
+  readonly initialState: string;
+  readonly transitions: readonly LifecycleTransitionShape[];
+}
+
+/** The two refusals, one per operation that can carry a state value. */
+export const LIFECYCLE_STATE_ERRORS = {
+  create: "lifecycle_state_not_initial",
+  update: "lifecycle_state_not_writable",
+} as const;
+
+/** Shortest chain of declared transitions from `from` to `to`, or null when none exists. */
+function transitionRoute(
+  transitions: readonly LifecycleTransitionShape[],
+  from: string,
+  to: string,
+): readonly string[] | null {
+  const seen = new Set([from]);
+  let frontier: { readonly state: string; readonly path: readonly string[] }[] = [{ state: from, path: [] }];
+  while (frontier.length > 0) {
+    const next: { readonly state: string; readonly path: readonly string[] }[] = [];
+    for (const { state, path } of frontier) {
+      for (const t of transitions) {
+        if (!t.from.includes(state) || seen.has(t.to)) continue;
+        const route = [...path, t.name];
+        if (t.to === to) return route;
+        seen.add(t.to);
+        next.push({ state: t.to, path: route });
+      }
+    }
+    frontier = next;
+  }
+  return null;
+}
+
+function routeSentence(config: LifecycleStateConfig, from: string, to: string): string {
+  const route = transitionRoute(config.transitions, from, to);
+  return route === null
+    ? `no declared transition leads from '${from}' to '${to}'`
+    : `from '${from}' fire ${route.map((n) => `'${n}'`).join(" then ")}`;
+}
+
+/**
+ * A lifecycle state field is moved only by the lifecycle's declared transitions.
+ *
+ * The field is an ordinary `enum` on the entity, so without this a `PATCH {"state":"approved"}`
+ * skipped the `approve` transition's own grant and from-state check, and a Bill PATCHed
+ * draft → approved → draft → approved posted to the general ledger once per arrival, because the
+ * recognition effect fires on entering the state whatever the operation. A guard per document
+ * (ADR-0391's `paid` edge) closed one edge of one graph; the field is what has to be read-only.
+ *
+ * A create may land only in the workflow's `initialState` (or leave the field unset), and an update
+ * may not change the field at all — a value equal to the stored one is not a change, which is what
+ * a client re-sending a whole record does. A `transition` is the declared path and is not looked at;
+ * a `delete` carries no new state. Keyed on the stored value, so an update that cannot see `before`
+ * refuses any state it is handed rather than assuming it matches.
+ *
+ * The detail names the transitions that would make the move, or says that none does, because the
+ * remedy for this refusal is a route the manifest defines and the caller may not know.
+ */
+export function lifecycleStateGuard(config: LifecycleStateConfig): WriteGuard {
+  const { entity, stateField, initialState } = config;
+  return async (input) => {
+    if (input.entity !== entity) return null;
+    if (input.operation === "create") {
+      const v = input.after[stateField];
+      if (v === undefined || v === null || v === initialState) return null;
+      return {
+        status: 422,
+        error: LIFECYCLE_STATE_ERRORS.create,
+        detail:
+          `${withArticle(entity)} is created in '${initialState}', and '${stateField}' moves only through its` +
+          ` lifecycle transitions: ${routeSentence(config, initialState, String(v))}`,
+      };
+    }
+    if (input.operation !== "update") return null;
+    // A stored record with no state is in `initialState`, because a create may leave the field unset
+    // and that is what the create arm above admits it as — the transition handler reads it the same
+    // way. With no `before` at all nothing is known, so the stored value stays `undefined` and any
+    // state handed in is refused rather than assumed to match.
+    //
+    // Both sides are read that way, not only `before`: the handler passes `after` as `{...before,
+    // ...patch}`, so an edit that does not name the state leaves it unset on both sides, and reading
+    // only the stored side as `initialState` compared 'draft' against `undefined` and refused every
+    // ordinary edit of a stateless record.
+    const loaded = input.before !== null && input.before !== undefined;
+    const asState = (v: unknown): unknown => (loaded && (v === undefined || v === null) ? initialState : v);
+    const from = asState(input.before?.[stateField]);
+    const to = asState(input.after[stateField]);
+    if (to === from) return null;
+    const fromText = typeof from === "string" ? from : "(unset)";
+    return {
+      status: 422,
+      error: LIFECYCLE_STATE_ERRORS.update,
+      detail:
+        `'${stateField}' on ${entity} cannot be changed by an update; it moves only through its` +
+        ` lifecycle transitions: ${routeSentence(config, fromText, String(to))}`,
+    };
   };
 }
 
@@ -627,9 +800,18 @@ export const SETTLEMENT_COVERAGE_DOCUMENTS: readonly SettlementCoverageConfig[] 
  * all** — four `lockedStates` declarations exist in `compile.ts`, for `Invoice`, `TaxReturn`,
  * `SalesOrder` and `PurchaseOrder`. So `PATCH /v1/invoices/{id} {"state":"paid"}` lands from
  * `draft` and `PATCH /v1/bills/{id} {"state":"paid"}` lands from **any** state, neither of them
- * through the `mark_paid` transition this would otherwise be read as guarding. A `create` carrying
+ * through the `mark_paid` transition this would otherwise be read as guarding. (That was the state
+ * when this was written. Both state PATCHes are refused upstream by `lifecycleStateGuard` now, and
+ * `Bill` has had a locked-document guard since the one that refused its delete-and-recreate — so
+ * on the shipped pack this guard is reached by `mark_paid` and by a `create`; the paragraph stays
+ * because a manifest whose documents carry no lifecycle reaches it exactly as described.) A `create` carrying
  * `state: "paid"` is the same lie told at insert time, and `before` is `null` there, so the
  * `!==` arm admits it by construction rather than by a third clause.
+ *
+ * Since `lifecycleStateGuard`, both plain-write routes into `paid` are refused upstream for any
+ * document with a lifecycle, so on the shipped packs this guard is reached by the transition and by
+ * a write raising a settled document's total. The state-keyed arms stay: a document whose state is
+ * not a lifecycle field, or a deployment passing its own `writeGuards`, still writes it directly.
  *
  * A `delete` can never satisfy it: the handler passes `after: before ?? {}` on that path, so the
  * two states are equal and the second conjunct is false. That is why there is no operation
@@ -673,8 +855,10 @@ export function settlementCoverageGuard(config: SettlementCoverageConfig): Write
     // by the nothing-owed arm below, correctly — nothing was owed), then `PATCH {"total":120}`,
     // which the edge-only predicate let through because `before[state]` was already `paid`. The
     // result is `paid` with 120 owed and no payments, which is the divergence this guard exists to
-    // close, on the one entity nothing else protects: `Invoice` is incidentally covered because
-    // `paid` is one of its `lockedStates`, and `Bill` has no locked-document guard at all.
+    // close, on the one entity nothing else protected when this was written: `Invoice` was
+    // incidentally covered because `paid` is one of its `lockedStates`, and `Bill` had no
+    // locked-document guard. It has one now, so on the shipped pack that PATCH answers `bill_locked`
+    // first; the raising arm stays for a manifest whose settled document carries no lock.
     //
     // So the predicate is *a write that leaves the document settled and owing more than it did*.
     // A write of an already-settled document that does not raise the total still answers `null` —

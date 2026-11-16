@@ -11,7 +11,7 @@ import type { Manifest } from "@crossengin/kernel/manifest";
 import type { Entity, Trait } from "@crossengin/types/meta-schema";
 
 import { listQueryParameters, LIST_PARAMETER_COMPLEMENT_NOTE } from "./openapi-list-params.js";
-import { entitySchemas, type JsonSchema } from "./openapi-schema.js";
+import { entityLifecycleShape, entitySchemas, type JsonSchema } from "./openapi-schema.js";
 import { entityCamel } from "./slugs.js";
 import type { RouteSpec } from "./operations.js";
 
@@ -331,7 +331,7 @@ export const buildOpenApiDocument = (input: OpenApiEmitInput): OpenApiEmit => {
   const undescribableFields: { entity: string; field: string; reason: string }[] = [];
 
   for (const entity of entities) {
-    const built = entitySchemas(entity, traits);
+    const built = entitySchemas(entity, traits, entityLifecycleShape(input.manifest, entity.name));
     const base = entityCamel(entity.name);
     const name = `${base.charAt(0).toUpperCase()}${base.slice(1)}`;
     schemas[name] = built.response;

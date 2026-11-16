@@ -30,7 +30,7 @@ describe("entityRouteSpecs", () => {
 
   it("adds a transition route per lifecycle transition", () => {
     const specs = entityRouteSpecs(invoice, [
-      { name: "send", stateField: "state", toState: "sent", fromStates: ["draft"] },
+      { name: "send", stateField: "state", toState: "sent", fromStates: ["draft"], initialState: "draft" },
     ]);
     const send = specs.find((s) => s.action === "transition")!;
     expect(send.operationId).toBe("invoice.send");

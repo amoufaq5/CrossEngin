@@ -13,6 +13,14 @@ export interface TransitionSpec {
   readonly stateField: string;
   readonly toState: string;
   readonly fromStates: readonly string[];
+  /**
+   * The lifecycle's `initialState`, which is what a stored record with **no** state is in. Required,
+   * because the one reader that needs it — the transition handler's from-state check — skipped the
+   * check entirely on a non-string state, so a record created with the field unset (which the create
+   * guard admits, and which a manifest whose state field is optional with no default produces) could
+   * fire any transition from anywhere.
+   */
+  readonly initialState: string;
 }
 
 export interface RouteSpec {
@@ -45,6 +53,7 @@ function transitionsForEntity(
         stateField: workflow.stateField,
         toState: t.to,
         fromStates: Array.isArray(t.from) ? [...t.from] : [t.from],
+        initialState: workflow.initialState,
       });
     }
   }

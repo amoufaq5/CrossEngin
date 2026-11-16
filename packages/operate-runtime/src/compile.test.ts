@@ -70,7 +70,7 @@ const CLINIC = {
       kind: "entityLifecycle",
       entity: "Patient",
       stateField: "status",
-      initial: "registered",
+      initialState: "registered",
       transitions: [{ name: "admit", from: "registered", to: "admitted" }],
     },
   },
@@ -951,32 +951,34 @@ describe("compileOperateServer — settlement coverage is wired for the real pac
     expect((await store.get(COVERAGE_TENANT, "Invoice", id))?.["state"]).toBe("paid");
   });
 
-  it("refuses a plain PATCH that sets state=paid from draft, which no transition covers", async () => {
-    // The path an operation-keyed guard would have missed, and it is the *larger* of the two:
-    // `draft → paid` is not a declared transition at all (`mark_paid` is from `sent`/`overdue`), and
-    // `lockedDocumentGuard` returns null because `draft` is not one of Invoice's locked states.
+  it("refuses a plain PATCH that sets state=paid from draft, naming the transitions instead", async () => {
+    // This test used to assert `uncovered_settlement` here, which pinned the defect it was written
+    // about: the coverage guard was the only thing in front of a PATCH that skipped `send` and
+    // `mark_paid` entirely, so a *covered* document went `draft → paid` with no recognition posting
+    // and no transition grant consulted. The state field is read-only to an update now, and the
+    // refusal names the route the manifest declares.
     const { store, compiled } = coverageServer();
     const id = await seedInvoice(store, { state: "draft", total: 120 });
     const r = await callOperation(compiled, "invoice.update", { id }, { state: "paid" });
     expect(r.status).toBe(422);
-    expect(r.body["error"]).toBe("uncovered_settlement");
+    expect(r.body["error"]).toBe("lifecycle_state_not_writable");
+    expect(r.body["detail"]).toContain("from 'draft' fire 'send' then 'mark_paid'");
     expect((await store.get(COVERAGE_TENANT, "Invoice", id))?.["state"]).toBe("draft");
   });
 
-  it("lets invoice_locked win over coverage on a PATCH from a locked state", async () => {
-    // The guard order, and it is load-bearing rather than incidental. `sent` is one of Invoice's
-    // locked states, so this PATCH is refused whatever the coverage — and measured live with the
-    // coverage guard first, the answer was `uncovered_settlement: 70.00 of 120.00 still owed`,
-    // whose remedy (record the payment) would NOT let the PATCH through, because the locked guard
-    // would then refuse it. ADR-0334: naming a fix that cannot work is worse than naming none.
+  it("lets invoice_locked win over coverage when both refuse an edit of a paid invoice", async () => {
+    // The guard order, and it is load-bearing rather than incidental: a document that satisfies
+    // *both* guards is the only one that can observe which runs first. Measured live with the
+    // coverage guard first, the answer was `uncovered_settlement`, whose remedy (record the payment)
+    // would NOT let the edit through, because the locked guard would then refuse it — ADR-0334:
+    // naming a fix that cannot work is worse than naming none.
     //
-    // The invoice is **under-covered on purpose**, and the first draft of this test had it fully
-    // covered — which is invisible to the order, because a passing coverage guard is transparent
-    // and both orders then answer `invoice_locked`. Caught by the order mutation staying green.
-    // Only a document that satisfies *both* guards can observe which runs first.
+    // It used to be driven by `PATCH {"state":"paid"}` from `sent`, which the lifecycle guard now
+    // answers before either of these runs. Raising the total of a paid invoice reaches both: `paid`
+    // is a locked state, and the coverage guard refuses a settled document owing more than it did.
     const { store, compiled } = coverageServer();
-    const id = await seedInvoice(store, { state: "sent", total: 120, paid: 50 });
-    const r = await callOperation(compiled, "invoice.update", { id }, { state: "paid" });
+    const id = await seedInvoice(store, { state: "paid", total: 120, paid: 120 });
+    const r = await callOperation(compiled, "invoice.update", { id }, { total: 200 });
     expect(r.status).toBe(422);
     expect(r.body["error"]).toBe("invoice_locked");
   });
@@ -991,21 +993,45 @@ describe("compileOperateServer — settlement coverage is wired for the real pac
     expect(r.body["error"]).toBe("uncovered_settlement");
   });
 
-  it("refuses a plain PATCH on a Bill, which has no locked-document guard at all", async () => {
-    // Four `lockedStates` declarations exist in `compile.ts` — Invoice, TaxReturn, SalesOrder and
-    // PurchaseOrder — and no Bill, so `PATCH /v1/bills/{id} {"state":"paid"}` lands from *any*
-    // state and this guard is the only thing in front of it.
+  it("lets bill_locked win over coverage when both refuse an edit of a paid bill", async () => {
+    // This test used to be titled "…which no locked-document guard covers" and asserted
+    // `uncovered_settlement`: four `lockedStates` declarations existed — Invoice, TaxReturn,
+    // SalesOrder, PurchaseOrder — and none for Bill, so the coverage guard was the only thing in front
+    // of a paid bill's total. That absence was the defect, not the specification (ADR-0372's class):
+    // with no lock an approved Bill could be deleted and created again under the same number, and
+    // approving it again posted a second journal entry. `paid` is a locked state of Bill now, so the
+    // edit reaches both guards and the locked one answers first — the invoice twin above, one entity
+    // over, and for the reason given there.
     const { store, compiled } = coverageServer();
     const bill = await store.create(COVERAGE_TENANT, "Bill", {
       bill_number: "B-1",
-      state: "draft",
+      state: "paid",
       total: 90,
       currency: "USD",
     });
-    const r = await callOperation(compiled, "bill.update", { id: String(bill["id"]) }, { state: "paid" });
+    await store.create(COVERAGE_TENANT, "Payment", { state: "completed", amount: 90, bill_id: String(bill["id"]) });
+    const r = await callOperation(compiled, "bill.update", { id: String(bill["id"]) }, { total: 120 });
+    expect(r.status).toBe(422);
+    expect(r.body["error"]).toBe("bill_locked");
+    expect(r.body["detail"]).toBe("a paid bill cannot be edited");
+    expect((await store.get(COVERAGE_TENANT, "Bill", String(bill["id"])))?.["total"]).toBe(90);
+  });
+
+  it("still reaches coverage on bill.mark_paid, which the bill lock lets through", async () => {
+    // The complement: the arm of the coverage guard that matters on a Bill is the transition, and the
+    // lock returns null on a `transition` by design.
+    const { store, compiled } = coverageServer();
+    const bill = await store.create(COVERAGE_TENANT, "Bill", {
+      bill_number: "B-2",
+      state: "approved",
+      total: 120,
+      currency: "USD",
+    });
+    await store.create(COVERAGE_TENANT, "Payment", { state: "completed", amount: 90, bill_id: String(bill["id"]) });
+    const r = await callOperation(compiled, "bill.mark_paid", { id: String(bill["id"]) }, null);
     expect(r.status).toBe(422);
     expect(r.body["error"]).toBe("uncovered_settlement");
-    expect(r.body["detail"]).toContain("90.00 of 90.00");
+    expect(r.body["detail"]).toContain("30.00 of 120.00");
   });
 
   it("lets an uncovered settlement through under allowUncoveredSettlement", async () => {
@@ -1184,5 +1210,530 @@ describe("compileOperateServer — report surfaces are the handlers' own", () =>
     });
     expect(compiled.reportSurfaces).toEqual([]);
     expect(compiled.routes.list().some((r) => r.operationId.startsWith("meta.aging"))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A line cannot leave a locked document (C-02). The child arm of `lockedDocumentGuard` read
+// `after[parentField] ?? before[parentField]`, and `after` is the merged record on an update, so
+// it checked only the parent a line was moving *to*: re-pointing a credit line of a posted entry at
+// a draft one left the posted entry 500 debit / 0 credit. Driven through the real pack's wiring,
+// over every child config `defaultWriteGuards` builds (retail's `OrderLine` below), so a fix on one child cannot pass here
+// while another stays open.
+// ---------------------------------------------------------------------------
+
+const LOCKED_PARENTS = [
+  { parent: "JournalEntry", child: "JournalLine", ref: "journal_entry_id", locked: "posted", error: "posted_entry_locked_lines" },
+  { parent: "Invoice", child: "InvoiceLine", ref: "invoice_id", locked: "sent", error: "invoice_locked_lines" },
+  { parent: "SalesOrder", child: "SalesOrderLine", ref: "sales_order_id", locked: "confirmed", error: "sales_order_locked_lines" },
+  { parent: "PurchaseOrder", child: "PurchaseOrderLine", ref: "purchase_order_id", locked: "approved", error: "purchase_order_locked_lines" },
+] as const;
+
+function camelOf(entity: string): string {
+  return entity[0]!.toLowerCase() + entity.slice(1);
+}
+
+describe("compileOperateServer — a line cannot be re-parented out of a locked document", () => {
+  for (const c of LOCKED_PARENTS) {
+    it(`refuses moving a ${c.child} out of a ${c.locked} ${c.parent}, and leaves it where it was`, async () => {
+      const { store, compiled } = coverageServer();
+      const locked = await store.create(COVERAGE_TENANT, c.parent, { state: c.locked });
+      const draft = await store.create(COVERAGE_TENANT, c.parent, { state: "draft" });
+      const line = await store.create(COVERAGE_TENANT, c.child, { [c.ref]: String(locked["id"]) });
+      const r = await callOperation(
+        compiled,
+        `${camelOf(c.child)}.update`,
+        { id: String(line["id"]) },
+        { [c.ref]: String(draft["id"]) },
+      );
+      expect(r.status).toBe(422);
+      expect(r.body["error"]).toBe(c.error);
+      expect(r.body["detail"]).toContain("cannot move a line out of");
+      expect((await store.get(COVERAGE_TENANT, c.child, String(line["id"])))?.[c.ref]).toBe(String(locked["id"]));
+    });
+
+    it(`still moves a ${c.child} between two unlocked ${c.parent}s`, async () => {
+      const { store, compiled } = coverageServer();
+      const a = await store.create(COVERAGE_TENANT, c.parent, { state: "draft" });
+      const b = await store.create(COVERAGE_TENANT, c.parent, { state: "draft" });
+      const line = await store.create(COVERAGE_TENANT, c.child, { [c.ref]: String(a["id"]) });
+      const r = await callOperation(compiled, `${camelOf(c.child)}.update`, { id: String(line["id"]) }, { [c.ref]: String(b["id"]) });
+      expect(r.status).toBe(200);
+      expect(r.body[c.ref]).toBe(String(b["id"]));
+    });
+  }
+
+  it("keeps a posted entry balanced: the L13 reproduction", async () => {
+    const { store, compiled } = coverageServer();
+    const posted = await store.create(COVERAGE_TENANT, "JournalEntry", { state: "posted" });
+    const draft = await store.create(COVERAGE_TENANT, "JournalEntry", { state: "draft" });
+    await store.create(COVERAGE_TENANT, "JournalLine", { journal_entry_id: String(posted["id"]), debit: 500, credit: 0 });
+    const credit = await store.create(COVERAGE_TENANT, "JournalLine", {
+      journal_entry_id: String(posted["id"]),
+      debit: 0,
+      credit: 500,
+    });
+    const r = await callOperation(
+      compiled,
+      "journalLine.update",
+      { id: String(credit["id"]) },
+      { journal_entry_id: String(draft["id"]) },
+    );
+    expect(r.status).toBe(422);
+    const page = await store.listPage(COVERAGE_TENANT, "JournalLine", {
+      sort: [],
+      filters: [{ field: "journal_entry_id", op: "eq", value: String(posted["id"]) }],
+      limit: 10,
+      cursor: null,
+    });
+    const totals = page.records.reduce<{ debit: number; credit: number }>(
+      (t, l) => ({ debit: t.debit + Number(l["debit"]), credit: t.credit + Number(l["credit"]) }),
+      { debit: 0, credit: 0 },
+    );
+    expect(totals).toEqual({ debit: 500, credit: 500 });
+  });
+
+  it("locks retail's own OrderLine with a placed SalesOrder, beside core's SalesOrderLine", async () => {
+    const store = new InMemoryEntityStore();
+    const compiled = compileOperateServer(resolved, { store, principalRoles: () => ({ primaryRole: "cashier" }) });
+    const placed = await store.create(COVERAGE_TENANT, "SalesOrder", { state: "placed" });
+    const cart = await store.create(COVERAGE_TENANT, "SalesOrder", { state: "cart" });
+    const line = await store.create(COVERAGE_TENANT, "OrderLine", { sales_order_id: String(placed["id"]), quantity: 2 });
+    const moved = await callOperation(compiled, "orderLine.update", { id: String(line["id"]) }, { sales_order_id: String(cart["id"]) });
+    expect(moved.status).toBe(422);
+    expect(moved.body["error"]).toBe("sales_order_locked_lines");
+    const edited = await callOperation(compiled, "orderLine.update", { id: String(line["id"]) }, { quantity: 9 });
+    expect(edited.body["error"]).toBe("sales_order_locked_lines");
+    // The control: a cart's lines stay editable.
+    const cartLine = await store.create(COVERAGE_TENANT, "OrderLine", { sales_order_id: String(cart["id"]), quantity: 1 });
+    expect((await callOperation(compiled, "orderLine.update", { id: String(cartLine["id"]) }, { quantity: 3 })).status).toBe(200);
+    expect((await store.get(COVERAGE_TENANT, "OrderLine", String(line["id"])))?.["quantity"]).toBe(2);
+  });
+
+  it("keeps a reversed entry's lines where they are, since its mirror offsets exactly those", async () => {
+    // `reversed` is the state a posted entry leaves `posted` for, and the reversal effect writes a
+    // mirror entry negating the lines it found at that moment. Moving, editing or deleting one of the
+    // original's lines afterwards — or deleting the original — breaks that pairing, so the line set
+    // is as immutable after the reversal as before it.
+    const { store, compiled } = coverageServer();
+    const reversed = await store.create(COVERAGE_TENANT, "JournalEntry", { state: "reversed" });
+    const draft = await store.create(COVERAGE_TENANT, "JournalEntry", { state: "draft" });
+    const line = await store.create(COVERAGE_TENANT, "JournalLine", {
+      journal_entry_id: String(reversed["id"]),
+      debit: 0,
+      credit: 500,
+    });
+    const moved = await callOperation(compiled, "journalLine.update", { id: String(line["id"]) }, { journal_entry_id: String(draft["id"]) });
+    expect(moved.status).toBe(422);
+    expect(moved.body["error"]).toBe("posted_entry_locked_lines");
+    const edited = await callOperation(compiled, "journalLine.update", { id: String(line["id"]) }, { credit: 1 });
+    expect(edited.body["error"]).toBe("posted_entry_locked_lines");
+    const added = await callOperation(compiled, "journalLine.create", {}, {
+      journal_entry_id: String(reversed["id"]),
+      ledger_account_id: "00000000-0000-4000-8000-0000000000a1",
+      debit: 1,
+      credit: 0,
+    });
+    expect(added.body["error"]).toBe("posted_entry_locked_lines");
+    const deleted = await callOperation(compiled, "journalEntry.delete", { id: String(reversed["id"]) }, null);
+    expect(deleted.body["error"]).toBe("posted_entry_immutable");
+    expect((await store.get(COVERAGE_TENANT, "JournalLine", String(line["id"])))?.["credit"]).toBe(500);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A lifecycle state field moves only through its declared transitions (C-03). It is an ordinary
+// `enum`, so a plain PATCH could set any state, skip the transition's grant and from-state check,
+// and re-enter a posting state: Bill draft → approved → draft → approved posted to the GL once per
+// arrival (L15). ADR-0391 guarded only the edge into `paid`.
+// ---------------------------------------------------------------------------
+
+const BILL_BODY = {
+  bill_number: "B-L15",
+  vendor_id: "00000000-0000-4000-8000-0000000000c1",
+  bill_date: "2026-06-01",
+  due_date: "2026-07-01",
+  subtotal: "100.00",
+  tax_total: "0.00",
+  total: "100.00",
+  currency: "USD",
+};
+
+async function journalEntryCount(store: InMemoryEntityStore): Promise<number> {
+  const page = await store.listPage(COVERAGE_TENANT, "JournalEntry", { sort: [], filters: [], limit: 100, cursor: null });
+  return page.records.length;
+}
+
+describe("compileOperateServer — lifecycle state moves only through transitions", () => {
+  it("refuses the L15 loop: a Bill cannot be PATCHed into approved, so nothing posts", async () => {
+    const { store, compiled } = coverageServer();
+    const created = await callOperation(compiled, "bill.create", {}, BILL_BODY);
+    expect(created.status).toBe(201);
+    expect(created.body["state"]).toBe("draft");
+    const id = String(created.body["id"]);
+
+    const patched = await callOperation(compiled, "bill.update", { id }, { state: "approved" });
+    expect(patched.status).toBe(422);
+    expect(patched.body["error"]).toBe("lifecycle_state_not_writable");
+    expect(patched.body["detail"]).toContain("from 'draft' fire 'approve'");
+    expect(await journalEntryCount(store)).toBe(0);
+
+    // The declared route still works, and posts exactly once.
+    const approved = await callOperation(compiled, "bill.approve", { id }, null);
+    expect(approved.status).toBe(200);
+    expect(await journalEntryCount(store)).toBe(1);
+
+    // And the way back that re-entered the posting state is closed.
+    const back = await callOperation(compiled, "bill.update", { id }, { state: "draft" });
+    expect(back.status).toBe(422);
+    expect(back.body["detail"]).toContain("no declared transition leads from 'approved' to 'draft'");
+    expect(await journalEntryCount(store)).toBe(1);
+  });
+
+  it("refuses a create that lands past the initial state, naming the route", async () => {
+    const { store, compiled } = coverageServer();
+    const r = await callOperation(compiled, "bill.create", {}, { ...BILL_BODY, state: "approved" });
+    expect(r.status).toBe(422);
+    expect(r.body["error"]).toBe("lifecycle_state_not_initial");
+    expect(r.body["detail"]).toContain("created in 'draft'");
+    expect(r.body["detail"]).toContain("fire 'approve'");
+    expect(await journalEntryCount(store)).toBe(0);
+  });
+
+  it("admits a create naming the initial state, and an update re-sending the stored state", async () => {
+    const { compiled } = coverageServer();
+    const r = await callOperation(compiled, "bill.create", {}, { ...BILL_BODY, state: "draft" });
+    expect(r.status).toBe(201);
+    const id = String(r.body["id"]);
+    const same = await callOperation(compiled, "bill.update", { id }, { state: "draft", total: "110.00", subtotal: "110.00" });
+    expect(same.status).toBe(200);
+    expect(same.body["total"]).toBe("110.00");
+  });
+
+  it("answers ahead of the coverage guard for a PATCH into paid, with the route that exists", async () => {
+    // Before this guard the coverage guard answered `uncovered_settlement`, and for a *covered*
+    // invoice it answered nothing: the state went `draft → paid` with no recognition posting.
+    const { store, compiled } = coverageServer();
+    const id = await seedInvoice(store, { state: "draft", total: 120, paid: 120 });
+    const r = await callOperation(compiled, "invoice.update", { id }, { state: "paid" });
+    expect(r.status).toBe(422);
+    expect(r.body["error"]).toBe("lifecycle_state_not_writable");
+    expect((await store.get(COVERAGE_TENANT, "Invoice", id))?.["state"]).toBe("draft");
+  });
+
+  it("runs ahead of invoice_locked, so a state PATCH on a sent invoice is told the transition", async () => {
+    // Only a document that satisfies both guards observes the order. `sent` is locked, so with the
+    // locked guard first this answered `invoice_locked … void it instead` — true, and not how the
+    // state moves: `mark_paid` is the route, and it is what the caller asked for.
+    const { store, compiled } = coverageServer();
+    const id = await seedInvoice(store, { state: "sent", total: 120, paid: 120 });
+    const r = await callOperation(compiled, "invoice.update", { id }, { state: "paid" });
+    expect(r.body["error"]).toBe("lifecycle_state_not_writable");
+    expect(r.body["detail"]).toContain("from 'sent' fire 'mark_paid'");
+  });
+
+  it("guards a lifecycle on a field other than `state`", async () => {
+    const { store, compiled } = coverageServer();
+    const opp = await store.create(COVERAGE_TENANT, "Opportunity", { stage: "prospecting" });
+    const r = await callOperation(compiled, "opportunity.update", { id: String(opp["id"]) }, { stage: "won" });
+    expect(r.status).toBe(422);
+    expect(r.body["detail"]).toContain("'stage' on Opportunity");
+    expect(r.body["detail"]).toContain(
+      "from 'prospecting' fire 'advance_to_qualification' then 'advance_to_proposal' then 'advance_to_negotiation' then 'win'",
+    );
+  });
+
+  it("posts and reverses a journal entry through its transitions, not by PATCH", async () => {
+    const { store, compiled } = coverageServer();
+    const entry = await store.create(COVERAGE_TENANT, "JournalEntry", { state: "draft", entry_number: "JE-1" });
+    const id = String(entry["id"]);
+    await store.create(COVERAGE_TENANT, "JournalLine", { journal_entry_id: id, debit: 10, credit: 0 });
+    await store.create(COVERAGE_TENANT, "JournalLine", { journal_entry_id: id, debit: 0, credit: 10 });
+    const patched = await callOperation(compiled, "journalEntry.update", { id }, { state: "posted" });
+    expect(patched.status).toBe(422);
+    expect(patched.body["detail"]).toContain("fire 'post'");
+    expect((await callOperation(compiled, "journalEntry.post", { id }, null)).status).toBe(200);
+    expect((await callOperation(compiled, "journalEntry.update", { id }, { state: "reversed" })).status).toBe(422);
+    expect((await callOperation(compiled, "journalEntry.reverse", { id }, null)).status).toBe(200);
+    expect(await journalEntryCount(store)).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A document whose state has caused a GL posting cannot be deleted, and its posting-relevant fields
+// and lines cannot change. The documents are the ones `defaultWriteEffects` posts from — Invoice and
+// JournalEntry were already locked; Bill (`approved`), Payment (`completed`) and WhtCertificate
+// (`confirmed`) were not. Measured live before this lock on `--store pg`: approve a Bill (200),
+// DELETE it (204), POST it again with the same `bill_number` (201), approve (200) — two journal
+// entries for one bill number, and a BillLine could be moved out of the approved bill (200).
+// ---------------------------------------------------------------------------
+
+describe("compileOperateServer — a posted document is locked", () => {
+  it("refuses deleting an approved Bill, which is what made delete-and-recreate double-post", async () => {
+    const { store, compiled } = coverageServer();
+    const created = await callOperation(compiled, "bill.create", {}, { ...BILL_BODY, bill_number: "B-DEL" });
+    const id = String(created.body["id"]);
+    expect((await callOperation(compiled, "bill.approve", { id }, null)).status).toBe(200);
+    expect(await journalEntryCount(store)).toBe(1);
+
+    const deleted = await callOperation(compiled, "bill.delete", { id }, null);
+    expect(deleted.status).toBe(422);
+    expect(deleted.body["error"]).toBe("bill_locked");
+    // The remedy names a declared transition and says what it does not do: voiding a bill posts no
+    // reversal (no effect in compile.ts reverses one), so its journal entry has to be reversed too.
+    expect(deleted.body["detail"]).toBe(
+      "an approved bill cannot be deleted; void it instead — voiding a bill posts no reversal, so" +
+        " reverse its journal entry as well",
+    );
+    expect(await store.get(COVERAGE_TENANT, "Bill", id)).not.toBeNull();
+    expect(await journalEntryCount(store)).toBe(1);
+  });
+
+  it("keeps a voided bill locked, so it cannot be deleted and recreated either", async () => {
+    // Void posts no reversal, so the approved bill's posting is still in the ledger once it is void.
+    const { store, compiled } = coverageServer();
+    const created = await callOperation(compiled, "bill.create", {}, { ...BILL_BODY, bill_number: "B-VOID" });
+    const id = String(created.body["id"]);
+    await callOperation(compiled, "bill.approve", { id }, null);
+    expect((await callOperation(compiled, "bill.void", { id }, null)).status).toBe(200);
+    const deleted = await callOperation(compiled, "bill.delete", { id }, null);
+    expect(deleted.body["error"]).toBe("bill_locked");
+    // No declared transition leaves `void`, so the refusal names no remedy rather than an impossible one.
+    expect(deleted.body["detail"]).toBe("a void bill cannot be deleted");
+    expect(await journalEntryCount(store)).toBe(1);
+  });
+
+  it("locks an approved bill's lines, including moving one out", async () => {
+    const { store, compiled } = coverageServer();
+    const approved = await store.create(COVERAGE_TENANT, "Bill", { bill_number: "B-L1", state: "approved", total: 100 });
+    const draft = await store.create(COVERAGE_TENANT, "Bill", { bill_number: "B-L2", state: "draft", total: 0 });
+    const line = await store.create(COVERAGE_TENANT, "BillLine", { bill_id: String(approved["id"]), amount: 100 });
+    const lineId = String(line["id"]);
+
+    const moved = await callOperation(compiled, "billLine.update", { id: lineId }, { bill_id: String(draft["id"]) });
+    expect(moved.status).toBe(422);
+    expect(moved.body["error"]).toBe("bill_locked_lines");
+    expect(moved.body["detail"]).toBe("cannot move a line out of an approved bill");
+    const edited = await callOperation(compiled, "billLine.update", { id: lineId }, { amount: 1 });
+    expect(edited.body["error"]).toBe("bill_locked_lines");
+    expect((await callOperation(compiled, "billLine.delete", { id: lineId }, null)).body["error"]).toBe("bill_locked_lines");
+    expect((await store.get(COVERAGE_TENANT, "BillLine", lineId))?.["bill_id"]).toBe(String(approved["id"]));
+
+    // The control: a draft bill's line moves and edits freely.
+    const draftLine = await store.create(COVERAGE_TENANT, "BillLine", { bill_id: String(draft["id"]), amount: 5 });
+    expect((await callOperation(compiled, "billLine.update", { id: String(draftLine["id"]) }, { amount: 6 })).status).toBe(200);
+  });
+
+  it("leaves the whole ordinary flow open: approve, pay, the effect settles the locked bill, refund", async () => {
+    // The control for every lock above. `paymentApplicationEffect` marks the bill paid through
+    // `store.update` while the bill sits in a locked state, and `refund` fires from a locked one; a
+    // lock that reached either would break the flow it exists to protect. Effects write through the
+    // store, past the guards — this pins that rather than assuming it.
+    const { store, compiled } = coverageServer();
+    const bill = await callOperation(compiled, "bill.create", {}, { ...BILL_BODY, bill_number: "B-FLOW" });
+    const billId = String(bill.body["id"]);
+    expect((await callOperation(compiled, "bill.approve", { id: billId }, null)).status).toBe(200);
+    const pay = await callOperation(compiled, "payment.create", {}, {
+      direction: "outbound",
+      amount: "100.00",
+      bill_id: billId,
+    });
+    expect(pay.status).toBe(201);
+    const payId = String(pay.body["id"]);
+    expect((await callOperation(compiled, "payment.submit", { id: payId }, null)).status).toBe(200);
+    expect((await callOperation(compiled, "payment.complete", { id: payId }, null)).status).toBe(200);
+    expect((await store.get(COVERAGE_TENANT, "Bill", billId))?.["state"]).toBe("paid");
+    expect((await callOperation(compiled, "payment.refund", { id: payId }, null)).status).toBe(200);
+    // Recognition and settlement: one entry each, and nothing posted twice along the way.
+    expect(await journalEntryCount(store)).toBe(2);
+  });
+
+  it("locks a completed payment, whose settlement has posted", async () => {
+    const { store, compiled } = coverageServer();
+    const paid = await store.create(COVERAGE_TENANT, "Payment", { payment_number: "P-1", state: "completed", amount: 50 });
+    const id = String(paid["id"]);
+    const edited = await callOperation(compiled, "payment.update", { id }, { amount: 500 });
+    expect(edited.status).toBe(422);
+    expect(edited.body["error"]).toBe("payment_locked");
+    expect(edited.body["detail"]).toBe(
+      "a completed payment cannot be edited; refund it if the money was returned — a refund posts no" +
+        " reversal, so reverse its journal entry as well",
+    );
+    const deleted = await callOperation(compiled, "payment.delete", { id }, null);
+    expect(deleted.body["error"]).toBe("payment_locked");
+    expect((await store.get(COVERAGE_TENANT, "Payment", id))?.["amount"]).toBe(50);
+
+    // The control: a pending payment has posted nothing, so it is still editable.
+    const pending = await store.create(COVERAGE_TENANT, "Payment", { payment_number: "P-2", state: "pending", amount: 50 });
+    expect((await callOperation(compiled, "payment.update", { id: String(pending["id"]) }, { amount: 60 })).status).toBe(200);
+  });
+
+  it("closes the WhtCertificate confirm loop, which re-posted the clearing entry on every arrival", async () => {
+    // WhtCertificate has no lifecycle in any shipped pack, so `lifecycleStateGuard` never reaches it and
+    // its state moves by a plain update. Before this lock confirmed → draft → confirmed posted the
+    // clearing entry twice.
+    const { store, compiled } = coverageServer();
+    const cert = await store.create(COVERAGE_TENANT, "WhtCertificate", {
+      certificate_number: "WHT-1",
+      state: "draft",
+      amount: 30,
+      currency: "USD",
+    });
+    const id = String(cert["id"]);
+    expect((await callOperation(compiled, "whtCertificate.update", { id }, { state: "confirmed" })).status).toBe(200);
+    expect(await journalEntryCount(store)).toBe(1);
+
+    const back = await callOperation(compiled, "whtCertificate.update", { id }, { state: "draft" });
+    expect(back.status).toBe(422);
+    expect(back.body["error"]).toBe("wht_certificate_locked");
+    expect(back.body["detail"]).toContain("set its state to 'void' instead");
+    expect(await journalEntryCount(store)).toBe(1);
+
+    // The one move left open lands in a locked state and posts nothing, so it cannot be walked back.
+    expect((await callOperation(compiled, "whtCertificate.update", { id }, { state: "void" })).status).toBe(200);
+    const again = await callOperation(compiled, "whtCertificate.update", { id }, { state: "confirmed" });
+    expect(again.body["error"]).toBe("wht_certificate_locked");
+    expect(again.body["detail"]).toBe("a void WHT certificate cannot be edited");
+    expect(await journalEntryCount(store)).toBe(1);
+  });
+
+  it("names a reversed entry's state and no impossible remedy, and a posted one's real remedy", async () => {
+    const { store, compiled } = coverageServer();
+    const posted = await store.create(COVERAGE_TENANT, "JournalEntry", { state: "posted", entry_number: "JE-P" });
+    const reversed = await store.create(COVERAGE_TENANT, "JournalEntry", { state: "reversed", entry_number: "JE-R" });
+    const p = await callOperation(compiled, "journalEntry.delete", { id: String(posted["id"]) }, null);
+    expect(p.body["detail"]).toBe("a posted journal entry cannot be deleted; reverse it instead");
+    const r = await callOperation(compiled, "journalEntry.delete", { id: String(reversed["id"]) }, null);
+    expect(r.body["error"]).toBe("posted_entry_immutable");
+    expect(r.body["detail"]).toBe("a reversed journal entry cannot be deleted");
+    const line = await store.create(COVERAGE_TENANT, "JournalLine", { journal_entry_id: String(reversed["id"]), debit: 1, credit: 0 });
+    const edited = await callOperation(compiled, "journalLine.update", { id: String(line["id"]) }, { debit: 2 });
+    expect(edited.body["detail"]).toBe("cannot modify the lines of a reversed journal entry");
+  });
+
+  it("names a correction only from the states it fires from", async () => {
+    // `void` fires from draft/sent/overdue, so a paid invoice's refusal used to name it anyway.
+    const { store, compiled } = coverageServer();
+    const sent = await seedInvoice(store, { state: "sent", total: 10 });
+    const paid = await seedInvoice(store, { state: "paid", total: 10, paid: 10 });
+    expect((await callOperation(compiled, "invoice.delete", { id: sent }, null)).body["detail"]).toBe(
+      "an issued invoice cannot be deleted; void it instead",
+    );
+    expect((await callOperation(compiled, "invoice.delete", { id: paid }, null)).body["detail"]).toBe(
+      "an issued invoice cannot be deleted",
+    );
+  });
+
+  it("names the state a locked document is in, not the one its config was written for", async () => {
+    // The noun was fixed per document, so a `submitted` purchase order — locked before approval — was
+    // refused as "an approved purchase order", and an invoice voided straight from draft as "an issued
+    // invoice": item 2's wrong-noun defect on the reversed journal entry, in two more documents.
+    const { store, compiled } = coverageServer();
+    const po = await store.create(COVERAGE_TENANT, "PurchaseOrder", { po_number: "PO-1", state: "submitted" });
+    const poDeleted = await callOperation(compiled, "purchaseOrder.delete", { id: String(po["id"]) }, null);
+    expect(poDeleted.body["error"]).toBe("purchase_order_locked");
+    expect(String(poDeleted.body["detail"])).toMatch(/^a submitted purchase order cannot be deleted/);
+    const voided = await seedInvoice(store, { state: "void", total: 10 });
+    expect(String((await callOperation(compiled, "invoice.delete", { id: voided }, null)).body["detail"])).toMatch(
+      /^a void invoice cannot be deleted/,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A record with no stored state is in the lifecycle's initial state (C-03's latent half). The
+// transition handler skipped its from-state check when the stored state was not a string, and the
+// create guard admits an omitted state, so on a manifest whose state field is optional with no
+// default a stateless record could fire any transition from anywhere. No shipped pack reaches it —
+// all 137 resolved lifecycles have a required state field with a literal default — so this drives a
+// synthetic manifest.
+// ---------------------------------------------------------------------------
+
+const STATELESS = {
+  meta: { name: "stateless", version: "1.0.0" },
+  entities: [
+    {
+      name: "Claim",
+      fields: [
+        { name: "title", type: { kind: "text" } },
+        { name: "state", type: { kind: "enum", values: ["draft", "submitted", "approved"] } },
+      ],
+    },
+  ],
+  roles: { erp_admin: { name: "erp_admin" } },
+  permissions: {
+    Claim: {
+      read: { roles: ["erp_admin"] },
+      list: { roles: ["erp_admin"] },
+      create: { roles: ["erp_admin"] },
+      update: { roles: ["erp_admin"] },
+      transitions: { submit: { roles: ["erp_admin"] }, approve: { roles: ["erp_admin"] } },
+    },
+  },
+  workflows: {
+    claim_lifecycle: {
+      kind: "entityLifecycle",
+      entity: "Claim",
+      stateField: "state",
+      initialState: "draft",
+      states: [{ name: "draft" }, { name: "submitted" }, { name: "approved" }],
+      transitions: [
+        { name: "submit", from: ["draft"], to: "submitted", trigger: { kind: "userAction" } },
+        { name: "approve", from: ["submitted"], to: "approved", trigger: { kind: "userAction" } },
+      ],
+    },
+  },
+};
+
+describe("compileOperateServer — an unset lifecycle state is the initial state", () => {
+  function statelessServer() {
+    const store = new InMemoryEntityStore();
+    const compiled = compileOperateServer(STATELESS as unknown as Manifest, {
+      store,
+      principalRoles: () => ({ primaryRole: "erp_admin" }),
+    });
+    return { store, compiled };
+  }
+
+  it("refuses skipping ahead from a record created with no state", async () => {
+    const { store, compiled } = statelessServer();
+    const created = await callOperation(compiled, "claim.create", {}, { title: "t" });
+    expect(created.status).toBe(201);
+    const id = String(created.body["id"]);
+    expect((await store.get(COVERAGE_TENANT, "Claim", id))?.["state"]).toBeUndefined();
+
+    const skipped = await callOperation(compiled, "claim.approve", { id }, null);
+    expect(skipped.status).toBe(409);
+    expect(skipped.body["detail"]).toBe("'approve' cannot fire from 'draft'");
+    expect((await callOperation(compiled, "claim.submit", { id }, null)).status).toBe(200);
+    expect((await callOperation(compiled, "claim.approve", { id }, null)).status).toBe(200);
+  });
+
+  it("refuses a stored state that is not a string, rather than reading it as any state", async () => {
+    const { store, compiled } = statelessServer();
+    const rec = await store.create(COVERAGE_TENANT, "Claim", { title: "t", state: 7 });
+    const r = await callOperation(compiled, "claim.submit", { id: String(rec["id"]) }, null);
+    expect(r.status).toBe(409);
+    expect(r.body["detail"]).toContain("holds no state of this lifecycle");
+  });
+
+  it("admits an update re-sending the initial state to a record stored with none", async () => {
+    // The update arm reads the unset stored state as `initialState` too, so the two agree.
+    const { compiled } = statelessServer();
+    const created = await callOperation(compiled, "claim.create", {}, { title: "t" });
+    const id = String(created.body["id"]);
+    expect((await callOperation(compiled, "claim.update", { id }, { state: "draft" })).status).toBe(200);
+    expect((await callOperation(compiled, "claim.update", { id }, { state: "approved" })).status).toBe(422);
+  });
+
+  it("admits an ordinary edit of a record stored with no state", async () => {
+    // The merged `after` carries no state either, so a guard reading only the stored side as
+    // `initialState` refused this 422 — every edit of a stateless record, over a field it never named.
+    const { compiled } = statelessServer();
+    const created = await callOperation(compiled, "claim.create", {}, { title: "t" });
+    const id = String(created.body["id"]);
+    const edited = await callOperation(compiled, "claim.update", { id }, { title: "t2" });
+    expect(edited.status).toBe(200);
+    expect(edited.body["title"]).toBe("t2");
   });
 });

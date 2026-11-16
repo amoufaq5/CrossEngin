@@ -633,6 +633,18 @@ What the flag buys is the limit being *yours* and every decision being on the re
   serving role cannot reclaim them. So scale the API for request throughput, and expect one
   replica's worth of scheduled work to become N replicas' worth of duplicated scheduled work.
 
+### If a credential was committed
+
+- **Rotate it first.** Revoke the key at its provider and change the password in Postgres and in
+  `.env`; anyone who cloned or fetched the branch already holds the old value, and nothing done to
+  the repository takes it back.
+- **Rewriting history is a separate decision.** It shortens how long the value is easy to find; it
+  does not unpublish it, so it never substitutes for rotation, and it rewrites every clone's history.
+- **The scanner only prevents the next one.** `packages/testing/src/strategy/secret-values.ts` runs
+  in the pre-commit hook and in CI and refuses a key-shaped value in any tracked file, or a literal
+  value for a secret-named variable in an env or YAML file. It reads files the index holds — a staged
+  `.env` included — and never an untracked one, and it cannot see what is already in history.
+
 ### Clearing the foreign-key drift after an upgrade
 
 A **fresh** database is unaffected by this section: it gets the patched shape straight out of

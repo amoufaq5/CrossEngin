@@ -20,3 +20,4 @@ export * from "./pg-unreadable-rows.js";
 export * from "./entity-field-aperture.js";
 export * from "./manifest-event-names.js";
 export * from "./webhook-event-producers.js";
+export * from "./secret-values.js";

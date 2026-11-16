@@ -8,6 +8,7 @@ import {
   FIELD_REQUEST_SCHEMAS,
   FIELD_RESPONSE_SCHEMAS,
   UNDESCRIBABLE_FIELD_KINDS,
+  entityLifecycleShape,
   entitySchemas,
   fieldRequestSchema,
   fieldResponseSchema,
@@ -214,7 +215,7 @@ describe("entitySchemas over the real erp-core pack", () => {
       own += e.fields.length;
       resolved += resolvedFields(e, traits).length;
       props += Object.keys(
-        entitySchemas(e, traits).response.properties ?? {},
+        entitySchemas(e, traits, null).response.properties ?? {},
       ).length;
     }
     expect(own).toBe(426);
@@ -224,7 +225,7 @@ describe("entitySchemas over the real erp-core pack", () => {
   });
 
   it("carries the four trait fields a narrow read would omit", () => {
-    const v = entitySchemas(entity("Vendor"), traits);
+    const v = entitySchemas(entity("Vendor"), traits, null);
     const names = Object.keys(v.response.properties ?? {});
     for (const n of ["created_at", "updated_at", "created_by", "updated_by"]) {
       expect(names, n).toContain(n);
@@ -254,7 +255,7 @@ describe("entitySchemas over the real erp-core pack", () => {
       const fields = resolvedFields(e, traits);
       declared += fields.filter((f) => f.required === true).length;
       noDefault += fields.filter((f) => f.required === true && f.default === undefined).length;
-      required += entitySchemas(e, traits).create.required?.length ?? 0;
+      required += entitySchemas(e, traits, null).create.required?.length ?? 0;
     }
     expect(declared).toBe(395);
     expect(required).toBe(noDefault);
@@ -267,8 +268,8 @@ describe("entitySchemas over the real erp-core pack", () => {
     // settings arm that read whether a settings STORE was wired, while the fill reads the tenant's
     // own settings VALUES. Every deployment wires a store — `ResolvedStores.settingsStore` is not
     // optional — so all three were understated on every tenant until its settings were populated.
-    const inv = entitySchemas(entity("Invoice"), traits).create.required ?? [];
-    const bill = entitySchemas(entity("Bill"), traits).create.required ?? [];
+    const inv = entitySchemas(entity("Invoice"), traits, null).create.required ?? [];
+    const bill = entitySchemas(entity("Bill"), traits, null).create.required ?? [];
     expect(inv).toContain("currency");
     expect(inv).toContain("due_date");
     expect(bill).toContain("due_date");
@@ -280,13 +281,13 @@ describe("entitySchemas over the real erp-core pack", () => {
 
   it("describes every field of every entity — nothing undescribable in any pack entity", () => {
     const undescribable = entities.flatMap(
-      (e) => entitySchemas(e, traits).undescribable,
+      (e) => entitySchemas(e, traits, null).undescribable,
     );
     expect(undescribable).toEqual([]);
   });
 
   it("leaves an update body wholly optional and sets no additionalProperties anywhere", () => {
-    const v = entitySchemas(entity("Invoice"), traits);
+    const v = entitySchemas(entity("Invoice"), traits, null);
     expect(v.update.required).toBeUndefined();
     // Measured rather than cautious: an unknown key is accepted, stored and echoed by the JSONB and
     // in-memory stores and silently dropped by the column store, so `false` would be false of two
@@ -296,11 +297,42 @@ describe("entitySchemas over the real erp-core pack", () => {
     expect(v.update.additionalProperties).toBeUndefined();
   });
 
+  it("publishes a lifecycle state field as the server enforces it, not as a free enum", () => {
+    // The server refuses every create value but the initial state and every update value but the
+    // stored one (`lifecycleStateGuard`). The document used to publish Invoice.state as a five-value
+    // writable enum on both bodies, which told a generated client it could do what each request then
+    // answered 422 to.
+    const lifecycle = entityLifecycleShape(manifest, "Invoice");
+    expect(lifecycle).toEqual({ stateField: "state", initialState: "draft" });
+    const v = entitySchemas(entity("Invoice"), traits, lifecycle);
+    expect(v.create.properties?.["state"]?.enum).toEqual(["draft"]);
+    expect(v.create.properties?.["state"]?.description).toContain("transition");
+    expect(v.update.properties?.["state"]?.readOnly).toBe(true);
+    expect(v.update.properties?.["state"]?.description).toContain("refused 422");
+    // The response still says every state the record can be in.
+    expect(v.response.properties?.["state"]?.enum).toHaveLength(5);
+    // And a field that is not the state field is untouched.
+    expect(v.update.properties?.["total"]?.readOnly).toBeUndefined();
+    // The control: with no lifecycle the field is published as declared.
+    const bare = entitySchemas(entity("Invoice"), traits, null);
+    expect(bare.create.properties?.["state"]?.enum).toHaveLength(5);
+    expect(bare.update.properties?.["state"]?.readOnly).toBeUndefined();
+  });
+
+  it("follows the lifecycle's own state field, which is not always `state`", () => {
+    const lifecycle = entityLifecycleShape(manifest, "Opportunity");
+    expect(lifecycle?.stateField).toBe("stage");
+    const v = entitySchemas(entity("Opportunity"), traits, lifecycle);
+    expect(v.create.properties?.["stage"]?.enum).toEqual([lifecycle?.initialState]);
+    expect(v.update.properties?.["stage"]?.readOnly).toBe(true);
+    expect(entityLifecycleShape(manifest, "Vendor")).toBeNull();
+  });
+
   it("emits no pattern for `id`, because the API does not enforce one", () => {
     // `rec_` + base36 is the GENERATOR's shape; `resolveRecordId` keeps a caller-supplied id as
     // given. A pattern would describe a constraint this API does not have, which is the
     // falsely-specific direction of a falsely-complete description.
-    const id = entitySchemas(entity("Vendor"), traits)
+    const id = entitySchemas(entity("Vendor"), traits, null)
       .response.properties?.["id"];
     expect(id?.type).toBe("string");
     expect(id?.pattern).toBeUndefined();

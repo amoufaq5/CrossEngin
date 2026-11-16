@@ -56,6 +56,7 @@ import { sequenceFieldPlans, type SequenceAllocator, type SequenceFieldPlan } fr
 import { planHasSettingsDefaults, settingsDefaultPlan, type SettingsDefaultPlan } from "./settings-defaults.js";
 import {
   journalPostingGuard,
+  lifecycleStateGuard,
   lockedDocumentGuard,
   postedEntryImmutabilityGuard,
   SETTLEMENT_COVERAGE_DOCUMENTS,
@@ -333,6 +334,75 @@ function buildDefaultPlans(manifest: Manifest): Map<string, readonly LiteralDefa
   return plans;
 }
 
+/**
+ * The remedy a locked document's refusal names, per locked state: the declared transitions out of
+ * that state which correct the document, each with the sentence that names it.
+ *
+ * Read off the entity's own lifecycle rather than written once per document, because one sentence
+ * per document was false of some of its locked states — `void it instead` to a `paid` invoice
+ * (`void` fires from draft, sent and overdue), `amend it instead` to a `paid` tax return. A state no
+ * correction leaves gets no remedy at all, which is ADR-0334's rule: naming a fix that cannot work
+ * is worse than naming none. An entity with no lifecycle has no transitions to name, so it gets an
+ * empty map rather than the sentence a pack's lifecycle would have earned.
+ */
+function correctionHints(
+  manifest: Manifest,
+  entity: string,
+  lockedStates: readonly string[],
+  corrections: Readonly<Record<string, string>>,
+): Readonly<Record<string, string>> {
+  const hints: Record<string, string> = {};
+  for (const wf of Object.values(manifest.workflows ?? {})) {
+    if (wf.kind !== "entityLifecycle" || wf.entity !== entity) continue;
+    for (const state of lockedStates) {
+      const clauses = wf.transitions
+        .filter((t) => corrections[t.name] !== undefined && (Array.isArray(t.from) ? t.from : [t.from]).includes(state))
+        .map((t) => corrections[t.name] as string);
+      if (clauses.length > 0) hints[state] = clauses.join("; or ");
+    }
+  }
+  return hints;
+}
+
+function declaresTransition(manifest: Manifest, entity: string, name: string): boolean {
+  return Object.values(manifest.workflows ?? {}).some(
+    (wf) => wf.kind === "entityLifecycle" && wf.entity === entity && wf.transitions.some((t) => t.name === name),
+  );
+}
+
+function hasLifecycle(manifest: Manifest, entity: string): boolean {
+  return lifecycleStateField(manifest, entity) !== null;
+}
+
+/**
+ * The documents whose state, once reached, has caused a general-ledger posting, and the states that
+ * lock them. Enumerated from `defaultWriteEffects`' own triggers rather than chosen: `Bill`'s
+ * recognition fires on entering `approved`, a `Payment`'s settlement on entering `completed`, and a
+ * `WhtCertificate`'s clearing on entering `confirmed` (the invoice and journal-entry triggers are
+ * already locked above them). The rule is *a document whose state has caused a posting cannot be
+ * deleted, and its posting-relevant fields and lines cannot change* — otherwise deleting it and
+ * creating it again with the same number posts a second time, which was measured live for an
+ * approved Bill (204, 201, 200: two journal entries for one bill number).
+ *
+ * The locked set is every state at or past the trigger, including the ones that **post no
+ * reversal**: a voided bill, a refunded payment and a voided certificate all leave their posting in
+ * the ledger, and no effect in this file reverses any of them, so leaving them unlocked would reopen
+ * the delete-and-recreate route one state further on. `void` is reachable from `draft` too, so a
+ * bill voided without ever being approved is locked as well; a stored record does not say which way
+ * it came, and refusing to delete a void document is the `Invoice` precedent.
+ *
+ * Deliberately **not** here: `Expense`, which no effect posts from in any state, and `FiscalPeriod`,
+ * whose `closed` edge posts the unrealized FX revaluation. Reopening a closed period is a domain act
+ * the console documents (`fetchRevaluationEntry`'s comment states that a re-close posts a second
+ * entry), so a lock would either forbid reopening — a decision nobody has made — or allow it and be
+ * defeated by it. The honest fix there is the revaluation reversing its own prior entry, not a lock.
+ */
+const POSTED_DOCUMENT_LOCKS = {
+  Bill: { lockedStates: ["approved", "overdue", "paid", "void"], child: { entity: "BillLine", parentField: "bill_id" }, error: "bill_locked", noun: "approved bill" },
+  Payment: { lockedStates: ["completed", "refunded"], child: null, error: "payment_locked", noun: "completed payment" },
+  WhtCertificate: { lockedStates: ["confirmed", "void"], child: null, error: "wht_certificate_locked", noun: "confirmed WHT certificate" },
+} as const;
+
 /** Guards inferred from the manifest's shape; opt out by passing `writeGuards: []`. */
 function defaultWriteGuards(
   manifest: Manifest,
@@ -340,8 +410,41 @@ function defaultWriteGuards(
 ): readonly WriteGuard[] {
   const names = new Set((manifest.entities ?? []).map((e) => e.name));
   const guards: WriteGuard[] = [];
+  // First: a state value the caller may not write is refused before any other guard reads it as a
+  // fact. Otherwise a `PATCH {"state":"paid"}` from `sent` reaches `invoice_locked … void it
+  // instead`, which is true and is not the remedy — the state moves through `mark_paid`.
+  for (const wf of Object.values(manifest.workflows ?? {})) {
+    if (wf.kind !== "entityLifecycle" || !names.has(wf.entity)) continue;
+    guards.push(
+      lifecycleStateGuard({
+        entity: wf.entity,
+        stateField: wf.stateField,
+        initialState: wf.initialState,
+        transitions: wf.transitions.map((t) => ({
+          name: t.name,
+          from: Array.isArray(t.from) ? [...t.from] : [t.from],
+          to: t.to,
+        })),
+      }),
+    );
+  }
+  // A posting is corrected by reversing the journal entry it made, so every "posts no reversal"
+  // remedy below names that only where the manifest declares the `reverse` transition.
+  const jeReverses = declaresTransition(manifest, "JournalEntry", "reverse");
+  const noReversal = (act: string): string =>
+    jeReverses ? `${act} posts no reversal, so reverse its journal entry as well` : `${act} posts no reversal`;
   if (names.has("JournalEntry") && names.has("JournalLine")) {
-    guards.push(journalPostingGuard(), postedEntryImmutabilityGuard());
+    guards.push(
+      journalPostingGuard(),
+      // With no lifecycle the guard's own default stands: its `posted → reversed` plain update is the
+      // route a lifecycle-less entry is reversed by, so `reverse it instead` is real there.
+      postedEntryImmutabilityGuard(
+        {},
+        hasLifecycle(manifest, "JournalEntry")
+          ? correctionHints(manifest, "JournalEntry", ["posted", "reversed"], { reverse: "reverse it instead" })
+          : undefined,
+      ),
+    );
   }
   // Issued invoices are legal records: once out of draft they can't be edited or
   // deleted (correct by void/credit note); their lines lock with them.
@@ -354,7 +457,9 @@ function defaultWriteGuards(
         lockedError: "invoice_locked",
         childLockedError: "invoice_locked_lines",
         noun: "issued invoice",
-        reverseHint: "void it instead",
+        // `void` fires from `draft` too, so a void invoice may never have been issued.
+        nounByState: { void: "void invoice" },
+        hintByState: correctionHints(manifest, "Invoice", ["sent", "overdue", "paid", "void"], { void: "void it instead" }),
       }),
     );
   }
@@ -367,25 +472,33 @@ function defaultWriteGuards(
         lockedStates: ["filed", "paid"],
         lockedError: "tax_return_locked",
         noun: "filed tax return",
-        reverseHint: "amend it instead",
+        hintByState: correctionHints(manifest, "TaxReturn", ["filed", "paid"], { amend: "amend it instead" }),
       }),
     );
   }
   // A committed sales order is a customer commitment: once it leaves draft it
   // can't be edited or deleted out of band (cancel via the lifecycle instead).
   // States span the core (confirmed→…→closed) and retail (placed/returned) lifecycles.
+  // Core's line entity is `SalesOrderLine` and retail's is `OrderLine`, and a resolved retail manifest
+  // carries both — so each present one gets the child arm. Keying on `SalesOrderLine` alone left a
+  // `placed` retail order's own lines editable, movable and deletable while its states were listed
+  // here as locked.
   if (names.has("SalesOrder")) {
-    guards.push(
-      lockedDocumentGuard({
-        entity: "SalesOrder",
-        lockedStates: ["confirmed", "fulfilled", "invoiced", "closed", "placed", "returned"],
-        ...(names.has("SalesOrderLine") ? { childEntity: "SalesOrderLine", childParentField: "sales_order_id" } : {}),
-        lockedError: "sales_order_locked",
-        childLockedError: "sales_order_locked_lines",
-        noun: "committed sales order",
-        reverseHint: "cancel it instead",
-      }),
-    );
+    const SALES_ORDER_LOCKED_STATES = ["confirmed", "fulfilled", "invoiced", "closed", "placed", "returned"];
+    const lineEntities = ["SalesOrderLine", "OrderLine"].filter((n) => names.has(n));
+    for (const child of lineEntities.length > 0 ? lineEntities : [null]) {
+      guards.push(
+        lockedDocumentGuard({
+          entity: "SalesOrder",
+          lockedStates: SALES_ORDER_LOCKED_STATES,
+          ...(child !== null ? { childEntity: child, childParentField: "sales_order_id" } : {}),
+          lockedError: "sales_order_locked",
+          childLockedError: "sales_order_locked_lines",
+          noun: "committed sales order",
+          hintByState: correctionHints(manifest, "SalesOrder", SALES_ORDER_LOCKED_STATES, { cancel: "cancel it instead" }),
+        }),
+      );
+    }
   }
   // An approved purchase order is a supplier commitment: locked once submitted.
   if (names.has("PurchaseOrder")) {
@@ -397,7 +510,70 @@ function defaultWriteGuards(
         lockedError: "purchase_order_locked",
         childLockedError: "purchase_order_locked_lines",
         noun: "approved purchase order",
-        reverseHint: "cancel it instead",
+        // `submitted` precedes approval, so "an approved purchase order" was false of it.
+        nounByState: { submitted: "submitted purchase order", received: "received purchase order", closed: "closed purchase order" },
+        hintByState: correctionHints(manifest, "PurchaseOrder", ["submitted", "approved", "received", "closed"], {
+          cancel: "cancel it instead",
+        }),
+      }),
+    );
+  }
+  // Documents whose state has caused a GL posting — see `POSTED_DOCUMENT_LOCKS` for the enumeration
+  // and for the two that are deliberately absent.
+  if (names.has("Bill")) {
+    const lock = POSTED_DOCUMENT_LOCKS.Bill;
+    guards.push(
+      lockedDocumentGuard({
+        entity: "Bill",
+        lockedStates: lock.lockedStates,
+        ...(names.has(lock.child.entity) ? { childEntity: lock.child.entity, childParentField: lock.child.parentField } : {}),
+        lockedError: lock.error,
+        childLockedError: "bill_locked_lines",
+        noun: lock.noun,
+        nounByState: { void: "void bill", paid: "paid bill", overdue: "overdue bill" },
+        hintByState: correctionHints(manifest, "Bill", lock.lockedStates, {
+          void: `void it instead — ${noReversal("voiding a bill")}`,
+        }),
+      }),
+    );
+  }
+  if (names.has("Payment")) {
+    const lock = POSTED_DOCUMENT_LOCKS.Payment;
+    guards.push(
+      lockedDocumentGuard({
+        entity: "Payment",
+        lockedStates: lock.lockedStates,
+        lockedError: lock.error,
+        noun: lock.noun,
+        nounByState: { refunded: "refunded payment" },
+        hintByState: correctionHints(manifest, "Payment", lock.lockedStates, {
+          refund: `refund it if the money was returned — ${noReversal("a refund")}`,
+        }),
+      }),
+    );
+  }
+  // No lifecycle in any shipped pack, so its state moves by a plain update and the lifecycle guard
+  // does not reach it: `confirmed → draft → confirmed` posted the clearing entry once per arrival.
+  // The one move left open is `confirmed → void`, the field's declared forward value, which posts
+  // nothing and lands in a locked state, so it cannot be walked back into `confirmed`.
+  if (names.has("WhtCertificate")) {
+    const lock = POSTED_DOCUMENT_LOCKS.WhtCertificate;
+    const stateField = lifecycleStateField(manifest, "WhtCertificate");
+    guards.push(
+      lockedDocumentGuard({
+        entity: "WhtCertificate",
+        ...(stateField !== null ? { stateField } : {}),
+        lockedStates: lock.lockedStates,
+        ...(stateField === null ? { allowedUpdateTransitions: { confirmed: ["void"] }, ignoredFields: ["confirmed_at"] } : {}),
+        lockedError: lock.error,
+        noun: lock.noun,
+        nounByState: { void: "void WHT certificate" },
+        hintByState:
+          stateField === null
+            ? { confirmed: `set its state to 'void' instead — ${noReversal("voiding a certificate")}` }
+            : correctionHints(manifest, "WhtCertificate", lock.lockedStates, {
+                void: `void it instead — ${noReversal("voiding a certificate")}`,
+              }),
       }),
     );
   }
@@ -421,7 +597,9 @@ function defaultWriteGuards(
   // Everything this guard is for still reaches it, which is why last costs nothing: a `transition`
   // (the locked guard returns null on that operation by design, so `mark_paid` lands here), a
   // `create`, an update from an unlocked state — `draft` is Invoice's only one, and `draft → paid`
-  // is no declared transition — and anything at all on `Bill`, which has no locked-document guard.
+  // is no declared transition — and, on `Bill`, an update from `draft`, its one unlocked state.
+  // The state PATCHes in this paragraph are answered by the lifecycle guard at the head of the list
+  // now; the order between these two is still observable on a write raising a paid invoice's total.
   //
   // `stateField` comes from the entity's own lifecycle rather than from the guard's `state`
   // fallback, and that is a correctness fix rather than a generalisation: the guard reads the field

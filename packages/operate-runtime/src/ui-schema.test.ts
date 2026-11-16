@@ -135,6 +135,24 @@ describe("buildUiSchema", () => {
     if (undefaulted !== undefined) expect(undefaulted.defaulted).toBeUndefined();
   });
 
+  it("marks a defaulted lifecycle state field read-only, since only a transition may move it", () => {
+    expect(entity("Bill").fields.find((f) => f.name === "state")?.readOnly).toBe(true);
+    expect(entity("Opportunity").fields.find((f) => f.name === "stage")?.readOnly).toBe(true);
+    // An entity with no lifecycle keeps its status editable: a plain update is its only route.
+    expect(entity("FiscalPeriod").fields.find((f) => f.name === "status")?.readOnly).toBeUndefined();
+  });
+
+  it("leaves a lifecycle state field with no default editable, so a create can name the initial state", () => {
+    const m = {
+      entities: [{ name: "Ticket", fields: [{ name: "state", type: { kind: "enum", values: ["new", "done"] } }] }],
+      workflows: {
+        t: { kind: "entityLifecycle", entity: "Ticket", stateField: "state", initialState: "new", transitions: [] },
+      },
+    } as unknown as Manifest;
+    const t = buildUiSchema(m, new Date("2026-06-20T00:00:00Z")).entities.find((e) => e.name === "Ticket");
+    expect(t?.fields.find((f) => f.name === "state")?.readOnly).toBeUndefined();
+  });
+
   it("exposes searchableFields as text-like fields (never enum/number/state)", () => {
     for (const e of schema.entities) {
       for (const name of e.searchableFields) {

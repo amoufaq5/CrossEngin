@@ -9183,9 +9183,9 @@ typechecks *something*, which is the dangerous outcome) and runs the one script.
 (`packages/config`, which is JSON only, and `apps/operate-web`, a Next app that already includes every
 `.ts`/`.tsx`) are spelled out as lines, so adding a third is visible in a diff.
 
-**`packages/testing/src/strategy/` holds the workspace-level rules**, and there are **fourteen** now
-(the thirteenth, `test-runner-config.ts`, and the fourteenth, `webhook-event-producers.ts`, are
-described after the twelve):
+**`packages/testing/src/strategy/` holds the workspace-level rules**, and there are **fifteen** now
+(the thirteenth, `test-runner-config.ts`, the fourteenth, `webhook-event-producers.ts`, and the
+fifteenth, `secret-values.ts` (ADR-0420), are described after the twelve):
 `typecheck-config.ts` (ADR-0307), `pg-column-coverage.ts` (ADR-0333), which reads `META_TABLES`
 and every store's SQL *as text* and asserts the two things a fake `PgConnection` structurally
 cannot — that every column a statement names exists, and that every `notNull`-with-no-default
@@ -15639,6 +15639,36 @@ method is that a stale figure misleads.
    Cosmetic and **not free to fix**: the slugs are in every client's URLs, in the OpenAPI document
    and in the console's routes, so correcting them is a breaking change that wants either an alias
    period or an explicit per-entity slug on the manifest — a decision rather than a patch.
+
+### The external due-diligence audit, and what of it is closed
+
+An external audit at `2b98f46` (66 ranked findings, 394 module findings, 32 live tests) was checked
+against the tree at `f6faf05`: **no finding was false when written**, 63 of 66 ranked findings were
+true and 3 partly true, and at `f6faf05` 40 were still open and 24 partly fixed. Its three critical
+findings are closed or narrowed as follows; the high, medium and low tiers follow in later batches.
+
+- **C-01, a committed credential.** Commit `7bc8db9` put a real-format Anthropic key and a database
+  password into `deploy/.env.example` on `main` (not an ancestor of this branch). **Rotation and a
+  history rewrite are the owner's decisions and are not taken here** — the finding stays critical
+  until the key is revoked. What is closed is that nothing could have refused it:
+  `packages/testing/src/strategy/secret-values.ts` (ADR-0420) is the **fifteenth** workspace
+  rule, run by the existing hook and CI step, reading **staged blobs** rather than the working tree
+  (reading the working tree was a measured bypass: stage, delete, commit). It flags seven key shapes
+  anywhere plus literal values for secret-named variables in env and YAML files, with
+  `${X:-<literal>}` refused, and never prints a value.
+- **C-02 and C-03, a document's lock and its state** (ADR-0419). A child write checks the lock of
+  **both** its before-parent and its after-parent, so a line cannot leave a posted entry (L13 now
+  422 on both stores). The lifecycle state field moves **only** by transition: a create may land
+  only in `initialState` and an update may not change it (`lifecycle_state_not_initial`,
+  `lifecycle_state_not_writable`), which closes L15's triple posting and every born-posted or
+  skipped-approval path — ADR-0391's `paid` guard was one edge of this. A **reversed** entry is as
+  immutable as a posted one, retail's `OrderLine` gets the sales-order lock, and **Bill, Payment
+  and WhtCertificate** are locked from the state that posted them (a WhtCertificate re-posted on
+  every confirm/draft round trip, in no report). The published OpenAPI state field is
+  `enum: [initialState]` on create and `readOnly` on update. What remains: a **second** document
+  carrying the same number still double-posts on `--store pg`, which is P0.7's unenforced unique
+  index; FiscalPeriod reopen-and-reclose re-posts the FX revaluation by decision; Expense posts
+  nothing and is not locked.
 
 ### Demoted, with the measurement that demoted them
 

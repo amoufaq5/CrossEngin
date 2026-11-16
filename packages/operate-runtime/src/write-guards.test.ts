@@ -3,7 +3,11 @@ import { describe, expect, it } from "vitest";
 import { InMemoryEntityStore, type ListPage, type ListQuery } from "./store.js";
 import {
   APPLIED_PAYMENT_EPSILON,
+  childParentRefs,
   journalPostingGuard,
+  LIFECYCLE_STATE_ERRORS,
+  lifecycleStateGuard,
+  withArticle,
   lockedDocumentGuard,
   postedEntryImmutabilityGuard,
   readAppliedPayments,
@@ -393,6 +397,162 @@ describe("lockedDocumentGuard — committed sales / purchase orders", () => {
       store: s,
     };
     expect((await g(line))?.error).toBe("purchase_order_locked_lines");
+  });
+});
+
+describe("lockedDocumentGuard — every parent a child write touches", () => {
+  const guard = postedEntryImmutabilityGuard();
+
+  async function seedParents() {
+    const s = new InMemoryEntityStore();
+    const posted = String((await s.create(TENANT, "JournalEntry", { state: "posted" })).id);
+    const draft = String((await s.create(TENANT, "JournalEntry", { state: "draft" })).id);
+    const draft2 = String((await s.create(TENANT, "JournalEntry", { state: "draft" })).id);
+    return { s, posted, draft, draft2 };
+  }
+
+  const line = (
+    s: InMemoryEntityStore,
+    op: WriteGuardInput["operation"],
+    before: Record<string, unknown> | null,
+    after: Record<string, unknown>,
+  ): WriteGuardInput => ({ operation: op, entity: "JournalLine", tenantId: TENANT, id: op === "create" ? null : "l1", before, after, store: s });
+
+  it("refuses moving a line out of a posted entry, which reading only the new parent allowed", async () => {
+    const { s, posted, draft } = await seedParents();
+    const r = await guard(line(s, "update", { journal_entry_id: posted, credit: 500 }, { journal_entry_id: draft, credit: 500 }));
+    expect(r?.error).toBe("posted_entry_locked_lines");
+    expect(r?.detail).toBe("cannot move a line out of a posted journal entry");
+  });
+
+  it("refuses moving a line into a posted entry", async () => {
+    const { s, posted, draft } = await seedParents();
+    const r = await guard(line(s, "update", { journal_entry_id: draft }, { journal_entry_id: posted }));
+    expect(r?.detail).toBe("cannot modify the lines of a posted journal entry");
+  });
+
+  it("refuses deleting a line of a posted entry and creating one under it", async () => {
+    const { s, posted } = await seedParents();
+    expect((await guard(line(s, "delete", { journal_entry_id: posted }, { journal_entry_id: posted })))?.error).toBe(
+      "posted_entry_locked_lines",
+    );
+    expect((await guard(line(s, "create", null, { journal_entry_id: posted })))?.error).toBe("posted_entry_locked_lines");
+  });
+
+  it("refuses unsetting the parent of a line in a posted entry", async () => {
+    const { s, posted } = await seedParents();
+    expect((await guard(line(s, "update", { journal_entry_id: posted }, { journal_entry_id: null })))?.error).toBe(
+      "posted_entry_locked_lines",
+    );
+  });
+
+  it("allows moving a line between two draft entries", async () => {
+    const { s, draft, draft2 } = await seedParents();
+    expect(await guard(line(s, "update", { journal_entry_id: draft }, { journal_entry_id: draft2 }))).toBeNull();
+  });
+
+  it("childParentRefs answers the stored parent then the written one, de-duplicated", () => {
+    const input = (before: Record<string, unknown> | null, after: Record<string, unknown>): WriteGuardInput =>
+      ({ operation: "update", entity: "L", tenantId: TENANT, id: "x", before, after, store: new InMemoryEntityStore() });
+    expect(childParentRefs(input({ p: "a" }, { p: "b" }), "p")).toEqual(["a", "b"]);
+    expect(childParentRefs(input({ p: "a" }, { p: "a" }), "p")).toEqual(["a"]);
+    expect(childParentRefs(input(null, { p: "b" }), "p")).toEqual(["b"]);
+    expect(childParentRefs(input({ p: "a" }, { p: null }), "p")).toEqual(["a"]);
+    expect(childParentRefs(input({ p: "" }, { p: 7 }), "p")).toEqual([]);
+  });
+});
+
+describe("lifecycleStateGuard", () => {
+  const guard = lifecycleStateGuard({
+    entity: "Bill",
+    stateField: "state",
+    initialState: "draft",
+    transitions: [
+      { name: "approve", from: ["draft"], to: "approved" },
+      { name: "mark_paid", from: ["approved", "overdue"], to: "paid" },
+      { name: "void", from: ["draft", "approved", "overdue"], to: "void" },
+    ],
+  });
+  const store = new InMemoryEntityStore();
+  const inp = (
+    op: WriteGuardInput["operation"],
+    before: Record<string, unknown> | null,
+    after: Record<string, unknown>,
+    entity = "Bill",
+  ): WriteGuardInput => ({ operation: op, entity, tenantId: TENANT, id: op === "create" ? null : "b1", before, after, store });
+
+  it("admits a create in the initial state or with the field unset", async () => {
+    expect(await guard(inp("create", null, { state: "draft" }))).toBeNull();
+    expect(await guard(inp("create", null, {}))).toBeNull();
+    expect(await guard(inp("create", null, { state: null }))).toBeNull();
+  });
+
+  it("refuses a create past the initial state and names the route", async () => {
+    const r = await guard(inp("create", null, { state: "paid" }));
+    expect(r?.status).toBe(422);
+    expect(r?.error).toBe(LIFECYCLE_STATE_ERRORS.create);
+    expect(r?.detail).toContain("from 'draft' fire 'approve' then 'mark_paid'");
+  });
+
+  it("says so when no declared transition reaches the requested state", async () => {
+    const r = await guard(inp("create", null, { state: "overdue" }));
+    expect(r?.detail).toContain("no declared transition leads from 'draft' to 'overdue'");
+  });
+
+  it("admits an update that does not change the state, named or not", async () => {
+    expect(await guard(inp("update", { state: "approved", total: 1 }, { state: "approved", total: 2 }))).toBeNull();
+    expect(await guard(inp("update", { state: "draft" }, { state: "draft" }))).toBeNull();
+  });
+
+  it("refuses an update that changes the state, either direction", async () => {
+    const fwd = await guard(inp("update", { state: "draft" }, { state: "approved" }));
+    expect(fwd?.error).toBe(LIFECYCLE_STATE_ERRORS.update);
+    expect(fwd?.detail).toContain("from 'draft' fire 'approve'");
+    const back = await guard(inp("update", { state: "approved" }, { state: "draft" }));
+    expect(back?.detail).toContain("no declared transition leads from 'approved' to 'draft'");
+  });
+
+  it("refuses a state it is handed when the stored record was not loaded", async () => {
+    expect((await guard(inp("update", null, { state: "approved" })))?.error).toBe(LIFECYCLE_STATE_ERRORS.update);
+    expect(await guard(inp("update", null, { total: 3 }))).toBeNull();
+  });
+
+  it("puts the right article before an entity name", async () => {
+    // The detail hardcoded `a`, so a lifecycle on Invoice read "a Invoice is created in 'draft'".
+    const invoiceGuard = lifecycleStateGuard({
+      entity: "Invoice",
+      stateField: "state",
+      initialState: "draft",
+      transitions: [{ name: "send", from: ["draft"], to: "sent" }],
+    });
+    const r = await invoiceGuard(inp("create", null, { state: "sent" }, "Invoice"));
+    expect(r?.detail).toMatch(/^an Invoice is created in 'draft'/);
+    expect((await guard(inp("create", null, { state: "approved" })))?.detail).toMatch(/^a Bill is created/);
+    expect(withArticle("approved bill")).toBe("an approved bill");
+    expect(withArticle("paid bill")).toBe("a paid bill");
+  });
+
+  it("reads a loaded record with no state as the initial state, and an unloaded one as nothing", async () => {
+    expect(await guard(inp("update", { total: 1 }, { state: "draft" }))).toBeNull();
+    expect((await guard(inp("update", { total: 1 }, { state: "approved" })))?.detail).toContain("from 'draft' fire 'approve'");
+    expect((await guard(inp("update", null, { state: "draft" })))?.error).toBe(LIFECYCLE_STATE_ERRORS.update);
+  });
+
+  it("admits an ordinary edit of a stateless record, whose merged `after` carries no state either", async () => {
+    // The handler passes `after: {...before, ...patch}`, so an edit that does not name the state
+    // leaves it unset on both sides. Reading only `before` as `initialState` compared 'draft' against
+    // `undefined` and refused every edit of such a record, a field nobody had touched.
+    expect(await guard(inp("update", { total: 1 }, { total: 2 }))).toBeNull();
+    expect(await guard(inp("update", { total: 1, state: null }, { total: 2, state: null }))).toBeNull();
+    expect(await guard(inp("update", { total: 1 }, { total: 2, state: null }))).toBeNull();
+    // Clearing a set state is still a change.
+    expect((await guard(inp("update", { state: "approved" }, { state: null })))?.error).toBe(LIFECYCLE_STATE_ERRORS.update);
+  });
+
+  it("leaves a transition, a delete and another entity alone", async () => {
+    expect(await guard(inp("transition", { state: "draft" }, { state: "approved" }))).toBeNull();
+    expect(await guard(inp("delete", { state: "approved" }, { state: "approved" }))).toBeNull();
+    expect(await guard(inp("update", { state: "draft" }, { state: "approved" }, "Invoice"))).toBeNull();
   });
 });
 
