@@ -686,7 +686,7 @@ inline `k=v` pairs — and the keypair an environment variable, so **nothing in 
 a file any more.** The claim is deliberately narrow: a host mount is not unavailable, and this very
 file uses one three times (`db` and `extensions` each mount `./postgres/init` read-only, `caddy`
 mounts its `Caddyfile`). What those three carry is non-secret configuration. The eight *other*
-file-taking flags (`--slo-config`, `--slo-defaults`, `--access-reviews-config`,
+file-taking flags (`--slo-config`, `--slo-defaults-override`, `--access-reviews-config`,
 `--certification-config`, `--dr-readiness-config`, `--metering-config`,
 `--stripe-usage-sync-config`, `--pack-catalog`) still want a file, so the key is withheld **for the
 shipped set** and is not declared unnecessary for ever.
@@ -862,6 +862,13 @@ scheduled deletion `data_subject_erasure` over that same tenant-wide erasure, so
 said one person's data had been erased while every person's had been. The deletion **pipeline** now
 refuses that kind before it opens a transaction, so the runner cannot mount without saying which it
 means. If you do not run the unattended runner, you do not need this flag.
+
+**Erasure is the only GDPR data-subject right this deployment has a route for.** It cannot answer a
+subject access request (Article 15) or a portability request (Article 20) by any route, flag or
+scheduler: the `data-lineage` package models both as contracts and nothing in the binary imports
+it, and nothing writes a tenant data export either. What exists is whole-tenant erasure, above —
+so before you promise a tenant GDPR compliance, know that answering "what do you hold about me"
+and "give me my data" is work you would do by hand against the database.
 
 **`--workflow-workers` and `--schedule-ms` are inert rather than off.** `JOB_HANDLER_PROVIDERS`
 ships empty and `erp-core` declares 14 jobs, so the job worker refuses `no_job_handlers` and the

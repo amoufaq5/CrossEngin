@@ -83,8 +83,19 @@ that builds the whole workspace. Deploy it and set the API's command + env.
 node apps/operate-server/dist/bin/operate-server.js \
   --pack erp-core --store pg --port 8787 --scheme https --platform-admin \
   --platform-user-routes --platform-user-role platform_admin \
+  --credential-login --credential-admin-role platform_admin \
+  --jwt-issuer https://<API_HOST>/ --jwt-audience crossengin-operate \
   --idempotency-store pg
 ```
+
+> **The four login flags are what make the UI usable at all.** `--credential-login` mounts
+> `POST /v1/auth/token`, which is the only thing the UI's `/login` form talks to; this command
+> used to omit it, so the form refused every password and the troubleshooting entry below sent
+> you there anyway. It needs `--jwt-issuer` and `--jwt-audience` (the session token it mints
+> asserts both and the gateway verifies both — any stable values, the ones above match the
+> single-VM compose's) and the two secrets in the environment block below.
+> `--credential-admin-role` is what lets the bootstrap api-key set the first user's password over
+> HTTP, the same as the single-VM compose.
 
 The api-key spec goes in the **environment**, not here:
 
@@ -141,7 +152,15 @@ PGSSLMODE=verify-full
 NODE_ENV=production
 OPERATE_API_KEY_SPECS=<STRONG_TOKEN>:platform_admin:<TENANT_ID>:<USER_ID>
 CURSOR_ENCRYPTION_SECRET=<32+ random bytes>
+CREDENTIAL_PEPPER=<32+ random bytes>
+OPERATE_TOKEN_SIGNING_KEY=<32 bytes of base64>
 ```
+
+`CREDENTIAL_PEPPER` and `OPERATE_TOKEN_SIGNING_KEY` are the login's two secrets and
+[`.env.example`](./.env.example) says what each is for; generate each with
+`node -e 'console.log(require("node:crypto").randomBytes(32).toString("base64"))'`. With
+`--credential-login` on the command the API refuses to start without them, naming the one that is
+missing. Changing the pepper later makes every stored password unverifiable, so set it once.
 
 `CURSOR_ENCRYPTION_SECRET` seals the entity-list keyset cursor with a per-tenant
 key derived from it. Set it: `erp-core` has classified fields a list view can
@@ -241,15 +260,16 @@ exposed — that's the audited GDPR flow.)
 
 ## 5. Production auth
 
-The `--api-key` shared secret bootstraps the platform console. For end-users,
-switch `operate-server` to JWT/JWKS by adding to its command:
+End users sign in with the credential login the command in §2 mounts: the UI's `/login` posts
+an email and password to the API, which mints and verifies its own EdDSA session token. The
+api-key spec bootstraps the platform console.
 
-```
---jwks-url https://your-idp/.well-known/jwks.json --jwks-refresh-ms 300000
---jwt-issuer https://your-idp --jwt-audience crossengin-api
-```
-
-Keep one `platform_admin` API key for the console only. See
+This section used to tell you to add `--jwks-url` and a second `--jwt-issuer`/`--jwt-audience` for
+"end users". Do not: `--credential-login and --jwks-url are mutually exclusive`, so that command
+does not start, and the `--jwks-*` flags are an API-client path rather than a federated login —
+EdDSA (Ed25519) tokens only, so an RS256 IdP is refused on every request; one issuer and audience
+shared with the login; and the UI cannot present such a token. The single-VM guide's
+[Going to production (auth)](./README.md#going-to-production-auth) lists the preconditions. See
 `operate-server --help` for the full flag surface.
 
 ---
@@ -318,7 +338,10 @@ deployment.
   isn't public. It must be the API's external HTTPS URL, reachable from Vercel.
 - **UI 401 / empty lists** → you are not signed in, or your session expired.
   The UI has a login: open `/login` and sign in as a user provisioned through
-  `POST /v1/platform/users` (see `.env.example`'s bootstrap). This entry used to
+  `POST /v1/platform/users` (see `.env.example`'s bootstrap). If the form refuses
+  every password, check the API command carries `--credential-login` (§2): without
+  it there is no `POST /v1/auth/token` and the form cannot tell that apart from a
+  wrong password. This entry used to
   blame `OPERATE_API_KEY` on Vercel, a variable the UI does not read — so the
   remedy it named could not have worked.
 - **Boot log says `cursor disclosure: plaintext_disclosing`** → this manifest has

@@ -13,8 +13,10 @@
 > human-in-the-loop approval (`--allow-file-write`), AND
 > persist the full session / messages / tool invocations /
 > proposals to Postgres with `--persist` for full audit; M6
-> closed the HTTP-webhook → workflow-signal chain via the signal
-> bridge; M7 shipped the first vertical pack
+> built the HTTP-webhook → workflow-signal bridge (a gateway
+> handler that nothing in the deployed binary registers, so the
+> chain is closed in the package and open in every deployment);
+> M7 shipped the first vertical pack
 > (`@crossengin/pack-erp-core`) proving the substrate holds up
 > under a real schema.
 > **51 packages + 1 app, 119 meta-schema tables, 5,768 tests**,
@@ -56,7 +58,9 @@ real Postgres execution; `crypto`: real signatures + hashes;
 in-process executor with Postgres projection;
 `api-gateway-runtime` + `api-gateway-pg`: 17-stage HTTP pipeline
 with Postgres-backed stores; `workflow-signal-bridge`: webhook
-→ workflow signal routing; `ai-providers-anthropic`: real
+→ workflow signal routing, built and never registered — nothing
+imports it, so no deployment routes a webhook to a signal;
+`ai-providers-anthropic`: real
 Anthropic Messages API client). The first binary,
 `architect-cli`, ships under `apps/`. Detailed orientation is
 in **[CLAUDE.md](CLAUDE.md)**.
@@ -87,10 +91,15 @@ Quick map by concern:
   `access-reviews`, `data-lineage`.
 - **Vertical packs.** `pack-erp-core`.
 
-Three compliance triangles closed at the contract layer:
-- **Privacy.** `tenant-lifecycle` (GDPR Art. 17 deletion) +
-  `data-lineage` (Art. 15 access) + `forensics` (legal hold).
-- **Access control.** `auth` (RBAC/ABAC) + `sso` (federation) +
+Three compliance triangles modelled at the contract layer — which is
+not the same as served:
+- **Privacy.** `tenant-lifecycle` (GDPR Art. 17 deletion, served as
+  whole-tenant erasure) + `data-lineage` (Art. 15 access — contracts
+  only: nothing imports the package, so no deployment can answer a
+  subject access or portability request) + `forensics` (legal hold).
+- **Access control.** `auth` (RBAC/ABAC) + `sso` (federation —
+  contracts only and imported by nothing, so no deployment offers
+  SAML, OIDC or SCIM sign-in) +
   `access-reviews` (SOC 2 CC6.3 periodic attestation).
 - **Runtime safety.** `feature-flags` (kill switches +
   gradual rollout) + `rate-limiting` (admission control) +

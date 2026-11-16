@@ -1266,3 +1266,276 @@ describe("every secret an operator must replace is named in README's first-launc
     }
   });
 });
+
+/**
+ * Prose about capabilities that are NOT there, fenced against the code that makes it true.
+ *
+ * Every assertion below pairs a sentence in a deploy document with the fact it rests on, read from
+ * the source rather than restated, so the two cannot drift apart silently: a change that makes the
+ * sentence false (a JWKS route that composes with the login, an import flag, a producer of an email
+ * notification, an importer of the signal bridge) reds here and sends its author to the document.
+ * Each block carries a floor, because a document that stopped saying the thing would otherwise pass
+ * every absence assertion by saying nothing.
+ */
+const REPO_README = resolve(here, "../../../README.md");
+
+/** Fenced blocks of any language, as their bodies — a prescription is something an operator pastes. */
+function fencedBlocks(src: string): readonly string[] {
+  return [...src.matchAll(/```[a-z]*\n([\s\S]*?)```/g)].map((m) => m[1] ?? "");
+}
+
+/** Whitespace collapsed, so a fence on a phrase survives a re-wrap of the prose. */
+function flat(src: string): string {
+  return src.replace(/\s+/g, " ");
+}
+
+/** The non-test `.ts` sources of this app, for the producer census. */
+function appSources(): readonly { readonly name: string; readonly src: string }[] {
+  return readdirSync(here)
+    .filter((n) => n.endsWith(".ts") && !n.endsWith(".test.ts") && !n.endsWith(".d.ts"))
+    .map((name) => ({ name, src: readFileSync(resolve(here, name), "utf8") }));
+}
+
+describe("federated identity is not documented as a path that cannot be followed (register P1.9)", () => {
+  const cli = readFileSync(resolve(here, "./cli.ts"), "utf8");
+  const docs = deployMarkdown();
+
+  it("prescribes no --jwks-url in any pasteable block, because it cannot boot beside the login", () => {
+    // Both deploy guides used to paste `--jwks-url …` plus a second `--jwt-issuer`/`--jwt-audience`
+    // as the "production auth" step. The shipped command passes `--credential-login`, and the CLI
+    // refuses the pair by name — so the prescription was a boot failure, and the duplicated issuer
+    // and audience were last-wins on argv besides.
+    for (const { doc, src } of docs) {
+      for (const block of fencedBlocks(src)) {
+        expect(block, `${doc} prescribes --jwks-url in a pasteable block`).not.toMatch(/--jwks-url\b/);
+      }
+    }
+    // The refusal the prose quotes is the CLI's own, so the quotation is checked against it.
+    expect(cli).toContain("--credential-login and --jwks-url are mutually exclusive");
+    expect(apiCommandArgs()).toContain("--credential-login");
+  });
+
+  it("names EdDSA and the exclusion wherever a JWKS flag is mentioned at all", () => {
+    // EdDSA because it is what a standard IdP does not do: `verifyBearerJwt` refuses any other
+    // `alg` before a key is looked up, and a remote JWKS keeps only `OKP`/`Ed25519` entries.
+    // Measured live: an RS256 token answers 401 `credential_malformed`.
+    const verifier = readFileSync(
+      resolve(here, "../../../packages/api-gateway-runtime/src/auth.ts"),
+      "utf8",
+    );
+    expect(verifier).toContain('jwt.header.alg !== "EdDSA"');
+    const mentioning = docs.filter(({ src }) => /--jwks-(?:url|key|file|\*)/.test(src));
+    // Population floor: the single-VM and managed-cloud guides both explain the flags.
+    expect(mentioning.map((d) => d.doc).sort()).toEqual(
+      expect.arrayContaining(["README.md", "VERCEL-SUPABASE.md"]),
+    );
+    for (const { doc, src } of mentioning) {
+      expect(src, `${doc} mentions a JWKS flag and never says EdDSA`).toMatch(/\bEdDSA\b/);
+      expect(src, `${doc} mentions a JWKS flag and not the login exclusion`).toContain(
+        "--credential-login and --jwks-url are mutually exclusive",
+      );
+    }
+  });
+
+  it("states the tenant_id fallback, which is the highest-stakes precondition", () => {
+    // A verified token with no `tenant_id` claim takes its tenant from `x-tenant-id` (ADR-0098);
+    // measured live: an EdDSA token without the claim answered 200 in whichever tenant the header
+    // named. The README sentence is fenced against the runtime that makes it true.
+    const runtime = readFileSync(
+      resolve(here, "../../../packages/api-gateway-runtime/src/runtime.ts"),
+      "utf8",
+    );
+    expect(runtime).toContain('typeof jwt.payload.tenant_id === "string"');
+    expect(flat(deployDoc(README))).toContain(
+      "No `tenant_id` claim means the caller picks the tenant.",
+    );
+  });
+
+  it("every documented serve command carries the login, and its document the two secrets", () => {
+    // The managed-cloud guide's command omitted `--credential-login` while its troubleshooting
+    // sent the reader to `/login`: a form that refused every password, because the route it posts
+    // to was not mounted. A serve command is a fenced `operate-server.js` invocation with `--pack`.
+    let commands = 0;
+    for (const { doc, src } of docs) {
+      for (const block of fencedBlocks(src)) {
+        const joined = block.replace(/\\\n\s*/g, " ");
+        if (!/operate-server\.js\b[^\n]*--pack\b/.test(joined)) continue;
+        commands += 1;
+        for (const flag of ["--credential-login", "--jwt-issuer", "--jwt-audience"]) {
+          expect(joined, `${doc}: a serve command without ${flag}`).toContain(flag);
+        }
+        expect(src, `${doc}: no CREDENTIAL_PEPPER beside its serve command`).toContain(
+          "CREDENTIAL_PEPPER=",
+        );
+        expect(src, `${doc}: no OPERATE_TOKEN_SIGNING_KEY beside its serve command`).toContain(
+          "OPERATE_TOKEN_SIGNING_KEY=",
+        );
+      }
+    }
+    expect(commands, "no deploy document carries a serve command any more").toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("GDPR rights other than erasure are said to be absent (register P1.4)", () => {
+  it("ORACLE.md's subject-scope section says Article 15 and Article 20 have no route", () => {
+    // Before this, nothing under deploy/ mentioned Article 15, Article 20, subject access or
+    // portability, while the same section discussed Article 17 at length — so an operator could
+    // read the deletion story and conclude the rest of GDPR was covered too.
+    const oracle = deployDoc(ORACLE);
+    const start = oracle.indexOf("**`--deletion-subject-scope` is a decision");
+    const end = oracle.indexOf("**`--workflow-workers`", start);
+    expect(start, "ORACLE.md lost the --deletion-subject-scope section").toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const section = flat(oracle.slice(start, end));
+    expect(section).toContain("Article 15");
+    expect(section).toContain("Article 20");
+    expect(section).toContain("by any route");
+  });
+
+  it("the root README no longer pairs Art. 15 with 'closed', and data-lineage really is unimported", () => {
+    const readme = flat(readFileSync(REPO_README, "utf8"));
+    expect(readme).not.toContain("Three compliance triangles closed");
+    expect(readme).toContain("`data-lineage` (Art. 15 access — contracts only");
+    // The sentence is true only while nothing depends on the package; a dependency added later
+    // reds here rather than leaving the README asserting an absence that ended.
+    expect(workspaceDependents("@crossengin/data-lineage")).toEqual([]);
+  });
+});
+
+/**
+ * Every workspace `package.json` that declares a dependency on `name`, excluding the package's own.
+ * The positive control lives with each caller: a name that IS depended on must come back non-empty.
+ */
+function workspaceDependents(name: string): readonly string[] {
+  const root = resolve(here, "../../..");
+  const out: string[] = [];
+  for (const group of ["apps", "packages"]) {
+    for (const member of readdirSync(resolve(root, group))) {
+      let pkg: string;
+      try {
+        pkg = readFileSync(resolve(root, group, member, "package.json"), "utf8");
+      } catch {
+        continue;
+      }
+      const parsed: unknown = JSON.parse(pkg);
+      if (parsed === null || typeof parsed !== "object") continue;
+      const record = parsed as Record<string, unknown>;
+      if (record["name"] === name) continue;
+      for (const key of ["dependencies", "devDependencies", "peerDependencies"]) {
+        const deps = record[key];
+        if (deps !== null && typeof deps === "object" && name in deps) out.push(`${group}/${member}`);
+      }
+    }
+  }
+  return out;
+}
+
+describe("workspaceDependents reads dependencies at all", () => {
+  it("finds the dependents of a package that has them (non-vacuity for the absences above)", () => {
+    expect(workspaceDependents("@crossengin/kernel").length).toBeGreaterThan(5);
+  });
+});
+
+describe("there is no import route, and the README says so (register P1.13)", () => {
+  const readme = deployDoc(README);
+  const cli = readFileSync(resolve(here, "./cli.ts"), "utf8");
+  const flags = [...cli.matchAll(/arg === "(--[a-z][a-z0-9-]*)"/g)].map((m) => m[1] ?? "");
+  const importFlags = flags.filter(
+    (f) => /import|bulk|backfill|onboard/.test(f) && f !== "--read-state-backfill-role",
+  );
+
+  it("reads the CLI's flags at all (non-vacuity)", () => {
+    // `cli.ts` is an if/else chain of `arg === "--…"`, not a table. The one excluded flag is the
+    // positive control: the pattern does match a name containing `backfill`, and it is excluded
+    // because it marks notices read rather than loading records.
+    expect(flags.length).toBeGreaterThan(100);
+    expect(flags).toContain("--read-state-backfill-role");
+  });
+
+  it("claims the absence exactly when the CLI has no import flag", () => {
+    // A biconditional and not `importFlags.length === 0` alone, which would pin the absence as a
+    // specification (ADR-0412): an import flag landing makes this fail and points at the README
+    // sentence that must change with it.
+    const claimsAbsent = flat(readme).includes("**No import, backfill or bulk route.**");
+    expect(claimsAbsent).toBe(importFlags.length === 0);
+    expect(claimsAbsent, "the README's non-capabilities list lost the import row").toBe(true);
+    expect(workspaceDependents("@crossengin/migration")).toEqual([]);
+  });
+
+  it("ties the loading hazards to the code and the compose they describe", () => {
+    const section = flat(
+      readme.slice(readme.indexOf("### Loading existing records"), readme.indexOf("## Rate limiting")),
+    );
+    expect(section.length, "the Loading existing records section is gone").toBeGreaterThan(500);
+    // The idempotency window is the runtime's default and nothing passes another.
+    const runtime = readFileSync(
+      resolve(here, "../../../packages/api-gateway-runtime/src/runtime.ts"),
+      "utf8",
+    );
+    expect(runtime).toContain("opts.idempotencyTtlSeconds ?? 86_400");
+    expect(section).toContain("86,400 seconds");
+    const operatorSources = appSources().filter(({ src }) => src.includes("idempotencyTtlSeconds"));
+    expect(operatorSources.map((s) => s.name), "something now sets the idempotency TTL").toEqual([]);
+    // The duplicate hazard is stated for the store the compose ships.
+    expect(valueAfter(apiCommandArgs(), "--store")).toBe("pg");
+    expect(section).toContain("not enforced on `--store pg`");
+    // The bootstrap key's role is the one the hazard names.
+    const env = readFileSync(resolve(here, "../../../deploy/.env.example"), "utf8");
+    expect(env).toMatch(/^OPERATE_ADMIN_API_KEY=[^:\n]+:platform_admin:/m);
+    expect(section).toContain("It carries `platform_admin`, which grants no operation on any entity");
+  });
+});
+
+describe("email and SMS are not documented as delivered (register P1.14)", () => {
+  const env = readFileSync(resolve(here, "../../../deploy/.env.example"), "utf8");
+  const docs = [...deployMarkdown(), { doc: ".env.example", src: env }];
+
+  it("promises no backlog delivery and shows no email/SMS channel line as the expected check", () => {
+    for (const { doc, src } of docs) {
+      expect(flat(src), `${doc} still promises the backlog`).not.toMatch(
+        /configuring a channel later delivers the backlog rather than losing it/,
+      );
+      // No verbatim boot line naming email or sms as a success check: the line is changing, and a
+      // configured provider registers a sender and sends nothing.
+      expect(src, `${doc} quotes a [notify] channel line with email or sms`).not.toMatch(
+        /\[notify\] channels:[^\n]*\b(?:email|sms)\b/,
+      );
+    }
+  });
+
+  it("states the drop schedule the drain actually uses", () => {
+    const plan = readFileSync(resolve(here, "./delivery-plan.ts"), "utf8");
+    expect(plan).toContain("DEFAULT_MAX_DELIVERY_ATTEMPTS = 5");
+    expect(plan).toContain("DEFAULT_INITIAL_BACKOFF_SECONDS = 30");
+    expect(flat(deployDoc(README))).toContain("30, 60, 120 and 240 seconds apart");
+    expect(flat(env)).toContain("30/60/120/240 s");
+  });
+
+  it("is true only while no source here addresses a non-in_app channel", () => {
+    // The README says the one producer is the design-review notice and that it is in-app. A
+    // dispatch literal on another channel landing in this app reds here and sends its author to
+    // that sentence. The positive control is the in-app producer itself.
+    const sources = appSources();
+    const inApp = sources.filter(({ src }) => /channel: "in_app"/.test(src)).map((s) => s.name);
+    expect(inApp).toContain("design-notifications.ts");
+    const other = sources
+      .filter(({ src }) => /channel: "(?:email|sms|push_mobile|voice_call|webhook)"/.test(src))
+      .map((s) => s.name);
+    expect(other, "a source now addresses a non-in_app notification channel").toEqual([]);
+    expect(flat(deployDoc(README))).toContain(
+      "nothing in this binary *produces* an email or SMS notification",
+    );
+  });
+});
+
+describe("the root README does not claim the signal bridge is wired (register P1.17)", () => {
+  it("says the bridge is built and never registered, while nothing imports it", () => {
+    const readme = flat(readFileSync(REPO_README, "utf8"));
+    // Not "M6 closed …": the sentence sits in a blockquote, so `flat` leaves a `>` between the
+    // two words and that spelling matched nothing even on the text it was written to refuse
+    // (found by mutation). The claim itself is the phrase.
+    expect(readme).not.toMatch(/closed the HTTP-webhook → workflow-signal chain/);
+    expect(readme).toContain("built and never registered");
+    expect(workspaceDependents("@crossengin/workflow-signal-bridge")).toEqual([]);
+  });
+});

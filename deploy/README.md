@@ -270,17 +270,45 @@ time, so there is no set to check at boot.
 
 ## Going to production (auth)
 
-The api-key above is a simple shared secret — fine to bootstrap, but for real
-end-users switch `operate-server` to JWT/JWKS by adding these args to the `api`
-service `command` in `docker-compose.yml`:
+**End users sign in with the credential login, and that is already on.** The shipped `api`
+command passes `--credential-login` with `--jwt-issuer` and `--jwt-audience`: the API mints its own
+EdDSA session token at `POST /v1/auth/token` and verifies it on every request, and the UI's
+`/login` is that route. There is nothing to switch to for real end users — see
+[The UI has a login](#the-ui-has-a-login). The bootstrap api-key stays what it is: the credential
+the five bootstrap calls use.
 
-```
---jwks-url https://your-idp/.well-known/jwks.json --jwks-refresh-ms 300000
---jwt-issuer https://your-idp --jwt-audience crossengin-api
-```
+**`--jwks-*` is not a federated-login route, and this section used to say it was.** It told you to
+add `--jwks-url https://your-idp/.well-known/jwks.json` plus a second `--jwt-issuer` and
+`--jwt-audience`, which does not boot beside `--credential-login`
+(`--credential-login and --jwks-url are mutually exclusive`), and the duplicated issuer and audience
+are last-wins on argv, so they silently change what the login's own tokens assert. What the three
+JWKS flags actually are is a way for an **API client** holding its own Ed25519 key to call this API
+with a token it signed itself, and they have preconditions a standard identity provider does not
+meet:
 
-Keep a single `platform_admin` API key only for the console. See
-`operate-server --help` for the full flag surface (SLO enforcement, audit chain,
+- **EdDSA (Ed25519) only.** A token whose header says anything else — RS256, which OIDC makes the
+  default — is refused `401 … credential_malformed` before any key is looked up, and a remote JWKS
+  keeps only `kty: OKP, crv: Ed25519` entries, dropping RSA and EC keys without a word. Most hosted
+  IdPs sign RS256, so pointed at one of them every request is a 401.
+- **One issuer and one audience.** `iss` must equal `--jwt-issuer` and `aud` must equal
+  `--jwt-audience` — the same pair the login mints with, since there is one of each on the command.
+  A token naming another issuer is `issuer_mismatch`.
+- **No `tenant_id` claim means the caller picks the tenant.** Without one, the `x-tenant-id` request
+  header decides which tenant the token acts in (ADR-0098's recorded decision). Issue tokens that
+  carry `tenant_id`.
+- **`scope` is read as role names.** The first is the primary role and the rest are secondary, so
+  an IdP's `openid profile` scopes are read as roles.
+- **`--jwks-url` cannot be combined with the login at all**, and `--jwks-key` / `--jwks-file` can —
+  but then the login's revocation check stays on, and it refuses any token subject with no active
+  membership. A key-holder's `sub` must therefore name a provisioned `meta.users` id with an active
+  membership in the tenant it acts in, or every request is a 401.
+- **The UI has no way to present a third-party token.** Its only sign-in is the email-and-password
+  form, so none of this changes how people log in.
+
+Federated login (SAML, OIDC, SCIM) is not available: the `sso` package is contracts only and nothing
+in the binary imports it.
+
+See `operate-server --help` for the full flag surface (SLO enforcement, audit chain,
 checkpoints, billing, marketplace, etc.) — add the flags you want to the `api` command.
 
 Four things the boot log tells you about this deployment's exposure, which are worth
@@ -433,7 +461,8 @@ and what is not:
 | **Notifications** (`/notifications`) | Every in-app notice this deployment delivered to you, each marked read, unread or **Unknown**, with per-notice and mark-all-read. The sidebar badge points here and nowhere else — it used to hang off AI Studio, which renders only review decisions and digests, so a badge counting every unread notice led to a page showing a subset of them. A digest's rendered body and a decision's notes are still read in AI Studio; this page links there. |
 | **/account** | Change your own password. Needs the current one, so it is the one credential act that needs no grant. |
 
-Four things it deliberately does **not** do, so you know where the edges are:
+Five things it does **not** do, so you know where the edges are — the first four by design, the
+last because the subsystem is unbuilt:
 
 - **Email search is exact, not partial.** `?email=` is matched whole and case-folded, because
   `meta.users.email` is UNIQUE so an equality is one index lookup where a substring search is an
@@ -453,6 +482,11 @@ Four things it deliberately does **not** do, so you know where the edges are:
 - **No database browser and no SQL.** A tenant's records are served by that tenant's own
   compiled gateway, under that tenant's field grants, classification and redaction. A
   platform-level reader would be a second path to the same rows with none of that applied.
+- **No import, backfill or bulk route.** Nothing in this deployment loads existing records in
+  bulk — no CSV upload, no batch endpoint, no import flag; the `migration` package that models
+  onboarding is contracts only and nothing imports it. The only path is one `POST` per record
+  through the same entity routes the UI uses, and a script doing that meets the hazards in
+  [Loading existing records](#loading-existing-records).
 
 Setting someone's password needs `--credential-admin-role` on the `api` command; the shipped
 compose grants it to `platform_admin`. Without it the panel says so and names
@@ -480,6 +514,35 @@ Three limits of that panel are worth knowing before you use it:
 `.env.example` go. That publish is loopback-only on purpose: it is reachable by exactly the people
 who can already run `docker compose exec`, and it means creating the first user does not wait on DNS
 or on Caddy holding a certificate. The same API is at `https://api.$DOMAIN` from anywhere else.
+
+### Loading existing records
+
+There is no importer, so moving data in from another system is a script that `POST`s one record at
+a time. Five things such a script gets wrong silently, each measured against a running server
+(`--store pg`, the shipped default, unless it says otherwise):
+
+- **A re-run duplicates, because a declared `unique` field is not enforced on `--store pg`.** Two
+  `POST /v1/warehouses` with the same `code` both answer **201**; the boot line
+  `[unique] declared unique fields: 0 of 32 enforced` says so. A duplicated invoice that is then
+  sent posts to the general ledger **twice** — two journal entries carrying one entry number. On
+  `--store pg-columns` the second `POST` answers **409** `unique_violation` naming the field.
+- **An `Idempotency-Key` protects a re-run for 24 hours and no longer.** Within that window a
+  repeated key answers the original status with `x-idempotent-replay: true` and **an empty body**,
+  so record the id from the first response rather than expecting it back. The record expires after
+  86,400 seconds and no flag changes that, so a re-run a day later executes every create again.
+- **A caller-supplied `id` is kept, and re-sending it is not a conflict.** That is the only way to
+  preserve references between imported records. A second `POST` with an `id` that already exists
+  leaves the first record untouched and answers **500** `write_failed` on both stores — not a 409 —
+  so on a re-run, `GET` the id before deciding the record failed.
+- **A caller-supplied sequence number is kept and the allocator does not move.** Importing
+  `quote_number: QUO-2026-00010` while the allocator stands at `…00009` means the next quote created
+  without a number is handed `…00010` again: a silent duplicate on `--store pg`, a **500** on
+  `--store pg-columns`. Import numbered history first and expect the clash, or leave the number
+  unset and let the allocator assign it.
+- **The bootstrap api-key cannot write a single record.** It carries `platform_admin`, which grants
+  no operation on any entity — `GET` and `POST /v1/warehouses` with it are both **403**. Load as a
+  signed-in user holding an ERP role (a session lasts one hour), or add a spec naming one —
+  `<token>:erp_admin:<tenant-uuid>:<user-uuid>` — to `OPERATE_API_KEY_SPECS`.
 
 ## Rate limiting
 
@@ -639,31 +702,39 @@ ALTER TABLE meta.rate_limit_decisions DROP COLUMN IF EXISTS quota_definition_id;
 
 ## Sending email and SMS
 
-Out of the box only **in-app** notices are delivered: an email or SMS dispatch is refused as
-`no_sender_configured`, which the drain treats as retryable — so configuring a channel later
-delivers the backlog rather than losing it.
+Only **in-app** notices are delivered, and today configuring SES or Twilio does not change that.
+Filling the SES or Twilio block registers a *sender* for its channel; nothing in this binary
+*produces* an email or SMS notification. The one producer is the design-review decision notice —
+plus the digest that summarises such notices, which keeps their channel — and both are in-app.
+So the `[notify]` boot line names a configured provider as a registered sender with no producer in
+this binary, warns that nothing will be sent on it, and it sends nothing, because nothing is ever
+addressed to it.
 
-That sentence was false until the drain flag became a default, and in the direction that reads as
-working. `DeliveryScheduler` is the *only* delivery path in this binary, so without
+This section used to promise the opposite twice: it showed an email-and-SMS channel line as the
+check to run after configuring the providers, and it said an email or SMS dispatch made before a
+channel was configured is retried until one is, so "configuring a channel later delivers the
+backlog". Neither holds. Nothing makes such a dispatch, and if one existed it would not wait: a
+dispatch for a channel with no sender is retried four times, 30, 60, 120 and 240 seconds apart, and
+its fifth attempt is recorded `dropped` — about seven and a half minutes after it was queued, with no
+flag that lengthens it.
+
+The drain itself is on. `DeliveryScheduler` is the *only* delivery path in this binary, so without
 `--notification-drain-ms` nothing is delivered on **any** channel, `in_app` included — and the
 warning that was supposed to say so could not fire, because it was gated on more than one channel
-being registered and this stack registers exactly one. Boot printed `[notify] channels: in_app` and
-stopped. The flag is now on the `api` command, and the gate is the store rather than the channel
-count, so a deployment that removes it is told.
+being registered and this stack registers exactly one. The flag is now on the `api` command, and the
+gate is the store rather than the channel count, so a deployment that removes it is told.
 
-To turn email and SMS on, fill the SES and/or Twilio block in `.env` (see
-[`.env.example`](./.env.example)). The drain is already running.
-
-These are credentials, so they live in the environment rather than in `command` — a process's argv
-is readable by anyone who can run `ps`. After the first `up`, check what was registered:
+If you fill the SES and/or Twilio block in `.env` anyway (see [`.env.example`](./.env.example)) —
+ready for the day something addresses those channels — they are credentials, so they live in the
+environment rather than in `command`: a process's argv is readable by anyone who can run `ps`. Read
+what the boot made of them with:
 
 ```sh
 docker compose logs api | grep '\[notify\]'
-# [notify] channels: in_app, email, sms
 ```
 
-A channel you configured but that is missing from that line is reported on the next line with what
-it still needs. A half-configured channel is never guessed at.
+A channel you configured but that is missing from those lines is reported with what it still needs.
+A half-configured channel is never guessed at.
 
 **Read state and the inbox badge.** `--read-state-routes` plus `--read-state-role erp_admin`
 and `--read-state-role platform_admin` are on the `api` command, so **Notifications** shows
