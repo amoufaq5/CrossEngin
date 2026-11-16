@@ -1,10 +1,10 @@
 # ADR index
 
-407 records. Generated from the ADR files themselves — regenerate rather than
+412 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 328  **Proposed:** 79
+- **Accepted:** 333  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -419,3 +419,8 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0411](0411-a-loop-that-could-not-find-a-duplicate.md) | A loop that could not find a duplicate | — | Accepted | 2026-11-09 |
 | [0412](0412-a-member-that-never-fails-a-test.md) | A member that never fails a test | — | Accepted | 2026-11-09 |
 | [0413](0413-a-producer-the-survey-assumed.md) | A producer the survey assumed | — | Accepted | 2026-11-09 |
+| [0414](0414-a-value-bound-by-its-own-type.md) | A value bound by its own type | — | Accepted | 2026-11-16 |
+| [0415](0415-a-rollback-that-cost-the-page.md) | A rollback that cost the page | — | Accepted | 2026-11-16 |
+| [0416](0416-a-boot-line-that-read-as-working.md) | A boot line that read as working | — | Accepted | 2026-11-16 |
+| [0417](0417-a-path-the-documents-describe-and-nothing-serves.md) | A path the documents describe and nothing serves | — | Accepted | 2026-11-16 |
+| [0418](0418-a-diagnosis-the-console-had-not-measured.md) | A diagnosis the console had not measured | — | Accepted | 2026-11-16 |
