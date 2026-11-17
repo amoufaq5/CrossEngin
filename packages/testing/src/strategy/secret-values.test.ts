@@ -270,6 +270,13 @@ describe("reading the index", () => {
   it("reads the staged blob, so a key staged and then removed from the working copy is still found", () => {
     // The accident's shape: `git add` with the key, edit it out, commit without re-staging.
     const dir = mkdtempSync(join(tmpdir(), "secret-index-"));
+    // Run inside a pre-commit hook, git exports GIT_INDEX_FILE (and, under `commit -a`, points it at
+    // a temporary index of the *outer* repository). Inherited, it makes this scratch repository read
+    // the outer index and fail on objects it does not hold — so the hook's variables are withheld
+    // here, and only here: the real-tree scan below is right to read the index being committed.
+    const hookEnv = Object.keys(process.env).filter((k) => k.startsWith("GIT_"));
+    const saved = new Map(hookEnv.map((k) => [k, process.env[k]]));
+    for (const k of hookEnv) delete process.env[k];
     try {
       const git = (...args: string[]): void => {
         execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd: dir });
@@ -290,6 +297,7 @@ describe("reading the index", () => {
       });
       expect(clean.findings).toEqual([]);
     } finally {
+      for (const [k, v] of saved) if (v !== undefined) process.env[k] = v;
       rmSync(dir, { recursive: true, force: true });
     }
   });
