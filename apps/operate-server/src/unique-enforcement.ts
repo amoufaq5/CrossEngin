@@ -17,18 +17,17 @@
  *
  * `uniqueWithheldFor(plan)` in `@crossengin/operate-runtime-pg` answers the same question for a
  * table it is about to emit, and is exhaustive over what an `EntityTablePlan` can express — which
- * is `encrypted_at_rest` and nothing else. The deployment-level answer is strictly larger, because
- * **the two stores that enforce nothing have no plan to ask**: `--store pg` builds no entity tables
- * and `--store memory` builds no tables at all, so on those the emitter is never called and its
- * taxonomy has no producer. That is not a gap in it; it is where the question changes from *what
- * will this table carry* to *what will this deployment guarantee*.
+ * is `encrypted_at_rest` and nothing else. The deployment-level answer is larger: `--store memory`
+ * builds no tables, so the emitter has no producer there, and `--store pg` enforces by a different
+ * mechanism whose outcome is only known once its indexes have been *built*.
  *
- * And the deployment-level answer is the one an operator needs, because it is the bigger number.
- * On `--store pg-columns` serving `erp-healthcare`, 33 of 34 declarations are enforced and one is
- * withheld. On `--store pg` serving `erp-core` — **the shipped compose default** — all 32 are
- * unenforceable, and nothing anywhere says so. A survey that only ever spoke about ciphertext
- * would have reported the small number on the deployment that is mostly right and printed nothing
- * at all on the deployment that is wholly wrong.
+ * Until H-09 that mechanism did not exist: on `--store pg` serving `erp-core` — the shipped compose
+ * default — all 32 declarations were unenforced (measured: two invoices sharing a number posted the
+ * general ledger twice under it). `PostgresEntityStore` now creates one partial unique expression
+ * index per declared field at boot, and a build can still fail — rows already holding duplicates,
+ * a serving role that does not own the table — so on that store the survey is told which indexes
+ * the boot could not create (`observed`), and reports those rather than claiming a guarantee it did
+ * not see established.
  *
  * ## Said either way, including when the figure is zero
  *
@@ -76,10 +75,11 @@ export const UNIQUE_ENFORCEMENT_REASONS = {
    * over them never fires. Emitting one anyway would be worse than emitting nothing, because an
    * operator reading `\d` would see a constraint that cannot do its job.
    *
-   * The remedy is reclassification and **not** "serve it where the value is plaintext", which is
-   * the obvious second half and is false: the only store that keeps a classified value as plaintext
-   * is the document store, which withholds every unique for its own reason, so moving the field
-   * there trades one withholding for another. There is no store in this repository that both
+   * The remedy is reclassification and **not** "serve it where the value is plaintext". The
+   * document store does keep it as plaintext and does now index it, but only by refusing to
+   * encrypt a field the manifest says must be — ADR-0338 refuses that boot unless
+   * `--allow-plaintext-phi` accepts it — so it trades one guarantee for the other rather than
+   * resolving anything. There is no store in this repository that both
    * encrypts a column at rest and enforces uniqueness over it, and that is structural rather than
    * unbuilt — which is worth saying in the remedy, because it turns a reader's search for a
    * configuration into a choice between two guarantees.
@@ -93,25 +93,35 @@ export const UNIQUE_ENFORCEMENT_REASONS = {
       " choice between the two guarantees rather than a misconfiguration",
   },
   /**
-   * The JSONB document store cannot carry the guarantee **at all** — blocked by shape, not by
-   * ordering. Every entity's records share one catalogued table whose only UNIQUE is
-   * `(tenant_id, entity, record_id)`; `PostgresEntityStore` has no `ensureSchema`, so there is no
-   * DDL seam to hang an index on; and enforcing a *field* would need a partial unique expression
-   * index per (entity, field) — `(tenant_id, (document->>'sku')) WHERE entity = 'Item'` — which
-   * `META_TABLES` cannot declare, because the kernel catalog cannot know a manifest, and which
-   * `kernel-pg`'s `diffSchema` would then report as an undeclared index on every drift check
-   * forever.
-   *
-   * `pg-unreachable-stores.ts` keeps `prerequisite_of_unbuilt_surface` and
-   * `contract_cannot_carry_the_surface` apart on exactly this distinction, on the stated grounds
-   * that calling both "unwired" sends the next person to write the thing that cannot be written
-   * honestly. This is the second kind.
+   * The four ways the document store's boot can fail to build a field's index. This member used to
+   * be one reason, `document_store`, which said the guarantee *could not* be carried there because
+   * the catalog cannot declare a per-manifest index and the reconciler would report one as
+   * undeclared for ever. Both halves were answered rather than worked around: the catalog declares
+   * the *namespace* (`runtimeIndexPrefix`) and the reconciler skips it.
    */
-  document_store: {
+  existing_duplicates: {
     withheld:
-      "the JSONB document store shares one table across every entity and has no DDL seam, so a" +
-      " per-field UNIQUE cannot be declared there",
-    remedy: "serve this manifest on --store pg-columns, which emits one unique index per field",
+      "the shared table already holds two records of this entity with the same value within a" +
+      " tenant, so the unique index could not be built",
+    remedy:
+      "deduplicate those records (the CREATE statement is logged above), then restart — the index" +
+      " is created at boot",
+  },
+  index_not_owner: {
+    withheld:
+      "the connecting role does not own the shared records table, so it cannot create an index on" +
+      " it",
+    remedy: "run the logged CREATE statement once as the table's owner (the role that ran migrate)",
+  },
+  index_invalid: {
+    withheld:
+      "an index of this name exists and Postgres reports it invalid — a failed CREATE INDEX" +
+      " CONCURRENTLY leaves one — so it enforces nothing",
+    remedy: "DROP the logged index and restart, so the boot builds it again",
+  },
+  index_failed: {
+    withheld: "Postgres refused the index for a reason logged above",
+    remedy: "read the logged error; the table serves without this guarantee until the index exists",
   },
   /**
    * `InMemoryEntityStore` is a `Map` keyed on the record id and nothing else: `create` assigns an
@@ -122,10 +132,10 @@ export const UNIQUE_ENFORCEMENT_REASONS = {
    * declarations went unenforced for four phases is that nobody was told which layer owed the
    * guarantee.
    *
-   * Its own member rather than sharing `document_store`'s: `memory` is not the document store, the
-   * sentence would be false of it, and `boot-erasure-report.ts` refuses the same conflation for the
-   * same reason — naming a schema for a deployment with no database invites a reader to believe
-   * something is happening in it.
+   * Its own member rather than sharing the document store's reasons: `memory` is not the document
+   * store, those sentences would be false of it, and `boot-erasure-report.ts` refuses the same
+   * conflation for the same reason — naming a schema for a deployment with no database invites a
+   * reader to believe something is happening in it.
    */
   no_durable_store: {
     withheld:
@@ -134,7 +144,9 @@ export const UNIQUE_ENFORCEMENT_REASONS = {
     // The exposure is stated in `withheld` and deliberately not repeated here: the remedy is the
     // one clause an operator acts on, and the figure appended to it below has to be the last thing
     // on the line or it reads as qualifying the exposure instead of the store change.
-    remedy: "serve on --store pg-columns for an enforced guarantee",
+    remedy:
+      "serve on --store pg or --store pg-columns, which both enforce a declared unique field with" +
+      " an index",
   },
 } as const;
 
@@ -178,18 +190,33 @@ void _emitterReasonsAreExplained;
  * on pairs that could be stated inconsistently.
  */
 const STORE_ENFORCEMENT: Readonly<
-  Record<StoreKind, { readonly blanketReason: UniqueEnforcementReason | null; readonly mechanism: string }>
+  Record<
+    StoreKind,
+    {
+      readonly blanketReason: UniqueEnforcementReason | null;
+      /** Whether a phi/regulated value is ciphertext on this store, which no unique index can cover. */
+      readonly encryptsAtRest: boolean;
+      readonly mechanism: string;
+    }
+  >
 > = {
   memory: {
     blanketReason: "no_durable_store",
+    encryptsAtRest: false,
     mechanism: "records live in a process-local Map keyed on the record id",
   },
   pg: {
-    blanketReason: "document_store",
-    mechanism: "records are JSONB rows in one shared catalogued table",
+    blanketReason: null,
+    // Plaintext, so a classified unique field is enforced here where the column store withholds it.
+    encryptsAtRest: false,
+    mechanism:
+      "one partial unique index per field on the shared table, over (tenant_id, …any declared" +
+      " scope, document ->> 'field') where entity matches, so the guarantee is uniqueness within a" +
+      " tenant and never across tenants",
   },
   "pg-columns": {
     blanketReason: null,
+    encryptsAtRest: true,
     // `(tenant_id, …)` and never `(col)` alone is why this could not be an inline `UNIQUE` copied
     // from the field: these tables carry a `(tenant_id, id)` primary key, so a bare `UNIQUE (col)`
     // would make one tenant's `employee_number` collide with another's. The guarantee a pack means
@@ -204,6 +231,20 @@ const STORE_ENFORCEMENT: Readonly<
 export const UNIQUE_SURVEY_STORE_KINDS: readonly StoreKind[] = Object.keys(
   STORE_ENFORCEMENT,
 ) as StoreKind[];
+
+/**
+ * A field whose index the store could not establish at boot. Only `PostgresEntityStore` produces
+ * these (its indexes are built at run time); the column store's refusals are logged by its own
+ * callback, and the memory store has nothing to build.
+ */
+export interface ObservedUniqueRefusal {
+  readonly entity: string;
+  readonly field: string;
+  readonly reason: Extract<
+    UniqueEnforcementReason,
+    "existing_duplicates" | "index_not_owner" | "index_invalid" | "index_failed"
+  >;
+}
 
 /** One field whose declared uniqueness this deployment will not enforce, and why. */
 export interface WithheldUniqueField {
@@ -229,7 +270,7 @@ export const UNIQUE_ENFORCEMENT_VERDICTS = [
   "all_enforced",
   /** Some are enforced and at least one is withheld — `pg-columns` with a classified unique field. */
   "partly_enforced",
-  /** Declarations exist and this store enforces none of them. The headline for `pg` and `memory`. */
+  /** Declarations exist and this store enforces none of them — `memory` always, `pg` if no index built. */
   "none_enforced",
 ] as const;
 export type UniqueEnforcementVerdict = (typeof UNIQUE_ENFORCEMENT_VERDICTS)[number];
@@ -238,32 +279,21 @@ export type UniqueEnforcementVerdict = (typeof UNIQUE_ENFORCEMENT_VERDICTS)[numb
  * Whether each verdict permits a boot. `LIST_SURFACE_MAY_SERVE`'s shape, and **every member is
  * `true`**: this survey reports and never refuses.
  *
- * ## The argument, measured rather than asserted
+ * ## The argument
  *
- * ADR-0338 refuses PHI-without-encryption on the grounds that *nothing served PHI correctly today,
- * so the refusal breaks nothing that worked*, while ADR-0334 made `--tenant-status-gate` opt-in
- * because on-by-default would refuse a deployment that works. The first premise holds here —
- * **zero** unique constraints exist on any of the 54 tables and none ever has — so "breaks nothing
- * that worked" is satisfied and the safe default is in principle available. Two measurements take
- * it away again, and the second is the deciding one.
+ * It was argued here once on two grounds and only one survives. *The remedy cannot work* — the
+ * declarations are in builtin packs and `--store pg` had no mechanism — is retired: that store now
+ * builds the indexes itself. *The degradation is permissive, not a wrong answer* is **refuted**: a
+ * duplicate document number reaches the GL posting effect and posts the ledger twice under one
+ * number, in entries that each balance (register P0.7), so an absent index does produce a wrong
+ * figure.
  *
- * **The remedy cannot work.** The declarations are in *builtin packs*. On `--store pg` serving
- * `erp-core`, which is the shipped compose default, 32 of 32 are unenforceable and an operator
- * cannot clear that by editing anything they own: they would have to edit `pack-erp-core` in this
- * repository, or migrate the deployment to `pg-columns`, which is a data migration and not a flag.
- * A refusal whose remedy is "change the product" refuses the shipped default with no action
- * available, and "a remedy that cannot work is worse than none" (ADR-0334) — the same reason
- * `list-surface-survey.ts` reports where ADR-0338 refuses.
- *
- * **And the degradation is permissive, not a wrong answer.** This is the sharper half and the real
- * distinction from ADR-0338. A plaintext PHI column is *incoherent*: the manifest says the value is
- * protected and it is not. An unenforced `unique` is a **missing constraint**: every read returns
- * the right rows, every write stores what it was given, and the only consequence is that a
- * duplicate can be created. ADR-0359 drew exactly this line one increment ago —
- * *a surface whose drop changes WHICH rows come back is refused; one whose drop changes only their
- * ORDER is reported* — and an absent unique index changes neither which rows come back nor their
- * order. It changes which rows can be *created*, and in the admitting direction, which is the
- * reporting side of this repo's own rule.
+ * What still makes this a report is the remaining withholdings themselves. Each is an index the
+ * boot could not build — duplicates already in the table, a role that does not own it, a leftover
+ * invalid index, ciphertext on the column store — and every remedy is an act on *data or
+ * ownership* the server cannot perform. Refusing the boot would take every tenant's deployment down
+ * over one tenant's duplicate rows, which the operator then cannot repair through the API that is no
+ * longer up.
  *
  * So: reported, and `uniqueEnforcementIsSuspect` earns a `warn` wherever anything is withheld.
  */
@@ -331,8 +361,10 @@ function declaredScope(unique: boolean | { readonly scope: readonly string[] } |
 export function surveyUniqueEnforcement(
   manifest: Manifest,
   storeKind: StoreKind,
+  observed: readonly ObservedUniqueRefusal[],
 ): UniqueEnforcementReport {
-  const blanketReason = STORE_ENFORCEMENT[storeKind].blanketReason;
+  const { blanketReason, encryptsAtRest } = STORE_ENFORCEMENT[storeKind];
+  const observedReason = new Map(observed.map((o) => [`${o.entity}.${o.field}`, o.reason] as const));
   const traits = manifest.traits ?? [];
   const withheld: WithheldUniqueField[] = [];
   let declaredCount = 0;
@@ -346,10 +378,14 @@ export function surveyUniqueEnforcement(
       const classification = field.classification;
       const encrypted = classification !== undefined && requiresEncryptionAtRest(classification);
       if (encrypted) encryptedCount += 1;
-      // The blanket reason wins where it applies, and it has to: on `pg` a classified field is
-      // stored as plaintext, so reporting it under `encrypted_at_rest` would name a condition that
-      // is not true of that deployment and a remedy — reclassify — that would change nothing.
-      const reason = blanketReason ?? (encrypted ? "encrypted_at_rest" : null);
+      // The blanket reason wins where it applies. `encrypted_at_rest` is asked only of a store that
+      // encrypts: on `pg` a classified field is plaintext and its index is built like any other, so
+      // naming the ciphertext reason there would state a condition untrue of that deployment.
+      const reason =
+        blanketReason ??
+        (encrypted && encryptsAtRest ? "encrypted_at_rest" : null) ??
+        observedReason.get(`${entity.name}.${field.name}`) ??
+        null;
       if (reason !== null) withheld.push({ entity: entity.name, field: field.name, reason, scope });
     }
   }
@@ -446,10 +482,11 @@ export function formatUniqueEnforcementReport(report: UniqueEnforcementReport): 
     // whose only withheld field is classified it is the same number that is withheld now, which is
     // the case where advising a different store would buy nothing.
     const checked =
-      reason === "encrypted_at_rest"
-        ? remedy
-        : `${remedy}; measured on this manifest, that would enforce ` +
-          `${report.enforceableOnColumnStore.toString()} of these ${report.declaredCount.toString()}`;
+      reason === "no_durable_store"
+        ? `${remedy}; measured on this manifest, --store pg would enforce all ` +
+          `${report.declaredCount.toString()} and --store pg-columns ` +
+          `${report.enforceableOnColumnStore.toString()} of them`
+        : remedy;
     lines.push(`    remedy: ${checked}`);
   }
   return lines.join("\n");

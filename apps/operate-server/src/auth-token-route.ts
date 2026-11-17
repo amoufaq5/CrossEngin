@@ -4,6 +4,7 @@ import {
   type PasswordScryptParams,
   type PasswordVerifyOutcome,
   hashPassword,
+  parsePasswordHash,
   passwordHashIsStale,
   spendPasswordWork,
   verifyPassword,
@@ -12,6 +13,12 @@ import { z } from "zod";
 
 import type { CredentialRecord, PostgresCredentialStore } from "./credential-store.js";
 import type { RawHttpRequest, RawHttpResponse } from "./http.js";
+import {
+  LOGIN_ADMISSION_REFUSAL_STATUS,
+  type LoginAdmission,
+  type LoginAdmissionRefusal,
+} from "./login-admission.js";
+import { normalizeEmail } from "./platform-users.js";
 import { dedupedSessionRoles, roleNameIsScopeSafe, type SessionRoles } from "./token-mint.js";
 
 /**
@@ -32,7 +39,15 @@ import { dedupedSessionRoles, roleNameIsScopeSafe, type SessionRoles } from "./t
  * Of those the first is the one that matters, and the KDF cost is **not** an acceptable substitute:
  * scrypt at the shipped parameters is ~130 ms on a libuv pool of 4 shared with fs and dns, so
  * treating the derivation as the limiter is a denial of service against the rest of the process.
- * Hence the per-user lockout, counted in SQL.
+ * Hence two bounds, both decided before any derivation: `LoginAdmission` caps how many
+ * verifications run at once across the process and per account, and the per-user lockout counts
+ * each attempt in SQL *before* evaluating it, so a burst of parallel guesses cannot outrun it.
+ *
+ * Neither is protection against credential stuffing. Behind the shipped Caddy every request
+ * arrives from one peer address and the edge is not declared trusted, so there is no per-source
+ * fact to key on: the lockout is per account, which means anyone who knows an address can lock it
+ * by spending the threshold of guesses each window. What the window buys is that the lock lapses
+ * and an attempt made while locked does not extend it.
  *
  * ## The one rule the whole module is built around
  *
@@ -87,7 +102,7 @@ export const LOGIN_REFUSALS = [
    * run and not by a test, because every test supplies a well-formed role list.
    *
    * So the check moves into `verifyLogin`, where it takes the uniform 401 body like every other
-   * refusal and the detail reaches the operator through `onFailure`. The mint's throw stays as a
+   * refusal and the detail reaches the operator through `onRefusal`. The mint's throw stays as a
    * pure backstop that this path can no longer reach -- `dischargeAbac`'s shape, where the refusal
    * sits before the call so a caller that forgets cannot get it wrong.
    */
@@ -97,6 +112,10 @@ export type LoginRefusal = (typeof LOGIN_REFUSALS)[number];
 
 /**
  * Whether a refusal should count against the lockout.
+ *
+ * Read by `verifyLogin` when it settles a reservation: the attempt is counted before its password
+ * is verified, and a refusal this map answers `false` for gives the reservation back. Only a
+ * refusal reached *after* the reservation is settled through it; the earlier ones never reserve.
  *
  * A total map rather than a condition, because the two that answer `false` are the two a condition
  * would get wrong. `credential_unreadable` must not count: a corrupt or foreign-format row would
@@ -284,48 +303,77 @@ export async function verifyLogin(input: VerifyLoginInput): Promise<LoginOutcome
     };
   }
 
+  if (parsePasswordHash(record.credentialHash) === null) {
+    // Settled before the reservation, so an attempt that cannot be verified is never counted:
+    // `REFUSAL_COUNTS_AGAINST_LOCKOUT.credential_unreadable` is false because a corrupt row must
+    // not lock out a user whose password was correct.
+    //
+    // The work is still spent, and this was the seventh equaliser site (ADR-0398): a refusal that
+    // derives nothing answered in **7 ms** on this route against **79-81 ms** for every other
+    // refusal, ~11x -- the route's ratio, which is what an unauthenticated caller samples. On a
+    // route whose design is that every refusal is byte-identical, that is a channel saying *this
+    // account's stored hash is one this build cannot read*. `users_credential_hash_check` refuses a
+    // foreign format outright, so what reaches here is a `scrypt$`-shaped row whose numeric
+    // parameters the CHECK admits and `passwordParamsAreDerivable` refuses.
+    await spendPasswordWork(password, input.pepper, params);
+    return unreadable(record.userId);
+  }
+
+  // The attempt is counted BEFORE it is evaluated. See `reserveAttempt` for the measurement: counted
+  // afterwards, N concurrent guesses were all evaluated whatever the threshold.
+  const reservation = await input.store.reserveAttempt(
+    record.userId,
+    input.lockout.attempts,
+    input.lockout.seconds,
+  );
+  if (!reservation.reserved) {
+    // Locked between the read above and now, by a concurrent attempt -- the race the read alone
+    // could not close. Same answer and same cost as the read-time lock.
+    await spendPasswordWork(password, input.pepper, params);
+    return {
+      ok: false,
+      refusal: "account_locked",
+      userId: record.userId,
+      detail: `user ${record.userId} was locked by a concurrent attempt`,
+    };
+  }
+  // Every refusal past the reservation goes through here, and `REFUSAL_COUNTS_AGAINST_LOCKOUT` is
+  // what decides whether its reservation is kept -- so that map is the policy rather than a
+  // description of one. A release that fails is swallowed: the refusal is already decided, and the
+  // cost is one attempt counted that should not have been, bounded by the window, where a throw
+  // would turn a correct password's refusal into a retryable 503.
+  const settle = async (refusal: Extract<LoginOutcome, { ok: false }>): Promise<LoginOutcome> => {
+    if (!REFUSAL_COUNTS_AGAINST_LOCKOUT[refusal.refusal]) {
+      try {
+        await input.store.releaseAttempt(record.userId, input.lockout.attempts);
+      } catch {
+        /* see above */
+      }
+    }
+    return refusal;
+  };
+
   const outcome: PasswordVerifyOutcome = await verifyPassword(
     password,
     record.credentialHash,
     input.pepper,
   );
+  if (outcome === "unreadable_hash") {
+    // The hash was replaced between the parse above and now.
+    await spendPasswordWork(password, input.pepper, params);
+    return settle(unreadable(record.userId));
+  }
   if (!PASSWORD_OUTCOME_ADMITS[outcome]) {
-    if (outcome === "unreadable_hash") {
-      // The seventh equaliser site, and the one arm that had none (ADR-0398). `verifyPassword`
-      // answers `unreadable_hash` from `parsePasswordHash` **before** deriving anything, so this
-      // refusal returned at the route's floor where every other one pays a full derivation. The
-      // ratio to quote is the **route's**, because that is what an unauthenticated caller samples:
-      // measured live, a refusal that derives nothing answers in **7 ms** against **79-81 ms** for
-      // every other refusal on this route, ~11x. (`parsePasswordHash` itself costs 0.05 us, so the
-      // *function* ratio is ~1.8 million -- a true figure about the wrong layer, and an earlier
-      // draft of this comment split the difference at "~1000x", which is neither.) On a route whose
-      // entire design is that every refusal is byte-identical, that is a channel saying *this
-      // account's stored hash is one this build cannot read* -- a fact about a specific account.
-      //
-      // It is a pre-existing oracle rather than one this increment created, and the pre-existing
-      // population is narrower than it looks: `users_credential_hash_check` refuses a foreign
-      // format outright (an argon2 string is rejected by the column, verified), so what reaches
-      // this arm is a `scrypt$`-shaped row whose *numeric* parameters the CHECK admits and the
-      // parser's shape rules refuse -- `n=0`, `n=1`, `n=3`, `n=6` all store and all parse to `null`.
-      // This increment **widens** that population by adding the two cost ceilings, so an
-      // out-of-bounds `p` or `r` now lands here too. Enlarging a timing channel while leaving it
-      // open is not a trade worth making for a one-line spend.
-      //
-      // Deliberately here and not in `verifyPassword`, which is a pure predicate: all seven spend
-      // sites are in this function, so one place owns the route's timing policy. And deliberately
-      // not counted against the lockout, which is unchanged -- `REFUSAL_COUNTS_AGAINST_LOCKOUT`
-      // excludes it because a corrupt row must not lock out a user whose password was correct.
-      await spendPasswordWork(password, input.pepper, params);
-    }
-    return {
+    return settle({
       ok: false,
-      refusal: outcome === "unreadable_hash" ? "credential_unreadable" : "password_mismatch",
+      refusal: "password_mismatch",
       userId: record.userId,
       detail:
-        outcome === "unreadable_hash"
-          ? `user ${record.userId} has a credential this build cannot read`
-          : "password did not match",
-    };
+        reservation.lockedUntil === null
+          ? `password did not match (${reservation.failedAttempts.toString()} consecutive)`
+          : `password did not match; account locked until ${reservation.lockedUntil} after` +
+            ` ${reservation.failedAttempts.toString()} consecutive failures`,
+    });
   }
 
   const roles = await input.roleFor(tenant.tenantId, record.userId);
@@ -333,12 +381,12 @@ export async function verifyLogin(input: VerifyLoginInput): Promise<LoginOutcome
   // empty primary names no role the mint can put first, and `principalRoles` would read the first
   // secondary as the primary -- promoting a role nobody granted as such.
   if (roles === null || roles.primaryRole === "") {
-    return {
+    return settle({
       ok: false,
       refusal: "no_active_membership",
       userId: record.userId,
       detail: `user ${record.userId} has no active membership in tenant ${tenant.tenantId}`,
-    };
+    });
   }
   // Asked here rather than left to `sessionScope`'s throw: that throw escapes the interceptor as a
   // 500 carrying its own message, which on this route is both a disclosure and a retryable status
@@ -346,14 +394,14 @@ export async function verifyLogin(input: VerifyLoginInput): Promise<LoginOutcome
   // 400 and this 401 cannot come to disagree about which names are usable.
   const unusable = [roles.primaryRole, ...roles.secondaryRoles].find((r) => !roleNameIsScopeSafe(r));
   if (unusable !== undefined) {
-    return {
+    return settle({
       ok: false,
       refusal: "membership_role_unusable",
       userId: record.userId,
       detail:
         `user ${record.userId} has a membership in tenant ${tenant.tenantId} naming role` +
         ` ${JSON.stringify(unusable)}, which the session scope claim cannot carry`,
-    };
+    });
   }
   return {
     ok: true,
@@ -370,6 +418,15 @@ export async function verifyLogin(input: VerifyLoginInput): Promise<LoginOutcome
     rehashTo: passwordHashIsStale(record.credentialHash, params)
       ? await hashPassword(password, input.pepper, { params })
       : null,
+  };
+}
+
+function unreadable(userId: string): Extract<LoginOutcome, { ok: false }> {
+  return {
+    ok: false,
+    refusal: "credential_unreadable",
+    userId,
+    detail: `user ${userId} has a credential this build cannot read`,
   };
 }
 
@@ -417,7 +474,16 @@ export interface AuthTokenRouteContext {
    * forget the upgrade.
    */
   readonly onSuccess: (userId: string, rehashTo: string | null) => Promise<void>;
-  readonly onFailure: (userId: string, refusal: LoginRefusal) => Promise<void>;
+  /**
+   * Bounds how many verifications run at once, before any of them starts. **Required**: an optional
+   * cap defaulting to none is the pre-auth CPU exhaustion this exists to close, restated as a
+   * default. There is no `onFailure` beside it any more -- a wrong password is counted by the
+   * reservation `verifyLogin` takes before verifying, which is what makes the count bound
+   * concurrent guesses rather than report them afterwards.
+   */
+  readonly admission: LoginAdmission;
+  /** Told each time a request is shed. Never receives the email or the password. */
+  readonly onShed?: (refusal: LoginAdmissionRefusal) => void;
   /** The deployment's own record. Must never receive the password or the minted token. */
   readonly onRefusal?: (info: { readonly refusal: LoginRefusal; readonly detail: string }) => void;
   readonly onError?: (err: unknown) => void;
@@ -433,6 +499,28 @@ function json(status: number, body: unknown): RawHttpResponse {
     },
     body: new TextEncoder().encode(JSON.stringify(body)),
   };
+}
+
+/** The admission refusal's body. Names the condition, never the account or the request. */
+function shed(refusal: LoginAdmissionRefusal, retryAfterSeconds: number): RawHttpResponse {
+  const status = LOGIN_ADMISSION_REFUSAL_STATUS[refusal];
+  const res = json(
+    status,
+    refusal === "saturated"
+      ? {
+          type: "https://crossengin.io/errors/login-unavailable",
+          title: "Login unavailable",
+          status,
+          detail: "Too many sign-ins are being verified right now. Retry shortly.",
+        }
+      : {
+          type: "https://crossengin.io/errors/too-many-sign-ins",
+          title: "Too many sign-ins",
+          status,
+          detail: "Too many sign-ins for this email address are already in progress. Retry shortly.",
+        },
+  );
+  return { ...res, headers: { ...res.headers, "retry-after": retryAfterSeconds.toString() } };
 }
 
 export function isAuthTokenPath(url: string): boolean {
@@ -476,6 +564,15 @@ export function buildAuthTokenInterceptor(
       });
     }
 
+    // After the parse, so a malformed body costs nothing, and before `verify`, so a shed request
+    // has done no password work. Keyed on the normalised email the caller typed and never on the
+    // account it resolves to: the decision must not depend on whether that account exists.
+    const admission = await ctx.admission.enter(normalizeEmail(parsed.email));
+    if (!admission.admitted) {
+      ctx.onShed?.(admission.refusal);
+      return shed(admission.refusal, admission.retryAfterSeconds);
+    }
+
     let outcome: LoginOutcome;
     try {
       outcome = await ctx.verify(parsed);
@@ -496,22 +593,14 @@ export function buildAuthTokenInterceptor(
         status: 503,
         detail: "The credential directory could not be reached. Retry shortly.",
       });
+    } finally {
+      // Every derivation is inside `verify`, including a success's re-hash, so the slot is held
+      // exactly as long as password work can be running.
+      admission.release();
     }
 
     if (!outcome.ok) {
       ctx.onRefusal?.({ refusal: outcome.refusal, detail: outcome.detail });
-      if (outcome.userId !== null && REFUSAL_COUNTS_AGAINST_LOCKOUT[outcome.refusal]) {
-        try {
-          await ctx.onFailure(outcome.userId, outcome.refusal);
-        } catch (err) {
-          // Reported and swallowed: the refusal has already been decided and raising here would
-          // turn a correctly-refused login into a 503, which is the one answer that invites a
-          // retry. The cost is an uncounted attempt, which is the failure direction a counter can
-          // afford -- unlike `put` in the idempotency store, nothing has been committed that a
-          // retry would duplicate.
-          ctx.onError?.(err);
-        }
-      }
       return json(401, LOGIN_REFUSED_PROBLEM);
     }
 

@@ -2,6 +2,13 @@ import { resolvedFields } from "@crossengin/kernel/ddl";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import type { Entity, Field, FieldType, PrimitiveFieldType, Trait } from "@crossengin/types/meta-schema";
 
+import {
+  CALLER_RECORD_ID_PATTERN,
+  EXPECTED_UPDATED_AT_KEY,
+  SERVER_OWNED_ADMITTED,
+  type WriteSurface,
+} from "./write-surface.js";
+
 /**
  * The subset of JSON Schema 2020-12 this emitter produces.
  *
@@ -308,18 +315,17 @@ export interface EntitySchemas {
  * real create handler they **are** in the response body. So an emitter reusing `uiField` would
  * describe 426 of 630 fields, a document missing a third of every entity.
  *
- * `id` is added to the response and to neither request: `resolvedFields` deliberately excludes the
- * implicit primary key, and `RESERVED_ENTITY_FIELD_NAMES` refuses a field declaring either name, so
- * nothing derived from the manifest can collide with it. No `pattern` is emitted for it, because
- * the `rec_` + base36 shape is the *generator's* and `resolveRecordId` keeps a caller-supplied id as
- * given — a pattern would describe a constraint this API does not enforce, which is the
- * falsely-specific direction of the same mistake as a falsely-complete path list.
+ * `id` is added to the response and to the create request, which keeps a caller-supplied id, with
+ * the pattern the create handler refuses outside of (`record_id_malformed`). It is in no update
+ * request, and neither is any other field the server owns (`writeSurfaceRefusal`): a field the
+ * server stamps is described on the response and in neither request, because both requests refuse
+ * it 422 — publishing it as writable would hand a generated client a property every request fails
+ * on.
  *
- * `additionalProperties` is **not** set to `false`, and that is a measurement rather than caution:
- * an unknown key is accepted, stored and echoed by the JSONB and in-memory stores and silently
- * dropped by the column store, so the two stores answer one create with different bodies. `false`
- * would be false of two of the three; `true` would promise the column store's drop is a round trip.
- * Saying nothing is the only honest answer, and the asymmetry is reported instead.
+ * `additionalProperties` is `false` on both requests, which is true now and was not before the
+ * write surface: an undeclared key used to be stored by the JSONB and in-memory stores and dropped
+ * by the column store, so no value of the keyword described all three. The handler refuses it 422
+ * before any store sees the body, so every store answers alike.
  *
  * All three schemas are a function of **the manifest alone** — this took a `CreateWiring` until the
  * two arms that read it were measured, and neither survived: see `omittableOnCreate`. That is a
@@ -337,6 +343,8 @@ export const entitySchemas = (
    * permissive answer makes its own omission unobservable).
    */
   lifecycle: EntityLifecycleShape | null,
+  /** Which fields the server owns, so a request schema does not offer them. See `buildWriteSurfaces`. */
+  surface: WriteSurface,
 ): EntitySchemas => {
   const fields = resolvedFields(entity, customTraits);
   const responseProps: Record<string, JsonSchema> = {
@@ -345,7 +353,14 @@ export const entitySchemas = (
       description: "The record id. Generated as `rec_` + base36; a caller-supplied id is kept.",
     },
   };
-  const createProps: Record<string, JsonSchema> = {};
+  const createProps: Record<string, JsonSchema> = {
+    id: {
+      type: "string",
+      pattern: CALLER_RECORD_ID_PATTERN.source,
+      description:
+        "Optional. Kept as the record id when supplied (an import keeping its source ids); an id that already exists is refused 409.",
+    },
+  };
   const updateProps: Record<string, JsonSchema> = {};
   const createRequired: string[] = [];
   const undescribable: { field: string; reason: string }[] = [];
@@ -383,10 +398,11 @@ export const entitySchemas = (
           `transition routes. Re-sending the stored value is accepted; any other value is refused 422.`,
       };
     } else {
-      createProps[field.name] = req;
-      updateProps[field.name] = req;
+      const owned = surface.serverOwned.get(field.name);
+      if (owned === undefined || SERVER_OWNED_ADMITTED[owned].create) createProps[field.name] = req;
+      if (owned === undefined || SERVER_OWNED_ADMITTED[owned].update) updateProps[field.name] = req;
     }
-    if (field.required === true && !omittableOnCreate(field)) {
+    if (field.required === true && !omittableOnCreate(field) && field.name in createProps) {
       createRequired.push(field.name);
     }
   }
@@ -397,10 +413,24 @@ export const entitySchemas = (
       type: "object",
       properties: createProps,
       ...(createRequired.length > 0 ? { required: createRequired } : {}),
+      additionalProperties: false,
     },
     // An update is a partial by construction: the handler merges the patch into the stored record,
     // so every property is optional and `required` is absent rather than empty.
-    update: { type: "object", properties: updateProps },
+    // The concurrency token rides beside the fields; closing the body without it would describe the
+    // token the console sends on every edit as a request this API refuses.
+    update: {
+      type: "object",
+      properties: {
+        ...updateProps,
+        [EXPECTED_UPDATED_AT_KEY]: {
+          type: "string",
+          description:
+            "Optional. The `updated_at` this client last read; the update is refused 409 when the record has moved since. Not stored.",
+        },
+      },
+      additionalProperties: false,
+    },
     undescribable,
   };
 };

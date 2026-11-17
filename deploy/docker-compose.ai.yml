@@ -42,13 +42,20 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      app-role:
+        condition: service_completed_successfully
+      document-indexes:
+        condition: service_completed_successfully
       ai-pull:
         condition: service_completed_successfully
     environment:
       PGHOST: db
       PGPORT: "5432"
-      PGUSER: ${POSTGRES_USER}
-      PGPASSWORD: ${POSTGRES_PASSWORD}
+      # The app role and never POSTGRES_USER, for the base file's reason: this key replaces the
+      # base's, so naming the owner here would hand the self-hosted-AI path a session every RLS
+      # policy is inert for.
+      PGUSER: ${POSTGRES_APP_USER:-${POSTGRES_USER}}
+      PGPASSWORD: ${POSTGRES_APP_PASSWORD:-${POSTGRES_PASSWORD}}
       PGDATABASE: ${POSTGRES_DB}
       NODE_ENV: production
       # `ai-providers-local`, not `ai-providers-openai` with a base URL (ADR-0306). Both reach Ollama's

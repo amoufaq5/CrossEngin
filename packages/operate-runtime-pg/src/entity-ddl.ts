@@ -115,22 +115,6 @@ export const UNIQUE_WITHHELD_REASONS = {
    */
   encrypted_at_rest:
     "the column holds pgcrypto ciphertext and pgp_sym_encrypt is non-deterministic, so a UNIQUE over it never fires",
-  /**
-   * The deployment serves this entity from the JSONB document store, which cannot carry the
-   * guarantee **at all** — not pending wiring, but by shape. Every entity's records share one
-   * catalogued table whose only UNIQUE is `(tenant_id, entity, record_id)`; `PostgresEntityStore`
-   * has no `ensureSchema`, so there is no DDL seam; and enforcing a *field* would need a partial
-   * unique expression index per (entity, field), which `META_TABLES` cannot declare because the
-   * catalog cannot know a manifest and which `diffSchema` would then report as undeclared drift on
-   * every check forever. `pg-unreachable-stores.ts` keeps *blocked by ordering* and *blocked by
-   * shape* apart for exactly this reason: calling both "unwired" sends the next person to write the
-   * thing that cannot be written honestly.
-   *
-   * Emitted by the boot survey rather than by this module, which only ever plans column tables — so
-   * the member is here, where the vocabulary is, and has no producer in this file.
-   */
-  document_store:
-    "the JSONB document store shares one table across every entity and has no DDL seam, so a per-field UNIQUE cannot be declared there",
 } as const;
 export type UniqueWithheldReason = keyof typeof UNIQUE_WITHHELD_REASONS;
 

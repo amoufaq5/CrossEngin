@@ -3317,3 +3317,25 @@ describe("a table-level constraint's name avoids the column-check naming family"
     expect(META_WORKFLOW_TIMERS.columns.map((c) => c.name)).toContain(suffix);
   });
 });
+
+describe("a runtime index namespace", () => {
+  it("is declared on exactly the one table a serving store indexes at run time", () => {
+    expect(META_TABLES.filter((t) => t.runtimeIndexPrefix !== undefined).map((t) => t.name)).toEqual([
+      "operate_entity_records",
+    ]);
+  });
+
+  it("is never carried by a declared index or constraint, so the reconciler cannot skip a declared one", () => {
+    const offenders = META_TABLES.flatMap((t) => {
+      const prefix = t.runtimeIndexPrefix;
+      if (prefix === undefined) return [];
+      const declared = [
+        ...(t.indexes ?? []).map((i) => i.name),
+        ...(t.uniqueConstraints ?? []).map((u) => u.name),
+        ...(t.constraints ?? []).map((c) => c.name),
+      ];
+      return declared.filter((n) => n.startsWith(prefix)).map((n) => `${t.name}.${n}`);
+    });
+    expect(offenders).toEqual([]);
+  });
+});

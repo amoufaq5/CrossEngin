@@ -3,10 +3,13 @@ import {
   encodeKeyset,
   keysetOf,
   ListSurfaceUnserveable,
+  preconditionHolds,
+  type ConditionalUpdate,
   type EntityRecord,
   type ListPage,
   type ListQuery,
   type ListValueType,
+  type UpdatePrecondition,
 } from "@crossengin/operate-runtime";
 
 import {
@@ -20,6 +23,12 @@ import {
 import { rawFoldCall } from "./search-function.js";
 import { guardedTimestamptzCast } from "./temporal-sql.js";
 import { mergeRecord, resolveRecordId, type DocumentRow } from "./records.js";
+import {
+  checkReferences,
+  removeWithReferences,
+  rethrowDocumentUniqueViolation,
+  type DocumentIntegrityPlan,
+} from "./document-integrity.js";
 
 const FIELD_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -152,13 +161,19 @@ export async function createOp(
   tenantId: string,
   entity: string,
   record: EntityRecord,
+  integrity: DocumentIntegrityPlan | null = null,
 ): Promise<EntityRecord> {
   const id = resolveRecordId(record);
   const stored: EntityRecord = { ...record, id };
-  await tx.query(
-    `INSERT INTO ${table} (tenant_id, entity, record_id, document) VALUES ($1, $2, $3, $4::jsonb)`,
-    [tenantId, entity, id, JSON.stringify(stored)],
-  );
+  await checkReferences(tx, table, integrity, tenantId, entity, stored, null);
+  try {
+    await tx.query(
+      `INSERT INTO ${table} (tenant_id, entity, record_id, document) VALUES ($1, $2, $3, $4::jsonb)`,
+      [tenantId, entity, id, JSON.stringify(stored)],
+    );
+  } catch (err) {
+    rethrowDocumentUniqueViolation(integrity, err);
+  }
   return stored;
 }
 
@@ -169,6 +184,7 @@ export async function updateOp(
   entity: string,
   id: string,
   patch: EntityRecord,
+  integrity: DocumentIntegrityPlan | null = null,
 ): Promise<EntityRecord | null> {
   const existing = await tx.query<DocumentRow>(
     `SELECT document FROM ${table} WHERE tenant_id = $1 AND entity = $2 AND record_id = $3 FOR UPDATE`,
@@ -176,11 +192,55 @@ export async function updateOp(
   );
   const current = existing.rows[0]?.document;
   if (current === undefined) return null;
-  const merged = mergeRecord(current, patch, id);
-  await tx.query(
-    `UPDATE ${table} SET document = $4::jsonb, updated_at = now() WHERE tenant_id = $1 AND entity = $2 AND record_id = $3`,
-    [tenantId, entity, id, JSON.stringify(merged)],
+  return writeMerged(tx, table, tenantId, entity, id, current, patch, integrity);
+}
+
+/**
+ * `updateOp` with a precondition, compared against the document this statement holds `FOR UPDATE`.
+ * Under READ COMMITTED a `SELECT … FOR UPDATE` that waited on a concurrent writer returns that
+ * writer's committed version, not the one this transaction saw earlier — so the comparison is
+ * against the newest row and the write cannot interleave with another, which is the whole point.
+ */
+export async function updateIfOp(
+  tx: PgConnection,
+  table: string,
+  tenantId: string,
+  entity: string,
+  id: string,
+  patch: EntityRecord,
+  expected: UpdatePrecondition,
+  integrity: DocumentIntegrityPlan | null = null,
+): Promise<ConditionalUpdate> {
+  const existing = await tx.query<DocumentRow>(
+    `SELECT document FROM ${table} WHERE tenant_id = $1 AND entity = $2 AND record_id = $3 FOR UPDATE`,
+    [tenantId, entity, id],
   );
+  const current = existing.rows[0]?.document;
+  if (current === undefined) return { kind: "not_found" };
+  if (!preconditionHolds(current, expected)) return { kind: "precondition_failed" };
+  return { kind: "updated", record: await writeMerged(tx, table, tenantId, entity, id, current, patch, integrity) };
+}
+
+async function writeMerged(
+  tx: PgConnection,
+  table: string,
+  tenantId: string,
+  entity: string,
+  id: string,
+  current: EntityRecord,
+  patch: EntityRecord,
+  integrity: DocumentIntegrityPlan | null,
+): Promise<EntityRecord> {
+  const merged = mergeRecord(current, patch, id);
+  await checkReferences(tx, table, integrity, tenantId, entity, merged, current);
+  try {
+    await tx.query(
+      `UPDATE ${table} SET document = $4::jsonb, updated_at = now() WHERE tenant_id = $1 AND entity = $2 AND record_id = $3`,
+      [tenantId, entity, id, JSON.stringify(merged)],
+    );
+  } catch (err) {
+    rethrowDocumentUniqueViolation(integrity, err);
+  }
   return merged;
 }
 
@@ -190,7 +250,11 @@ export async function removeOp(
   tenantId: string,
   entity: string,
   id: string,
+  integrity: DocumentIntegrityPlan | null = null,
 ): Promise<boolean> {
+  if (integrity !== null && integrity.enforceReferences) {
+    return removeWithReferences(tx, table, integrity, tenantId, entity, id);
+  }
   const res = await tx.query(
     `DELETE FROM ${table} WHERE tenant_id = $1 AND entity = $2 AND record_id = $3`,
     [tenantId, entity, id],

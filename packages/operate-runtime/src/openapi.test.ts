@@ -58,6 +58,7 @@ const emitFor = (manifest: Manifest, role: string, coverage: readonly OpenApiCov
       title: "CrossEngin",
       version: "manifest-hash",
       coverage,
+      writeSurfaces: compiled.writeSurfaces,
     }),
   };
 };
@@ -147,6 +148,7 @@ const fixtureInput = (routes: readonly RouteDefinition[]): OpenApiEmitInput => (
   title: "F",
   version: "v",
   coverage: [],
+  writeSurfaces: new Map(),
 });
 
 // ---------------------------------------------------------------------------

@@ -1,3 +1,4 @@
+import { addDecimal, compareDecimal, DECIMAL_ZERO, type ExactDecimal, parseDecimal, renderDecimal } from "./decimal.js";
 import { drainList } from "./list-drain.js";
 import type { EntityStore, ListFilter } from "./store.js";
 
@@ -48,12 +49,15 @@ export interface JournalPostingGuardConfig {
   readonly lineEntryRefField?: string;
   readonly debitField?: string;
   readonly creditField?: string;
+  /** The functional-currency (base) amounts, which must balance as well as the transaction ones. */
+  readonly functionalDebitField?: string;
+  readonly functionalCreditField?: string;
+  /** The line's transaction currency; transaction amounts balance per currency. */
+  readonly currencyField?: string;
   readonly periodRefField?: string;
   readonly periodEntity?: string;
   readonly periodStateField?: string;
   readonly lockedPeriodStates?: readonly string[];
-  /** Largest absolute debit/credit difference treated as balanced (rounding slack). */
-  readonly tolerance?: number;
   /**
    * Largest number of lines this guard reads before it refuses rather than deciding. Reaching it
    * yields `unverifiable_journal_entry` and never a balance verdict over the prefix — which is the
@@ -72,11 +76,13 @@ const DEFAULTS = {
   lineEntryRefField: "journal_entry_id",
   debitField: "debit",
   creditField: "credit",
+  functionalDebitField: "functional_debit",
+  functionalCreditField: "functional_credit",
+  currencyField: "currency",
   periodRefField: "fiscal_period_id",
   periodEntity: "FiscalPeriod",
   periodStateField: "status",
   lockedPeriodStates: ["closed", "locked"] as readonly string[],
-  tolerance: 0.005,
   // 50_000 rather than 1000: `JournalEntry.source` enumerates `payroll` and `depreciation`, and
   // both jobs are declared (`erp-core-payroll-disbursement`, and `erp-core-depreciation-run`, whose
   // own description posts the period's entries to the GL), so a payroll run for 5,000 employees at
@@ -285,11 +291,11 @@ export function settlementIsCovered(total: number, applied: number): boolean {
 }
 
 /**
- * Enforces double-entry integrity when a journal entry is posted: the entry's
- * fiscal period must be open (not closed/locked), it must have at least one line,
- * and total debits must equal total credits (within `tolerance`). Fires only on
- * the draft→posted edge; all other writes pass. Domain field/entity names are
- * configurable so the guard isn't hard-wired to one manifest.
+ * Enforces double-entry integrity when a journal entry is posted: the entry's fiscal period must be
+ * open (not closed/locked), it must have at least two lines, and its debits must equal its credits
+ * **exactly** — per transaction currency, and again over the functional-currency (base) amounts.
+ * Fires on every write that leaves the entry `posted` from anything else, a create included.
+ * Domain field/entity names are configurable so the guard isn't hard-wired to one manifest.
  *
  * The balance is totalled over **every** line, draining the set rather than reading one page of
  * `maxLines`, because a prefix cannot carry this verdict in either direction. Measured at the old
@@ -299,6 +305,16 @@ export function settlementIsCovered(total: number, applied: number): boolean {
  * about the entry. A balancing prefix is the ordinary shape here rather than a contrivance, because
  * every GL posting effect writes its lines as a balanced group and the reversal mirrors them
  * pairwise. Past `maxLines` the guard refuses `unverifiable_journal_entry` instead of guessing.
+ *
+ * The totals are exact decimals and the comparison is `===`, with no tolerance. The tolerance this
+ * replaced (0.005 over doubles) was too loose and too tight at once: a double cannot hold a
+ * `NUMERIC(16, 2)` amount near its upper range, so `99999999999999.99` and `…98` read as the same
+ * number and an entry out by a cent posted, while at scale 2 there is no real difference below a
+ * cent for the slack to absorb. Per currency, because a sum of euros and dollars is not a quantity:
+ * the old single total admitted `100 EUR Dr / 100 USD Cr`. The functional amounts are checked
+ * because they are what a base-currency ledger is read from, and they were not checked at all —
+ * an entry posted with functional `100 Dr / 7 Cr` (live L11). A line amount that is not a decimal
+ * refuses the entry rather than reading as zero, which is what `Number("n/a") → 0` used to do.
  */
 export function journalPostingGuard(config: JournalPostingGuardConfig = {}): WriteGuard {
   const c = { ...DEFAULTS, ...config };
@@ -322,15 +338,15 @@ export function journalPostingGuard(config: JournalPostingGuardConfig = {}): Wri
       }
     }
 
-    // Balance: total debits must equal total credits across the entry's lines.
+    // An entry with no id yet — a create that names none — can have no line referencing it, so it
+    // is the empty entry. This arm used to return `null`, which let `POST {state: "posted"}` with
+    // no lines through (live L12).
     const entryId = input.id ?? (typeof input.after["id"] === "string" ? (input.after["id"] as string) : null);
-    if (entryId === null) return null;
+    if (entryId === null) return EMPTY_ENTRY;
     const filter: ListFilter = { field: c.lineEntryRefField, op: "eq", value: entryId };
-    let lines = 0;
-    let debit = 0;
-    let credit = 0;
-    // Folded page by page, so the guard holds two running totals rather than the entry's rows: a
-    // depreciation or payroll entry costs O(1) here whatever its size.
+    const totals = new JournalTotals();
+    // Folded page by page, so the guard holds running totals rather than the entry's rows: a
+    // depreciation or payroll entry costs O(currencies) here whatever its size.
     const read = await drainList(
       input.store,
       input.tenantId,
@@ -340,9 +356,13 @@ export function journalPostingGuard(config: JournalPostingGuardConfig = {}): Wri
       (records) => {
         for (const line of records) {
           if (String(line[c.lineEntryRefField] ?? "") !== entryId) continue;
-          lines += 1;
-          debit += num(line[c.debitField]);
-          credit += num(line[c.creditField]);
+          totals.add(
+            line[c.currencyField],
+            line[c.debitField],
+            line[c.creditField],
+            line[c.functionalDebitField],
+            line[c.functionalCreditField],
+          );
         }
       },
     );
@@ -354,9 +374,7 @@ export function journalPostingGuard(config: JournalPostingGuardConfig = {}): Wri
     // store that ignored the filter could exhaust the ceiling on other entries' lines and match
     // none of this entry's. With the conjunct the two cases partition and swapping these blocks is
     // behaviour-identical; dropping it makes the guard call an entry with lines empty.
-    if (lines === 0 && read.complete) {
-      return { status: 422, error: "empty_journal_entry", detail: "a posted journal entry must have at least one line" };
-    }
+    if (totals.lines === 0 && read.complete) return EMPTY_ENTRY;
     if (!read.complete) {
       // No remedy is named, deliberately: `maxLines` is reachable by no CLI flag, no manifest field
       // and no environment variable (`compileOperateServer` constructs this guard with no config at
@@ -369,15 +387,101 @@ export function journalPostingGuard(config: JournalPostingGuardConfig = {}): Wri
           `debits and credits could not be established over the whole set`,
       };
     }
-    if (Math.abs(debit - credit) > c.tolerance) {
+    // One line cannot be a double entry: it either moves nothing (debit equals credit on itself)
+    // or is unbalanced, so neither reading is a posting.
+    if (totals.lines === 1) {
+      return {
+        status: 422,
+        error: "single_line_journal_entry",
+        detail: "a posted journal entry must have at least two lines",
+      };
+    }
+    if (totals.unreadable > 0) {
+      return {
+        status: 422,
+        error: "unverifiable_journal_entry",
+        detail:
+          `${totals.unreadable.toString()} line amount(s) are not decimals, so the balance of ` +
+          `this entry's debits and credits could not be established`,
+      };
+    }
+    return totals.imbalance();
+  };
+}
+
+const EMPTY_ENTRY: WriteGuardBlock = {
+  status: 422,
+  error: "empty_journal_entry",
+  detail: "a posted journal entry must have at least two lines",
+};
+
+/** A debit total and a credit total, both exact. */
+interface DebitCredit {
+  debit: ExactDecimal;
+  credit: ExactDecimal;
+}
+
+/**
+ * The running exact totals of one entry's lines: transaction amounts keyed by currency, functional
+ * amounts over the whole entry. An absent or null amount is zero — the column defaults to 0 and a
+ * line naming only its debit is a line whose credit is zero — while a present value that is not a
+ * decimal is counted as unreadable and decides nothing.
+ */
+class JournalTotals {
+  lines = 0;
+  unreadable = 0;
+  private readonly byCurrency = new Map<string, DebitCredit>();
+  private readonly functional: DebitCredit = { debit: DECIMAL_ZERO, credit: DECIMAL_ZERO };
+
+  add(currency: unknown, debit: unknown, credit: unknown, fDebit: unknown, fCredit: unknown): void {
+    this.lines += 1;
+    const key = typeof currency === "string" ? currency : "";
+    const bucket = this.byCurrency.get(key) ?? { debit: DECIMAL_ZERO, credit: DECIMAL_ZERO };
+    bucket.debit = this.plus(bucket.debit, debit);
+    bucket.credit = this.plus(bucket.credit, credit);
+    this.byCurrency.set(key, bucket);
+    this.functional.debit = this.plus(this.functional.debit, fDebit);
+    this.functional.credit = this.plus(this.functional.credit, fCredit);
+  }
+
+  private plus(total: ExactDecimal, value: unknown): ExactDecimal {
+    if (value === undefined || value === null) return total;
+    const parsed = parseDecimal(value);
+    if (parsed === null) {
+      this.unreadable += 1;
+      return total;
+    }
+    return addDecimal(total, parsed);
+  }
+
+  imbalance(): WriteGuardBlock | null {
+    const several = this.byCurrency.size > 1;
+    for (const [currency, { debit, credit }] of [...this.byCurrency].sort(([a], [b]) => a.localeCompare(b))) {
+      if (compareDecimal(debit, credit) !== 0) {
+        const where = several ? `in ${currency === "" ? "lines with no currency" : currency}: ` : "";
+        return {
+          status: 422,
+          error: "unbalanced_journal_entry",
+          detail: `${where}debits (${cents(debit)}) must equal credits (${cents(credit)})`,
+        };
+      }
+    }
+    if (compareDecimal(this.functional.debit, this.functional.credit) !== 0) {
       return {
         status: 422,
         error: "unbalanced_journal_entry",
-        detail: `debits (${debit.toFixed(2)}) must equal credits (${credit.toFixed(2)})`,
+        detail:
+          `functional-currency debits (${cents(this.functional.debit)}) must equal ` +
+          `functional-currency credits (${cents(this.functional.credit)})`,
       };
     }
     return null;
-  };
+  }
+}
+
+/** Renders a total with at least two fraction digits, never fewer than it carries. */
+function cents(d: ExactDecimal): string {
+  return renderDecimal(addDecimal(d, { negative: false, units: 0n, scale: 2 }));
 }
 
 /** Fields whose change is always allowed (audit/lifecycle), so they don't count as an "edit". */

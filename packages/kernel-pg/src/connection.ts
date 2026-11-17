@@ -412,6 +412,150 @@ export function looksLikeProductionDatabase(database: string): boolean {
 export type ConnectionFactory = (config: PgConfig) => PgConnection;
 
 /**
+ * How many connections a pool holds, how long it waits for one, and the three per-session limits
+ * that bound what one statement, one lock wait and one abandoned transaction can cost.
+ *
+ * `0` on a session limit means **not set**: the server's (or the role's) own default applies, which
+ * for a stock Postgres is no limit. It is deliberately not "set it to 0", so a DBA's
+ * `ALTER ROLE … SET statement_timeout` survives a binary that was told nothing. `0` on
+ * `connectTimeoutMs` is node-postgres's own meaning, wait for ever, and `0` on `idleTimeoutMs`
+ * keeps idle connections open indefinitely.
+ */
+export interface PgPoolSettings {
+  readonly maxConnections: number;
+  readonly connectTimeoutMs: number;
+  readonly idleTimeoutMs: number;
+  readonly statementTimeoutMs: number;
+  readonly lockTimeoutMs: number;
+  readonly idleInTransactionTimeoutMs: number;
+}
+
+export type PgPoolSettingKey = keyof PgPoolSettings;
+
+/**
+ * What a pool is when nobody chose: node-postgres's own pool defaults made explicit, and **no**
+ * session limit. This is what `crossengin apply`, `crossengin-pg` and the operator subcommands run
+ * with, on purpose: a migration, a rekey and a by-hand chain verification are each one long
+ * operation an operator started and is watching, and a timeout chosen for request traffic would
+ * cancel them partway — a rekey or an `encrypt --apply` halted mid-transaction is exactly the
+ * outcome those commands are written to avoid.
+ */
+export const UNBOUNDED_POOL_SETTINGS: PgPoolSettings = Object.freeze({
+  maxConnections: 10,
+  connectTimeoutMs: 0,
+  idleTimeoutMs: 10_000,
+  statementTimeoutMs: 0,
+  lockTimeoutMs: 0,
+  idleInTransactionTimeoutMs: 0,
+});
+
+/**
+ * The serving process's defaults, each chosen against a measurement rather than a habit.
+ *
+ * - `connectTimeoutMs` 30s: node-postgres applies it both to opening a connection **and** to
+ *   waiting for a free slot in a full pool, so today an unreachable database or an exhausted pool
+ *   holds a request for ever. A request that waited 30s for a connection is already lost.
+ * - `statementTimeoutMs` 5 min: the longest statement the server issues on its own is the integrity
+ *   proof's whole-chain read, measured on PG 16 at **~6 s per million entries** end to end (0.72 s
+ *   server-side, the rest node-postgres pacing the socket) — so 5 minutes is ~50M entries, and the
+ *   same read holds **~870 MB of heap per million**, so memory gives out an order of magnitude
+ *   before this does. A fresh catalog bootstrap is 2.5 s. What it can cancel is a single DELETE in
+ *   an Article 17 erasure over a very large tenant table, and the `--pg-statement-timeout-ms` hatch
+ *   (0 = unset) exists for exactly that.
+ * - `lockTimeoutMs` 60s: every advisory and row lock this binary takes is held for one short
+ *   operation (a transaction, or the incident store's session lock around one allocation); the
+ *   longest is a per-tenant schema application. A lock wait past a minute is a
+ *   wedged holder, and an `ALTER TABLE` queued behind one blocks every later reader of the table.
+ * - `idleInTransactionTimeoutMs` 60s: the longest gap between two statements inside one
+ *   transaction is the chain read parsing its rows before the transaction ends, measured at **~6 s
+ *   per million entries** — so 60 s is ~10M entries, past where the heap runs out.
+ */
+export const SERVING_POOL_SETTINGS: PgPoolSettings = Object.freeze({
+  maxConnections: 10,
+  connectTimeoutMs: 30_000,
+  idleTimeoutMs: 10_000,
+  statementTimeoutMs: 300_000,
+  lockTimeoutMs: 60_000,
+  idleInTransactionTimeoutMs: 60_000,
+});
+
+/**
+ * Each setting's flag and bounds, as one total map so a seventh setting is a compile error here
+ * rather than a key with no flag and no validation.
+ *
+ * `zeroAllowed` is separate from `min` because zero is a *meaning* (unset / wait for ever) rather
+ * than a small value: a 5 ms statement timeout is not a timeout anybody wants, and a 0 is.
+ */
+export const PG_POOL_SETTING_SPECS: Readonly<
+  Record<
+    PgPoolSettingKey,
+    { readonly flag: string; readonly min: number; readonly max: number; readonly zeroAllowed: boolean }
+  >
+> = {
+  maxConnections: { flag: "--pg-pool-max", min: 1, max: 1000, zeroAllowed: false },
+  connectTimeoutMs: { flag: "--pg-connect-timeout-ms", min: 1000, max: 600_000, zeroAllowed: true },
+  idleTimeoutMs: { flag: "--pg-idle-timeout-ms", min: 1000, max: 3_600_000, zeroAllowed: true },
+  statementTimeoutMs: {
+    flag: "--pg-statement-timeout-ms",
+    min: 1000,
+    max: 86_400_000,
+    zeroAllowed: true,
+  },
+  lockTimeoutMs: { flag: "--pg-lock-timeout-ms", min: 100, max: 86_400_000, zeroAllowed: true },
+  idleInTransactionTimeoutMs: {
+    flag: "--pg-idle-in-transaction-timeout-ms",
+    min: 1000,
+    max: 86_400_000,
+    zeroAllowed: true,
+  },
+};
+
+export const PG_POOL_SETTING_KEYS = Object.keys(PG_POOL_SETTING_SPECS) as readonly PgPoolSettingKey[];
+
+/** The setting a flag names, or `undefined` when the flag is not one of these. */
+export function pgPoolSettingForFlag(flag: string): PgPoolSettingKey | undefined {
+  return PG_POOL_SETTING_KEYS.find((key) => PG_POOL_SETTING_SPECS[key].flag === flag);
+}
+
+/** Parse one setting's value, throwing a message that names the flag and its bounds. */
+export function parsePgPoolSetting(key: PgPoolSettingKey, raw: string): number {
+  const spec = PG_POOL_SETTING_SPECS[key];
+  const n = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+  const ok =
+    Number.isSafeInteger(n) && ((n === 0 && spec.zeroAllowed) || (n >= spec.min && n <= spec.max));
+  if (!ok) {
+    const range = `${String(spec.min)}..${String(spec.max)}${spec.zeroAllowed ? ", or 0" : ""}`;
+    throw new Error(`invalid ${spec.flag}: ${raw} (${range})`);
+  }
+  return n;
+}
+
+/** The PG session parameters a pool sets on each new connection, omitting the unset ones. */
+export function pgSessionParameters(
+  settings: PgPoolSettings,
+): readonly { readonly name: string; readonly valueMs: number }[] {
+  const all = [
+    { name: "statement_timeout", valueMs: settings.statementTimeoutMs },
+    { name: "lock_timeout", valueMs: settings.lockTimeoutMs },
+    { name: "idle_in_transaction_session_timeout", valueMs: settings.idleInTransactionTimeoutMs },
+  ];
+  return all.filter((p) => p.valueMs > 0);
+}
+
+/** One line a boot log prints, saying every setting including the ones left unset. */
+export function formatPgPoolSettings(settings: PgPoolSettings): string {
+  const ms = (n: number, zero: string): string => (n === 0 ? zero : `${String(n)}ms`);
+  return (
+    `pool max ${String(settings.maxConnections)}, ` +
+    `connect timeout ${ms(settings.connectTimeoutMs, "none (waits for ever)")}, ` +
+    `idle close ${ms(settings.idleTimeoutMs, "never")}; ` +
+    `session statement_timeout ${ms(settings.statementTimeoutMs, "server default")}, ` +
+    `lock_timeout ${ms(settings.lockTimeoutMs, "server default")}, ` +
+    `idle_in_transaction_session_timeout ${ms(settings.idleInTransactionTimeoutMs, "server default")}`
+  );
+}
+
+/**
  * A value a `PgConnection` handed back, as the ISO 8601 text every contract in this workspace
  * declares a timestamp to be.
  *

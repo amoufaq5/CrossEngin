@@ -829,3 +829,28 @@ describe("the job survey is unconditional, derived, and total over its own vocab
     expect(src.slice(at, at + 400), "the mounted producer set").toContain("mountedProducers");
   });
 });
+
+describe("the serving pool is bounded and the operator subcommands are not", () => {
+  /**
+   * Text, for the reason the blocks above give: `serve()` needs a live Postgres to reach. The
+   * subcommands (prune-links, replay, verify-chain, rekey) are each one long operation an operator
+   * started — a rekey is one transaction re-encrypting a tenant — so a request-traffic timeout
+   * would cancel them partway; the serving connection is the one that must not hang for ever.
+   */
+  const src = readFileSync(resolve(import.meta.dirname, "./node.ts"), "utf8");
+  const sites = [...src.matchAll(/createNodePgConnection\(([^;]*?)\);/g)].map((m) => m[1] ?? "");
+
+  it("passes the merged serving settings to the one serving connection", () => {
+    expect(sites.filter((s) => s.includes("{ pool: pgPool }"))).toEqual([
+      "pgConfig, { pool: pgPool }",
+    ]);
+    expect(src).toContain("const pgPool = { ...SERVING_POOL_SETTINGS, ...options.pgPool };");
+    expect(src).toContain("console.info(`[pg] ${formatPgPoolSettings(pgPool)}");
+  });
+
+  it("passes no pool settings to any other connection", () => {
+    const others = sites.filter((s) => !s.includes("pool"));
+    expect(others.length).toBeGreaterThanOrEqual(4);
+    expect(new Set(others)).toEqual(new Set(["parsePgEnvConfig()"]));
+  });
+});

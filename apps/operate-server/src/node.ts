@@ -22,7 +22,9 @@ import {
   admissionRemedy,
   createNodePgConnection,
   formatCheckAdmissionSurvey,
+  formatPgPoolSettings,
   parsePgEnvConfig,
+  SERVING_POOL_SETTINGS,
   pgChannelAssurance,
   PG_CHANNEL_ASSURANCE_DESCRIPTIONS,
   sslModeValidatesCertificate,
@@ -43,6 +45,7 @@ import {
   LicenseEntitlementResolver,
   buildPlanCatalog,
   entityEventEffect,
+  formatSegregationOfDuties,
   type WriteEffect,
   type BillingPortalWiring,
   type EntitlementResolver,
@@ -58,6 +61,8 @@ import {
   ColumnMappedEntityStore,
   PostgresEntitlementResolver,
   PostgresEntityStore,
+  type DocumentIndexEnsureReport,
+  type DocumentUniqueIndexOutcome,
   PostgresSequenceAllocator,
   PostgresSettingsStore,
   PostgresSubscriptionStore,
@@ -74,7 +79,14 @@ import {
   type ColumnEncryptionKeySource,
 } from "@crossengin/operate-runtime-pg";
 
-import type { PruneOptions, ReplayOptions, ServeOptions, StoreKind, VerifyChainOptions } from "./cli.js";
+import type {
+  DocumentIndexesOptions,
+  PruneOptions,
+  ReplayOptions,
+  ServeOptions,
+  StoreKind,
+  VerifyChainOptions,
+} from "./cli.js";
 import type { RawHttpRequest, RawHttpResponse } from "./http.js";
 import {
   DEFAULT_MAX_REQUEST_BODY_BYTES,
@@ -166,6 +178,7 @@ import {
   formatUniqueEnforcementReport,
   surveyUniqueEnforcement,
   uniqueEnforcementIsSuspect,
+  type ObservedUniqueRefusal,
 } from "./unique-enforcement.js";
 import {
   TENANT_WRITE_STATUS_DETAIL,
@@ -188,6 +201,7 @@ import {
 } from "./sensitive-field-policy.js";
 import { formatAdminGrant } from "./admin-grant.js";
 import { formatTenantManifestSurvey } from "./tenant-manifest-survey.js";
+import { formatServingRoleSurvey, surveyServingRole } from "./serving-role-survey.js";
 import { userIdentityFromStore } from "./user-identity.js";
 import {
   AbacObligationsUnevaluable,
@@ -284,6 +298,11 @@ import {
   parseLoginLockout,
   verifyLogin,
 } from "./auth-token-route.js";
+import {
+  LoginAdmission,
+  buildShedReporter,
+  defaultLoginAdmissionPolicy,
+} from "./login-admission.js";
 import { formatCredentialAuth, resolveCredentialAuth } from "./credential-auth-env.js";
 import { ensureSearchExtension, searchExtensionLine } from "@crossengin/operate-runtime-pg";
 import { aiModelLine, resolveAiModel } from "./ai-model-source.js";
@@ -809,7 +828,7 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
   }
 
   if (options.store === "memory") {
-    sayUniqueEnforcement(manifest, "memory");
+    sayUniqueEnforcement(manifest, "memory", []);
     return {
       store: new InMemoryEntityStore(),
       allocator: new InMemorySequenceAllocator(),
@@ -840,7 +859,12 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
   const channelLine = `database channel: PGSSLMODE=${pgConfig.ssl} — ${PG_CHANNEL_ASSURANCE_DESCRIPTIONS[channel]}`;
   if (sslModeValidatesCertificate(pgConfig.ssl)) console.info(`[pg] ${channelLine}`);
   else console.warn(`[pg] ${channelLine}; PGSSLMODE=verify-full validates it`);
-  const conn = createNodePgConnection(pgConfig);
+  // The serving pool is bounded and the operator subcommands are not (`UNBOUNDED_POOL_SETTINGS`):
+  // a request that waits for ever, a statement that never ends and a transaction a wedged handler
+  // abandoned all hold a connection and its locks, and here they are said at boot either way.
+  const pgPool = { ...SERVING_POOL_SETTINGS, ...options.pgPool };
+  console.info(`[pg] ${formatPgPoolSettings(pgPool)} — tune with --pg-* flags (see --help)`);
+  const conn = createNodePgConnection(pgConfig, { pool: pgPool });
   const schema = options.schema ?? undefined;
   // The envelope is built here and not beside the derivation, because it needs the connection the
   // derivation does not. The derived source stays live either way: in envelope mode it is the
@@ -920,12 +944,76 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
         ),
     });
     await store.ensureSchema();
-    sayUniqueEnforcement(manifest, "pg-columns", store);
+    sayUniqueEnforcement(manifest, "pg-columns", [], store);
     return { store, allocator, settingsStore, conn, columnKey };
   }
-  const store = new PostgresEntityStore(conn, options.schema !== null ? { schema: options.schema } : {});
-  sayUniqueEnforcement(manifest, "pg");
+  const store = new PostgresEntityStore(conn, {
+    ...(options.schema !== null ? { schema: options.schema } : {}),
+    manifest,
+    enforceReferences: !options.allowDanglingReferences,
+  });
+  const indexes = await store.ensureUniqueIndexes();
+  for (const r of indexes.results) {
+    if (r.outcome === "enforced") continue;
+    console.error(
+      `[unique] ${r.index.entity}.${r.index.field}: a declared unique field is NOT enforced` +
+        ` (${r.outcome}): ${r.detail ?? ""}. Statement: ${r.index.sql}`,
+    );
+  }
+  for (const stale of indexes.stale) {
+    console.warn(
+      `[unique] runtime index ${stale.name} is enforced and no longer declared by this manifest;` +
+        ` it is left in place (the store never drops a constraint at boot). To retire it: ${stale.dropSql}`,
+    );
+  }
+  sayUniqueEnforcement(
+    manifest,
+    "pg",
+    indexes.results.flatMap((r) =>
+      r.outcome === "enforced"
+        ? []
+        : [{ entity: r.index.entity, field: r.index.field, reason: DOCUMENT_UNIQUE_REFUSAL_REASON[r.outcome] }],
+    ),
+  );
+  sayReferenceIntegrity(store, options.allowDanglingReferences);
   return { store, allocator, settingsStore, conn };
+}
+
+/** Each way a document-store index build can fail, as the boot survey's reason for it. */
+const DOCUMENT_UNIQUE_REFUSAL_REASON: Readonly<
+  Record<Exclude<DocumentUniqueIndexOutcome, "enforced">, ObservedUniqueRefusal["reason"]>
+> = {
+  existing_duplicates: "existing_duplicates",
+  not_owner: "index_not_owner",
+  invalid_index: "index_invalid",
+  failed: "index_failed",
+};
+
+/**
+ * The `[references]` boot line, said either way. On `--store pg` a reference is checked on write
+ * and every declared `onDelete` applied on delete; under `--allow-dangling-references` neither, and
+ * the line says so at warning level because that is the state in which the ledger can name an
+ * account that does not exist.
+ */
+function sayReferenceIntegrity(store: PostgresEntityStore, allowDangling: boolean): void {
+  const plan = store.integrityPlan();
+  const edges = plan === null ? [] : [...plan.referencesFrom.values()].flat();
+  const byRule = { restrict: 0, cascade: 0, set_null: 0 };
+  for (const e of edges) byRule[e.onDelete] += 1;
+  const counts =
+    `${edges.length.toString()} reference field(s) (on delete: restrict ${byRule.restrict.toString()},` +
+    ` cascade ${byRule.cascade.toString()}, set_null ${byRule.set_null.toString()})`;
+  if (allowDangling) {
+    console.warn(
+      `[references] --store pg: NOT enforced under --allow-dangling-references — ${counts} may name` +
+        ` records that do not exist, and a referenced record may be deleted`,
+    );
+  } else {
+    console.info(
+      `[references] --store pg: enforced — ${counts}; a write naming a missing record is refused,` +
+        ` and each declared onDelete is applied as the column store's foreign key would`,
+    );
+  }
 }
 
 /**
@@ -956,9 +1044,10 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
 function sayUniqueEnforcement(
   manifest: Manifest,
   storeKind: StoreKind,
+  observed: readonly ObservedUniqueRefusal[],
   store?: ColumnMappedEntityStore,
 ): void {
-  const report = surveyUniqueEnforcement(manifest, storeKind);
+  const report = surveyUniqueEnforcement(manifest, storeKind, observed);
   const line = formatUniqueEnforcementReport(report);
   if (uniqueEnforcementIsSuspect(report)) console.warn(line);
   else console.info(line);
@@ -1064,6 +1153,24 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     options,
     manifest,
   );
+  if (conn !== undefined) {
+    // Whether the isolation policies apply to the role this process connected as, said before the
+    // first request either way (ADR-0338's rule: reported, never refused).
+    // Both schemas on `--store pg-columns`: its entity tables are created by this process at boot,
+    // so this role owns them and their policies never apply to it.
+    const servingRole = await surveyServingRole(conn, [
+      ...new Set([
+        options.schema ?? "meta",
+        ...(options.store === "pg-columns" ? [options.schema ?? COLUMN_STORE_DEFAULT_SCHEMA] : []),
+      ]),
+    ]);
+    const erasureDeclared =
+      options.deletionCapabilityDeclarations !== null || options.deletionCapabilities !== null;
+    for (const line of formatServingRoleSurvey(servingRole, erasureDeclared)) {
+      if (line.level === "warn") console.warn(line.text);
+      else console.info(line.text);
+    }
+  }
   if (options.columnKeyMode === "envelope" && conn !== undefined) {
     // ADR-0349's live finding (a). `meta.tenant_data_keys.tenant_id` references `meta.tenants(id)`,
     // so a credential naming a tenant with no row there has **every** PHI read and write refused by
@@ -1136,6 +1243,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   } else {
     console.info(settlementLine);
   }
+  // Said either way. Off is a decision a single-user tenant needs, and on changes what an approval
+  // means for every record already in the database — none of which carries a recorded creator.
+  console.info(formatSegregationOfDuties(manifest, options.segregationOfDuties));
   // Who may read and write each sensitive class. One declaration, both directions: the same policy
   // object reaches the response-redaction registry and the write mask, because `privilegedForClass`
   // has a single definition precisely so a role cannot end up able to write a class it may not read
@@ -3010,6 +3120,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     options.loginLockoutAttempts ?? DEFAULT_LOGIN_LOCKOUT_ATTEMPTS,
     options.loginLockoutSeconds ?? DEFAULT_LOGIN_LOCKOUT_SECONDS,
   );
+  // One admission for every password verification in the process, for the lockout's reason: the
+  // login and the credential routes run scrypt on the one libuv pool, so two caps would not bound it.
+  const loginAdmission = new LoginAdmission(defaultLoginAdmissionPolicy());
   if (credentialAuth?.ok === true && credentialStore !== null) {
     const emitter = requireEmitter("--credential-login");
     extraRouteList.push(
@@ -3043,24 +3156,28 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             }),
           );
         },
-        // The login's `onFailure`, read a second time rather than written a second time: the same
-        // store method under the same hoisted policy, so a wrong password at either door advances
-        // one counter toward one lock. Without this the self-service route was an unmetered oracle
-        // and the lock it bypassed was the login's.
-        onFailedAttempt: async (userId): Promise<void> => {
-          const r = await credentialStore.recordFailure(
-            userId,
-            loginLockout.attempts,
-            loginLockout.seconds,
-          );
-          if (r.lockedUntil !== null) {
-            console.warn(
-              `[auth] user ${userId} locked until ${r.lockedUntil}` +
-                ` after ${r.failedAttempts.toString()} consecutive failures` +
-                " (failed password change)",
+        // The login's reservation, read a second time rather than written a second time: the same
+        // store methods under the same hoisted policy, so a wrong password at either door advances
+        // one counter toward one lock, counted before it is verified at both.
+        attempts: {
+          reserve: async (userId): Promise<boolean> => {
+            const r = await credentialStore.reserveAttempt(
+              userId,
+              loginLockout.attempts,
+              loginLockout.seconds,
             );
-          }
+            if (r.reserved && r.lockedUntil !== null) {
+              console.warn(
+                `[auth] user ${userId} locked until ${r.lockedUntil}` +
+                  ` after ${r.failedAttempts.toString()} consecutive failures` +
+                  " (password change)",
+              );
+            }
+            return r.reserved;
+          },
+          release: (userId) => credentialStore.releaseAttempt(userId, loginLockout.attempts),
         },
+        admission: loginAdmission,
       }),
     );
     console.info(
@@ -4192,6 +4309,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     policyForEntity: sensitivePolicyForEntity,
     writeMaskMode,
     allowUncoveredSettlement: options.allowUncoveredSettlement,
+    segregationOfDuties: options.segregationOfDuties,
     ...(abac !== undefined ? { abac } : {}),
     ...(sessionRevocation !== undefined ? { sessionRevocation } : {}),
     // Unconditional, so a drop at this literal is a compile error rather than a silent safe
@@ -5090,6 +5208,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           // manifest inside `defaultWriteGuards`, so a tenant whose design declares no `Invoice`
           // or `Bill` simply gets no guard rather than a guard over an entity it does not have.
           allowUncoveredSettlement: options.allowUncoveredSettlement,
+          // A deployment's maker-checker rule, so a tenant's own manifest gets it on its own
+          // approve-class transitions — the rule reads transition names, not the boot pack.
+          segregationOfDuties: options.segregationOfDuties,
           // One policy layer for every gateway: a policy key is a deployment declaration and an
           // attribute is a fact about a membership in the tenant being served, so neither varies
           // with whose manifest is compiled. The per-tenant manifest's own obligations are checked
@@ -5446,17 +5567,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           console.info(`[auth] user ${userId} credential re-hashed at current scrypt parameters`);
         }
       },
-      onFailure: (userId) =>
-        credentialStore
-          .recordFailure(userId, lockout.attempts, lockout.seconds)
-          .then((r) => {
-            if (r.lockedUntil !== null) {
-              console.warn(
-                `[auth] user ${userId} locked until ${r.lockedUntil}` +
-                  ` after ${r.failedAttempts.toString()} consecutive failures`,
-              );
-            }
-          }),
+      admission: loginAdmission,
+      onShed: buildShedReporter(loginAdmission, (line) => console.warn(line), 10_000),
       // Neither the password nor the minted token may reach a log line. The refusal reason is what
       // separates a misconfigured deployment from a wrong password, and it is the only thing an
       // operator can act on -- the caller gets one body for all ten.
@@ -5471,7 +5583,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     };
     console.info(
       `[auth] serving ${AUTH_TOKEN_PATH} (session ttl ${ttl.toString()}s, lockout after` +
-        ` ${lockout.attempts.toString()} failures for ${lockout.seconds.toString()}s)`,
+        ` ${lockout.attempts.toString()} failures for ${lockout.seconds.toString()}s, each attempt` +
+        ` counted before it is verified; at most ${loginAdmission.policy.concurrency.toString()}` +
+        ` password verifications at once with ${loginAdmission.policy.queue.toString()} queued and` +
+        ` ${loginAdmission.policy.perAccount.toString()} per account, the rest shed with` +
+        " Retry-After -- sized from UV_THREADPOOL_SIZE, leaving one thread for fs and dns)",
     );
     /*
      * One arm, not two.
@@ -5663,6 +5779,28 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         });
       }),
   };
+}
+
+/**
+ * Runs the `document-indexes` subcommand: builds the JSONB store's per-manifest unique indexes as
+ * whoever this connection is, which the shipped compose arranges to be the table's owner. Returns
+ * the store's own report, so the one-shot and the API's boot line describe an index identically.
+ */
+export async function runDocumentIndexes(options: DocumentIndexesOptions): Promise<DocumentIndexEnsureReport> {
+  const manifest =
+    options.manifestPath !== null
+      ? loadManifestFromJson(await readFile(options.manifestPath, "utf8"))
+      : await loadBuiltinPack(options.pack ?? "");
+  const conn = createNodePgConnection(parsePgEnvConfig());
+  try {
+    const store = new PostgresEntityStore(conn, {
+      ...(options.schema !== null ? { schema: options.schema } : {}),
+      manifest,
+    });
+    return await store.ensureUniqueIndexes();
+  } finally {
+    await conn.close();
+  }
 }
 
 /**

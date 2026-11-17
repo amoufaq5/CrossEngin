@@ -23,7 +23,7 @@ import {
 const TENANT = "11111111-1111-1111-1111-111111111111";
 
 /** One `[debit, credit]` pair per journal line. */
-type LineAmounts = readonly [number, number];
+type LineAmounts = readonly [number | string, number | string];
 
 function rep(n: number, row: LineAmounts): LineAmounts[] {
   return Array.from({ length: n }, () => row);
@@ -111,11 +111,107 @@ describe("journalPostingGuard", () => {
     expect(r?.error).toBe("period_locked");
   });
 
-  it("tolerates sub-cent rounding noise", async () => {
+  it("refuses a sub-cent difference instead of tolerating it", async () => {
+    // This test used to assert the opposite: a 0.005 tolerance over doubles admitted 100 against
+    // 100.004. The totals are exact now, so any difference is an imbalance.
     const { store, entryId } = await seed();
     await store.create(TENANT, "JournalLine", { journal_entry_id: entryId, debit: 100, credit: 0 });
     await store.create(TENANT, "JournalLine", { journal_entry_id: entryId, debit: 0, credit: 100.004 });
+    expect(await guard(postInput(store, entryId, { fiscal_period_id: "p_open" }))).toEqual({
+      status: 422,
+      error: "unbalanced_journal_entry",
+      detail: "debits (100.00) must equal credits (100.004)",
+    });
+  });
+
+  it("balances amounts a double cannot add exactly", async () => {
+    // 0.1 + 0.2 is 0.30000000000000004 in binary floating point; exact decimals make it 0.3.
+    const store = new InMemoryEntityStore();
+    const entryId = await seedWith(store, [[0.1, 0], [0.2, 0], [0, 0.3]]);
     expect(await guard(postInput(store, entryId, { fiscal_period_id: "p_open" }))).toBeNull();
+  });
+
+  it("tells two amounts apart at the top of NUMERIC(16, 2), which a double cannot", async () => {
+    // As doubles these two are the same number, so the float comparison posted an entry out by a
+    // cent. Strings, because that is the wire form a decimal arrives in (ADR-0332).
+    const store = new InMemoryEntityStore();
+    const entryId = await seedWith(store, [["99999999999999.99", "0"], ["0", "99999999999999.98"]]);
+    expect(await guard(postInput(store, entryId, { fiscal_period_id: "p_open" }))).toEqual({
+      status: 422,
+      error: "unbalanced_journal_entry",
+      detail: "debits (99999999999999.99) must equal credits (99999999999999.98)",
+    });
+  });
+
+  it("refuses an entry with one line", async () => {
+    const store = new InMemoryEntityStore();
+    const entryId = await seedWith(store, [[100, 100]]);
+    expect((await guard(postInput(store, entryId, { fiscal_period_id: "p_open" })))?.error).toBe(
+      "single_line_journal_entry",
+    );
+  });
+
+  it("refuses unbalanced functional-currency amounts under balanced transaction ones", async () => {
+    // Live L11: transaction 100/100 balanced, functional 100 Dr / 7 Cr, and it posted.
+    const store = new InMemoryEntityStore();
+    const entryId = await seedWith(store, []);
+    await store.create(TENANT, "JournalLine", {
+      journal_entry_id: entryId, currency: "EUR", debit: "100.00", credit: "0.00", functional_debit: "100.00", functional_credit: "0.00",
+    });
+    await store.create(TENANT, "JournalLine", {
+      journal_entry_id: entryId, currency: "EUR", debit: "0.00", credit: "100.00", functional_debit: "0.00", functional_credit: "7.00",
+    });
+    expect(await guard(postInput(store, entryId, { fiscal_period_id: "p_open" }))).toEqual({
+      status: 422,
+      error: "unbalanced_journal_entry",
+      detail: "functional-currency debits (100.00) must equal functional-currency credits (7.00)",
+    });
+  });
+
+  it("balances transaction amounts per currency, not as one sum across currencies", async () => {
+    // 100 EUR against 100 USD summed to 100 = 100 under one total; they are not one quantity.
+    const store = new InMemoryEntityStore();
+    const entryId = await seedWith(store, []);
+    await store.create(TENANT, "JournalLine", {
+      journal_entry_id: entryId, currency: "EUR", debit: 100, credit: 0, functional_debit: 110, functional_credit: 0,
+    });
+    await store.create(TENANT, "JournalLine", {
+      journal_entry_id: entryId, currency: "USD", debit: 0, credit: 100, functional_debit: 0, functional_credit: 110,
+    });
+    expect(await guard(postInput(store, entryId, { fiscal_period_id: "p_open" }))).toEqual({
+      status: 422,
+      error: "unbalanced_journal_entry",
+      detail: "in EUR: debits (100.00) must equal credits (0.00)",
+    });
+  });
+
+  it("admits a multi-currency entry that balances in each currency and in functional amounts", async () => {
+    // The trading-account form: each currency balances through a clearing line in that currency.
+    const store = new InMemoryEntityStore();
+    const entryId = await seedWith(store, []);
+    for (const [currency, debit, credit, fd, fc] of [
+      ["EUR", 100, 0, 110, 0],
+      ["EUR", 0, 100, 0, 110],
+      ["USD", 110, 0, 110, 0],
+      ["USD", 0, 110, 0, 110],
+    ] as const) {
+      await store.create(TENANT, "JournalLine", {
+        journal_entry_id: entryId, currency, debit, credit, functional_debit: fd, functional_credit: fc,
+      });
+    }
+    expect(await guard(postInput(store, entryId, { fiscal_period_id: "p_open" }))).toBeNull();
+  });
+
+  it("refuses a line amount that is not a decimal rather than reading it as zero", async () => {
+    // `Number("n/a")` read as 0, so these three lines balanced at 0/0 and posted with an amount
+    // nobody could read. The value itself is not repeated in the refusal.
+    const store = new InMemoryEntityStore();
+    const entryId = await seedWith(store, [[0, 0], [0, 0]]);
+    await store.create(TENANT, "JournalLine", { journal_entry_id: entryId, debit: "n/a", credit: 0 });
+    const r = await guard(postInput(store, entryId, { fiscal_period_id: "p_open" }));
+    expect(r?.error).toBe("unverifiable_journal_entry");
+    expect(r?.detail).toContain("not decimals");
+    expect(r?.detail).not.toContain("n/a");
   });
 
   // The two directions a capped prefix got wrong, pinned at the cap that produced them and again at
@@ -206,10 +302,9 @@ describe("journalPostingGuard", () => {
     expect(store.linePages).toBe(3);
   });
 
-  it("leaves the create path alone: the balance arm is unreachable without an entry id", async () => {
-    // `input.id` is null on a create and the body carries no id either, so the guard returns before
-    // it reads a line — a `POST {state:"posted"}` with no lines passes. That is a separate defect
-    // and this refusal must not have moved it in either direction.
+  it("refuses a create straight into posted with no id, which cannot have lines", async () => {
+    // This test used to pin the opposite as the specification: the guard returned null before it
+    // read a line, so `POST {state:"posted"}` with no lines passed (live L12).
     const store = new InMemoryEntityStore();
     const input: WriteGuardInput = {
       operation: "create",
@@ -220,8 +315,24 @@ describe("journalPostingGuard", () => {
       after: { state: "posted" },
       store,
     };
-    expect(await guard(input)).toBeNull();
-    expect(await journalPostingGuard({ maxLines: 0 })(input)).toBeNull();
+    expect((await guard(input))?.error).toBe("empty_journal_entry");
+    expect((await journalPostingGuard({ maxLines: 0 })(input))?.error).toBe("empty_journal_entry");
+  });
+
+  it("checks a create into posted that names its id against the lines already under it", async () => {
+    const store = new InMemoryEntityStore();
+    await store.create(TENANT, "JournalLine", { journal_entry_id: "je_new", debit: 50, credit: 0 });
+    await store.create(TENANT, "JournalLine", { journal_entry_id: "je_new", debit: 0, credit: 40 });
+    const input: WriteGuardInput = {
+      operation: "create",
+      entity: "JournalEntry",
+      tenantId: TENANT,
+      id: null,
+      before: null,
+      after: { id: "je_new", state: "posted" },
+      store,
+    };
+    expect((await guard(input))?.error).toBe("unbalanced_journal_entry");
   });
 });
 

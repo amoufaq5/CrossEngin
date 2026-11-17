@@ -39,6 +39,14 @@ export interface CredentialRecord {
   readonly lockedUntil: string | null;
 }
 
+/**
+ * `reserved: false` is *this account is locked* (or the row is gone): nothing was counted and the
+ * attempt must not be evaluated.
+ */
+export type AttemptReservation =
+  | { readonly reserved: true; readonly failedAttempts: number; readonly lockedUntil: string | null }
+  | { readonly reserved: false };
+
 export interface TenantRef {
   readonly tenantId: string;
   readonly status: string;
@@ -166,42 +174,73 @@ export class PostgresCredentialStore {
   }
 
   /**
-   * Advances the failure counter and locks the account when it crosses the threshold, in **one**
-   * statement.
+   * Counts an attempt **before** its password is verified, and refuses it when the account is
+   * locked -- one statement, so the count is a reservation rather than a report.
    *
-   * Read-modify-write is what this must not be: the losing side of that race is the one that
-   * *admits* an attempt, so two concurrent wrong guesses would each read the same count and each
-   * write it plus one -- advancing by one where two attempts happened. That is
-   * `meta.notification_fax_observations`' reasoning (ADR-0332) about a counter whose whole job is
-   * to stop something, and it is why the arithmetic is in SQL and the threshold is a parameter
-   * rather than a branch in TypeScript.
+   * It used to be counted *after* the verification (`recordFailure`), and that ordering is the
+   * whole of the parallel bypass: N concurrent guesses each read an unlocked row, each spent a
+   * derivation, and only then each advanced the counter. Measured on PG 16 as the non-owner, 40
+   * concurrent wrong passwords were **all 40 evaluated** against a threshold of 10. Here the `WHERE`
+   * admits a row only while it is unlocked, and a concurrent `UPDATE` re-checks that predicate
+   * against the row the earlier one committed, so once the threshold-th reservation sets the lock
+   * every later one matches nothing: at most `lockAfterAttempts` guesses are evaluated per window.
    *
-   * The lock is set from the database clock and not the process's, for the same reason the
-   * kill-switch active predicate uses it: a drifted worker must not unlock an account early.
+   * A lock that has **expired** restarts the count at 1 rather than continuing it. Continuing it was
+   * the persistent re-lock: the counter never fell below the threshold, so after the window lapsed a
+   * single wrong guess locked the account again, and one guess per window kept any known address
+   * locked for ever -- correct password included. Now re-locking an account costs the full
+   * threshold of guesses per window. An attempt made *while* locked changes nothing, so hammering a
+   * locked account cannot extend its lock.
+   *
+   * The caller releases the reservation when the attempt turns out not to count (`releaseAttempt`),
+   * and a success clears the counter outright (`recordSuccess`). Both clocks are the database's.
    */
-  async recordFailure(
+  async reserveAttempt(
     userId: string,
     lockAfterAttempts: number,
     lockSeconds: number,
-  ): Promise<{ readonly failedAttempts: number; readonly lockedUntil: string | null }> {
+  ): Promise<AttemptReservation> {
+    const next =
+      "CASE WHEN credential_locked_until IS NULL THEN credential_failed_attempts + 1 ELSE 1 END";
     const result = await this.conn.query<Record<string, unknown>>(
       `UPDATE ${this.users} SET` +
-        " credential_failed_attempts = credential_failed_attempts + 1," +
-        " credential_locked_until = CASE" +
-        "   WHEN credential_failed_attempts + 1 >= $2 THEN now() + make_interval(secs => $3)" +
-        "   ELSE credential_locked_until END," +
+        ` credential_failed_attempts = ${next},` +
+        ` credential_locked_until = CASE WHEN ${next} >= $2` +
+        " THEN now() + make_interval(secs => $3) ELSE NULL END," +
         " updated_at = now()" +
         " WHERE id = $1::uuid" +
+        " AND (credential_locked_until IS NULL OR credential_locked_until <= now())" +
         " RETURNING credential_failed_attempts, credential_locked_until",
       [userId, lockAfterAttempts, lockSeconds],
     );
     const row = result.rows[0];
-    if (row === undefined) return { failedAttempts: 0, lockedUntil: null };
+    if (row === undefined) return { reserved: false };
     const locked = row["credential_locked_until"];
     return {
+      reserved: true,
       failedAttempts: Number(row["credential_failed_attempts"] ?? 0),
       lockedUntil: locked === null || locked === undefined ? null : isoInstant(locked),
     };
+  }
+
+  /**
+   * Gives back a reservation whose attempt does not count -- a correct password the login refused
+   * for another reason, or a hash this build cannot read.
+   *
+   * The lock is lifted only when the count falls back below the threshold, because under
+   * `reserveAttempt` a lock is in force exactly when the window's count reached it: releasing the
+   * one reservation that tripped it is what undoes it, and releasing one among many does not.
+   */
+  async releaseAttempt(userId: string, lockAfterAttempts: number): Promise<void> {
+    await this.conn.query(
+      `UPDATE ${this.users} SET` +
+        " credential_failed_attempts = GREATEST(credential_failed_attempts - 1, 0)," +
+        " credential_locked_until = CASE WHEN credential_failed_attempts - 1 < $2" +
+        " THEN NULL ELSE credential_locked_until END," +
+        " updated_at = now()" +
+        " WHERE id = $1::uuid",
+      [userId, lockAfterAttempts],
+    );
   }
 
   /**

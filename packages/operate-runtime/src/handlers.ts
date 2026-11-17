@@ -18,7 +18,7 @@ import {
   type SensitiveFieldPolicy,
 } from "@crossengin/auth";
 import type { ResolvedPrincipal } from "@crossengin/api-gateway";
-import { principalAbacAttributes } from "@crossengin/api-gateway";
+import { principalAbacAttributes, principalUserId } from "@crossengin/api-gateway";
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 
 import {
@@ -37,6 +37,7 @@ import { isReadCeilingExceeded } from "./list-drain.js";
 import { applySequenceDefaults, type SequenceAllocator, type SequenceFieldPlan } from "./sequences.js";
 import { applySettingsDefaults, type SettingsDefaultPlan } from "./settings-defaults.js";
 import { sequenceSpecResolver, type SettingsStore, type TenantSettings } from "./settings.js";
+import type { TransactionSettingsScope } from "./settings-snapshot.js";
 import { runWriteGuards, type WriteGuard } from "./write-guards.js";
 import { runWriteEffects, type WriteEffect } from "./write-effects.js";
 import { validateBody, type EntityValidationPlan } from "./validation.js";
@@ -44,12 +45,25 @@ import {
   isTransactional,
   ListSurfaceUnserveable,
   projectRecord,
+  ReferencedRecordInUse,
+  ReferenceNotFound,
   UniqueViolation,
   type EntityRecord,
   type EntityStore,
   type ListPage,
 } from "./store.js";
 import { maskWrite, type WriteMaskMode, type WriteMaskRefusal } from "./write-mask.js";
+import {
+  callerRecordIdIsWellFormed,
+  CREATED_BY_FIELD,
+  EXPECTED_UPDATED_AT_KEY,
+  SERVER_OWNED_REASON_TEXT,
+  UPDATED_BY_FIELD,
+  writeSurfaceRefusal,
+  type WriteSurface,
+  type WriteSurfaceRefusal,
+} from "./write-surface.js";
+import { isApproveClassTransition, makerCheckerRefusal } from "./maker-checker.js";
 import type { CursorRefusal, CursorSealer } from "./cursor-seal.js";
 import type { RouteAction, RouteSpec } from "./operations.js";
 
@@ -88,6 +102,13 @@ export interface HandlerContext {
   /** Lets tenant settings override a sequence's format/start/resetPeriod at runtime. */
   readonly settingsStore?: SettingsStore;
   /**
+   * Reads the tenant's settings once before a write transaction opens and serves them to the write
+   * effects inside it, so no effect borrows a second pooled connection while the transaction holds
+   * one. Present exactly when `settingsStore` is; see `settings-snapshot.ts` for the measured
+   * deadlock it closes.
+   */
+  readonly settingsScope?: TransactionSettingsScope;
+  /**
    * Per-entity sensitive-field policy (privileged roles, per class). The *same* seam the
    * gateway's response redaction reads, deliberately: ADR-0329 put one function behind both
    * halves so a role cannot end up able to write a class it may not read, and two policy
@@ -123,6 +144,26 @@ export interface HandlerContext {
    * `apps/operate-server`, which is the layer that knows whether a secret was configured.
    */
   readonly cursorSealer?: CursorSealer;
+  /**
+   * Per-entity: which body keys a client may name, and which fields the server owns. Absent, no key
+   * is checked — the shape of every hand-built context in this package's tests; `compileOperateServer`
+   * always supplies it.
+   */
+  readonly writeSurfaces?: ReadonlyMap<string, WriteSurface>;
+  /**
+   * Refuse an approve-class transition fired by the record's own creator (`--segregation-of-duties`).
+   * Off by default: a single-user tenant has nobody else to approve, and turning it on there would
+   * leave every bill unapprovable.
+   */
+  readonly segregationOfDuties?: boolean;
+  /**
+   * Per-entity lifecycle state field. An update that loaded its record is written conditional on
+   * that field still holding what was read, because the guards (a document lock above all) decided
+   * from that read: without it a PATCH that read `draft` landed on an invoice a concurrent `send`
+   * had already posted. Absent, an update is unconditional on state, as in the hand-built test
+   * contexts; `compileOperateServer` always supplies it.
+   */
+  readonly lifecycleStateFields?: ReadonlyMap<string, string>;
   readonly clock?: { now(): Date };
 }
 
@@ -245,6 +286,10 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
     // Hoisted rather than re-derived per call site: the write mask asks the same question of the
     // same principal, and two independent constructions could answer it from two role sets.
     const auth = authPrincipal(principal, ctx.principalRoles);
+    // The person a write is attributed to, or null when the credential names none. Through
+    // `principalUserId` and not `principalId` directly: a bare api-key resolves to one placeholder
+    // shared by every such key, and writing that into `created_by` would claim one actor for many.
+    const actorId = principalUserId(principal);
     // Built once and used three ways — asked with no record, re-asked with one, and handed to
     // `rbacCheckForRecords` for a whole page — because every one of those must differ in **nothing
     // but the record**: separate construction sites could drift in the principal, the operation or
@@ -426,6 +471,22 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
             createMask.kind === "deferred" ? ABAC_RECORD_AVAILABILITY_REASONS.field_update : undefined,
           );
         }
+        // After the mask, so a field this principal may not write is a 403 before a 422 tells them
+        // anything about the entity's shape, and before validation, so a key the server owns is
+        // named as such rather than type-checked as though the client could set it.
+        const surface = ctx.writeSurfaces?.get(spec.entity);
+        if (surface !== undefined) {
+          const refused = writeSurfaceRefusal(surface, createKeys, "create");
+          if (refused !== null) return surfaceRefused(spec.entity, refused);
+          if (createKeys.includes("id") && !callerRecordIdIsWellFormed(parsedBody?.["id"])) {
+            return json(422, {
+              error: "record_id_malformed",
+              detail:
+                "a caller-supplied id must be 1-200 characters of letters, digits, '_' or '-'; omit it and the server mints one",
+              field: "id",
+            });
+          }
+        }
         const settings =
           ctx.settingsStore !== undefined ? await ctx.settingsStore.get(tenantId) : undefined;
         let body = parsedBody ?? {};
@@ -434,14 +495,42 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
           body = applySettingsDefaults(body, settingsPlan, settings, ctx.clock?.now());
         }
         body = applyLiteralDefaults(body, ctx.defaultPlans?.get(spec.entity) ?? []);
-        body = await applyEntitySequences(ctx, spec.entity, tenantId, body, settings);
         const createdAt = nowIso(ctx);
-        body = { created_at: createdAt, ...body, updated_at: createdAt };
-        // Validate AFTER defaults are applied, so a required field filled by a literal/sequence
-        // default passes. A schema violation is a 422 before anything is written.
+        body = {
+          ...body,
+          created_at: createdAt,
+          updated_at: createdAt,
+          ...(surface?.stampsActor === true
+            ? { [CREATED_BY_FIELD]: actorId, [UPDATED_BY_FIELD]: actorId }
+            : {}),
+        };
+        // Validate AFTER literal and settings defaults are applied, so a required field one fills
+        // passes, and BEFORE a sequence number is allocated. A sequence field is server-managed, so
+        // validation never reads it; allocating first only meant a refused create spent a number
+        // (a 422 between JE-…30 and JE-…32, measured live).
         const createErrors = validateEntity(ctx, spec.entity, body, "create");
         if (createErrors !== null) return createErrors;
+        // Allocated here and not inside `writeTxn`, though inside would also spare the numbers a
+        // guard refusal or an id conflict spends. The Postgres allocator commits on a connection of
+        // its own, so allocating while the entity transaction holds one takes two pool slots per
+        // create: as many concurrent creates as the pool has connections each hold one and wait for
+        // a second that never frees, and every request on the process waits with them. So the
+        // numbering is gap-reduced and not gapless — a guard refusal, an id conflict, the store's
+        // own refusal, a throwing effect or a failed commit each still spend the number.
+        body = await applyEntitySequences(ctx, spec.entity, tenantId, body, settings);
+        const callerId = createKeys.includes("id") ? (parsedBody?.["id"] as string) : null;
         return writeTxn(ctx, tenantId, async (store) => {
+          // A caller-supplied id that already exists in this tenant is a 409 rather than whatever
+          // the store does with it: the in-memory store overwrote the record and the Postgres stores
+          // raised an unattributed key violation answered as a 500. Asked inside the transaction;
+          // a concurrent insert of the same id can still reach the store's own refusal.
+          if (callerId !== null && (await store.get(tenantId, spec.entity, callerId)) !== null) {
+            return json(409, {
+              error: "id_conflict",
+              detail: `a ${spec.entity} with this id already exists; a create cannot replace it`,
+              field: "id",
+            });
+          }
           const block = await guard(ctx, {
             operation: "create",
             entity: spec.entity,
@@ -470,8 +559,9 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         // `expectedUpdatedAt`; it's stripped from the stored patch and, on mismatch, the write is
         // rejected 409 (a lost-update guard for the generic editor). Absent → unconditional.
         const raw = { ...(parsedBody ?? {}) };
-        const expectedUpdatedAt = typeof raw["expectedUpdatedAt"] === "string" ? (raw["expectedUpdatedAt"] as string) : null;
-        delete raw["expectedUpdatedAt"];
+        const expectedUpdatedAt =
+          typeof raw[EXPECTED_UPDATED_AT_KEY] === "string" ? (raw[EXPECTED_UPDATED_AT_KEY] as string) : null;
+        delete raw[EXPECTED_UPDATED_AT_KEY];
         // `raw` with the concurrency token removed is exactly the caller's field set, and
         // `updated_at` is merged below rather than above for that reason. Before `validateEntity`,
         // so a 403 for a field you may not write is never preceded by a 422 naming the others.
@@ -490,9 +580,18 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         const updateMask = evaluateMask(ctx, spec.entity, auth, "update", Object.keys(raw));
         if (updateMask?.kind === "refused") return maskForbidden(spec.entity, updateMask.refusal);
         const maskDeferred = updateMask?.kind === "deferred";
+        const updateSurface = ctx.writeSurfaces?.get(spec.entity);
+        if (updateSurface !== undefined) {
+          const refused = writeSurfaceRefusal(updateSurface, Object.keys(raw), "update");
+          if (refused !== null) return surfaceRefused(spec.entity, refused);
+        }
         const updateErrors = validateEntity(ctx, spec.entity, raw, "update");
         if (updateErrors !== null) return updateErrors;
-        const patch = { ...raw, updated_at: nowIso(ctx) };
+        const patch = {
+          ...raw,
+          updated_at: nowIso(ctx),
+          ...(updateSurface?.stampsActor === true ? { [UPDATED_BY_FIELD]: actorId } : {}),
+        };
         return writeTxn(ctx, tenantId, async (store) => {
           // An outstanding obligation — entity-level or field-level — forces the load, on top of
           // the three reasons that already did. Without it the record is never fetched for a plain
@@ -520,15 +619,16 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
             const again = evaluateMask(ctx, spec.entity, auth, "update", Object.keys(raw), before);
             if (again !== null) return maskForbidden(spec.entity, again.refusal);
           }
+          // The comparison answers "was it modified before this transaction read it"; the
+          // precondition handed to the store answers "since", which the comparison alone could not —
+          // two requests carrying the same token both passed it and the second overwrote the first.
+          let readUpdatedAt: string | null = null;
           if (expectedUpdatedAt !== null && before !== null) {
             const current = typeof before["updated_at"] === "string" ? (before["updated_at"] as string) : null;
             if (current !== null && current !== expectedUpdatedAt) {
-              return json(409, {
-                error: "conflict",
-                detail: "the record was modified since you loaded it",
-                currentUpdatedAt: current,
-              });
+              return modifiedSinceLoaded(current);
             }
+            readUpdatedAt = current;
           }
           const block = await guard(ctx, {
             operation: "update",
@@ -540,7 +640,33 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
             store,
           });
           if (block !== null) return block;
-          const record = await store.update(tenantId, spec.entity, id, patch);
+          // The guards just decided from `before`'s state — a document lock above all — so the write
+          // holds only while that state does. Without it a PATCH that read `draft` landed on an
+          // invoice a concurrent `send` had posted, editing a locked document after its GL entry.
+          // The state alone and not `updated_at`, so two untokened edits that move no state still
+          // both land, as they always have.
+          const stateField = ctx.lifecycleStateFields?.get(spec.entity);
+          const expected: Record<string, unknown> = {};
+          if (readUpdatedAt !== null) expected["updated_at"] = readUpdatedAt;
+          if (stateField !== undefined && before !== null) expected[stateField] = before[stateField];
+          let record: EntityRecord | null;
+          if (Object.keys(expected).length === 0) {
+            record = await store.update(tenantId, spec.entity, id, patch);
+          } else {
+            const written = await store.updateIf(tenantId, spec.entity, id, patch, expected);
+            if (written.kind === "precondition_failed") {
+              if (readUpdatedAt === null) {
+                return json(409, {
+                  error: "state_changed",
+                  detail: `another request moved this ${spec.entity} to a different state while this update was in flight; nothing was written — re-read it`,
+                });
+              }
+              const now = await store.get(tenantId, spec.entity, id);
+              const at = now !== null && typeof now["updated_at"] === "string" ? (now["updated_at"] as string) : null;
+              return modifiedSinceLoaded(at);
+            }
+            record = written.kind === "updated" ? written.record : null;
+          }
           if (record === null) return json(404, { error: "not_found" });
           await runEffects(ctx, {
             operation: "update",
@@ -606,7 +732,14 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         // grant's policy needs the record, the re-ask is threaded in as one nullable function
         // rather than as a flag plus a resolver, so the two facts ("an obligation is outstanding"
         // and "here is how to discharge it") cannot be passed out of step with each other.
-        return applyTransition(spec, ctx, tenantId, id, obligationOutstanding ? resolveObligation : null);
+        return applyTransition(
+          spec,
+          ctx,
+          tenantId,
+          id,
+          obligationOutstanding ? resolveObligation : null,
+          actorId,
+        );
     }
   };
 }
@@ -641,6 +774,7 @@ async function applyTransition(
   tenantId: string,
   id: string,
   resolveObligation: ObligationReAsk | null,
+  actorId: string | null,
 ): Promise<HandlerOutput> {
   const t = spec.transition;
   if (t === undefined) return json(500, { error: "missing_transition_spec" });
@@ -672,7 +806,25 @@ async function applyTransition(
         allowedFrom: t.fromStates,
       });
     }
-    const patch = { [t.stateField]: t.toState, updated_at: nowIso(ctx) };
+    // After the from-state 409, because "this transition cannot fire from here" is true whoever
+    // asks, and before the guard and every write. Keyed on the transition and not the entity: the
+    // same Bill is created by a clerk and edited by them freely; it is approving it that needs a
+    // second person.
+    if (ctx.segregationOfDuties === true && isApproveClassTransition(spec.entity, t.name)) {
+      const refused = makerCheckerRefusal(
+        spec.entity,
+        t.name,
+        record,
+        actorId,
+        ctx.writeSurfaces?.get(spec.entity)?.stampsActor === true,
+      );
+      if (refused !== null) return json(422, { error: refused.error, detail: refused.detail });
+    }
+    const patch = {
+      [t.stateField]: t.toState,
+      updated_at: nowIso(ctx),
+      ...(ctx.writeSurfaces?.get(spec.entity)?.stampsActor === true ? { [UPDATED_BY_FIELD]: actorId } : {}),
+    };
     const block = await guard(ctx, {
       operation: "transition",
       entity: spec.entity,
@@ -683,8 +835,20 @@ async function applyTransition(
       store,
     });
     if (block !== null) return block;
-    const updated = await store.update(tenantId, spec.entity, id, patch);
-    const after = updated ?? record;
+    // Conditional on the state this transaction read, so two concurrent requests for one transition
+    // cannot both fire it: the loser's write is refused after the winner commits and **its effects
+    // never run** — which is what stopped a raced `send` posting the invoice to the GL twice. The
+    // raw stored value and not `current`, because an unset state reads as the initial one above and
+    // the store compares what it holds.
+    const written = await store.updateIf(tenantId, spec.entity, id, patch, { [t.stateField]: stored });
+    if (written.kind === "not_found") return json(404, { error: "not_found" });
+    if (written.kind === "precondition_failed") {
+      return json(409, {
+        error: "transition_conflict",
+        detail: `another request moved this ${spec.entity} out of '${current}' while '${t.name}' was in flight; nothing was written — re-read it`,
+      });
+    }
+    const after = written.record;
     await runEffects(ctx, {
       operation: "transition",
       entity: spec.entity,
@@ -979,6 +1143,27 @@ function maskForbidden(
   });
 }
 
+/**
+ * **422, and identical on every store**: the refusal is decided here from the manifest, before any
+ * store sees the body. Two codes because the remedies differ — a server-owned field is one the
+ * client should stop sending, and an undeclared key is one the manifest would have to declare.
+ */
+function surfaceRefused(entity: string, refused: WriteSurfaceRefusal): HandlerOutput {
+  if (refused.kind === "not_declared") {
+    return json(422, {
+      error: "field_not_declared",
+      detail: `'${refused.field}' is not a field of ${entity}; only the entity's declared fields may be written`,
+      field: refused.field,
+    });
+  }
+  return json(422, {
+    error: "field_server_owned",
+    detail: `'${refused.field}' on ${entity} is not writable by a client: ${SERVER_OWNED_REASON_TEXT[refused.reason]}`,
+    field: refused.field,
+    reason: refused.reason,
+  });
+}
+
 function hasGuards(ctx: HandlerContext): boolean {
   return ctx.writeGuards !== undefined && ctx.writeGuards.length > 0;
 }
@@ -1000,15 +1185,59 @@ async function writeTxn(
   callerKeys: readonly string[],
 ): Promise<HandlerOutput> {
   try {
-    if (isTransactional(ctx.store)) {
-      return await ctx.store.withTransaction(tenantId, (tx) => body(tx));
-    }
-    return await body(ctx.store);
+    const run = async (): Promise<HandlerOutput> => {
+      const store = ctx.store;
+      if (isTransactional(store)) {
+        return await store.withTransaction(tenantId, (tx) => body(tx));
+      }
+      return await body(store);
+    };
+    // The settings read happens here, before the transaction takes its connection.
+    return ctx.settingsScope !== undefined ? await ctx.settingsScope.run(tenantId, run) : await run();
   } catch (err) {
     // The one write failure whose body may name something — and only when the caller named the
     // field. See `uniqueConflict`.
     if (err instanceof UniqueViolation && callerKeys.includes(err.field)) {
       return uniqueConflict(err);
+    }
+    // `uniqueConflict`'s rule: the caller supplied the id, so the caller can fix it. A dangling
+    // reference the server wrote (an effect's fallback account code) is an internal fault and takes
+    // the fixed 500 below.
+    if (err instanceof ReferenceNotFound && callerKeys.includes(err.field)) {
+      return json(422, {
+        error: "reference_not_found",
+        detail: `'${err.field}' on '${err.entity}' must name an existing '${err.target}' in this tenant`,
+        field: err.field,
+      });
+    }
+    // A reference the **server** wrote, which no change to this request can fix — but the tenant's
+    // configuration can, and naming it is the difference between a diagnosis and a dead end. The
+    // live member is the GL posting: an effect's fallback account code is a literal no LedgerAccount
+    // carries, and since `--store pg` enforces references (ADR-0423) a fresh tenant's first `send`
+    // was refused with the fixed sentence below and nothing in any log. 409, because the request is
+    // well-formed and the conflict is with the tenant's current state; a retry after the settings
+    // name real accounts succeeds. The body carries manifest names and no value or id.
+    if (err instanceof ReferenceNotFound) {
+      return json(409, {
+        error: "server_reference_unresolved",
+        detail:
+          `this write creates a '${err.entity}' whose '${err.field}' must name an existing '${err.target}' ` +
+          `in this tenant, and none matched; nothing was written` +
+          (err.target === "LedgerAccount"
+            ? " — set the tenant's finance account codes (PUT /v1/admin/settings, `finance`) to " +
+              "ledger accounts that exist"
+            : ""),
+      });
+    }
+    // A delete names its record, so the caller can act on this whatever the body held: remove or
+    // repoint the referencing records first. The referencing entity and field are manifest names.
+    if (err instanceof ReferencedRecordInUse) {
+      return json(409, {
+        error: "record_referenced",
+        detail: `this '${err.entity}' is referenced by '${err.referencedBy}.${err.field}', whose delete rule is restrict`,
+        referencedBy: err.referencedBy,
+        field: err.field,
+      });
     }
     // The second exception, and it earns it on the same argument read the other way round. The
     // reason the fixed body names nothing is that the exception reaching here is a *database* error
@@ -1091,6 +1320,15 @@ function uniqueConflict(err: UniqueViolation): HandlerOutput {
     error: "unique_violation",
     detail: `'${err.field}' must be unique within this tenant on '${err.entity}', and another record already holds that value`,
     field: err.field,
+  });
+}
+
+/** The optimistic-concurrency refusal, from the pre-check and from the store's own compare alike. */
+function modifiedSinceLoaded(currentUpdatedAt: string | null): HandlerOutput {
+  return json(409, {
+    error: "conflict",
+    detail: "the record was modified since you loaded it",
+    ...(currentUpdatedAt !== null ? { currentUpdatedAt } : {}),
   });
 }
 

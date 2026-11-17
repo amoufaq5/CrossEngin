@@ -5,6 +5,7 @@ import {
   isAssociationReader,
   isAssociationWriter,
   isTransactional,
+  type ConditionalUpdate,
   type EntityRecord,
   type EntityStore,
   type ListPage,
@@ -274,6 +275,10 @@ class RecordingStore implements EntityStore {
   async update(): Promise<EntityRecord | null> {
     this.calls.push(`${this.label}:update`);
     return null;
+  }
+  async updateIf(): Promise<ConditionalUpdate> {
+    this.calls.push(`${this.label}:updateIf`);
+    return { kind: "not_found" };
   }
   async remove(): Promise<boolean> {
     this.calls.push(`${this.label}:remove`);
@@ -553,12 +558,25 @@ describe("TenantColumnStoreRouter — the plaintext fallback and PHI", () => {
     expect(fallback.calls).toEqual([]);
   });
 
-  it("refuses update and remove as well, so all six methods are covered", async () => {
-    const { router } = await phiRouted({ declare: true });
+  it("refuses update, updateIf and remove as well, so all seven methods are covered", async () => {
+    const { router, fallback } = await phiRouted({ declare: true });
     await expect(router.update(OTHER, "Widget", "w1", { mrn: "x" })).rejects.toThrow(
       PlaintextFallbackRefused,
     );
+    await expect(router.updateIf(OTHER, "Widget", "w1", { mrn: "x" }, { mrn: "y" })).rejects.toThrow(
+      PlaintextFallbackRefused,
+    );
+    await expect(
+      router.withTransaction(OTHER, async (tx) => tx.updateIf(OTHER, "Widget", "w1", { mrn: "x" }, {})),
+    ).rejects.toThrow(PlaintextFallbackRefused);
     await expect(router.remove(OTHER, "Widget", "w1")).rejects.toThrow(PlaintextFallbackRefused);
+    expect(fallback.calls).toEqual([]);
+  });
+
+  it("routes updateIf to the fallback for an entity with no encrypted column", async () => {
+    const { router, fallback } = await phiRouted({ declare: true });
+    expect(await router.updateIf(OTHER, "Gadget", "g1", { label: "x" }, {})).toEqual({ kind: "not_found" });
+    expect(fallback.calls).toEqual(["fallback:updateIf"]);
   });
 
   it("names the tenant and the entity, and carries no field value", async () => {
@@ -619,7 +637,7 @@ describe("TenantColumnStoreRouter — the plaintext fallback and PHI", () => {
   it("refuses inside withTransaction, where the callback holds the underlying store", async () => {
     const { router, fallback } = await phiRouted({ declare: true });
     // The callback is handed the *underlying* store, so its ops do not pass back through the
-    // router — a guard only on the router's own six methods would be bypassed by every handler
+    // router — a guard only on the router's own seven methods would be bypassed by every handler
     // running its guard → write → effect unit in a transaction, i.e. the ordinary write path.
     await expect(
       router.withTransaction(OTHER, async (tx) => tx.create(OTHER, "Widget", { id: "w1", mrn: "x" })),

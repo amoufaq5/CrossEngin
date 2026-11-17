@@ -214,5 +214,14 @@ export interface TableDefinition {
    */
   readonly constraints?: readonly TableConstraint[];
   readonly indexes?: readonly IndexSpec[];
+  /**
+   * A name prefix for indexes a serving process creates on this table at run time, which the
+   * catalog therefore cannot list. The reconciler does not report a live index carrying it as
+   * undeclared — without that, every such index is an `index_removed` on every drift check and
+   * every `apply`, for ever. It is the *namespace* that is declared, because the members depend on
+   * a manifest this catalog cannot know; a declared index must not carry the prefix (a test asserts
+   * it), so the two kinds of index can never be confused.
+   */
+  readonly runtimeIndexPrefix?: string;
   readonly rls?: TableRls;
 }

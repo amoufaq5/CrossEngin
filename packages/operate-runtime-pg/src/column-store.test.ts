@@ -1,6 +1,12 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
 import type { Manifest } from "@crossengin/kernel/manifest";
-import { encodeKeyset, ListSurfaceUnserveable, UniqueViolation } from "@crossengin/operate-runtime";
+import {
+  encodeKeyset,
+  ListSurfaceUnserveable,
+  ReferencedRecordInUse,
+  ReferenceNotFound,
+  UniqueViolation,
+} from "@crossengin/operate-runtime";
 import type { Entity } from "@crossengin/types/meta-schema";
 import { describe, expect, it } from "vitest";
 
@@ -196,6 +202,56 @@ describe("ColumnMappedEntityStore — CRUD maps fields to typed columns", () => 
     expect(upd.sql).toContain('"updated_at" = date_trunc(\'milliseconds\', now())');
     expect(upd.sql).toContain("RETURNING");
     expect(updated).toMatchObject({ id: "w1", price: "12.00" });
+  });
+
+  it("updateIf puts the precondition in the UPDATE's own WHERE, after the SET parameters", async () => {
+    const cap = capturePg([{ id: "w1", sku: "S1", status: "archived" }]);
+    const out = await store(cap).updateIf(TENANT, "Widget", "w1", { status: "archived" }, { status: "active", owner: null });
+    const upd = cap.calls.find((c) => c.sql.includes("UPDATE"))!;
+    expect(upd.sql).toContain('"status" = $3');
+    expect(upd.sql).toMatch(/WHERE "tenant_id" = \$1 AND "id" = \$2 AND "status" IS NOT DISTINCT FROM \$4::TEXT AND "owner_id" IS NULL/);
+    expect(upd.params).toEqual([TENANT, "w1", "archived", "active"]);
+    expect(out).toEqual({ kind: "updated", record: { id: "w1", sku: "S1", status: "archived" } });
+  });
+
+  it("updateIf tells a changed row from a missing one when the UPDATE matched nothing", async () => {
+    for (const [present, kind] of [
+      [true, "precondition_failed"],
+      [false, "not_found"],
+    ] as const) {
+      const cap = capturePg();
+      const inner = cap.conn.query;
+      const conn: PgConnection = {
+        ...cap.conn,
+        query: (async (sql: string, params?: readonly unknown[]) => {
+          if (sql.includes("UPDATE")) {
+            await inner(sql, params);
+            return { rows: [], rowCount: 0 };
+          }
+          if (sql.includes("SELECT 1")) {
+            await inner(sql, params);
+            return { rows: present ? [{ "?column?": 1 }] : [], rowCount: present ? 1 : 0 };
+          }
+          return inner(sql, params);
+        }) as PgConnection["query"],
+      };
+      conn.transaction = (async <T>(fn: (tx: PgConnection) => Promise<T>) => fn(conn)) as PgConnection["transaction"];
+      const s = new ColumnMappedEntityStore(conn, MANIFEST, { schema: "tenant_app", encryptionKey: () => KEY });
+      expect(await s.updateIf(TENANT, "Widget", "w1", { status: "archived" }, { status: "active" })).toEqual({ kind });
+      const probe = cap.calls.find((c) => c.sql.includes("SELECT 1"))!;
+      expect(probe.params).toEqual([TENANT, "w1"]);
+    }
+  });
+
+  it("updateIf refuses a precondition it cannot express rather than dropping it", async () => {
+    const cap = capturePg([{ id: "w1" }]);
+    await expect(store(cap).updateIf(TENANT, "Widget", "w1", { sku: "x" }, { mrn: "a" })).rejects.toThrow(
+      /encrypted at rest/,
+    );
+    await expect(store(cap).updateIf(TENANT, "Widget", "w1", { sku: "x" }, { nope: "a" })).rejects.toThrow(
+      /has no column/,
+    );
+    expect(cap.calls.filter((c) => c.sql.includes("UPDATE"))).toEqual([]);
   });
 
   it("remove reports whether a row was deleted", async () => {
@@ -552,6 +608,26 @@ describe("ColumnMappedEntityStore — an auditable entity's trait columns", () =
       created_at: "2026-08-26T00:00:00Z",
       created_by: "u1",
     });
+  });
+
+  // A row whose `updated_at` holds microseconds (a pre-ADR-0334 `now()` default) is served truncated,
+  // so a precondition built from that read must compare truncated or it can never hold — measured
+  // live as `precondition_failed` on every retry. A text column is compared as itself.
+  it("compares an instant precondition at the precision the store serves it", async () => {
+    const cap = capturePg([{ id: "v1", reason: "x" }]);
+    await auditedStore(cap).updateIf(
+      TENANT,
+      "Visit",
+      "v1",
+      { reason: "y" },
+      { updated_at: "2026-01-01T00:00:00.123Z", reason: "x" },
+    );
+    const upd = cap.calls.find((c) => c.sql.includes("UPDATE"))!;
+    expect(upd.sql).toMatch(
+      /date_trunc\('milliseconds', "updated_at"\) IS NOT DISTINCT FROM \$\d+::TIMESTAMPTZ/,
+    );
+    expect(upd.sql).toMatch(/AND "reason" IS NOT DISTINCT FROM \$\d+::TEXT/);
+    expect(upd.sql).not.toMatch(/date_trunc\('milliseconds', "reason"\)/);
   });
 
   // The whole reason this class of defect survived: every offline fake here hands back a string,
@@ -1339,5 +1415,75 @@ describe("ColumnMappedEntityStore — a declared unique field", () => {
     // reads every op here issues. The emitter has its own unit tests; what this adds is that the
     // *store* carries the scope through, which is the measured 0-of-47 form no pack declares.
     expect(index).toContain('("tenant_id", "dept", "seat_no")');
+  });
+});
+
+describe("ColumnMappedEntityStore — a foreign-key violation names the reference", () => {
+  // The document store refuses the same two requests by lookup, so one request answers the same on
+  // both stores. Before this a `23503` reached the handler as the opaque 500 on this store while the
+  // document store stored the dangling id and answered 201.
+  const REFS = {
+    entities: [
+      { name: "Account", fields: [{ name: "name", type: { kind: "text" } }] },
+      { name: "Contact", fields: [{ name: "account", type: { kind: "reference", target: "Account" } }] },
+    ],
+  } as unknown as Manifest;
+  const refStore = (cap: Captured): ColumnMappedEntityStore =>
+    new ColumnMappedEntityStore(cap.conn, REFS, { schema: "tenant_app" });
+
+  it("turns a 23503 on this entity's own key into a ReferenceNotFound on write", async () => {
+    const cap = capturePg([], (sql) =>
+      sql.startsWith("INSERT") ? pgError("23503", "fk_contact_account_id") : null,
+    );
+    const err = await refStore(cap)
+      .create(TENANT, "Contact", { id: "c1", account: "nope" })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+    expect(err).toBeInstanceOf(ReferenceNotFound);
+    expect(err).toMatchObject({ entity: "Contact", field: "account", target: "Account" });
+  });
+
+  it("turns a 23503 on a delete into ReferencedRecordInUse naming the referencing field", async () => {
+    const cap = capturePg([], (sql) =>
+      sql.startsWith("DELETE") ? pgError("23503", "fk_contact_account_id") : null,
+    );
+    const err = await refStore(cap)
+      .remove(TENANT, "Account", "a1")
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+    expect(err).toBeInstanceOf(ReferencedRecordInUse);
+    expect(err).toMatchObject({ entity: "Account", referencedBy: "Contact", field: "account" });
+  });
+
+  it("re-throws a 23503 from a key this store did not emit, untouched", async () => {
+    const original = pgError("23503", "some_other_fk");
+    const cap = capturePg([], (sql) => (sql.startsWith("INSERT") || sql.startsWith("DELETE") ? original : null));
+    for (const op of [
+      () => refStore(cap).create(TENANT, "Contact", { id: "c1", account: "a1" }),
+      () => refStore(cap).remove(TENANT, "Account", "a1"),
+    ]) {
+      const err = await op().then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(err).toBe(original);
+    }
+  });
+
+  it("does not claim another entity's key as this write's dangling reference", async () => {
+    // A 23503 on an INSERT into Account naming Contact's key is not a reference Account wrote.
+    const original = pgError("23503", "fk_contact_account_id");
+    const cap = capturePg([], (sql) => (sql.startsWith("INSERT") ? original : null));
+    const err = await refStore(cap)
+      .create(TENANT, "Account", { id: "a1", name: "x" })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+    expect(err).toBe(original);
   });
 });

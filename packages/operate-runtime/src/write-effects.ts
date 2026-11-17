@@ -75,6 +75,21 @@ const DEFAULTS = {
   maxLines: 50_000,
 } as const;
 
+/**
+ * Who a record an effect creates is attributed to: whoever performed the act that fired the effect,
+ * which is the `updated_by` the handler stamped on the triggering record in this same request. Never
+ * the people a copy would carry over from its source — a credit note copied field by field from an
+ * invoice used to name the invoice's creator as its own. Empty when the source carries no stamp,
+ * which on the column store is also how a null actor reads back, so an entity without the
+ * `auditable` trait is not given a column it does not have.
+ */
+const ACTOR_FIELDS = ["created_by", "updated_by"] as const;
+function attributedToTrigger(source: EntityRecord): EntityRecord {
+  if (!Object.prototype.hasOwnProperty.call(source, "updated_by")) return {};
+  const actor = source["updated_by"] ?? null;
+  return { created_by: actor, updated_by: actor };
+}
+
 function num(v: unknown): number {
   const n = typeof v === "number" ? v : Number(v);
   return Number.isFinite(n) ? n : 0;
@@ -141,15 +156,17 @@ export function journalReversalEffect(config: JournalReversalConfig = {}): Write
       [c.postedAtField]: nowIso,
       created_at: nowIso,
       updated_at: nowIso,
+      ...attributedToTrigger(original),
     };
     for (const carry of ["book_id", "fiscal_period_id"]) {
       if (typeof original[carry] === "string") reversalEntry[carry] = original[carry];
     }
 
-    const skip = new Set([
+    const skip = new Set<string>([
       "id",
       "created_at",
       "updated_at",
+      ...ACTOR_FIELDS,
       c.lineEntryRefField,
       c.debitField,
       c.creditField,
@@ -196,6 +213,7 @@ export function journalReversalEffect(config: JournalReversalConfig = {}): Write
           reversed[c.descriptionField] = `Reversal: ${desc}`.trim();
           reversed.created_at = nowIso;
           reversed.updated_at = nowIso;
+          Object.assign(reversed, attributedToTrigger(original));
           reversals.push(reversed);
         }
       },
@@ -329,6 +347,7 @@ export function invoiceVoidCreditNoteEffect(config: InvoiceCreditNoteConfig = {}
       "paid_at",
       "created_at",
       "updated_at",
+      ...ACTOR_FIELDS,
     ]);
     const creditNote: EntityRecord = {};
     for (const [k, v] of Object.entries(original)) {
@@ -359,6 +378,7 @@ export function invoiceVoidCreditNoteEffect(config: InvoiceCreditNoteConfig = {}
     }
     creditNote.created_at = nowIso;
     creditNote.updated_at = nowIso;
+    Object.assign(creditNote, attributedToTrigger(original));
 
     // One spelling of the header write, deferred so each arm can order it against its own read.
     // The full-copy arm below writes it only after the line read is known complete, because a
@@ -389,11 +409,19 @@ export function invoiceVoidCreditNoteEffect(config: InvoiceCreditNoteConfig = {}
         [c.lineTotalField]: amount,
         created_at: nowIso,
         updated_at: nowIso,
+        ...attributedToTrigger(original),
       });
       return;
     }
 
-    const lineSkip = new Set(["id", c.lineInvoiceRefField, c.descriptionField, "created_at", "updated_at"]);
+    const lineSkip = new Set<string>([
+      "id",
+      c.lineInvoiceRefField,
+      c.descriptionField,
+      "created_at",
+      "updated_at",
+      ...ACTOR_FIELDS,
+    ]);
     // Derived per page and written only once the read is known complete, header included — the
     // reversal effect's ordering and for its reason, stated at `writeHeader` above. The payloads
     // carry no invoice reference while they are being built; it is stamped on after the header
@@ -416,6 +444,7 @@ export function invoiceVoidCreditNoteEffect(config: InvoiceCreditNoteConfig = {}
           cnLine[c.descriptionField] = `Credit: ${desc}`.trim();
           cnLine.created_at = nowIso;
           cnLine.updated_at = nowIso;
+          Object.assign(cnLine, attributedToTrigger(original));
           cnLines.push(cnLine);
         }
       },

@@ -187,6 +187,23 @@ export function compareDecimal(a: ExactDecimal, b: ExactDecimal): number {
 }
 
 /**
+ * The exact sum of two decimals, at the wider of their two scales. Widening only ever multiplies,
+ * so no digit of either operand is lost — which is what lets a balance check compare totals with
+ * `===` instead of a tolerance: a tolerance is a statement that the arithmetic beneath it is not
+ * exact, and at `NUMERIC(16, 2)`'s upper range a double cannot tell `…999.99` from `…999.98`.
+ */
+export function addDecimal(a: ExactDecimal, b: ExactDecimal): ExactDecimal {
+  const scale = Math.max(a.scale, b.scale);
+  const left = rescale(a, scale);
+  const right = rescale(b, scale);
+  const sum = (left.negative ? -left.units : left.units) + (right.negative ? -right.units : right.units);
+  return { negative: sum < 0n, units: sum < 0n ? -sum : sum, scale };
+}
+
+/** Zero, at scale 0 — the identity for {@link addDecimal}. */
+export const DECIMAL_ZERO: ExactDecimal = { negative: false, units: 0n, scale: 0 };
+
+/**
  * Exact comparison of two decimal numerals, or null when either side is not one. Used by the
  * in-memory store's sort: with decimals on the wire as strings, a `localeCompare` would order
  * `"9.50"` after `"10.25"` and so disagree with the typed store's `ORDER BY` on the same field.

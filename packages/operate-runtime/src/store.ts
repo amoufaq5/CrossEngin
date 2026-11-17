@@ -157,6 +157,48 @@ export class UniqueViolation extends Error {
   }
 }
 
+/**
+ * A write set a `reference` field to an id no record of the target entity holds in this tenant.
+ *
+ * Both Postgres stores raise it: the column store from its composite foreign key's `23503`, the
+ * document store from one indexed lookup before the write. So one request is refused by both, where
+ * the document store used to store the dangling id and answer 201. It carries the field and the
+ * target entity and never the id, which is a value the caller supplied or the server derived.
+ */
+export class ReferenceNotFound extends Error {
+  readonly entity: string;
+  readonly field: string;
+  readonly target: string;
+
+  constructor(entity: string, field: string, target: string) {
+    super(`'${field}' on '${entity}' must name an existing '${target}' in this tenant`);
+    this.name = "ReferenceNotFound";
+    this.entity = entity;
+    this.field = field;
+    this.target = target;
+  }
+}
+
+/**
+ * A delete was refused because another record references this one through a relation whose
+ * `onDelete` is `restrict` (or a reference field no relation qualifies, which defaults to it).
+ *
+ * Names the referencing entity and field, which come from the manifest, and no record id.
+ */
+export class ReferencedRecordInUse extends Error {
+  readonly entity: string;
+  readonly referencedBy: string;
+  readonly field: string;
+
+  constructor(entity: string, referencedBy: string, field: string) {
+    super(`'${entity}' is referenced by '${referencedBy}.${field}', whose delete rule is restrict`);
+    this.name = "ReferencedRecordInUse";
+    this.entity = entity;
+    this.referencedBy = referencedBy;
+    this.field = field;
+  }
+}
+
 export interface EntityStore {
   list(tenantId: string, entity: string): Promise<readonly EntityRecord[]>;
   listPage(tenantId: string, entity: string, query: ListQuery): Promise<ListPage>;
@@ -168,7 +210,65 @@ export interface EntityStore {
     id: string,
     patch: EntityRecord,
   ): Promise<EntityRecord | null>;
+  /**
+   * `update`, applied only while every field in `expected` still holds the value it was read as —
+   * the compare-and-set a decision made from a read needs. A transition decided from the state it
+   * read must not land on a record another request has already moved: two concurrent `send`s both
+   * passed the from-state check and both ran the GL posting effect, because the check and the write
+   * were two statements with nothing tying the second to what the first saw.
+   *
+   * The check and the write are one atomic step **in the store**, never in the caller: the memory
+   * store has no `await` between them, the document store compares against the row it holds
+   * `FOR UPDATE`, and the column store puts the comparison in the `UPDATE`'s own `WHERE`, which
+   * Postgres re-evaluates against the newest committed row version after waiting for a concurrent
+   * writer's lock. So the loser is refused after the winner commits — effects included, since a
+   * handler runs them inside the same transaction — and never interleaves with it.
+   *
+   * A required method rather than an optional fifth argument to `update`, because a wrapper that
+   * forwards four arguments would drop a fifth and compile — ADR-0386's dropped-field class — while
+   * a missing method is a compile error in every decorator object literal and every `implements`.
+   */
+  updateIf(
+    tenantId: string,
+    entity: string,
+    id: string,
+    patch: EntityRecord,
+    expected: UpdatePrecondition,
+  ): Promise<ConditionalUpdate>;
   remove(tenantId: string, entity: string, id: string): Promise<boolean>;
+}
+
+/**
+ * Field values a conditional update requires the stored record still to hold, **as the store's own
+ * `get` returned them**. An absent key in the record and `null` are the same value here, since no
+ * store distinguishes them on read (the column store omits a NULL column; the document store may
+ * hold either).
+ */
+export type UpdatePrecondition = Readonly<Record<string, unknown>>;
+
+/** What a conditional update did. `precondition_failed` means the record exists and changed. */
+export type ConditionalUpdate =
+  | { readonly kind: "updated"; readonly record: EntityRecord }
+  | { readonly kind: "not_found" }
+  | { readonly kind: "precondition_failed" };
+
+/**
+ * Whether `record` still holds every value `expected` names. One definition for every store that
+ * compares in process (memory, document), so they cannot disagree about what "unchanged" means.
+ */
+export function preconditionHolds(record: EntityRecord, expected: UpdatePrecondition): boolean {
+  for (const [field, want] of Object.entries(expected)) {
+    if (!sameStoredValue(record[field], want)) return false;
+  }
+  return true;
+}
+
+function sameStoredValue(a: unknown, b: unknown): boolean {
+  const aAbsent = a === undefined || a === null;
+  const bAbsent = b === undefined || b === null;
+  if (aAbsent || bAbsent) return aAbsent && bAbsent;
+  if (typeof a !== "object" || typeof b !== "object") return a === b;
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 /**
@@ -537,6 +637,24 @@ export class InMemoryEntityStore implements EntityStore {
     const merged: EntityRecord = { ...existing, ...patch, id };
     bucket.set(id, merged);
     return merged;
+  }
+
+  // No `await` between the comparison and the write, which is what makes it atomic here: the event
+  // loop cannot run another request's update between them.
+  async updateIf(
+    tenantId: string,
+    entity: string,
+    id: string,
+    patch: EntityRecord,
+    expected: UpdatePrecondition,
+  ): Promise<ConditionalUpdate> {
+    const bucket = this.bucket(tenantId, entity);
+    const existing = bucket.get(id);
+    if (existing === undefined) return { kind: "not_found" };
+    if (!preconditionHolds(existing, expected)) return { kind: "precondition_failed" };
+    const merged: EntityRecord = { ...existing, ...patch, id };
+    bucket.set(id, merged);
+    return { kind: "updated", record: merged };
   }
 
   async remove(tenantId: string, entity: string, id: string): Promise<boolean> {

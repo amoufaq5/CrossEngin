@@ -1290,6 +1290,7 @@ function pagedAt(inner: InMemoryEntityStore, size: number): EntityStore {
     get: (t, e, id) => inner.get(t, e, id),
     create: (t, e, r) => inner.create(t, e, r),
     update: (t, e, id, patch) => inner.update(t, e, id, patch),
+    updateIf: (t, e, id, patch, expected) => inner.updateIf(t, e, id, patch, expected),
     remove: (t, e, id) => inner.remove(t, e, id),
     list: (t, e) => inner.list(t, e),
   };
@@ -1738,6 +1739,7 @@ describe("resolveAccountId — no positional fallback", () => {
       get: (t, e, id) => store.get(t, e, id),
       create: (t, e, r) => store.create(t, e, r),
       update: (t, e, id, patch) => store.update(t, e, id, patch),
+      updateIf: (t, e, id, patch, expected) => store.updateIf(t, e, id, patch, expected),
       remove: (t, e, id) => store.remove(t, e, id),
       list: (t, e) => store.list(t, e),
     };

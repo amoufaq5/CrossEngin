@@ -28,6 +28,7 @@ import {
 import {
   FILTER_OPS,
   matchesFilter,
+  type ConditionalUpdate,
   type EntityRecord,
   type EntityStore,
   type ListPage,
@@ -452,6 +453,9 @@ class LinkStore implements EntityStore {
   }
   async update(_t: string, _e: string, _id: string, p: EntityRecord): Promise<EntityRecord | null> {
     return p;
+  }
+  async updateIf(_t: string, _e: string, _id: string, p: EntityRecord): Promise<ConditionalUpdate> {
+    return { kind: "updated", record: p };
   }
   async remove(): Promise<boolean> {
     return true;

@@ -1618,6 +1618,15 @@ export const PG_SCAN_GAPS: readonly PgScanGap[] = [
       "caller passes `${schema}.operate_entity_records`, so unlike the gap above this target IS " +
       "catalogued and the gap is the parameter rather than the table",
   },
+  {
+    file: "packages/operate-runtime-pg/src/document-integrity.ts",
+    expression: "${table}",
+    reason:
+      "the JSONB store's referential-integrity half (ADR-0423) takes the same qualified table " +
+      "`entity-ops.ts` does, from the same one caller: `PostgresEntityStore` passes " +
+      "`${schema}.operate_entity_records`, so the target is catalogued and the gap is again the " +
+      "parameter rather than the table",
+  },
 ];
 
 /**

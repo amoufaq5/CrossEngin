@@ -603,6 +603,19 @@ const JOB_CANCEL = "packages/workflow-runtime-pg/src/job-cancellation.ts";
  * back** and the six kinds above are what they collapse onto.
  */
 export const RECORD_READ_DIVERGENCES: readonly RecordReadDivergence[] = Object.freeze([
+  {
+    file: "packages/operate-runtime-pg/src/document-integrity.ts",
+    field: "id",
+    column: "record_id",
+    kind: "qualifier_differs",
+    note:
+      "`removeWithReferences` builds a `RowRef {entity, id}` from `SELECT record_id … FOR UPDATE` " +
+      "over `meta.operate_entity_records`, the same table `PostgresEntityStore` maps `record_id` " +
+      "onto `EntityRecord.id`. The `record_` qualifier exists because the row also carries " +
+      "`entity` and `tenant_id`; `id` is what every `EntityStore` caller names that column, and " +
+      "the ref is fed back into `record_id = $3` in the same function, so the round trip closes on " +
+      "the value. The row type is an inline literal, which is why no derivation was available (ADR-0423).",
+  },
   /* ------------------------------------------------- nested_record (6) */
   {
     file: ACCESS_REVIEWS,

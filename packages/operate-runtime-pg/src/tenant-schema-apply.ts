@@ -3,6 +3,7 @@ import { manifestHash, type Manifest } from "@crossengin/kernel/manifest";
 import type { PgConnection } from "@crossengin/kernel-pg";
 
 import {
+  UnadmittedDefaultError,
   UndecidedColumnTypeError,
   columnPlansForManifest,
   joinTablePlansForManifest,
@@ -198,7 +199,22 @@ export async function applyTenantManifestSchema(
   try {
     plans = columnPlansForManifest(manifest, { schema });
   } catch (error) {
-    if (!(error instanceof UndecidedColumnTypeError)) throw error;
+    // An unadmitted expression default is the same situation one field property over: a stored
+    // manifest that skipped validation, refused here so the tenant degrades to the JSONB store,
+    // which never evaluates an expression default, instead of the throw escaping `ensure`.
+    let refused: { kind: TenantSchemaChange["kind"]; entity: string; field: string; reason: string };
+    if (error instanceof UndecidedColumnTypeError) {
+      refused = { kind: "unservable_field_type", entity: error.entity, field: error.field, reason: error.reason };
+    } else if (error instanceof UnadmittedDefaultError) {
+      refused = {
+        kind: "unadmitted_expression_default",
+        entity: error.entity,
+        field: error.field,
+        reason: error.reason,
+      };
+    } else {
+      throw error;
+    }
     return {
       tenantId,
       schema,
@@ -208,10 +224,10 @@ export async function applyTenantManifestSchema(
       uniqueIndexRefusals: [],
       changes: [
         {
-          kind: "unservable_field_type",
-          table: error.entity,
-          column: error.field,
-          detail: error.reason,
+          kind: refused.kind,
+          table: refused.entity,
+          column: refused.field,
+          detail: refused.reason,
           blocking: true,
           sql: null,
         },

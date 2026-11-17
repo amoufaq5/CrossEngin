@@ -3,6 +3,8 @@
 import {
   CliUsageError,
   helpText,
+  documentIndexesHelpText,
+  parseDocumentIndexesArgs,
   parsePruneArgs,
   parseServeArgs,
   parseVerifyChainArgs,
@@ -23,7 +25,14 @@ import {
   formatChainTruncation,
   verificationExaminedNothing,
 } from "../src/anchor-audit.js";
-import { runPruneLinks, runRekey, runReplay, runVerifyChain, serve } from "../src/node.js";
+import {
+  runDocumentIndexes,
+  runPruneLinks,
+  runRekey,
+  runReplay,
+  runVerifyChain,
+  serve,
+} from "../src/node.js";
 import { formatReplayReport } from "../src/replay.js";
 import { formatRekeyResult, formatRekeySurvey } from "../src/rekey.js";
 import { formatSetCredentialReport, runSetCredential } from "../src/set-credential.js";
@@ -48,6 +57,55 @@ async function runPrune(argv: readonly string[]): Promise<number> {
   const report = await runPruneLinks(options);
   process.stdout.write(formatMultiTenantReport(report));
   return 0;
+}
+
+/**
+ * `document-indexes`: the owner's one-shot that builds --store pg's unique indexes before the API,
+ * which cannot (it owns nothing). Every index outcome is printed; duplicates already in the table
+ * are a warning and exit 0 (ADR-0360: deduplicating is an operator's act, and the API still serves),
+ * while any other failure exits 1 so compose does not start an API whose guarantee was never built.
+ */
+async function runDocIndexes(argv: readonly string[]): Promise<number> {
+  let options;
+  try {
+    options = parseDocumentIndexesArgs(argv);
+  } catch (err) {
+    if (err instanceof CliUsageError) {
+      process.stderr.write(`error: ${err.message}\n\n${documentIndexesHelpText}`);
+      return 2;
+    }
+    throw err;
+  }
+  if (options.help) {
+    process.stdout.write(documentIndexesHelpText);
+    return 0;
+  }
+  const report = await runDocumentIndexes(options);
+  let fatal = 0;
+  for (const r of report.results) {
+    const name = `${r.index.entity}.${r.index.field}`;
+    if (r.outcome === "enforced") {
+      process.stdout.write(`[document-indexes] ${name}: enforced (${r.index.name})\n`);
+    } else if (r.outcome === "existing_duplicates") {
+      process.stderr.write(
+        `[document-indexes] ${name}: NOT enforced — rows already hold duplicates. Deduplicate, then re-run.` +
+          ` Statement: ${r.index.sql}\n`,
+      );
+    } else {
+      fatal += 1;
+      process.stderr.write(`[document-indexes] ${name}: NOT enforced (${r.outcome}): ${r.detail ?? ""}\n`);
+    }
+  }
+  for (const stale of report.stale) {
+    process.stderr.write(
+      `[document-indexes] ${stale.name} is no longer declared by this manifest and is left in place: ${stale.dropSql}\n`,
+    );
+  }
+  process.stdout.write(
+    `[document-indexes] ${report.results.length.toString()} declared unique field(s);` +
+      ` ${report.results.filter((r) => r.outcome === "enforced").length.toString()} enforced\n`,
+  );
+  return fatal === 0 ? 0 : 1;
 }
 
 async function runVerify(argv: readonly string[]): Promise<number> {
@@ -209,6 +267,9 @@ async function runSetCredentialCommand(argv: readonly string[]): Promise<number>
 async function main(): Promise<number> {
 
   const argv = process.argv.slice(2);
+  if (argv[0] === "document-indexes") {
+    return runDocIndexes(argv.slice(1));
+  }
   if (argv[0] === "prune-links") {
     return runPrune(argv.slice(1));
   }

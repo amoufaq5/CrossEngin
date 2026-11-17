@@ -270,6 +270,11 @@ export interface BuildOperateHttpServerOptions {
    * its total. Default (absent) builds the coverage guard. See `--allow-uncovered-settlement`.
    */
   readonly allowUncoveredSettlement?: boolean;
+  /**
+   * Refuse an approve-class transition fired by the record's own creator. Default (absent) is off.
+   * See `--segregation-of-duties`.
+   */
+  readonly segregationOfDuties?: boolean;
   /** Allocates document numbers for sequence-defaulted fields on create. */
   readonly allocator?: SequenceAllocator;
   /**
@@ -617,6 +622,9 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     ...(options.writeMaskMode !== undefined ? { writeMaskMode: options.writeMaskMode } : {}),
     ...(options.allowUncoveredSettlement !== undefined
       ? { allowUncoveredSettlement: options.allowUncoveredSettlement }
+      : {}),
+    ...(options.segregationOfDuties !== undefined
+      ? { segregationOfDuties: options.segregationOfDuties }
       : {}),
     ...(options.abac !== undefined ? { abacEvaluator: options.abac.evaluator } : {}),
     ...(options.abac?.evaluateBatch !== undefined

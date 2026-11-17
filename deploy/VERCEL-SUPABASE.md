@@ -55,8 +55,30 @@ The three tiers and where they live:
    `_meta_migrations` — safe to re-run on every schema change). The applier's
    `pg_uuidv7` precondition is satisfied by the pure-SQL function from step 2.
 
-> Re-run steps 2–3 (in that order) whenever you pull a new version that changes
-> the schema.
+4. **Create the role the API connects as.** `postgres` owns every table step 3
+   created and holds `BYPASSRLS`, so an API connecting as it is a session for
+   which every row-level-security policy is inert — tenant isolation would rest on
+   the stores' own `tenant_id` predicates alone. From the same shell as step 3:
+
+   ```bash
+   APP_PW="$(openssl rand -hex 24)"; echo "$APP_PW"
+   CROSSENGIN_APP_DB_USER=crossengin_app CROSSENGIN_APP_DB_PASSWORD="$APP_PW" \
+     psql -v ON_ERROR_STOP=1 -f deploy/postgres/roles/app-role.sql
+   ```
+
+   Keep the printed password: it is the API's `PGPASSWORD` below, and nothing stores it
+   for you — a password generated inside the command line itself would be gone once the
+   command returned. The script reads both values with `\getenv`, which needs `psql`
+   15 or later; an older client answers `invalid command \getenv` and changes nothing. The script is the one the
+   compose stack's `app-role` service runs (see [README.md, "The database
+   roles"](./README.md#the-database-roles) for what it refuses and why); it names an
+   attribute only when the role holds one, which is what lets a provider's admin
+   role — not a superuser — run it. Measured against a non-superuser
+   `CREATEROLE BYPASSRLS` owner shaped like Supabase's `postgres`; not run against a
+   Supabase project.
+
+> Re-run steps 2–4 (in that order) whenever you pull a new version that changes
+> the schema: step 4 grants the tables step 3 added.
 
 > **Upgrading an existing database?** The version that added the user registry also
 > stopped declaring **29 foreign keys** your database is still enforcing, so `apply`
@@ -145,8 +167,8 @@ pooling*):
 ```
 PGHOST=<project-ref>.pooler.supabase.com
 PGPORT=5432                # session-mode pooler
-PGUSER=postgres.<project-ref>
-PGPASSWORD=<your-db-password>
+PGUSER=crossengin_app.<project-ref>   # step 4's role, in the pooler's role.project form
+PGPASSWORD=<the password from step 4>
 PGDATABASE=postgres
 PGSSLMODE=verify-full
 NODE_ENV=production

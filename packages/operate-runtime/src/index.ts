@@ -17,6 +17,7 @@ export * from "./association.js";
 export * from "./sequences.js";
 export * from "./defaults.js";
 export * from "./settings.js";
+export * from "./settings-snapshot.js";
 export * from "./settings-defaults.js";
 export * from "./write-guards.js";
 export * from "./write-effects.js";
@@ -34,6 +35,8 @@ export * from "./plan-catalog.js";
 export * from "./usage-handler.js";
 export * from "./billing-portal-handler.js";
 export * from "./validation.js";
+export * from "./write-surface.js";
+export * from "./maker-checker.js";
 
 export * from "./aging.js";
 export * from "./aging-handler.js";

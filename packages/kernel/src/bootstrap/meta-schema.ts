@@ -11293,6 +11293,10 @@ export const META_OPERATE_ENTITY_RECORDS: TableDefinition = {
     },
   ],
   indexes: [{ name: "idx_operate_entity_records_tenant_entity", columns: ["tenant_id", "entity"] }],
+  // `PostgresEntityStore` creates one partial unique expression index per declared `unique` field
+  // of the manifest it serves (`DOCUMENT_RUNTIME_INDEX_PREFIX`), because one shared table cannot
+  // carry per-entity DDL any other way.
+  runtimeIndexPrefix: "operate_entity_records_rt_",
   rls: {
     enabled: true,
     policies: [{ name: "operate_entity_records_tenant_isolation", using: TENANT_ISOLATION_USING }],

@@ -166,6 +166,7 @@ function recordingStore(): { store: EntityStore; seen: ListQuery[] } {
     get: (t, e, i) => inner.get(t, e, i),
     create: (t, e, r) => inner.create(t, e, r),
     update: (t, e, i, p) => inner.update(t, e, i, p),
+    updateIf: (t, e, i, p, x) => inner.updateIf(t, e, i, p, x),
     remove: (t, e, i) => inner.remove(t, e, i),
   };
   return { store, seen };
@@ -224,6 +225,7 @@ describe("withListValueTypes", () => {
       get: (t, e, i) => inner.get(t, e, i),
       create: (t, e, r) => inner.create(t, e, r),
       update: (t, e, i, p) => inner.update(t, e, i, p),
+      updateIf: (t, e, i, p, x) => inner.updateIf(t, e, i, p, x),
       remove: (t, e, i) => inner.remove(t, e, i),
     };
     const transactional = Object.assign(Object.create(tx) as EntityStore, {

@@ -24,6 +24,8 @@ import { SEALED_CURSOR_PREFIX, buildCursorSealer } from "./cursor-seal.js";
 import {
   InMemoryEntityStore,
   ListSurfaceUnserveable,
+  ReferencedRecordInUse,
+  ReferenceNotFound,
   UniqueViolation,
   decodeKeyset,
   type ListPage,
@@ -2010,6 +2012,15 @@ class RaisingStore extends InMemoryEntityStore {
     return super.update(...args);
   }
 
+  // A transition and a token-carrying update write through `updateIf`; a store raising on `update`
+  // alone would let them through unraised and the transition arm below would assert nothing.
+  override async updateIf(
+    ...args: Parameters<InMemoryEntityStore["updateIf"]>
+  ): ReturnType<InMemoryEntityStore["updateIf"]> {
+    this.raise();
+    return super.updateIf(...args);
+  }
+
   override async remove(
     ...args: Parameters<InMemoryEntityStore["remove"]>
   ): ReturnType<InMemoryEntityStore["remove"]> {
@@ -2262,5 +2273,64 @@ describe("operate handlers — the 409 is an exception to the fixed 500, not a h
     const invoiceNumber = field("Invoice", "invoice_number");
     expect(invoiceNumber?.unique).toBe(true);
     expect(invoiceNumber?.default?.kind).toBe("sequence");
+  });
+});
+
+describe("operate handlers — a reference the store refuses", () => {
+  it("422s a create whose supplied reference names no record, naming the field", async () => {
+    const store = new RaisingStore();
+    serving(store);
+    store.arm(new ReferenceNotFound("SalesOrder", "store_id", "Store"));
+
+    const out = await invoke("salesOrder.create", {
+      role: "retail_admin",
+      body: { store_id: "st-missing", order_number: "SO-9", currency: "USD" },
+    });
+    expect(out.status).toBe(422);
+    const body = bodyOf(out);
+    expect(body["error"]).toBe("reference_not_found");
+    expect(body["field"]).toBe("store_id");
+    expect(String(body["detail"])).toMatch(/'store_id' on 'SalesOrder' must name an existing 'Store'/);
+  });
+
+  it("409s by name when the dangling reference is one the server wrote, and names the settings remedy", async () => {
+    // A post-write effect writing a reference the caller never typed. This test used to pin a 500
+    // naming nothing, on the ground that "send an existing id" is an instruction the caller cannot
+    // follow — true of the caller and false of the tenant, whose finance settings are the remedy.
+    // Live on `--store pg` it was every fresh tenant's first invoice `send` (ADR-0423).
+    const store = new RaisingStore();
+    serving(store, new ReferenceNotFound("JournalLine", "ledger_account_id", "LedgerAccount"));
+
+    const out = await invoke("product.create", { role: "retail_admin", body: productBody() });
+    expect(out.status).toBe(409);
+    const body = bodyOf(out);
+    expect(body["error"]).toBe("server_reference_unresolved");
+    expect(String(body["detail"])).toMatch(/'ledger_account_id' must name an existing 'LedgerAccount'/);
+    expect(String(body["detail"])).toContain("PUT /v1/admin/settings");
+    expect(body["field"]).toBeUndefined();
+  });
+
+  it("names no settings remedy for a server-written reference to anything but a ledger account", async () => {
+    const store = new RaisingStore();
+    serving(store, new ReferenceNotFound("OrderLine", "product_id", "Product"));
+    const out = await invoke("product.create", { role: "retail_admin", body: productBody() });
+    expect(out.status).toBe(409);
+    expect(String(bodyOf(out)["detail"])).not.toContain("settings");
+  });
+
+  it("409s a delete a restrict reference blocks, naming what holds it", async () => {
+    const store = new RaisingStore();
+    serving(store);
+    const id = bodyOf(await invoke("product.create", { role: "retail_admin", body: productBody() }))[
+      "id"
+    ] as string;
+    store.arm(new ReferencedRecordInUse("Product", "OrderLine", "product_id"));
+
+    const out = await invoke("product.delete", { role: "retail_admin", params: { id } });
+    expect(out.status).toBe(409);
+    const body = bodyOf(out);
+    expect(body["error"]).toBe("record_referenced");
+    expect(body["referencedBy"]).toBe("OrderLine");
+    expect(body["field"]).toBe("product_id");
   });
 });

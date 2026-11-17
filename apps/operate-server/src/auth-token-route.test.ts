@@ -17,6 +17,7 @@ import {
   type LoginOutcome,
 } from "./auth-token-route.js";
 import type { CredentialRecord, PostgresCredentialStore, TenantRef } from "./credential-store.js";
+import { LoginAdmission } from "./login-admission.js";
 import type { SessionRoles } from "./token-mint.js";
 
 const PEPPER = "a-deployment-pepper-with-plenty-of-distinct-bytes-0123456789";
@@ -30,6 +31,11 @@ interface StubState {
   readonly tenant?: TenantRef | null;
   readonly record?: CredentialRecord | null;
   readonly roles?: SessionRoles | null;
+  /** What `reserveAttempt` answers. Defaults to reserved. */
+  readonly reserve?: boolean;
+  /** Every reservation call and release call, in order. */
+  readonly calls?: string[];
+  readonly releaseThrows?: boolean;
 }
 
 function stubStore(state: StubState): PostgresCredentialStore {
@@ -39,7 +45,48 @@ function stubStore(state: StubState): PostgresCredentialStore {
     resolveTenant: async () =>
       "tenant" in state ? state.tenant! : { tenantId: TENANT, status: "active" },
     findByEmail: async () => ("record" in state ? state.record! : null),
+    reserveAttempt: async () => {
+      state.calls?.push("reserve");
+      return state.reserve === false
+        ? { reserved: false }
+        : { reserved: true, failedAttempts: 1, lockedUntil: null };
+    },
+    releaseAttempt: async () => {
+      state.calls?.push("release");
+      if (state.releaseThrows === true) throw new Error("update failed");
+    },
   } as unknown as PostgresCredentialStore;
+}
+
+/**
+ * A store whose reservation behaves as the SQL does: one atomic step per call, admitting only while
+ * unlocked, restarting the count once a lock has expired. Used to test `verifyLogin`'s ordering --
+ * the store's own atomicity is the live run's subject, not this fake's.
+ */
+function reservingStore(
+  record: CredentialRecord,
+  clock: { ms: number },
+): { store: PostgresCredentialStore; state: { count: number; lockedUntilMs: number | null } } {
+  const state = { count: 0, lockedUntilMs: null as number | null };
+  const store = {
+    resolveTenant: async () => ({ tenantId: TENANT, status: "active" }),
+    findByEmail: async () => ({
+      ...record,
+      failedAttempts: state.count,
+      lockedUntil: state.lockedUntilMs === null ? null : new Date(state.lockedUntilMs).toISOString(),
+    }),
+    reserveAttempt: async (_u: string, attempts: number, seconds: number) => {
+      if (state.lockedUntilMs !== null && state.lockedUntilMs > clock.ms) return { reserved: false };
+      state.count = state.lockedUntilMs === null ? state.count + 1 : 1;
+      state.lockedUntilMs = state.count >= attempts ? clock.ms + seconds * 1000 : null;
+      return { reserved: true, failedAttempts: state.count, lockedUntil: null };
+    },
+    releaseAttempt: async (_u: string, attempts: number) => {
+      state.count = Math.max(state.count - 1, 0);
+      if (state.count < attempts) state.lockedUntilMs = null;
+    },
+  } as unknown as PostgresCredentialStore;
+  return { store, state };
 }
 
 async function activeRecord(over: Partial<CredentialRecord> = {}): Promise<CredentialRecord> {
@@ -311,6 +358,8 @@ describe("verifyLogin", () => {
       // oracle had to close in the same change rather than be left wider than it was found.
       { record: await activeRecord({ credentialHash: `scrypt$1000$8$1$${"a".repeat(32)}$${"b".repeat(128)}` }) },
       { record: await activeRecord({ credentialHash: `scrypt$32768$8$512$${"a".repeat(32)}$${"b".repeat(128)}` }) },
+      // Locked by a concurrent attempt between the read and the reservation.
+      { record: await activeRecord(), reserve: false },
     ];
     // A real verification at these parameters is the baseline; every refusal must be of the same
     // order rather than instant. Measured as a floor, not an equality -- a tight equality would be
@@ -325,6 +374,110 @@ describe("verifyLogin", () => {
       expect(ms, `case ${i.toString()} answered in ${ms.toFixed(2)}ms vs ${verifyMs.toFixed(2)}ms`)
         .toBeGreaterThan(verifyMs / 10);
     }
+  });
+
+  describe("the reservation", () => {
+    it("is taken BEFORE the password is verified, and kept for a wrong one", async () => {
+      const calls: string[] = [];
+      const outcome = await run({ record: await activeRecord(), calls }, "wrong");
+      expect(outcome).toMatchObject({ refusal: "password_mismatch" });
+      expect(calls).toEqual(["reserve"]);
+    });
+
+    it("is given back for a correct password the login then refuses", async () => {
+      // `REFUSAL_COUNTS_AGAINST_LOCKOUT` answers false for both, and it is the map that decides.
+      for (const roles of [null, { primaryRole: "hr manager", secondaryRoles: [] }]) {
+        const calls: string[] = [];
+        const outcome = await run({ record: await activeRecord(), roles, calls });
+        expect(outcome.ok, JSON.stringify(roles)).toBe(false);
+        expect(calls, JSON.stringify(roles)).toEqual(["reserve", "release"]);
+      }
+    });
+
+    it("is not released on success, which the caller's onSuccess clears outright", async () => {
+      const calls: string[] = [];
+      expect((await run({ record: await activeRecord(), calls })).ok).toBe(true);
+      expect(calls).toEqual(["reserve"]);
+    });
+
+    it("is never taken for an unreadable hash, a locked account or an unknown user", async () => {
+      for (const state of [
+        { record: await activeRecord({ credentialHash: "a".repeat(64) }) },
+        { record: await activeRecord({ lockedUntil: new Date(NOW.getTime() + 60_000).toISOString() }) },
+        { record: null },
+        { record: await activeRecord({ status: "suspended" }) },
+      ] as const) {
+        const calls: string[] = [];
+        await run({ ...state, calls });
+        expect(calls, JSON.stringify(state.record?.credentialHash ?? state.record)).toEqual([]);
+      }
+    });
+
+    it("refuses as locked, without verifying, when the reservation is refused", async () => {
+      // A wrong password here would answer `password_mismatch` if it were verified; a correct one
+      // would answer ok. Both answer locked, so neither was evaluated.
+      for (const password of [PASSWORD, "wrong"]) {
+        const outcome = await run({ record: await activeRecord(), reserve: false }, password);
+        expect(outcome, password).toMatchObject({ ok: false, refusal: "account_locked" });
+      }
+    });
+
+    it("still refuses, and does not throw, when giving a reservation back fails", async () => {
+      const outcome = await run({ record: await activeRecord(), roles: null, releaseThrows: true });
+      expect(outcome).toMatchObject({ ok: false, refusal: "no_active_membership" });
+    });
+
+    it("bounds CONCURRENT wrong guesses at the threshold", async () => {
+      // L25. Counted after the verification, all 40 were evaluated whatever the threshold; counted
+      // before it, at most `attempts` are, and the rest are refused as locked without a derivation.
+      const clock = { ms: NOW.getTime() };
+      const { store } = reservingStore(await activeRecord(), clock);
+      const lockout = { attempts: 10, seconds: 900 };
+      const outcomes = await Promise.all(
+        Array.from({ length: 40 }, () =>
+          verifyLogin({
+            request: { tenant: "acme", email: "a@example.test", password: "wrong" },
+            store,
+            pepper: PEPPER,
+            roleFor: async () => ({ primaryRole: "erp_admin", secondaryRoles: [] }),
+            lockout,
+            now: NOW,
+            scryptParams: CHEAP,
+            tenantBlocksAccess: () => false,
+          }),
+        ),
+      );
+      const evaluated = outcomes.filter((o) => !o.ok && o.refusal === "password_mismatch").length;
+      expect(evaluated).toBe(10);
+      expect(outcomes.filter((o) => !o.ok && o.refusal === "account_locked")).toHaveLength(30);
+    });
+
+    it("does not let one wrong guess after the window re-lock the account", async () => {
+      // L26. The count continued across windows, so after a lock lapsed a single wrong guess put it
+      // back over the threshold and the correct password was refused -- for ever, at one guess per
+      // window.
+      const clock = { ms: NOW.getTime() };
+      const { store, state } = reservingStore(await activeRecord(), clock);
+      const lockout = { attempts: 10, seconds: 900 };
+      const attempt = (password: string): Promise<LoginOutcome> =>
+        verifyLogin({
+          request: { tenant: "acme", email: "a@example.test", password },
+          store,
+          pepper: PEPPER,
+          roleFor: async () => ({ primaryRole: "erp_admin", secondaryRoles: [] }),
+          lockout,
+          now: new Date(clock.ms),
+          scryptParams: CHEAP,
+          tenantBlocksAccess: () => false,
+        });
+      for (let i = 0; i < 10; i++) await attempt("wrong");
+      expect(state.lockedUntilMs).not.toBeNull();
+      expect(await attempt(PASSWORD)).toMatchObject({ refusal: "account_locked" });
+      clock.ms += 901_000;
+      expect(await attempt("wrong-again")).toMatchObject({ refusal: "password_mismatch" });
+      expect(state).toEqual({ count: 1, lockedUntilMs: null });
+      expect((await attempt(PASSWORD)).ok).toBe(true);
+    });
   });
 
   it("re-hashes on success when the stored hash is below the current parameters", async () => {
@@ -360,7 +513,7 @@ describe("buildAuthTokenInterceptor", () => {
       }),
       mint: () => minted,
       onSuccess: async () => undefined,
-      onFailure: async () => undefined,
+      admission: new LoginAdmission({ concurrency: 4, queue: 4, perAccount: 4, retryAfterSeconds: 1 }),
       ...over,
     });
   }
@@ -472,16 +625,79 @@ describe("buildAuthTokenInterceptor", () => {
     expect(text).not.toContain(TENANT);
   });
 
-  it("counts a wrong password and nothing else", async () => {
-    const onFailure = vi.fn(async () => undefined);
-    for (const refusal of ["password_mismatch", "credential_unreadable", "account_locked"] as const) {
-      await interceptor({
-        onFailure,
-        verify: async () => ({ ok: false, refusal, userId: USER, detail: "" }),
-      })(req, body({ tenant: "acme", email: "a@b.test", password: "x" }));
-    }
-    expect(onFailure).toHaveBeenCalledTimes(1);
-    expect(onFailure).toHaveBeenCalledWith(USER, "password_mismatch");
+  it("sheds past the cap BEFORE verifying, with a retryable status and Retry-After", async () => {
+    // Pre-auth CPU exhaustion: 80 concurrent logins for unknown addresses took 2.17 s and an fs read
+    // issued during them waited 2,095 ms for a libuv thread. A shed request does no password work.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const verify = vi.fn(async (): Promise<LoginOutcome> => {
+      await gate;
+      return { ok: false, refusal: "password_mismatch", userId: USER, detail: "" };
+    });
+    const shedSeen: string[] = [];
+    const icpt = interceptor({
+      verify,
+      admission: new LoginAdmission({ concurrency: 1, queue: 1, perAccount: 2, retryAfterSeconds: 3 }),
+      onShed: (r) => shedSeen.push(r),
+    });
+    const send = (email: string) =>
+      icpt(req, body({ tenant: "acme", email, password: "x" }));
+    const running = send("one@b.test");
+    const queued = send("two@b.test");
+    const shedRes = await send("three@b.test");
+    expect(shedRes?.status).toBe(503);
+    expect(shedRes?.headers["retry-after"]).toBe("3");
+    expect(shedRes?.headers["cache-control"]).toBe("no-store");
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(shedSeen).toEqual(["saturated"]);
+    release();
+    expect((await running)?.status).toBe(401);
+    expect((await queued)?.status).toBe(401);
+    expect(verify).toHaveBeenCalledTimes(2);
+  });
+
+  it("caps one email's requests in flight, folding case, whether or not the account exists", async () => {
+    // Keyed on the normalised string the caller typed and decided before any lookup, so the 429 is
+    // the same answer for an address that exists and one that does not.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const verify = vi.fn(async (): Promise<LoginOutcome> => {
+      await gate;
+      return { ok: false, refusal: "user_unknown", userId: null, detail: "" };
+    });
+    const icpt = interceptor({
+      verify,
+      admission: new LoginAdmission({ concurrency: 8, queue: 8, perAccount: 1, retryAfterSeconds: 1 }),
+    });
+    const first = icpt(req, body({ tenant: "acme", email: "Ann@Example.test", password: "x" }));
+    const second = await icpt(req, body({ tenant: "acme", email: " ann@example.TEST ", password: "x" }));
+    expect(second?.status).toBe(429);
+    expect(second?.headers["retry-after"]).toBe("1");
+    const other = icpt(req, body({ tenant: "acme", email: "bob@example.test", password: "x" }));
+    release();
+    expect((await first)?.status).toBe(401);
+    expect((await other)?.status).toBe(401);
+    expect(verify).toHaveBeenCalledTimes(2);
+  });
+
+  it("gives the slot back when verify throws", async () => {
+    const admission = new LoginAdmission({ concurrency: 1, queue: 0, perAccount: 1, retryAfterSeconds: 1 });
+    const icpt = interceptor({
+      admission,
+      verify: async () => {
+        throw new Error("db down");
+      },
+    });
+    expect((await icpt(req, body({ tenant: "acme", email: "a@b.test", password: "x" })))?.status).toBe(503);
+    expect(admission.snapshot()).toEqual({ active: 0, queued: 0 });
+    expect((await icpt(req, body({ tenant: "acme", email: "a@b.test", password: "x" })))?.status).toBe(503);
+  });
+
+  it("does not admit a malformed body at all", async () => {
+    const admission = new LoginAdmission({ concurrency: 1, queue: 0, perAccount: 1, retryAfterSeconds: 1 });
+    const enter = vi.spyOn(admission, "enter");
+    expect((await interceptor({ admission })(req, body({ tenant: "acme" })))?.status).toBe(400);
+    expect(enter).not.toHaveBeenCalled();
   });
 
   it("400s a malformed body without naming which field was wrong", async () => {
@@ -536,24 +752,6 @@ describe("buildAuthTokenInterceptor", () => {
       },
     })(req, body({ tenant: "acme", email: "a@b.test", password: "x" }));
     expect(res?.status).toBe(200);
-    expect(onError).toHaveBeenCalled();
-  });
-
-  it("still refuses when recording the failure fails", async () => {
-    const onError = vi.fn();
-    const res = await interceptor({
-      onError,
-      verify: async () => ({
-        ok: false,
-        refusal: "password_mismatch",
-        userId: USER,
-        detail: "",
-      }),
-      onFailure: async () => {
-        throw new Error("update failed");
-      },
-    })(req, body({ tenant: "acme", email: "a@b.test", password: "x" }));
-    expect(res?.status).toBe(401);
     expect(onError).toHaveBeenCalled();
   });
 });

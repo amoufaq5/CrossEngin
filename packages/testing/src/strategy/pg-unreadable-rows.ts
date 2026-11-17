@@ -1839,7 +1839,7 @@ export const UNREADABLE_ROW_SITES: readonly UnreadableRowDeclaration[] = Object.
     note:
       "The watermark half of the same method and the same refusal: a watermark read as absent would re-show every notice below it, which is the one answer worse than a 503.",
   },
-  /* --------------------------- throwing is the answer this read owes (5) */
+  /* --------------------------- throwing is the answer this read owes (6) */
   {
     file: "apps/operate-server/src/design-review-store.ts",
     scope: "counts",
@@ -1884,6 +1884,15 @@ export const UNREADABLE_ROW_SITES: readonly UnreadableRowDeclaration[] = Object.
     consumedBy: "eraseTenantSchema",
     note:
       "The survey a human approves a DROP SCHEMA from (ADR-0316), and the figures a tombstone commits to: a survey short by one table under-reports what is about to be destroyed, so refusing is the only answer that cannot license a false proof.",
+  },
+  {
+    file: "apps/operate-server/src/serving-role-survey.ts",
+    scope: "surveyServingRole",
+    conversion: "parseSessionPolicyVisibility",
+    reason: "page_is_indivisible",
+    consumedBy: "formatServingRoleSurvey",
+    note:
+      "A claim about every policied table at once — `confined on all N` — so a page short by one refused row would assert confinement over a table nobody read. The survey catches the throw and reports `unreadable` for the whole page, which asserts nothing, rather than a figure over a subset.",
   },
   /* ----------------------- ADR-0362's class: asserted, never parsed (12) */
   {

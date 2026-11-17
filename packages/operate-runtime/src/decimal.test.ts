@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  addDecimal,
+  DECIMAL_ZERO,
   DECIMAL_REFUSALS,
   MAX_EXACT_DOUBLE_DIGITS,
   compareDecimal,
@@ -250,4 +252,27 @@ describe("renders byte-identically to Postgres numeric(p,s)", () => {
       });
     });
   }
+});
+
+describe("addDecimal", () => {
+  const d = (v: string) => parseDecimal(v)!;
+
+  it("adds exactly at the wider scale", () => {
+    expect(renderDecimal(addDecimal(d("0.1"), d("0.2")))).toBe("0.3");
+    expect(renderDecimal(addDecimal(d("10"), d("0.05")))).toBe("10.05");
+    expect(renderDecimal(addDecimal(d("99999999999999.99"), d("0.01")))).toBe("100000000000000.00");
+  });
+
+  it("crosses zero in both directions", () => {
+    expect(renderDecimal(addDecimal(d("-5.25"), d("2")))).toBe("-3.25");
+    expect(renderDecimal(addDecimal(d("5.25"), d("-5.25")))).toBe("0.00");
+    expect(addDecimal(d("5.25"), d("-5.25")).negative).toBe(false);
+  });
+
+  it("has zero as its identity and keeps two totals a cent apart distinct", () => {
+    expect(compareDecimal(addDecimal(DECIMAL_ZERO, d("7.10")), d("7.1"))).toBe(0);
+    expect(
+      compareDecimal(addDecimal(DECIMAL_ZERO, d("99999999999999.99")), d("99999999999999.98")),
+    ).toBe(1);
+  });
 });

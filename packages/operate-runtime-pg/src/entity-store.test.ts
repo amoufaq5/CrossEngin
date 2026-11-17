@@ -137,6 +137,37 @@ describe("PostgresEntityStore — CRUD round-trips", () => {
     expect(await store.update(TENANT, "Product", "nope", { name: "x" })).toBeNull();
   });
 
+  it("updateIf writes while the precondition holds on the row it locked, and only then", async () => {
+    const { conn, calls } = fakePg();
+    const store = new PostgresEntityStore(conn);
+    await store.create(TENANT, "Product", { ...PRODUCT, state: "draft" });
+    const sent = await store.updateIf(TENANT, "Product", "prod-1", { state: "sent" }, { state: "draft" });
+    expect(sent).toMatchObject({ kind: "updated", record: { id: "prod-1", state: "sent", sku: "SKU-1" } });
+    // The comparison is made against the row this statement holds, not one read earlier.
+    expect(calls.some((sql) => sql.includes("SELECT document") && sql.includes("FOR UPDATE"))).toBe(true);
+    const updatesBefore = calls.filter((sql) => sql.startsWith("UPDATE")).length;
+    expect(await store.updateIf(TENANT, "Product", "prod-1", { state: "void" }, { state: "draft" })).toEqual({
+      kind: "precondition_failed",
+    });
+    // A refused precondition issues no UPDATE at all.
+    expect(calls.filter((sql) => sql.startsWith("UPDATE")).length).toBe(updatesBefore);
+    expect((await store.get(TENANT, "Product", "prod-1"))?.["state"]).toBe("sent");
+    expect(await store.updateIf(TENANT, "Product", "nope", { state: "x" }, {})).toEqual({ kind: "not_found" });
+  });
+
+  it("updateIf inside a transaction shares it and stays tenant-bound", async () => {
+    const { conn } = fakePg();
+    const store = new PostgresEntityStore(conn);
+    await store.create(TENANT, "Product", { ...PRODUCT, state: "draft" });
+    const out = await store.withTransaction(TENANT, (tx) =>
+      tx.updateIf(TENANT, "Product", "prod-1", { state: "sent" }, { state: "draft" }),
+    );
+    expect(out.kind).toBe("updated");
+    await expect(
+      store.withTransaction(TENANT, (tx) => tx.updateIf(OTHER_TENANT, "Product", "prod-1", {}, {})),
+    ).rejects.toThrow(/cross-tenant/);
+  });
+
   it("remove deletes and reports whether a row was removed", async () => {
     const { conn } = fakePg();
     const store = new PostgresEntityStore(conn);

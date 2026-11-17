@@ -27,6 +27,7 @@ import {
 } from "@crossengin/views";
 import type { SearchManifest } from "@crossengin/search";
 import { BUILT_IN_TRAIT_FIELDS } from "../ddl/built-in-traits.js";
+import { expressionDefaultRefusal } from "../ddl/expression-default.js";
 import {
   RESERVED_ENTITY_FIELD_NAMES,
   reservedFieldNameReason,
@@ -203,6 +204,13 @@ function validateEntitiesTraitsRelations(manifest: Manifest): EntityIndex {
             `${reservedFieldNameReason(field.name)} — rename it`,
         );
       }
+      const refusal = expressionDefaultRefusal(field);
+      if (refusal !== null) {
+        throw new ManifestValidationError(
+          `entities[${i}].fields[${j}].default`,
+          `field '${entity.name}.${field.name}': ${refusal}`,
+        );
+      }
     }
     entityNames.add(entity.name);
   }
@@ -227,6 +235,13 @@ function validateEntitiesTraitsRelations(manifest: Manifest): EntityIndex {
           `trait '${trait.name}' supplies field '${field.name}', which is reserved: ` +
             `${reservedFieldNameReason(field.name)} — rename it in the trait, which changes every ` +
             `entity carrying it`,
+        );
+      }
+      const refusal = expressionDefaultRefusal(field);
+      if (refusal !== null) {
+        throw new ManifestValidationError(
+          `traits[${i}].fields[${j}].default`,
+          `trait '${trait.name}' field '${field.name}': ${refusal}`,
         );
       }
     }

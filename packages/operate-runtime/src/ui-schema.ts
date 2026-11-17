@@ -7,6 +7,7 @@ import { listConfigForEntity } from "./list-query.js";
 import { manifestAssociationRoutes } from "./association.js";
 import type { SettingsStore, TenantSettings } from "./settings.js";
 import { entityCamel, resourceSlug } from "./slugs.js";
+import { SERVER_OWNED_ADMITTED, type WriteSurface } from "./write-surface.js";
 
 export type UiInputType =
   | "text"
@@ -205,6 +206,12 @@ function isServerDefaulted(field: Field): boolean {
   return field.default !== undefined || field.name === "currency" || field.type.kind === "currency_amount";
 }
 
+/** A field neither a create nor an update may name — what a form should not offer as an input. */
+function clientMayNotWrite(surface: WriteSurface | undefined, field: string): boolean {
+  const reason = surface?.serverOwned.get(field);
+  return reason !== undefined && !SERVER_OWNED_ADMITTED[reason].create && !SERVER_OWNED_ADMITTED[reason].update;
+}
+
 function uiField(field: Field): UiFieldSchema {
   const base: UiFieldSchema = {
     name: field.name,
@@ -285,7 +292,16 @@ function transitionsFor(
 }
 
 /** Derives the manifest-driven UI metadata a front end needs to render every entity. */
-export function buildUiSchema(manifest: Manifest, now: Date = new Date()): UiSchema {
+export function buildUiSchema(
+  manifest: Manifest,
+  now: Date = new Date(),
+  /**
+   * The server's write surfaces, so a field the server stamps is shown read-only rather than offered
+   * as an input the create and update handlers would answer 422 to. Display only: the refusal is the
+   * handler's and does not depend on this.
+   */
+  writeSurfaces?: ReadonlyMap<string, WriteSurface>,
+): UiSchema {
   const associationsByOwner = new Map<string, UiAssociationSchema[]>();
   for (const route of manifestAssociationRoutes(manifest)) {
     const list = associationsByOwner.get(route.ownerEntity) ?? [];
@@ -312,7 +328,10 @@ export function buildUiSchema(manifest: Manifest, now: Date = new Date()): UiSch
       // and a create lands in the initial state, so offering it as an input invites a 422. One with
       // no default stays editable, because a create must then be able to name the initial state.
       fields: entity.fields.map((f) =>
-        f.name === stateField && f.default !== undefined ? { ...uiField(f), readOnly: true } : uiField(f),
+        (f.name === stateField && f.default !== undefined) ||
+        clientMayNotWrite(writeSurfaces?.get(entity.name), f.name)
+          ? { ...uiField(f), readOnly: true }
+          : uiField(f),
       ),
       listColumns: pickListColumns(entity, []),
       sortableFields: [...config.sortableFields],

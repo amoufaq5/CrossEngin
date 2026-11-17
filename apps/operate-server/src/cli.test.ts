@@ -6,6 +6,7 @@ import { ALLOW_UNCOVERED_SETTLEMENT_FLAG } from "./settlement-coverage-survey.js
 import {
   CliUsageError,
   helpText,
+  parseDocumentIndexesArgs,
   parsePruneArgs,
   parseRekeyArgs,
   parseServeArgs,
@@ -823,6 +824,39 @@ describe("parseVerifyChainArgs", () => {
   });
 });
 
+describe("parseDocumentIndexesArgs", () => {
+  it("takes the pack the API serves, inline or separate", () => {
+    expect(parseDocumentIndexesArgs(["--pack", "erp-core"])).toEqual({
+      pack: "erp-core",
+      manifestPath: null,
+      schema: null,
+      help: false,
+    });
+    expect(parseDocumentIndexesArgs(["--pack=erp-core", "--schema=tenants"]).schema).toBe("tenants");
+  });
+
+  it("takes a manifest file instead", () => {
+    expect(parseDocumentIndexesArgs(["--manifest", "m.json"]).manifestPath).toBe("m.json");
+  });
+
+  it("requires exactly one manifest source, because the indexes are per manifest", () => {
+    expect(() => parseDocumentIndexesArgs([])).toThrow(/one of --pack or --manifest is required/);
+    expect(() => parseDocumentIndexesArgs(["--pack", "erp-core", "--manifest", "m.json"])).toThrow(
+      /mutually exclusive/,
+    );
+  });
+
+  it("refuses an unknown argument rather than ignoring it", () => {
+    expect(() => parseDocumentIndexesArgs(["--pack", "erp-core", "--store", "pg"])).toThrow(
+      /unknown argument: --store/,
+    );
+  });
+
+  it("answers --help without a source", () => {
+    expect(parseDocumentIndexesArgs(["--help"]).help).toBe(true);
+  });
+});
+
 describe("parseRekeyArgs", () => {
   const TENANT = "00000000-0000-4000-8000-000000000001";
   const OTHER = "00000000-0000-4000-8000-000000000002";
@@ -1519,6 +1553,12 @@ describe("--workflow-workers", () => {
     expect(parseServeArgs([...PG, ALLOW_UNCOVERED_SETTLEMENT_FLAG]).allowUncoveredSettlement).toBe(
       true,
     );
+  });
+
+  it("defaults --segregation-of-duties off, because a one-person tenant could approve nothing", () => {
+    expect(parseServeArgs([...PG]).segregationOfDuties).toBe(false);
+    expect(parseServeArgs([...PG, "--segregation-of-duties"]).segregationOfDuties).toBe(true);
+    expect(parseServeArgs(["--pack", "erp-core", "--store", "memory", "--segregation-of-duties"]).segregationOfDuties).toBe(true);
   });
 
   it("parses --allow-uncovered-settlement on every store, because the question is not about one", () => {
@@ -2552,5 +2592,96 @@ describe("--audit-chain-config's help names the environment route", () => {
     expect(help).toContain("AUDIT_CHAIN_SIGNING_KEY");
     expect(help).toContain("public half is derived");
     expect(help).toMatch(/state the SAME one/);
+  });
+});
+
+describe("--pg-* pool flags", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg"];
+
+  it("overrides nothing by default, so the serving defaults apply", () => {
+    expect(parseServeArgs([...PG]).pgPool).toEqual({});
+  });
+
+  it("takes all six in both spellings, keyed by setting", () => {
+    const o = parseServeArgs([
+      ...PG,
+      "--pg-pool-max",
+      "25",
+      "--pg-connect-timeout-ms=5000",
+      "--pg-idle-timeout-ms",
+      "0",
+      "--pg-statement-timeout-ms=0",
+      "--pg-lock-timeout-ms",
+      "2000",
+      "--pg-idle-in-transaction-timeout-ms=120000",
+    ]);
+    expect(o.pgPool).toEqual({
+      maxConnections: 25,
+      connectTimeoutMs: 5000,
+      idleTimeoutMs: 0,
+      statementTimeoutMs: 0,
+      lockTimeoutMs: 2000,
+      idleInTransactionTimeoutMs: 120_000,
+    });
+  });
+
+  it("refuses an out-of-bounds or malformed value, naming the flag", () => {
+    for (const [flag, bad] of [
+      ["--pg-pool-max", "0"],
+      ["--pg-pool-max", "ten"],
+      ["--pg-statement-timeout-ms", "50"],
+      ["--pg-lock-timeout-ms", "-1"],
+      ["--pg-connect-timeout-ms", "1.5"],
+    ] as const) {
+      expect(() => parseServeArgs([...PG, flag, bad])).toThrow(`invalid ${flag}`);
+    }
+  });
+
+  it("refuses a flag given twice rather than letting argv order decide", () => {
+    expect(() =>
+      parseServeArgs([...PG, "--pg-lock-timeout-ms", "1000", "--pg-lock-timeout-ms=2000"]),
+    ).toThrow("--pg-lock-timeout-ms given more than once");
+  });
+
+  it("refuses the memory store, which opens no connection to bound", () => {
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "memory", "--pg-pool-max", "5"]),
+    ).toThrow(/need a Postgres store/);
+  });
+
+  it("documents every flag and the subcommands' exemption", () => {
+    for (const flag of [
+      "--pg-pool-max",
+      "--pg-connect-timeout-ms",
+      "--pg-idle-timeout-ms",
+      "--pg-statement-timeout-ms",
+      "--pg-lock-timeout-ms",
+      "--pg-idle-in-transaction-timeout-ms",
+    ]) {
+      expect(helpText).toContain(flag);
+    }
+    expect(helpText).toContain("migrate and the operator subcommands");
+  });
+});
+
+describe("parseServeArgs --allow-dangling-references", () => {
+  it("is off by default, so the document store enforces references", () => {
+    expect(parseServeArgs(["--pack", "erp-core", "--store", "pg"]).allowDanglingReferences).toBe(false);
+  });
+
+  it("turns the document store's reference check off when asked", () => {
+    expect(
+      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--allow-dangling-references"]).allowDanglingReferences,
+    ).toBe(true);
+  });
+
+  it("is refused by name on a store it would do nothing on", () => {
+    // `pg-columns` enforces references with foreign keys and `memory` checks nothing, so on either
+    // the flag would be accepted and inert, which reads as a choice the deployment made.
+    for (const store of ["pg-columns", "memory"]) {
+      expect(() =>
+        parseServeArgs(["--pack", "erp-core", "--store", store, "--allow-dangling-references"]),
+      ).toThrow(/--allow-dangling-references applies to --store pg only/);
+    }
   });
 });

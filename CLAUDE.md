@@ -14842,8 +14842,12 @@ land with or before it.
     declaring a `transaction:` member, so a required fifth method is unshippable while an optional
     parameter is free by contravariance *and* makes the snapshot unobservable to every fake that
     ignores it (ADR-0389's discarded-callback class, one argument in).
-18. **On the typed store no invoice can be sent until the tenant's account codes resolve, and the
-    refusal names nothing.** ADR-0121's GL resolution is
+18. ~~**On the typed store no invoice can be sent until the tenant's account codes resolve, and the
+    refusal names nothing.**~~ — **closed by ADR-0423 on both stores**: the refusal is
+    **409 `server_reference_unresolved`** naming the entity, field and target, and for a
+    `LedgerAccount` target the settings remedy; `--store pg` now refuses too, because H-09 made it
+    enforce references, so the dangling-reference posting below no longer happens anywhere. Whether
+    the platform should provision default ledger accounts is open. The original entry: ADR-0121's GL resolution is
     `(await resolveAccountId(…)) ?? c.arAccountRef`, and the fallbacks are literals
     (`"accounts_receivable"`, `"revenue"`, `"tax_payable"`, `"accounts_payable"`, `"expense"`,
     `"tax_input"`, `"cash"`, the two FX names) written into `JournalLine.ledger_account_id` — which
@@ -14866,8 +14870,10 @@ land with or before it.
     other way), or keep the fallback and report it. **P2**: the wrong answer is live on
     `--store pg` as a dangling reference rather than as a wrong figure, and the 500 needs the store
     the shipped compose does not select.
-19. **The document store saves a body field the manifest does not declare, and the typed store drops
-    it.** `validateBody` iterates the entity's *rules* and never the body's keys, so an undeclared
+19. ~~**The document store saves a body field the manifest does not declare, and the typed store drops
+    it.**~~ — **closed by ADR-0421**: an undeclared key is 422
+    `field_not_declared` before any store sees the body, so both stores refuse it identically. The
+    original entry: `validateBody` iterates the entity's *rules* and never the body's keys, so an undeclared
     key is neither refused nor stripped. Measured live on both stores:
     `POST /v1/accounts {"name":…, "billing_email":…, "totally_undeclared":{"nested":[1,2,3]}}`
     answers **201** on each; `--store pg` stores the key and returns it on every later read, while
@@ -15667,8 +15673,51 @@ findings are closed or narrowed as follows; the high, medium and low tiers follo
   every confirm/draft round trip, in no report). The published OpenAPI state field is
   `enum: [initialState]` on create and `readOnly` on update. What remains: a **second** document
   carrying the same number still double-posts on `--store pg`, which is P0.7's unenforced unique
-  index; FiscalPeriod reopen-and-reclose re-posts the FX revaluation by decision; Expense posts
-  nothing and is not locked.
+  index — **closed by ADR-0423** below; FiscalPeriod reopen-and-reclose re-posts the FX
+  revaluation by decision; Expense posts nothing and is not locked.
+
+**The high tier: nine findings in seven slices are closed (ADR-0421 – ADR-0427)**, each verified
+live on PG 16 in compose order with the API connecting as the confined role. The rest of the tier —
+**H-13, C-05, H-14, H-15, H-16, H-18, H-23, H-26, H-27, H-28, H-29, H-33** — was not attempted and
+is still open as the audit states it.
+
+- **H-08 + H-32, the write surface** (ADR-0421). A body key the entity does not declare is 422
+  `field_not_declared` and a server-owned one (id, implicit columns, actor stamps, effect stamps,
+  sequence numbers — one total map) 422 `field_server_owned`, before any store sees it, which
+  **closes register P2.19** by refusal on both stores. `created_by`/`updated_by` — declared on every
+  `auditable` entity and written by nothing — are stamped from `principalUserId`, copied records are
+  attributed to whoever fired the transition, and `--segregation-of-duties` (off by default) refuses
+  an approve-class transition by the record's creator. Open: the **last editor can still approve**,
+  and `FiscalPeriod` has no lifecycle, so a PATCH can reopen a period.
+- **H-10 + H-12, transitions and the balance** (ADR-0422). `updateIf` makes a transition's write
+  conditional on the from-state in the same statement, so two concurrent `place`s are 200 and 409
+  with the effect run once, and a PATCH carries the same precondition on the state field. The journal
+  balance is exact decimals per transaction currency and again in functional currency. **Live, this
+  exposed a pool deadlock** (GL effects reading tenant settings on a second pooled connection inside
+  the transaction: 1 × 500 per ten-way race after a 30 s stall); `transactionSettingsScope` reads the
+  settings before the transaction opens, and the race is now ~300 ms with no 500. Open: delete racing
+  a transition, and a line write racing `post` (Dr 1009 / Cr 10 measured).
+- **H-09, the document store's integrity** (ADR-0423). `--store pg` enforces `unique` through
+  partial expression indexes and references through `FOR KEY SHARE` lookups with each declared
+  `onDelete`, so it answers duplicates and dangling references as `pg-columns` does — **closing
+  P0.7's live double posting on the shipped store**. The indexes are built by the owner in a one-shot
+  `document-indexes` compose step, because a non-owner cannot `CREATE INDEX`. It also turns
+  **register P2.18** on `--store pg` from a dangling GL reference into **409
+  `server_reference_unresolved`** naming the settings remedy, on both stores.
+- **H-01, the confined role** (ADR-0424). The API connects as `crossengin_app`, `NOSUPERUSER
+  NOBYPASSRLS`, owning nothing, and the boot line asks Postgres whether it is confined. An upgraded
+  `.env` falls back to the owner (the opt-out, said at boot) rather than refusing, so an upgrade
+  cannot take a deployment down. This makes ADR-0400's DELETE fences and ADR-0332's splits **live on
+  the shipped stack for the first time**.
+- **H-21, the serving pool** (ADR-0425). An `'error'` listener so a reset idle connection no longer
+  exits the process, a watcher during `verify` (review found the fix's own crash window), and six
+  `--pg-*` bounds on the serving connection only.
+- **H-02, expression defaults** (ADR-0426). A closed `Map` of two expressions replaces verbatim
+  concatenation into DDL — a manifest-reachable SQL injection, measured creating `public.pwned` — and
+  string literals are `E'…'`-escaped.
+- **H-06, sign-in** (ADR-0427). The attempt is reserved in one conditional `UPDATE` before
+  verification (50 parallel wrong passwords: 2 × 401 + 48 × 429, failed attempts = 2), and
+  `LoginAdmission` caps concurrent derivations below the libuv pool, answering 503/429 at once.
 
 ### Demoted, with the measurement that demoted them
 
@@ -15693,7 +15742,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 412 records; 333 Accepted, 79 Proposed (the
+title or status change cannot drift. 421 records; 342 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

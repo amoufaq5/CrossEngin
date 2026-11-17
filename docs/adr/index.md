@@ -1,10 +1,10 @@
 # ADR index
 
-414 records. Generated from the ADR files themselves — regenerate rather than
+421 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 335  **Proposed:** 79
+- **Accepted:** 342  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -426,3 +426,10 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0418](0418-a-diagnosis-the-console-had-not-measured.md) | A diagnosis the console had not measured | — | Accepted | 2026-11-16 |
 | [0419](0419-a-documents-lock-and-its-state-are-one-rule.md) | A document's lock and its state are one rule | — | Accepted | 2026-11-16 |
 | [0420](0420-a-committed-secret-and-the-reader-that-was-missing.md) | A committed secret, and the reader that was missing | — | Accepted | 2026-11-16 |
+| [0421](0421-a-write-names-only-what-the-caller-may-write.md) | A write names only what the caller may write, and the server says who wrote it | — | Accepted | 2026-11-17 |
+| [0422](0422-a-transition-is-decided-against-the-state-it-writes.md) | A transition is decided against the state it writes, and a balance is exact | — | Accepted | 2026-11-17 |
+| [0423](0423-the-document-store-enforces-unique-and-reference.md) | The document store enforces `unique` and `reference` | — | Accepted | 2026-11-17 |
+| [0424](0424-the-api-connects-as-a-role-rls-confines.md) | The API connects as a role row-level security confines | — | Accepted | 2026-11-17 |
+| [0425](0425-the-serving-pool-is-bounded-and-survives-a-dropped-connection.md) | The serving pool is bounded, and survives a dropped connection | — | Accepted | 2026-11-17 |
+| [0426](0426-an-expression-default-is-looked-up-never-written.md) | An expression default is looked up in a closed table, never written into SQL | — | Accepted | 2026-11-17 |
+| [0427](0427-a-sign-in-is-admitted-before-it-is-verified.md) | A sign-in is admitted before it is verified, and counted before it is judged | — | Accepted | 2026-11-17 |

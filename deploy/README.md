@@ -21,10 +21,11 @@ and **Caddy** for automatic HTTPS.
 git clone <your-fork-url> crossengin && cd crossengin/deploy
 
 cp .env.example .env
-# Edit .env: set POSTGRES_PASSWORD, DOMAIN, ACME_EMAIL, a strong token in
+# Edit .env: set POSTGRES_PASSWORD, POSTGRES_APP_PASSWORD (the role the API
+# connects as -- see "The database roles"), DOMAIN, ACME_EMAIL, a strong token in
 # OPERATE_ADMIN_API_KEY, the two login secrets (CREDENTIAL_PEPPER and
 # OPERATE_TOKEN_SIGNING_KEY), CURSOR_ENCRYPTION_SECRET and
-# AUDIT_CHAIN_SIGNING_KEY -- four secrets, one generator line each in
+# AUDIT_CHAIN_SIGNING_KEY -- five secrets, one generator line each in
 # .env.example. The cursor one is not optional on this
 # pack: unsealed, `?sort=work_email` hands that field's plaintext back in
 # `nextCursor` to a caller the body redacts it from. The chain one is what makes
@@ -166,6 +167,114 @@ Other reasons `migrate` exits 1, in rough order of likelihood: `.env` not presen
 changing `.env` afterwards does not change it); and individual statements failing, which the report
 lists with an index and a message — the applier continues past a failure and re-runs it next time,
 so a partial apply is recoverable.
+
+### The database roles
+
+The stack connects to Postgres as **two** roles, and the split is what makes the catalog's
+row-level-security policies do anything.
+
+- **`POSTGRES_USER`** (`crossengin`) is the image's initdb superuser. `extensions`, `migrate` and
+  `app-role` run as it, because they create and alter the catalog, and it owns every table `migrate`
+  creates. Backups run as it too, and must: `pg_dump` as a role the policies confine stops at the
+  first policied table with `query would be affected by row-level security policy` and exits 1.
+- **`POSTGRES_APP_USER`** (`crossengin_app`) is the role the **API** connects as: `NOSUPERUSER`,
+  `NOBYPASSRLS`, owning no table, with `SELECT, INSERT, UPDATE, DELETE` on the catalog's tables and
+  nothing on `meta._meta_migrations` (the applier's bookkeeping, which a role that could write it
+  could use to make the next `apply` skip a statement).
+
+Until this split the API connected as `POSTGRES_USER`, which is a superuser, holds `BYPASSRLS` and
+owns every table — any one of the three makes every policy inert for the session. Tenant isolation
+held anyway, because every store also filters on `tenant_id` itself; the policies are the second
+belt, and a second belt no statement consults is a declaration rather than a control. The API says
+which it got at boot, either way:
+
+```text
+[pg] row-level security: role crossengin_app is confined on all 115 policied table(s) in schema meta — …
+[pg] row-level security: role crossengin BYPASSES the policies on 115 of 115 policied table(s) … — it is a superuser (115) …
+```
+
+The second is a **warning and never a refusal**: every deployment that predates this split connects
+that way and answers correctly, so refusing would break a working deployment to protect the second
+belt.
+
+**The `app-role` service** is a one-shot `psql -f postgres/roles/app-role.sql` that runs as the owner
+on every `up`, after `migrate` and before `api`, for the `extensions` service's reason —
+`/docker-entrypoint-initdb.d` fires only on a volume's first initialisation, and before `meta`
+exists. It creates the role if absent, re-asserts its attributes, sets its password from
+`POSTGRES_APP_PASSWORD`, grants every table `migrate` has created, and sets default privileges for
+one created later by the owner. Its last line reads the result back from the catalog:
+
+```text
+app-role: crossengin_app is ready -- superuser=f bypassrls=f; DML on 146 of 146 catalog tables in meta; owns 0 of them
+```
+
+It **refuses** — exit 3, and `api` does not start — when `POSTGRES_APP_PASSWORD` is empty, still the
+`.env.example` placeholder, under 16 characters, or equal to the owner's password (which is what an
+unset one falls back to), and when the role would bypass the policies anyway: it is a member of
+`POSTGRES_USER` or owns a table in `meta`. Naming `POSTGRES_USER` itself is the opt-out below, not a
+refusal. Each refusal is one
+sentence naming the fix:
+
+```bash
+docker compose logs app-role
+```
+
+**An upgraded deployment lands on the opt-out, not on a refusal.** Its `.env` predates the split and
+has neither line, and both compose services fall back to the owner (`${POSTGRES_APP_USER:-${POSTGRES_USER}}`,
+and the same for the password), so `app-role` prints that the API connects as the catalog owner and
+the API keeps answering as before — with `[pg] row-level security: … BYPASSES` on every boot. That
+is deliberate: an earlier draft refused there, and since Compose recreates a changed container
+before it waits on that container's dependencies, the refusing `up` would have replaced the running
+API with one that never starts. To take the split, add the two lines `.env.example` carries
+(`POSTGRES_APP_USER=crossengin_app`, and a password from `openssl rand -hex 24`) and run
+`docker compose up -d` — no data changes and nothing is migrated. Setting the user and forgetting the
+password is refused by name, because the password would fall back to the owner's and one secret would
+then open both roles. Changing the password later and re-running `up` rotates it.
+
+**Keeping the old behaviour** is a declared choice, made in `.env` and announced twice: set
+`POSTGRES_APP_USER` to the same name as `POSTGRES_USER` and `POSTGRES_APP_PASSWORD` to the same value
+as `POSTGRES_PASSWORD`. `app-role` then creates and grants nothing and prints that the API connects as
+the catalog owner, and the API's boot line says `BYPASSES` on every start — which is the record that
+the choice was made. It is the only spelling of the owner `app-role` accepts; any other route to an
+RLS-bypassing role is one of its refusals above.
+
+**What still needs the owner**, measured against a cluster shaped like this one:
+
+- **Everything the shipped command mounts works as the app role** — the full first-tenant bootstrap
+  below, entity reads and writes, `?q=` search, the hourly checkpoint and integrity passes (both
+  write their rows), the notification drain, the idempotency store and `set-credential`.
+- **`--store pg-columns`** does not: it creates and alters its entity tables at every boot
+  (`CREATE TABLE`, `ALTER TABLE`, `CREATE POLICY`, unique indexes, the `public.ce_unaccent` wrapper),
+  which needs `CREATE` on schema `public` and ownership of the tables it alters. A deployment
+  switching to it connects the API as the owner, or grants the app role `CREATE ON SCHEMA public` —
+  and either way the API then owns the entity tables, so on those tables the store's own `tenant_id`
+  predicates are again the only isolation. `--per-tenant-manifests` on that store additionally
+  creates one schema per tenant, which needs `CREATE` on the database.
+- **The Article 17 deletion surfaces** (`--tenant-deletion-routes`, `--deletion-request-routes`,
+  `--deletion-runner-ms`) refuse every deletion on a confined session with
+  `rls_would_confine_this_session`, by design: a `DELETE` the policies confine reports zero rows
+  while the rows remain, so the erasure asks first and refuses rather than signing a proof over data
+  that is still there. The API warns at boot when deletion capabilities are declared on a confined
+  role. None of the three is on the shipped command; mounting them means running the API as a role
+  that bypasses RLS on the erasure targets, which is the trade this section exists to make visible.
+- **The workflow engine and the job fleet** (`--workflow-workers`, `--workflow-cancel-role`) do
+  not either, and neither is on the shipped command. The fleet's claims are deliberately
+  cross-tenant, so one fleet serves every tenant, and `meta.job_runs`, `meta.workflow_timers` and
+  `meta.workflow_activities` carry only a tenant-isolation policy: on a confined session a claim
+  matches nothing and every poll reports an empty queue, and the definition load sees only
+  platform-wide rows. The API says so at boot (`job queue not visible to this connection`,
+  `no workflow definitions loaded`). Mounting either means connecting the API as the owner.
+- **The `rekey` and `replay --all-tenants` subcommands** run as the owner by design — the first
+  refuses a confined session, because a confined session would count zero rows to re-encrypt beside
+  a key generation it is about to destroy, and the second is an owner-only diagnostic. Pass the
+  owner's connection to that one command:
+
+```bash
+docker compose exec \
+  -e PGUSER="$(grep '^POSTGRES_USER=' .env | cut -d= -f2-)" \
+  -e PGPASSWORD="$(grep '^POSTGRES_PASSWORD=' .env | cut -d= -f2-)" \
+  api node apps/operate-server/dist/bin/operate-server.js rekey --plan --tenant <id> --confirm-tenant <id>
+```
 
 ## Create your first tenant
 
@@ -518,7 +627,7 @@ or on Caddy holding a certificate. The same API is at `https://api.$DOMAIN` from
 ### Loading existing records
 
 There is no importer, so moving data in from another system is a script that `POST`s one record at
-a time. Five things such a script gets wrong silently, each measured against a running server
+a time. What such a script meets, each measured against a running server
 (`--store pg`, the shipped default, unless it says otherwise):
 
 - **A re-run duplicates, because a declared `unique` field is not enforced on `--store pg`.** Two
@@ -530,10 +639,16 @@ a time. Five things such a script gets wrong silently, each measured against a r
   repeated key answers the original status with `x-idempotent-replay: true` and **an empty body**,
   so record the id from the first response rather than expecting it back. The record expires after
   86,400 seconds and no flag changes that, so a re-run a day later executes every create again.
-- **A caller-supplied `id` is kept, and re-sending it is not a conflict.** That is the only way to
-  preserve references between imported records. A second `POST` with an `id` that already exists
-  leaves the first record untouched and answers **500** `write_failed` on both stores — not a 409 —
-  so on a re-run, `GET` the id before deciding the record failed.
+- **A caller-supplied `id` is kept, and re-sending it is a 409.** That is the only way to preserve
+  references between imported records. It must be 1–200 letters, digits, `_` or `-` (else **422**
+  `record_id_malformed`), and a second `POST` with an `id` that already exists answers **409**
+  `id_conflict` and leaves the first record untouched. Two concurrent `POST`s of one new `id` can
+  still both pass that check, and the loser answers **500** `write_failed`.
+- **Only the entity's declared fields may be sent.** A key the manifest does not declare is **422**
+  `field_not_declared`, and a field the server writes — `tenant_id`, `created_at`, `updated_at`,
+  `created_by`/`updated_by` on an auditable entity, and a booking rate, withholding total or
+  `paid_at` a posting stamps — is **422** `field_server_owned`. Timestamps from the source system
+  cannot be preserved in those columns; carry them in a field the entity declares.
 - **A caller-supplied sequence number is kept and the allocator does not move.** Importing
   `quote_number: QUO-2026-00010` while the allocator stands at `…00009` means the next quote created
   without a number is handed `…00010` again: a silent duplicate on `--store pg`, a **500** on
@@ -574,7 +689,10 @@ What the flag buys is the limit being *yours* and every decision being on the re
   (the `migrate` job re-applies any new schema before the API restarts). After the upgrade
   that landed the user registry, read
   [Clearing the foreign-key drift](#clearing-the-foreign-key-drift-after-an-upgrade) once —
-  until you do, `migrate` reports the same 29 findings on every `up`.
+  until you do, `migrate` reports the same 29 findings on every `up`. The upgrade that split the
+  database roles keeps the API on the owner until `.env` gains `POSTGRES_APP_USER` and
+  `POSTGRES_APP_PASSWORD` — the boot line says `BYPASSES` until it does, and
+  [The database roles](#the-database-roles) says what to add.
 - **Backups:** the data lives in the `db-data` volume. For an ad-hoc dump:
 
   ```sh
@@ -1054,7 +1172,8 @@ here is Oracle-specific.
 
 ```bash
 git clone <your fork> crossengin && cd crossengin/deploy
-cp .env.example .env    # then set POSTGRES_PASSWORD, DOMAIN, ACME_EMAIL,
+cp .env.example .env    # then set POSTGRES_PASSWORD, POSTGRES_APP_PASSWORD,
+                        # DOMAIN, ACME_EMAIL,
                         # OPERATE_ADMIN_API_KEY, CREDENTIAL_PEPPER,
                         # OPERATE_TOKEN_SIGNING_KEY, CURSOR_ENCRYPTION_SECRET
                         # and AUDIT_CHAIN_SIGNING_KEY

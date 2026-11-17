@@ -1483,6 +1483,13 @@ describe("there is no import route, and the README says so (register P1.13)", ()
     const env = readFileSync(resolve(here, "../../../deploy/.env.example"), "utf8");
     expect(env).toMatch(/^OPERATE_ADMIN_API_KEY=[^:\n]+:platform_admin:/m);
     expect(section).toContain("It carries `platform_admin`, which grants no operation on any entity");
+    // The id and write-surface refusals are the create handler's codes, not prose of their own.
+    const handlers = readFileSync(resolve(here, "../../../packages/operate-runtime/src/handlers.ts"), "utf8");
+    for (const code of ["id_conflict", "record_id_malformed", "field_not_declared", "field_server_owned"]) {
+      expect(handlers, `the create handler no longer answers ${code}`).toContain(`"${code}"`);
+      expect(section, `the loading hazards no longer name ${code}`).toContain(`\`${code}\``);
+    }
+    expect(section).not.toContain("not a 409");
   });
 });
 
@@ -1537,5 +1544,162 @@ describe("the root README does not claim the signal bridge is wired (register P1
     expect(readme).not.toMatch(/closed the HTTP-webhook → workflow-signal chain/);
     expect(readme).toContain("built and never registered");
     expect(workspaceDependents("@crossengin/workflow-signal-bridge")).toEqual([]);
+  });
+});
+
+/**
+ * The compose stack connects the API as a role the row-level-security policies confine.
+ *
+ * It connected as `POSTGRES_USER`, which the official image makes a superuser holding BYPASSRLS and
+ * owning every table `migrate` creates — any one of the three makes every policy in the catalog
+ * inert for the session — so tenant isolation rested on the stores' `tenant_id` predicates alone
+ * (which hold; the policies are the second belt). The split lives in three files no type or rule
+ * reads, so each half is fenced here as text: the compose wiring, the overlay that replaces the
+ * api's connection keys, and the script's refusals.
+ */
+function composeService(path: string, name: string): string {
+  const src = readFileSync(path, "utf8");
+  const start = src.indexOf(`\n  ${name}:\n`);
+  expect(start, `${path} has no ${name} service`).toBeGreaterThanOrEqual(0);
+  const rest = src.slice(start + name.length + 4);
+  const next = /\n {2}[a-z][a-z0-9-]*:\n|\n[a-z]/.exec(rest);
+  return src.slice(start, start + name.length + 4 + (next?.index ?? rest.length));
+}
+
+/** A service block with its comment lines removed, so prose naming a key cannot satisfy a fence. */
+function liveLines(block: string): string {
+  return block
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("#"))
+    .join("\n");
+}
+
+describe("the API connects as a role the row-level-security policies confine", () => {
+  const AI_COMPOSE = resolve(here, "../../../deploy/docker-compose.ai.yml");
+  const SCRIPT = resolve(here, "../../../deploy/postgres/roles/app-role.sql");
+  const api = liveLines(composeService(COMPOSE, "api"));
+  const appRole = liveLines(composeService(COMPOSE, "app-role"));
+
+  it("overrides the owner's connection with the app role, never POSTGRES_USER", () => {
+    // The fallback is the owner, so an upgraded .env with neither line lands on the announced
+    // opt-out instead of on a refusal that leaves `api` created and never started.
+    expect(api).toMatch(/^ {6}PGUSER: \$\{POSTGRES_APP_USER:-\$\{POSTGRES_USER\}\}$/m);
+    expect(api).toMatch(/^ {6}PGPASSWORD: \$\{POSTGRES_APP_PASSWORD:-\$\{POSTGRES_PASSWORD\}\}$/m);
+    // The anchor still supplies PGHOST/PGDATABASE; the two keys after it are what decides the role,
+    // and a later edit restoring the owner's would read as harmless next to the merge line.
+    expect(api).not.toMatch(/PGUSER: \$\{POSTGRES_USER\}/);
+    expect(api).not.toMatch(/PGPASSWORD: \$\{POSTGRES_PASSWORD\}/);
+  });
+
+  it("does not start until the role has been created and granted, after migrate", () => {
+    expect(api).toMatch(/ {6}app-role:\n {8}condition: service_completed_successfully/);
+    expect(appRole).toMatch(/ {6}migrate:\n {8}condition: service_completed_successfully/);
+  });
+
+  it("runs the role script as the owner on every up, with the password from the environment", () => {
+    expect(appRole).toContain("<<: *pg-env");
+    expect(appRole).not.toMatch(/PGUSER:/);
+    expect(appRole).toContain("CROSSENGIN_APP_DB_USER: ${POSTGRES_APP_USER:-${POSTGRES_USER}}");
+    expect(appRole).toContain("CROSSENGIN_APP_DB_PASSWORD: ${POSTGRES_APP_PASSWORD:-${POSTGRES_PASSWORD}}");
+    expect(appRole).toContain("- ./postgres/roles:/roles:ro");
+    expect(appRole).toContain('command: ["-v", "ON_ERROR_STOP=1", "-f", "/roles/app-role.sql"]');
+    // Not from /docker-entrypoint-initdb.d, which runs once per volume and before `meta` exists.
+    expect(readdirSync(resolve(here, "../../../deploy/postgres/init"))).not.toContain("app-role.sql");
+    // ADR-0301: the password is not on argv, where `ps` on the host reads it.
+    expect(appRole).not.toMatch(/command:.*PASSWORD/);
+  });
+
+  it("keeps the self-hosted-AI overlay on the app role, since its environment replaces these keys", () => {
+    const overlay = liveLines(composeService(AI_COMPOSE, "api"));
+    expect(overlay).toContain("PGUSER: ${POSTGRES_APP_USER:-${POSTGRES_USER}}");
+    expect(overlay).toContain("PGPASSWORD: ${POSTGRES_APP_PASSWORD:-${POSTGRES_PASSWORD}}");
+    expect(overlay).not.toMatch(/PGUSER: \$\{POSTGRES_USER\}/);
+    expect(overlay).toMatch(/ {6}app-role:\n {8}condition: service_completed_successfully/);
+  });
+
+  it("ships the password as a placeholder the role script refuses", () => {
+    const env = readFileSync(resolve(here, "../../../deploy/.env.example"), "utf8");
+    expect(env).toMatch(/^POSTGRES_APP_USER=crossengin_app$/m);
+    expect(env).toMatch(/^POSTGRES_APP_PASSWORD=REPLACE_WITH_\S+$/m);
+    const script = readFileSync(SCRIPT, "utf8");
+    // The prefix is `SECRET_PLACEHOLDER_PREFIX`; the script spells it in SQL, so the two are pinned.
+    expect(script).toContain("starts_with(:'app_password', 'REPLACE_WITH_')");
+    expect(script).toContain("WHEN :'app_password' = '' THEN");
+    // An empty password is what an upgraded deployment meets, and that deployment answered correctly
+    // as the owner, so the refusal names the opt-out beside the new line (ADR-0338's rule).
+    expect(script).toContain("keep the API on the owner as before by setting POSTGRES_APP_USER and");
+    // The fallback makes a half-configured .env give the app role the owner's password; refused.
+    expect(script).toContain("WHEN :'owner_password' <> '' AND :'app_password' = :'owner_password' THEN");
+    expect(script).toContain("\\getenv owner_password PGPASSWORD");
+  });
+
+  it("asserts every attribute that would bypass the policies, and grants the applier's log nothing", () => {
+    // Comment lines removed first: the script's prose names all three bypassing attributes, so a
+    // bare `toContain` passed with the `ALTER ROLE` that removes them deleted.
+    const script = readFileSync(SCRIPT, "utf8")
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("--"))
+      .join("\n");
+    expect(script).toContain("'ALTER ROLE %I WITH LOGIN NOCREATEDB NOCREATEROLE%s%s%s PASSWORD %L'");
+    for (const [column, attr] of [
+      ["rolsuper", "NOSUPERUSER"],
+      ["rolbypassrls", "NOBYPASSRLS"],
+      ["rolreplication", "NOREPLICATION"],
+    ] as const) {
+      expect(script, attr).toContain(`CASE WHEN r.${column} THEN ' ${attr}' ELSE '' END`);
+    }
+    // Membership in the owner and ownership of a table are the two routes the attributes miss.
+    expect(script).toContain("pg_has_role(:'app_user', current_user, 'USAGE')");
+    // And asked again AFTER the attributes are re-asserted: before it, a superuser answers true for
+    // every role, so the first check skips one — and a SUPERUSER member of the owner, demoted, was
+    // reported ready while `row_security_active` answered false for it (measured).
+    const recheck = script.indexOf(" WHERE pg_has_role(:'app_user', current_user, 'USAGE')");
+    expect(recheck).toBeGreaterThan(script.indexOf("'ALTER ROLE %I WITH"));
+    expect(recheck).toBeLessThan(script.indexOf("GRANT CONNECT ON DATABASE"));
+    expect(script).toContain("c.relowner = (SELECT oid FROM pg_roles WHERE rolname = :'app_user')");
+    expect(script).toContain("REVOKE ALL ON meta._meta_migrations FROM %I");
+  });
+
+  it("says at boot whether the policies apply, and README quotes the line the code prints", () => {
+    const node = readFileSync(resolve(here, "node.ts"), "utf8");
+    expect(node).toContain("await surveyServingRole(conn,");
+    // `--store pg-columns` creates its entity tables at boot, so the serving role owns them; a
+    // survey of `meta` alone would print "confined" over every record read bypassing its policies.
+    expect(node).toContain(
+      '...(options.store === "pg-columns" ? [options.schema ?? COLUMN_STORE_DEFAULT_SCHEMA] : [])',
+    );
+    const survey = readFileSync(resolve(here, "serving-role-survey.ts"), "utf8");
+    const readme = readFileSync(README, "utf8");
+    expect(readme).toContain("### The database roles");
+    for (const phrase of ["is confined on all", "BYPASSES the policies on"]) {
+      expect(survey, phrase).toContain(phrase);
+      expect(readme, phrase).toContain(phrase);
+    }
+  });
+});
+
+describe("the owner builds --store pg's unique indexes before the confined API starts (ADR-0423)", () => {
+  const AI_COMPOSE = resolve(here, "../../../deploy/docker-compose.ai.yml");
+  const api = liveLines(composeService(COMPOSE, "api"));
+  const indexes = liveLines(composeService(COMPOSE, "document-indexes"));
+
+  it("runs as the owner, because Postgres refuses CREATE INDEX to anyone else", () => {
+    // Measured on PG 16: the app role gets 42501 "must be owner of table" for CREATE INDEX, and
+    // IF NOT EXISTS does not help, since the ownership check precedes the existence check.
+    expect(indexes).toContain("<<: *pg-env");
+    expect(indexes).not.toMatch(/PGUSER:/);
+    expect(indexes).not.toContain("POSTGRES_APP_USER");
+  });
+
+  it("builds the indexes for the pack the API serves, after migrate", () => {
+    expect(indexes).toContain('"document-indexes", "--pack", "${OPERATE_PACK:-erp-core}"]');
+    expect(valueAfter(apiCommandArgs(), "--pack")).toBe("${OPERATE_PACK:-erp-core}");
+    expect(indexes).toMatch(/ {6}migrate:\n {8}condition: service_completed_successfully/);
+  });
+
+  it("holds the API back until they exist, in both compose files", () => {
+    expect(api).toMatch(/ {6}document-indexes:\n {8}condition: service_completed_successfully/);
+    const overlay = liveLines(composeService(AI_COMPOSE, "api"));
+    expect(overlay).toMatch(/ {6}document-indexes:\n {8}condition: service_completed_successfully/);
   });
 });

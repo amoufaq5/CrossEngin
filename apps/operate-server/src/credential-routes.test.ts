@@ -17,6 +17,7 @@ import {
   type CredentialRoutesContext,
 } from "./credential-routes.js";
 import { PostgresCredentialStore } from "./credential-store.js";
+import { LoginAdmission } from "./login-admission.js";
 
 const TENANT = "11111111-1111-4111-8111-111111111111";
 const OPERATOR = "99999999-9999-4999-8999-999999999999";
@@ -193,8 +194,13 @@ function principal(over: Partial<ResolvedPrincipal> = {}): ResolvedPrincipal {
 
 interface Recorded {
   readonly events: CredentialAuditEvent[];
-  /** One entry per counted failed possession proof, which is what makes the oracle metered. */
+  /**
+   * One entry per reservation still held -- a counted failed possession proof, which is what makes
+   * the oracle metered. A reservation given back is removed.
+   */
   readonly failures: string[];
+  /** Every reserve and release, in order. */
+  readonly calls: string[];
 }
 
 function ctxFor(
@@ -204,10 +210,14 @@ function ctxFor(
     readonly adminRoles?: readonly string[];
     readonly auditThrows?: boolean;
     readonly counterThrows?: boolean;
+    readonly releaseThrows?: boolean;
+    /** What `reserve` answers; false is a lock taken by a concurrent attempt. */
+    readonly reserve?: boolean;
+    readonly admission?: LoginAdmission;
     readonly pepper?: string;
   } = {},
 ): { ctx: CredentialRoutesContext; recorded: Recorded } {
-  const recorded: Recorded = { events: [], failures: [] };
+  const recorded: Recorded = { events: [], failures: [], calls: [] };
   const roles = opts.roles ?? ["platform_admin"];
   return {
     recorded,
@@ -223,10 +233,24 @@ function ctxFor(
         if (opts.auditThrows === true) throw new Error("audit down");
         recorded.events.push(e);
       },
-      onFailedAttempt: async (userId) => {
-        if (opts.counterThrows === true) throw new Error("counter down");
-        recorded.failures.push(userId);
+      attempts: {
+        reserve: async (userId) => {
+          recorded.calls.push("reserve");
+          if (opts.counterThrows === true) throw new Error("counter down");
+          if (opts.reserve === false) return false;
+          recorded.failures.push(userId);
+          return true;
+        },
+        release: async (userId) => {
+          recorded.calls.push("release");
+          if (opts.releaseThrows === true) throw new Error("counter down");
+          const i = recorded.failures.lastIndexOf(userId);
+          if (i >= 0) recorded.failures.splice(i, 1);
+        },
       },
+      admission:
+        opts.admission ??
+        new LoginAdmission({ concurrency: 4, queue: 4, perAccount: 4, retryAfterSeconds: 1 }),
       clock: () => new Date(AT),
     },
   };
@@ -1089,21 +1113,106 @@ describe("the self-service route", () => {
     expect(recorded.events[0]?.detail["verification"]).toBe("unreadable_hash");
   });
 
-  it("refuses rather than 503s when the counter is down", async () => {
-    // Reported by the deployment's handler and swallowed here, the login's reasoning: the refusal
-    // is already decided and raising would turn a correctly-refused attempt into the one answer
-    // that invites a retry.
+  it("does not evaluate an attempt it cannot count", async () => {
+    // The reservation comes before the derivation, so a counter that is down cannot be routed
+    // around: evaluating the guess anyway would be the unmetered oracle this route used to be. It
+    // answered 401 here when the count came afterwards and a failure to count was swallowed.
+    const row = credentialRow({ id: OPERATOR, credential_hash: await storedHash() });
+    const db = fakeDb({ reads: [row, row] });
+    const { ctx } = ctxFor(new PostgresCredentialStore(db.conn), { counterThrows: true });
+    for (const currentPassword of [CURRENT_PASSWORD, "wrong"]) {
+      const out = await invoke(handlerFor(ctx, CHANGE), {
+        principal: principal(),
+        params: {},
+        parsedBody: changeBody({ currentPassword }),
+      });
+      expect(out.status, currentPassword).toBe(503);
+      expect(body(out)["error"]).toBe("unrecordable");
+    }
+    expect(db.updates()).toHaveLength(0);
+  });
+
+  it("reserves BEFORE verifying, and refuses a concurrent lock without verifying", async () => {
+    // The parallel bypass: counted after the derivation, a stolen session's N concurrent guesses
+    // were all evaluated. A refused reservation answers locked whatever the password was.
+    const db = fakeDb({
+      reads: [
+        credentialRow({ id: OPERATOR, credential_hash: await storedHash() }),
+        credentialRow({ id: OPERATOR, credential_hash: await storedHash() }),
+      ],
+    });
+    const { ctx, recorded } = ctxFor(new PostgresCredentialStore(db.conn), { reserve: false });
+    for (const currentPassword of [CURRENT_PASSWORD, "wrong"]) {
+      const out = await invoke(handlerFor(ctx, CHANGE), {
+        principal: principal(),
+        params: {},
+        parsedBody: changeBody({ currentPassword }),
+      });
+      expect(out.status, currentPassword).toBe(429);
+      expect(body(out)["error"]).toBe("account_locked");
+    }
+    expect(recorded.events).toHaveLength(0);
+    expect(db.updates()).toHaveLength(0);
+  });
+
+  it("gives the reservation back for a correct password, and keeps going if that fails", async () => {
+    for (const releaseThrows of [false, true]) {
+      const db = fakeDb({
+        reads: [credentialRow({ id: OPERATOR, credential_hash: await storedHash() })],
+        writes: [1],
+      });
+      const { ctx, recorded } = ctxFor(new PostgresCredentialStore(db.conn), { releaseThrows });
+      const out = await invoke(handlerFor(ctx, CHANGE), {
+        principal: principal(),
+        params: {},
+        parsedBody: changeBody(),
+      });
+      expect(out.status, String(releaseThrows)).toBe(200);
+      expect(recorded.calls).toEqual(["reserve", "release"]);
+      if (!releaseThrows) expect(recorded.failures).toEqual([]);
+    }
+  });
+
+  it("sheds an operator's set past the per-account cap before recording or hashing", async () => {
+    const admission = new LoginAdmission({ concurrency: 4, queue: 4, perAccount: 1, retryAfterSeconds: 1 });
+    const held = await admission.enter(TARGET);
+    const db = fakeDb({ reads: [credentialRow()] });
+    const { ctx, recorded } = ctxFor(new PostgresCredentialStore(db.conn), { admission });
+    const out = await invoke(handlerFor(ctx, SET), {
+      principal: principal(),
+      params: { id: TARGET },
+      parsedBody: setBody(),
+    });
+    expect(out.status).toBe(429);
+    expect(body(out)["error"]).toBe("account_busy");
+    expect(recorded.events).toHaveLength(0);
+    expect(db.updates()).toHaveLength(0);
+    if (held.admitted) held.release();
+  });
+
+  it("sheds a change past the shared admission before any password work", async () => {
+    const admission = new LoginAdmission({
+      concurrency: 1,
+      queue: 0,
+      perAccount: 1,
+      retryAfterSeconds: 1,
+    });
+    const held = await admission.enter("someone-else@example.test");
     const db = fakeDb({
       reads: [credentialRow({ id: OPERATOR, credential_hash: await storedHash() })],
     });
-    const { ctx } = ctxFor(new PostgresCredentialStore(db.conn), { counterThrows: true });
+    const { ctx, recorded } = ctxFor(new PostgresCredentialStore(db.conn), { admission });
     const out = await invoke(handlerFor(ctx, CHANGE), {
       principal: principal(),
       params: {},
-      parsedBody: changeBody({ currentPassword: "wrong" }),
+      parsedBody: changeBody(),
     });
-    expect(out.status).toBe(401);
-    expect(body(out)["error"]).toBe("current_password_wrong");
+    expect(out.status).toBe(503);
+    expect(body(out)["error"]).toBe("saturated");
+    expect(recorded.calls).toEqual([]);
+    expect(recorded.events).toHaveLength(0);
+    if (held.admitted) held.release();
+    expect(admission.snapshot()).toEqual({ active: 0, queued: 0 });
   });
 
   it("403s a suspended account changing its own password", async () => {

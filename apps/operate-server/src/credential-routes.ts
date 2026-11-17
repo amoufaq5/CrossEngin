@@ -1,11 +1,16 @@
 import type { PathSegment, ResolvedPrincipal, RouteDefinition } from "@crossengin/api-gateway";
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
-import { hashPassword, verifyPassword } from "@crossengin/crypto";
+import { hashPassword, parsePasswordHash, verifyPassword } from "@crossengin/crypto";
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
 import { z } from "zod";
 
 import { credentialIsLocked } from "./auth-token-route.js";
 import type { PostgresCredentialStore } from "./credential-store.js";
+import {
+  LOGIN_ADMISSION_REFUSALS,
+  LOGIN_ADMISSION_REFUSAL_STATUS,
+  type LoginAdmission,
+} from "./login-admission.js";
 import { USER_STATUSES, type UserStatus } from "./platform-users.js";
 
 /**
@@ -101,6 +106,8 @@ export const CREDENTIAL_REFUSALS = [
   "account_locked",
   "user_not_active",
   "unrecordable",
+  // Shed before any password work, by the admission the login shares.
+  ...LOGIN_ADMISSION_REFUSALS,
 ] as const;
 export type CredentialRefusal = (typeof CREDENTIAL_REFUSALS)[number];
 
@@ -133,6 +140,7 @@ export const CREDENTIAL_REFUSAL_STATUS: Readonly<Record<CredentialRefusal, numbe
     account_locked: 429,
     user_not_active: 403,
     unrecordable: 503,
+    ...LOGIN_ADMISSION_REFUSAL_STATUS,
   },
 );
 
@@ -250,22 +258,28 @@ export interface CredentialRoutesContext {
    */
   readonly audit: CredentialAuditor;
   /**
-   * Counts one failed possession proof against the account lockout.
+   * The account lockout, as the login enforces it: an attempt is **reserved** before its current
+   * password is verified, and given back when it turns out not to count.
    *
-   * **Required**, and that is the fence rather than a style: this increment's own review found the
-   * self-service route reading the stored hash and neither the lock nor the counter, so it was an
-   * *unmetered* guessing oracle that also ignored a lock the login was honouring -- the slow door
-   * bypassed through the fast one. An optional field with a default is how the next wiring site
-   * forgets to pass the real one (ADR-0330's rule), and the default that would read as safe here
-   * ("no counter") is exactly the defect.
+   * **Required**, and that is the fence rather than a style: this route's first version read the
+   * stored hash and neither the lock nor the counter, so it was an *unmetered* guessing oracle that
+   * also ignored a lock the login was honouring -- the slow door bypassed through the fast one. And
+   * the version after that counted a wrong guess *after* verifying it, which is the login's parallel
+   * bypass on this route: a stolen session firing N concurrent guesses had all N evaluated.
    *
    * The deployment supplies it, so the *policy* stays where the login's is -- one
-   * `resolveLoginLockout` result behind both, read twice rather than spelled twice. There is
-   * deliberately no `LoginLockoutPolicy` field beside this one: the handler never needs the
-   * threshold, because it checks the lock by reading the column the counter wrote, so carrying the
-   * numbers here would be a declaration nothing reads.
+   * `parseLoginLockout` result behind both, read twice rather than spelled twice. `reserve` answers
+   * `false` for a locked account; nothing was counted then.
    */
-  readonly onFailedAttempt: (userId: string) => Promise<void>;
+  readonly attempts: {
+    readonly reserve: (userId: string) => Promise<boolean>;
+    readonly release: (userId: string) => Promise<void>;
+  };
+  /**
+   * The login's admission, shared rather than duplicated: both routes run scrypt on the one libuv
+   * pool, so a cap that counted only one of them would not bound the pool.
+   */
+  readonly admission: LoginAdmission;
   readonly clock?: () => Date;
 }
 
@@ -336,6 +350,61 @@ async function recordRefusal(
 // 400 — and the casts are exactly why `tsc` had nothing to say about it. That is ADR-0362's class
 // (a type annotation standing in for a check) committed inside the increment that cites it, so the
 // handlers destructure the real fields and a renamed one becomes a compile error.
+
+function shed(refusal: (typeof LOGIN_ADMISSION_REFUSALS)[number]): HandlerOutput {
+  return refuse(
+    refusal,
+    refusal === "saturated"
+      ? "too many password verifications are running; retry shortly"
+      : "a password verification for this account is already in progress; retry shortly",
+  );
+}
+
+/**
+ * The possession proof, counted the way the login counts it: reserved before the derivation, kept
+ * for a wrong password, given back for anything else. `null` when the password matched.
+ */
+async function verifyCurrent(
+  ctx: CredentialRoutesContext,
+  event: Omit<CredentialAuditEvent, "at">,
+  credentialHash: string,
+  currentPassword: string,
+): Promise<HandlerOutput | null> {
+  const userId = event.subjectUserId;
+  const wrong = (verification: string): Promise<HandlerOutput> =>
+    recordRefusal(
+      ctx,
+      { ...event, detail: { ...event.detail, verification } },
+      "current_password_wrong",
+      refuse("current_password_wrong", "the current password did not match"),
+    );
+  // An unreadable hash is never reserved, `REFUSAL_COUNTS_AGAINST_LOCKOUT`'s split read one surface
+  // over: a corrupt row says nothing about the password, and counting it would lock out a person who
+  // typed theirs correctly. The caller gets one body for both, as before.
+  if (parsePasswordHash(credentialHash) === null) return wrong("unreadable_hash");
+  let reserved: boolean;
+  try {
+    reserved = await ctx.attempts.reserve(userId);
+  } catch {
+    // Not evaluated: an attempt that cannot be counted would be an unmetered guess.
+    return refuse("unrecordable", "the attempt could not be counted, so it was not evaluated");
+  }
+  if (!reserved) {
+    return refuse(
+      "account_locked",
+      "too many failed attempts; this account is locked and the lock lapses on its own",
+    );
+  }
+  const outcome = await verifyPassword(currentPassword, credentialHash, ctx.pepper);
+  if (outcome === "mismatched") return wrong(outcome);
+  try {
+    await ctx.attempts.release(userId);
+  } catch {
+    // Swallowed, the login's reasoning: the cost is one attempt counted that should not have been,
+    // bounded by the window, where a throw would refuse a correct possession proof with a 503.
+  }
+  return outcome === "matched" ? null : wrong(outcome);
+}
 
 /**
  * `POST /v1/platform/users/{id}/credential` — an operator sets another user's password.
@@ -414,10 +483,18 @@ export function buildSetUserCredentialHandler(ctx: CredentialRoutesContext): Han
       // one set for an active user, and the trail is where that distinction has to survive.
       detail: { hadCredential: existing.credentialHash !== null, subjectStatus: existing.status },
     };
-    const unrecordable = await record(ctx, event);
-    if (unrecordable !== null) return unrecordable;
-
-    const encoded = await hashPassword(body.data.password, ctx.pepper);
+    // Admitted before the record, so a request shed for want of capacity leaves no row claiming a
+    // credential was set.
+    const admission = await ctx.admission.enter(userId);
+    if (!admission.admitted) return shed(admission.refusal);
+    let encoded: string;
+    try {
+      const unrecordable = await record(ctx, event);
+      if (unrecordable !== null) return unrecordable;
+      encoded = await hashPassword(body.data.password, ctx.pepper);
+    } finally {
+      admission.release();
+    }
     const matched = await ctx.store.setCredential(userId, encoded);
     if (!matched) {
       // The row was there a moment ago. Retired between the read and the write, most likely.
@@ -522,46 +599,6 @@ export function buildChangeOwnPasswordHandler(ctx: CredentialRoutesContext): Han
       );
     }
 
-    const outcome = await verifyPassword(
-      body.data.currentPassword,
-      existing.credentialHash,
-      ctx.pepper,
-    );
-    if (outcome !== "matched") {
-      // Counted, which it was not: an uncounted wrong guess here is an *unmetered* oracle, and the
-      // caller is authenticated so the work is cheap to repeat. `mismatched` counts and
-      // `unreadable_hash` does not, which is `REFUSAL_COUNTS_AGAINST_LOCKOUT`'s split read one
-      // surface over -- `password.ts` states the reason: a corrupt or foreign-format row says
-      // nothing about the password, and counting it would lock a person out of an account whose
-      // password they typed correctly. The caller gets one body for both.
-      if (outcome === "mismatched") {
-        try {
-          await ctx.onFailedAttempt(userId);
-        } catch {
-          // Reported by the deployment's own handler and swallowed here, the login's reasoning
-          // exactly: the refusal is already decided and raising would turn a correctly-refused
-          // attempt into a 503, the one answer that invites a retry. An uncounted attempt is the
-          // direction a counter can afford, because nothing has been committed.
-        }
-      }
-      // Recorded too, best-effort. A wrong possession proof against a live account is the one event
-      // here an operator reading the trail would want and nothing wrote it -- and `recordRefusal`
-      // is best-effort for its own reason: nothing changed, so a lost row must not become a 503.
-      return recordRefusal(
-        ctx,
-        {
-          operation: CREDENTIAL_CHANGED_OPERATION,
-          tenantId: principal.tenantId ?? null,
-          subjectUserId: userId,
-          principalId: userId,
-          roles: rolesOf(ctx, principal),
-          detail: { self: true, verification: outcome },
-        },
-        "current_password_wrong",
-        refuse("current_password_wrong", "the current password did not match"),
-      );
-    }
-
     const event: Omit<CredentialAuditEvent, "at"> = {
       operation: CREDENTIAL_CHANGED_OPERATION,
       // Their own tenant, from their own token: this act is about a person inside a tenant, so the
@@ -572,10 +609,20 @@ export function buildChangeOwnPasswordHandler(ctx: CredentialRoutesContext): Han
       roles: rolesOf(ctx, principal),
       detail: { self: true },
     };
-    const unrecordable = await record(ctx, event);
-    if (unrecordable !== null) return unrecordable;
 
-    const encoded = await hashPassword(body.data.newPassword, ctx.pepper);
+    // The slot covers both derivations, the verification and the new hash.
+    const admission = await ctx.admission.enter(userId);
+    if (!admission.admitted) return shed(admission.refusal);
+    let encoded: string;
+    try {
+      const refused = await verifyCurrent(ctx, event, existing.credentialHash, body.data.currentPassword);
+      if (refused !== null) return refused;
+      const unrecordable = await record(ctx, event);
+      if (unrecordable !== null) return unrecordable;
+      encoded = await hashPassword(body.data.newPassword, ctx.pepper);
+    } finally {
+      admission.release();
+    }
     const matched = await ctx.store.setCredential(userId, encoded);
     if (!matched) {
       return recordRefusal(

@@ -258,12 +258,10 @@ describe("emitUniqueIndexDdl", () => {
   });
 
   it("covers every withheld reason", () => {
-    // `document_store` has no producer in this module and that is deliberate: it plans column
-    // tables only, so the member lives here with the vocabulary and the boot survey emits it.
-    expect(Object.keys(UNIQUE_WITHHELD_REASONS).sort()).toEqual([
-      "document_store",
-      "encrypted_at_rest",
-    ]);
+    // `document_store` was a second member with no producer here, stating that the document store
+    // could not carry the guarantee at all. It can now — `document-integrity.ts` — so the member
+    // is gone rather than left as a reason nothing emits.
+    expect(Object.keys(UNIQUE_WITHHELD_REASONS).sort()).toEqual(["encrypted_at_rest"]);
   });
 
   it("maps each emitted index name back to the field it enforces", () => {

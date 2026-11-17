@@ -569,8 +569,10 @@ function diffOneTable(
   for (const name of [...expected.indexes, ...expected.constraints]) {
     if (!liveIndexes.has(name)) addedIndexes.push(name);
   }
+  const runtimePrefix = target.runtimeIndexPrefix;
   for (const idx of liveIndexes.values()) {
     if (idx.primary) continue;
+    if (runtimePrefix !== undefined && runtimePrefix.length > 0 && idx.name.startsWith(runtimePrefix)) continue;
     if (!expected.indexes.has(idx.name) && !expected.constraints.has(idx.name)) {
       removedIndexes.push(idx.name);
     }

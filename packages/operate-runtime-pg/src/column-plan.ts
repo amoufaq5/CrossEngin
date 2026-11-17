@@ -1,4 +1,9 @@
-import { columnNameForField, emitDefault, fieldTypeToPostgresType } from "@crossengin/kernel/ddl";
+import {
+  columnNameForField,
+  emitDefault,
+  fieldTypeToPostgresType,
+  UnadmittedExpressionDefaultError,
+} from "@crossengin/kernel/ddl";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import { resolvedFields, toTableName } from "@crossengin/kernel/ddl";
 import {
@@ -161,7 +166,16 @@ export function columnPlanForEntity(
   if (!SCHEMA_RE.test(opts.schema)) {
     throw new Error(`invalid schema name: ${JSON.stringify(opts.schema)}`);
   }
-  const planned = resolvedFields(entity, opts.traits ?? []).map(mappingForField);
+  const planned = resolvedFields(entity, opts.traits ?? []).map((field) => {
+    try {
+      return mappingForField(field);
+    } catch (error) {
+      if (error instanceof UnadmittedExpressionDefaultError) {
+        throw new UnadmittedDefaultError(entity.name, field.name, error.message);
+      }
+      throw error;
+    }
+  });
   for (const column of planned) {
     // At plan time, not at the first read: see `UNDECIDED_SQL_TYPES`. A manifest that cannot be
     // served is a configuration error, and the one thing worse than refusing it is provisioning a
@@ -214,6 +228,25 @@ export class UndecidedColumnTypeError extends Error {
   ) {
     super(`${entity}.${field}: cannot plan a ${sqlType} column — ${reason}`);
     this.name = "UndecidedColumnTypeError";
+  }
+}
+
+/**
+ * Thrown when a field's expression default is outside the kernel's admitted set, so the plan has no
+ * SQL for it.
+ *
+ * `validateManifest` refuses this first; reaching it means a manifest that did not go through
+ * validation, such as one stored before the rule. It names the entity and field and never the
+ * expression, which is attacker-controllable text bound for a boot failure and a log line.
+ */
+export class UnadmittedDefaultError extends Error {
+  constructor(
+    readonly entity: string,
+    readonly field: string,
+    readonly reason: string,
+  ) {
+    super(`${entity}.${field}: cannot plan a column default — ${reason}`);
+    this.name = "UnadmittedDefaultError";
   }
 }
 

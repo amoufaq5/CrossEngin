@@ -14,6 +14,7 @@ import { listQueryParameters, LIST_PARAMETER_COMPLEMENT_NOTE } from "./openapi-l
 import { entityLifecycleShape, entitySchemas, type JsonSchema } from "./openapi-schema.js";
 import { entityCamel } from "./slugs.js";
 import type { RouteSpec } from "./operations.js";
+import type { WriteSurface } from "./write-surface.js";
 
 /**
  * Where this deployment's API description is served, under which operation id, and in which media
@@ -66,6 +67,7 @@ export const OPENAPI_REFUSALS = [
   "wildcard_path",
   "path_collision",
   "method_not_describable",
+  "write_surface_absent",
 ] as const;
 export type OpenApiRefusalKind = (typeof OPENAPI_REFUSALS)[number];
 
@@ -90,6 +92,12 @@ export interface OpenApiEmitInput {
   readonly version: string;
   /** Declared absences the caller knows about and the emitter cannot see. */
   readonly coverage: readonly OpenApiCoverageGap[];
+  /**
+   * The compiled server's write surfaces — which fields a client may name. Required: the fields a
+   * write effect stamps depend on which effects this server wired, which the manifest alone does
+   * not say, and a request schema built without them would publish a stamped field as writable.
+   */
+  readonly writeSurfaces: ReadonlyMap<string, WriteSurface>;
 }
 
 export type OpenApiEmit =
@@ -331,7 +339,18 @@ export const buildOpenApiDocument = (input: OpenApiEmitInput): OpenApiEmit => {
   const undescribableFields: { entity: string; field: string; reason: string }[] = [];
 
   for (const entity of entities) {
-    const built = entitySchemas(entity, traits, entityLifecycleShape(input.manifest, entity.name));
+    const surface = input.writeSurfaces.get(entity.name);
+    if (surface === undefined) {
+      return {
+        document: null,
+        refused: {
+          kind: "write_surface_absent",
+          detail: `no write surface was supplied for entity '${entity.name}', so its request schemas cannot say which fields the server owns`,
+          operationIds: [],
+        },
+      };
+    }
+    const built = entitySchemas(entity, traits, entityLifecycleShape(input.manifest, entity.name), surface);
     const base = entityCamel(entity.name);
     const name = `${base.charAt(0).toUpperCase()}${base.slice(1)}`;
     schemas[name] = built.response;

@@ -65,10 +65,10 @@ describe("UNIQUE_ENFORCEMENT_REASONS", () => {
   });
 
   it("never advises the document store as a remedy for a ciphertext column", () => {
-    // The obvious second half of that remedy — "serve it where the value is plaintext" — is false:
-    // the only store keeping a classified value as plaintext withholds every unique for its own
-    // reason, so it trades one withholding for another. A remedy that cannot work is worse than
-    // none, so this asserts the text does not contain the advice.
+    // The obvious second half of that remedy — "serve it where the value is plaintext" — trades the
+    // guarantee rather than resolving it: the document store indexes the field only by not
+    // encrypting it, which ADR-0338 refuses at boot without --allow-plaintext-phi. So this asserts
+    // the remedy does not offer that store.
     expect(UNIQUE_ENFORCEMENT_REASONS.encrypted_at_rest.remedy).not.toContain("--store pg");
     expect(UNIQUE_ENFORCEMENT_REASONS.encrypted_at_rest.remedy).toContain("reclassify");
   });
@@ -115,7 +115,7 @@ describe("UNIQUE_SURVEY_STORE_KINDS", () => {
 
   it("surveys every store kind without throwing and keeps the counts consistent", () => {
     for (const store of UNIQUE_SURVEY_STORE_KINDS) {
-      const r = surveyUniqueEnforcement(MIXED, store);
+      const r = surveyUniqueEnforcement(MIXED, store, []);
       expect(r.storeKind, store).toBe(store);
       expect(r.enforcedCount + r.withheld.length, store).toBe(r.declaredCount);
       expect(r.mayServe, store).toBe(true);
@@ -125,13 +125,13 @@ describe("UNIQUE_SURVEY_STORE_KINDS", () => {
 
 describe("surveyUniqueEnforcement — what each store enforces", () => {
   it("enforces every plain declaration on the column store", () => {
-    const r = surveyUniqueEnforcement(oneField({ unique: true }), "pg-columns");
+    const r = surveyUniqueEnforcement(oneField({ unique: true }), "pg-columns", []);
     expect(r.verdict).toBe("all_enforced");
     expect(r).toMatchObject({ declaredCount: 1, enforcedCount: 1, withheld: [] });
   });
 
   it("withholds a phi column on the column store and enforces the plain one beside it", () => {
-    const r = surveyUniqueEnforcement(MIXED, "pg-columns");
+    const r = surveyUniqueEnforcement(MIXED, "pg-columns", []);
     expect(r.verdict).toBe("partly_enforced");
     expect(r.declaredCount).toBe(2);
     expect(r.enforcedCount).toBe(1);
@@ -144,36 +144,61 @@ describe("surveyUniqueEnforcement — what each store enforces", () => {
     const r = surveyUniqueEnforcement(
       oneField({ unique: true, classification: "regulated" }),
       "pg-columns",
+      [],
     );
     expect(r.withheld[0]?.reason).toBe("encrypted_at_rest");
   });
 
   it("enforces a pii or commercial_sensitive column: classified is not encrypted-at-rest", () => {
     for (const classification of ["pii", "commercial_sensitive", "internal", "public"]) {
-      const r = surveyUniqueEnforcement(oneField({ unique: true, classification }), "pg-columns");
+      const r = surveyUniqueEnforcement(oneField({ unique: true, classification }), "pg-columns", []);
       expect(r.verdict, classification).toBe("all_enforced");
     }
   });
 
-  it("withholds every declaration on the document store, under document_store", () => {
-    const r = surveyUniqueEnforcement(MIXED, "pg");
-    expect(r.verdict).toBe("none_enforced");
-    expect(r.enforcedCount).toBe(0);
-    expect(r.withheld.map((f) => f.reason)).toEqual(["document_store", "document_store"]);
+  it("enforces every declaration on the document store when its boot built every index", () => {
+    // This was `none_enforced` under `document_store` until H-09: the store had no mechanism. It
+    // builds one partial unique expression index per field now, so with nothing observed refused
+    // the survey answers what the store established.
+    const r = surveyUniqueEnforcement(MIXED, "pg", []);
+    expect(r.verdict).toBe("all_enforced");
+    expect(r).toMatchObject({ declaredCount: 2, enforcedCount: 2, withheld: [] });
   });
 
-  it("reports a classified field under document_store on pg, never encrypted_at_rest", () => {
-    // On `pg` a classified value is stored as plaintext, so naming the ciphertext reason would
-    // state a condition untrue of that deployment and offer a remedy that changes nothing.
-    const r = surveyUniqueEnforcement(
-      oneField({ unique: true, classification: "phi" }),
-      "pg",
-    );
-    expect(r.withheld[0]?.reason).toBe("document_store");
+  it("enforces a classified field on pg, never withholding it as encrypted_at_rest", () => {
+    // On `pg` a classified value is plaintext, so its index is built like any other; naming the
+    // ciphertext reason would state a condition untrue of that deployment.
+    const r = surveyUniqueEnforcement(oneField({ unique: true, classification: "phi" }), "pg", []);
+    expect(r.verdict).toBe("all_enforced");
+  });
+
+  it("reports what the document store's boot observed it could not build, field by field", () => {
+    const r = surveyUniqueEnforcement(MIXED, "pg", [
+      { entity: "Patient", field: "chart_no", reason: "existing_duplicates" },
+    ]);
+    expect(r.verdict).toBe("partly_enforced");
+    expect(r.withheld).toEqual([
+      { entity: "Patient", field: "chart_no", reason: "existing_duplicates", scope: [] },
+    ]);
+  });
+
+  it("answers none_enforced on pg when no index could be built", () => {
+    const r = surveyUniqueEnforcement(MIXED, "pg", [
+      { entity: "Patient", field: "mrn", reason: "index_not_owner" },
+      { entity: "Patient", field: "chart_no", reason: "index_not_owner" },
+    ]);
+    expect(r.verdict).toBe("none_enforced");
+  });
+
+  it("ignores an observation on a store whose blanket reason already withholds the field", () => {
+    const r = surveyUniqueEnforcement(MIXED, "memory", [
+      { entity: "Patient", field: "mrn", reason: "index_failed" },
+    ]);
+    expect(r.withheld.map((f) => f.reason)).toEqual(["no_durable_store", "no_durable_store"]);
   });
 
   it("withholds every declaration on the memory store, under its own reason", () => {
-    const r = surveyUniqueEnforcement(MIXED, "memory");
+    const r = surveyUniqueEnforcement(MIXED, "memory", []);
     expect(r.verdict).toBe("none_enforced");
     expect(r.withheld.map((f) => f.reason)).toEqual(["no_durable_store", "no_durable_store"]);
   });
@@ -184,6 +209,7 @@ describe("surveyUniqueEnforcement — reading the declaration", () => {
     const r = surveyUniqueEnforcement(
       oneField({ unique: { scope: ["warehouse_id"] }, classification: "phi" }),
       "pg-columns",
+      [],
     );
     expect(r.declaredCount).toBe(1);
     expect(r.withheld).toEqual([
@@ -192,7 +218,7 @@ describe("surveyUniqueEnforcement — reading the declaration", () => {
   });
 
   it("counts a scoped declaration as enforced on the column store", () => {
-    const r = surveyUniqueEnforcement(oneField({ unique: { scope: ["warehouse_id"] } }), "pg-columns");
+    const r = surveyUniqueEnforcement(oneField({ unique: { scope: ["warehouse_id"] } }), "pg-columns", []);
     expect(r).toMatchObject({ verdict: "all_enforced", declaredCount: 1, enforcedCount: 1 });
   });
 
@@ -201,7 +227,7 @@ describe("surveyUniqueEnforcement — reading the declaration", () => {
     // fields nobody claimed a guarantee for.
     for (const store of UNIQUE_SURVEY_STORE_KINDS) {
       for (const spec of [{}, { unique: false }]) {
-        const r = surveyUniqueEnforcement(oneField(spec), store);
+        const r = surveyUniqueEnforcement(oneField(spec), store, []);
         expect(r.verdict, store).toBe("no_declarations");
         expect(r.declaredCount, store).toBe(0);
       }
@@ -216,13 +242,13 @@ describe("surveyUniqueEnforcement — reading the declaration", () => {
       [{ name: "Item", fields: [{ name: "name", type: { kind: "text" } }], traits: ["coded"] }],
       [{ name: "coded", fields: [{ name: "code", type: { kind: "text" }, unique: true }] }],
     );
-    expect(surveyUniqueEnforcement(m, "pg-columns")).toMatchObject({
+    expect(surveyUniqueEnforcement(m, "pg-columns", [])).toMatchObject({
       declaredCount: 1,
       verdict: "all_enforced",
     });
-    expect(surveyUniqueEnforcement(m, "pg").withheld).toEqual([
-      { entity: "Item", field: "code", reason: "document_store", scope: [] },
-    ]);
+    expect(
+      surveyUniqueEnforcement(m, "pg", [{ entity: "Item", field: "code", reason: "index_failed" }]).withheld,
+    ).toEqual([{ entity: "Item", field: "code", reason: "index_failed", scope: [] }]);
   });
 
   it("sees a classified unique field supplied by a custom trait", () => {
@@ -235,7 +261,7 @@ describe("surveyUniqueEnforcement — reading the declaration", () => {
         },
       ],
     );
-    expect(surveyUniqueEnforcement(m, "pg-columns").withheld).toEqual([
+    expect(surveyUniqueEnforcement(m, "pg-columns", []).withheld).toEqual([
       { entity: "Patient", field: "mrn", reason: "encrypted_at_rest", scope: [] },
     ]);
   });
@@ -253,11 +279,11 @@ describe("surveyUniqueEnforcement — reading the declaration", () => {
       ],
       [{ name: "coded", fields: [{ name: "code", type: { kind: "text" }, unique: true }] }],
     );
-    expect(surveyUniqueEnforcement(m, "pg-columns").declaredCount).toBe(0);
+    expect(surveyUniqueEnforcement(m, "pg-columns", []).declaredCount).toBe(0);
   });
 
   it("answers no_declarations for a manifest with no entities at all", () => {
-    expect(surveyUniqueEnforcement(manifest([]), "pg").verdict).toBe("no_declarations");
+    expect(surveyUniqueEnforcement(manifest([]), "pg", []).verdict).toBe("no_declarations");
   });
 });
 
@@ -265,13 +291,13 @@ describe("enforceableOnColumnStore", () => {
   it("counts what a store change would buy, excluding the classified ones", () => {
     // The figure that makes the store-change remedy checkable: on this manifest it is 1 of 2,
     // because the phi field moves from one withholding to the other rather than becoming enforced.
-    expect(surveyUniqueEnforcement(MIXED, "pg").enforceableOnColumnStore).toBe(1);
-    expect(surveyUniqueEnforcement(MIXED, "memory").enforceableOnColumnStore).toBe(1);
+    expect(surveyUniqueEnforcement(MIXED, "pg", []).enforceableOnColumnStore).toBe(1);
+    expect(surveyUniqueEnforcement(MIXED, "memory", []).enforceableOnColumnStore).toBe(1);
   });
 
   it("equals the enforced count when already on the column store", () => {
     for (const m of [MIXED, oneField({ unique: true }), oneField({})]) {
-      const r = surveyUniqueEnforcement(m, "pg-columns");
+      const r = surveyUniqueEnforcement(m, "pg-columns", []);
       expect(r.enforceableOnColumnStore).toBe(r.enforcedCount);
     }
   });
@@ -279,22 +305,28 @@ describe("enforceableOnColumnStore", () => {
 
 describe("uniqueEnforcementIsSuspect", () => {
   it("is false when nothing is withheld, in both zero directions", () => {
-    expect(uniqueEnforcementIsSuspect(surveyUniqueEnforcement(oneField({}), "pg"))).toBe(false);
+    expect(uniqueEnforcementIsSuspect(surveyUniqueEnforcement(oneField({}), "pg", []))).toBe(false);
     expect(
-      uniqueEnforcementIsSuspect(surveyUniqueEnforcement(oneField({ unique: true }), "pg-columns")),
+      uniqueEnforcementIsSuspect(surveyUniqueEnforcement(oneField({ unique: true }), "pg-columns", [])),
     ).toBe(false);
   });
 
   it("is true wherever anything is withheld", () => {
-    for (const store of ["pg", "memory", "pg-columns"] as const) {
-      expect(uniqueEnforcementIsSuspect(surveyUniqueEnforcement(MIXED, store)), store).toBe(true);
+    for (const store of ["memory", "pg-columns"] as const) {
+      expect(uniqueEnforcementIsSuspect(surveyUniqueEnforcement(MIXED, store, [])), store).toBe(true);
     }
+    expect(uniqueEnforcementIsSuspect(surveyUniqueEnforcement(MIXED, "pg", []))).toBe(false);
+    expect(
+      uniqueEnforcementIsSuspect(
+        surveyUniqueEnforcement(MIXED, "pg", [{ entity: "Patient", field: "mrn", reason: "index_invalid" }]),
+      ),
+    ).toBe(true);
   });
 });
 
 describe("formatUniqueEnforcementReport", () => {
   const lineFor = (m: Manifest, store: StoreKind): string =>
-    formatUniqueEnforcementReport(surveyUniqueEnforcement(m, store));
+    formatUniqueEnforcementReport(surveyUniqueEnforcement(m, store, []));
 
   it("is affirmative when the manifest declares none", () => {
     const line = lineFor(oneField({}), "pg");
@@ -309,24 +341,34 @@ describe("formatUniqueEnforcementReport", () => {
     expect(line).toContain("never across tenants");
   });
 
-  it("leads with the count on the headline case and names the reason", () => {
+  it("is affirmative on the document store and names its mechanism", () => {
     const line = lineFor(MIXED, "pg");
-    expect(line.split("\n")[0]).toBe("[unique] declared unique fields: 0 of 2 enforced on --store pg");
-    expect(line).toContain("2 withheld (document_store)");
-    expect(line).toContain("no DDL seam");
+    expect(line).toBe(
+      "[unique] declared unique fields: 2 of 2 enforced on --store pg — one partial unique index per" +
+        " field on the shared table, over (tenant_id, …any declared scope, document ->> 'field')" +
+        " where entity matches, so the guarantee is uniqueness within a tenant and never across tenants",
+    );
   });
 
-  it("carries the checked remedy for document_store", () => {
-    const line = lineFor(MIXED, "pg");
-    expect(line).toContain("remedy: serve this manifest on --store pg-columns");
-    expect(line).toContain("that would enforce 1 of these 2");
+  it("names an index the document store could not build and its remedy", () => {
+    const line = formatUniqueEnforcementReport(
+      surveyUniqueEnforcement(MIXED, "pg", [
+        { entity: "Patient", field: "chart_no", reason: "existing_duplicates" },
+      ]),
+    );
+    expect(line.split("\n")[0]).toBe("[unique] declared unique fields: 1 of 2 enforced on --store pg");
+    expect(line).toContain("1 withheld (existing_duplicates)");
+    expect(line).toContain("Patient.chart_no");
+    expect(line).toContain("remedy: deduplicate those records");
+    expect(line).not.toContain("measured on this manifest");
   });
 
-  it("carries the memory remedy and its mitigating fact", () => {
+  it("carries the memory remedy, its mitigating fact and the checked figures", () => {
     const line = lineFor(MIXED, "memory");
     expect(line).toContain("2 withheld (no_durable_store)");
     expect(line).toContain("nothing is persisted");
-    expect(line).toContain("remedy: serve on --store pg-columns");
+    expect(line).toContain("remedy: serve on --store pg or --store pg-columns");
+    expect(line).toContain("--store pg would enforce all 2 and --store pg-columns 1 of them");
   });
 
   it("carries the reclassify remedy for a ciphertext column", () => {
@@ -338,7 +380,7 @@ describe("formatUniqueEnforcementReport", () => {
   });
 
   it("names a declared scope in the withheld list", () => {
-    const line = lineFor(oneField({ unique: { scope: ["warehouse_id"] } }), "pg");
+    const line = lineFor(oneField({ unique: { scope: ["warehouse_id"] } }), "memory");
     expect(line).toContain("Item.sku within (warehouse_id)");
   });
 
@@ -353,8 +395,8 @@ describe("formatUniqueEnforcementReport", () => {
         })),
       },
     ]);
-    const line = lineFor(many, "pg");
-    expect(line).toContain(`${String(WITHHELD_FIELD_LIMIT + 4)} withheld (document_store)`);
+    const line = lineFor(many, "memory");
+    expect(line).toContain(`${String(WITHHELD_FIELD_LIMIT + 4)} withheld (no_durable_store)`);
     expect(line).toContain("(+4 more)");
     expect(line).toContain("Doc.f0");
     expect(line).not.toContain(`Doc.f${String(WITHHELD_FIELD_LIMIT)}`);
@@ -366,7 +408,7 @@ describe("formatUniqueEnforcementReport", () => {
     // `remedy:` line, which is what keeps the output from repeating itself per field.
     const line = lineFor(MIXED, "pg-columns");
     expect(line.split("\n").filter((l) => l.includes("remedy:"))).toHaveLength(1);
-    expect(line).not.toContain("document_store");
+    expect(line).not.toContain("no_durable_store");
   });
 
   it("names every withheld field of a real-shaped manifest — a negative control", () => {
@@ -378,7 +420,7 @@ describe("formatUniqueEnforcementReport", () => {
         fields: [{ name: "code", type: { kind: "text" }, unique: true }],
       })),
     );
-    const r = surveyUniqueEnforcement(eight, "pg");
+    const r = surveyUniqueEnforcement(eight, "memory", []);
     expect(r.declaredCount).toBe(8);
     const line = formatUniqueEnforcementReport(r);
     for (let i = 0; i < 8; i += 1) expect(line).toContain(`E${String(i)}.code`);

@@ -1,16 +1,25 @@
+import type { Manifest } from "@crossengin/kernel/manifest";
 import type { PgConnection } from "@crossengin/kernel-pg";
 import {
   type AssociationCounter,
   type AssociationReader,
   type AssociationWriter,
+  type ConditionalUpdate,
   type EntityRecord,
   type EntityStore,
   type ListPage,
   type ListQuery,
   type TransactionalEntityStore,
+  type UpdatePrecondition,
 } from "@crossengin/operate-runtime";
 
-import { createOp, getOp, listOp, listPageOp, removeOp, updateOp } from "./entity-ops.js";
+import { createOp, getOp, listOp, listPageOp, removeOp, updateIfOp, updateOp } from "./entity-ops.js";
+import {
+  ensureDocumentUniqueIndexes,
+  planDocumentIntegrity,
+  type DocumentIndexEnsureReport,
+  type DocumentIntegrityPlan,
+} from "./document-integrity.js";
 import { planLinkPrune } from "./link-integrity.js";
 import { withTenantContext } from "./tenant-context.js";
 
@@ -31,6 +40,17 @@ const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 export interface PostgresEntityStoreOptions {
   /** Schema holding `operate_entity_records` (default `meta`). */
   readonly schema?: string;
+  /**
+   * The manifest whose `unique` and `reference` fields this store enforces. Absent, the store
+   * enforces neither — which is what every caller got before, and what a manifest-agnostic use
+   * (a per-tenant fallback, an admin tool) still gets.
+   */
+  readonly manifest?: Manifest;
+  /**
+   * `false` keeps a dangling reference storable and a referenced record deletable, which is
+   * `--allow-dangling-references`. Default `true`. Uniqueness is not affected by it.
+   */
+  readonly enforceReferences?: boolean;
 }
 
 /**
@@ -45,6 +65,7 @@ class TxEntityStore implements EntityStore {
     private readonly tx: PgConnection,
     private readonly table: string,
     private readonly boundTenant: string,
+    private readonly integrity: DocumentIntegrityPlan | null,
   ) {}
 
   private assertTenant(tenantId: string): void {
@@ -70,17 +91,28 @@ class TxEntityStore implements EntityStore {
 
   create(tenantId: string, entity: string, record: EntityRecord): Promise<EntityRecord> {
     this.assertTenant(tenantId);
-    return createOp(this.tx, this.table, tenantId, entity, record);
+    return createOp(this.tx, this.table, tenantId, entity, record, this.integrity);
   }
 
   update(tenantId: string, entity: string, id: string, patch: EntityRecord): Promise<EntityRecord | null> {
     this.assertTenant(tenantId);
-    return updateOp(this.tx, this.table, tenantId, entity, id, patch);
+    return updateOp(this.tx, this.table, tenantId, entity, id, patch, this.integrity);
+  }
+
+  updateIf(
+    tenantId: string,
+    entity: string,
+    id: string,
+    patch: EntityRecord,
+    expected: UpdatePrecondition,
+  ): Promise<ConditionalUpdate> {
+    this.assertTenant(tenantId);
+    return updateIfOp(this.tx, this.table, tenantId, entity, id, patch, expected, this.integrity);
   }
 
   remove(tenantId: string, entity: string, id: string): Promise<boolean> {
     this.assertTenant(tenantId);
-    return removeOp(this.tx, this.table, tenantId, entity, id);
+    return removeOp(this.tx, this.table, tenantId, entity, id, this.integrity);
   }
 }
 
@@ -99,6 +131,8 @@ export class PostgresEntityStore
   private readonly conn: PgConnection;
   private readonly table: string;
   private readonly linksTable: string;
+  private readonly schema: string;
+  private readonly integrity: DocumentIntegrityPlan | null;
 
   constructor(conn: PgConnection, opts: PostgresEntityStoreOptions = {}) {
     this.conn = conn;
@@ -106,8 +140,29 @@ export class PostgresEntityStore
     if (!SCHEMA_RE.test(schema)) {
       throw new Error(`invalid schema name: ${JSON.stringify(schema)}`);
     }
+    this.schema = schema;
     this.table = `${schema}.operate_entity_records`;
     this.linksTable = `${schema}.operate_entity_links`;
+    this.integrity =
+      opts.manifest === undefined
+        ? null
+        : planDocumentIntegrity(opts.manifest, this.table, {
+            ...(opts.enforceReferences !== undefined ? { enforceReferences: opts.enforceReferences } : {}),
+          });
+  }
+
+  /** What this store enforces, or `null` for a store constructed without a manifest. */
+  integrityPlan(): DocumentIntegrityPlan | null {
+    return this.integrity;
+  }
+
+  /**
+   * Creates the manifest's unique indexes on the shared table and reports, per declared field,
+   * whether it is enforced. Called once at boot; a store with no manifest has nothing to create.
+   */
+  async ensureUniqueIndexes(): Promise<DocumentIndexEnsureReport> {
+    if (this.integrity === null) return { results: [], stale: [] };
+    return ensureDocumentUniqueIndexes(this.conn, this.integrity, this.schema);
   }
 
   list(tenantId: string, entity: string): Promise<readonly EntityRecord[]> {
@@ -123,20 +178,38 @@ export class PostgresEntityStore
   }
 
   create(tenantId: string, entity: string, record: EntityRecord): Promise<EntityRecord> {
-    return withTenantContext(this.conn, tenantId, (tx) => createOp(tx, this.table, tenantId, entity, record));
+    return withTenantContext(this.conn, tenantId, (tx) =>
+      createOp(tx, this.table, tenantId, entity, record, this.integrity),
+    );
   }
 
   update(tenantId: string, entity: string, id: string, patch: EntityRecord): Promise<EntityRecord | null> {
-    return withTenantContext(this.conn, tenantId, (tx) => updateOp(tx, this.table, tenantId, entity, id, patch));
+    return withTenantContext(this.conn, tenantId, (tx) =>
+      updateOp(tx, this.table, tenantId, entity, id, patch, this.integrity),
+    );
+  }
+
+  updateIf(
+    tenantId: string,
+    entity: string,
+    id: string,
+    patch: EntityRecord,
+    expected: UpdatePrecondition,
+  ): Promise<ConditionalUpdate> {
+    return withTenantContext(this.conn, tenantId, (tx) =>
+      updateIfOp(tx, this.table, tenantId, entity, id, patch, expected, this.integrity),
+    );
   }
 
   remove(tenantId: string, entity: string, id: string): Promise<boolean> {
-    return withTenantContext(this.conn, tenantId, (tx) => removeOp(tx, this.table, tenantId, entity, id));
+    return withTenantContext(this.conn, tenantId, (tx) =>
+      removeOp(tx, this.table, tenantId, entity, id, this.integrity),
+    );
   }
 
   /** Runs `fn` in one tenant-scoped transaction; every op on the supplied store shares it. */
   withTransaction<T>(tenantId: string, fn: (tx: EntityStore) => Promise<T>): Promise<T> {
-    return withTenantContext(this.conn, tenantId, (tx) => fn(new TxEntityStore(tx, this.table, tenantId)));
+    return withTenantContext(this.conn, tenantId, (tx) => fn(new TxEntityStore(tx, this.table, tenantId, this.integrity)));
   }
 
   /**

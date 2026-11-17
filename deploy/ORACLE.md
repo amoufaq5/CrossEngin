@@ -217,17 +217,19 @@ If `git log origin/main` already shows that work, stay on `main`; the check is o
 alternative is finding out at step 12. The arm64 database fix in step 1 is on **both**, so a plain
 `git pull` is enough for that one.
 
-Generate the five secrets. Run each line and paste the output into the matching `.env` key:
+Generate the seven secrets. Run each line and paste the output into the matching `.env` key:
 
 ```bash
-# POSTGRES_PASSWORD
-openssl rand -base64 32
+# POSTGRES_PASSWORD, then POSTGRES_APP_PASSWORD — two different values. The second is the role the
+# API connects as, which is not the superuser the first belongs to (README.md, "The database roles").
+openssl rand -hex 24
+openssl rand -hex 24
 
 # OPERATE_ADMIN_API_KEY — the format is token:role:tenant, and the token is the credential.
 echo "$(openssl rand -hex 24):platform_admin:00000000-0000-4000-8000-000000000001"
 
-# CREDENTIAL_PEPPER, OPERATE_TOKEN_SIGNING_KEY, CURSOR_ENCRYPTION_SECRET — one each
-for v in CREDENTIAL_PEPPER OPERATE_TOKEN_SIGNING_KEY CURSOR_ENCRYPTION_SECRET; do
+# CREDENTIAL_PEPPER, OPERATE_TOKEN_SIGNING_KEY, CURSOR_ENCRYPTION_SECRET, AUDIT_CHAIN_SIGNING_KEY — one each
+for v in CREDENTIAL_PEPPER OPERATE_TOKEN_SIGNING_KEY CURSOR_ENCRYPTION_SECRET AUDIT_CHAIN_SIGNING_KEY; do
   echo "$v=$(node -e 'console.log(require("node:crypto").randomBytes(32).toString("base64"))' 2>/dev/null \
     || openssl rand -base64 32)"
 done
@@ -245,6 +247,7 @@ What each secret does, so you know what rotating one costs:
 | Key | What it protects | Cost of changing it |
 |---|---|---|
 | `POSTGRES_PASSWORD` | the database | must match the volume; change before first boot |
+| `POSTGRES_APP_PASSWORD` | the role the API connects as (`POSTGRES_APP_USER`, `NOSUPERUSER NOBYPASSRLS`, owning nothing), which is what makes the row-level-security policies apply | none: `app-role` re-sets it on every `up`, so change it and run `docker compose up -d` |
 | `OPERATE_ADMIN_API_KEY` | the platform-admin credential — it can provision and delete tenants | invalidates that key |
 | `CREDENTIAL_PEPPER` | password hashes, which `meta.users` holds with no RLS | **every password stops verifying.** Do not change it after users exist |
 | `OPERATE_TOKEN_SIGNING_KEY` | session tokens; the public half is derived from it | every session gets one 401 and a re-login |
@@ -751,6 +754,13 @@ They are also not peers, and it is a three-way split rather than the two this se
       - --deletion-capability
       - caches=absent
   ```
+
+  **On this stack a declared deletion is refused until the API connects as a role that bypasses
+  RLS.** It connects as `POSTGRES_APP_USER`, which the policies confine, and the erasure refuses a
+  confined session by name (`rls_would_confine_this_session`) because a confined `DELETE` reports
+  zero rows while the rows remain — measured: the delete route answers `deletion_refused` and the
+  tenant's records and row are untouched. The API says so at boot. Which role to run the deletion
+  surfaces as is the trade README.md's "The database roles" lays out.
 
   All six or none: an incomplete set is **refused naming what is missing**, because silence may not
   answer the reach of an Article 17 proof. A repeated subsystem is refused rather than last-wins,

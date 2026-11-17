@@ -5,11 +5,13 @@ import {
   isAssociationReader,
   isAssociationWriter,
   isTransactional,
+  type ConditionalUpdate,
   type EntityRecord,
   type EntityStore,
   type ListPage,
   type ListQuery,
   type TransactionalEntityStore,
+  type UpdatePrecondition,
 } from "@crossengin/operate-runtime";
 
 import { ColumnMappedEntityStore, type ColumnEncryptionKeySource } from "./column-store.js";
@@ -366,6 +368,16 @@ export class TenantColumnStoreRouter implements TransactionalEntityStore {
     return this.storeForEntity(tenantId, entity).update(tenantId, entity, id, patch);
   }
 
+  async updateIf(
+    tenantId: string,
+    entity: string,
+    id: string,
+    patch: EntityRecord,
+    expected: UpdatePrecondition,
+  ): Promise<ConditionalUpdate> {
+    return this.storeForEntity(tenantId, entity).updateIf(tenantId, entity, id, patch, expected);
+  }
+
   async remove(tenantId: string, entity: string, id: string): Promise<boolean> {
     return this.storeForEntity(tenantId, entity).remove(tenantId, entity, id);
   }
@@ -379,7 +391,7 @@ export class TenantColumnStoreRouter implements TransactionalEntityStore {
   async withTransaction<T>(tenantId: string, fn: (tx: EntityStore) => Promise<T>): Promise<T> {
     const store = this.storeFor(tenantId);
     // The callback is handed the *underlying* store, so its ops do not pass back through this
-    // router — a guard only on the six methods above would be bypassed by every handler that runs
+    // router — a guard only on the seven methods above would be bypassed by every handler that runs
     // its guard → write → effect unit in a transaction, which is the ordinary write path. So the
     // store the callback sees is wrapped when it is the fallback, and the refusal is the same one.
     const guard = (inner: EntityStore): EntityStore =>
@@ -400,7 +412,7 @@ export class TenantColumnStoreRouter implements TransactionalEntityStore {
   // These deliberately keep `storeFor` rather than `storeForEntity`: a join table
   // holds the two ids and `created_at` and no classified field at all, so routing
   // one to the plaintext fallback cannot downgrade anything. The entity *rows* the
-  // link points at are reached through the six methods above, which do refuse.
+  // link points at are reached through the seven methods above, which do refuse.
 
   async link(
     tenantId: string,
@@ -480,8 +492,8 @@ export class TenantColumnStoreRouter implements TransactionalEntityStore {
  * Wraps a plaintext store so every entity-bearing op over an encrypted entity
  * refuses, used for the store a `withTransaction` callback is handed.
  *
- * A wrapper rather than a `Proxy`: the six methods are the whole `EntityStore`
- * surface, so listing them is a compile-time obligation — a seventh method added
+ * A wrapper rather than a `Proxy`: the seven methods are the whole `EntityStore`
+ * surface, so listing them is a compile-time obligation — an eighth method added
  * to the interface fails to typecheck here instead of passing through unguarded,
  * which is what a `Proxy` would do.
  */
@@ -513,6 +525,10 @@ function guardPlaintextEntities(
     update: (t, entity, id, patch) => {
       check(entity);
       return inner.update(t, entity, id, patch);
+    },
+    updateIf: (t, entity, id, patch, expected) => {
+      check(entity);
+      return inner.updateIf(t, entity, id, patch, expected);
     },
     remove: (t, entity, id) => {
       check(entity);

@@ -14,6 +14,8 @@ import {
   fieldResponseSchema,
   omittableOnCreate,
 } from "./openapi-schema.js";
+import { defaultEffectStamps } from "./compile.js";
+import { buildWriteSurfaces, type WriteSurface } from "./write-surface.js";
 
 const KINDS: readonly PrimitiveFieldType["kind"][] = [
   "text",
@@ -201,6 +203,12 @@ describe("entitySchemas over the real erp-core pack", () => {
     if (found === undefined) throw new Error(`no entity ${name}`);
     return found;
   };
+  const surfaces = buildWriteSurfaces(manifest, defaultEffectStamps(manifest));
+  const surfaceOf = (e: Entity): WriteSurface => {
+    const found = surfaces.get(e.name);
+    if (found === undefined) throw new Error(`no surface for ${e.name}`);
+    return found;
+  };
 
   it("describes the RESOLVED field set, which is a third wider than the entity's own", () => {
     // ADR-0361's class, and the whole correctness question for this module. Measured: 51 of 51
@@ -215,7 +223,7 @@ describe("entitySchemas over the real erp-core pack", () => {
       own += e.fields.length;
       resolved += resolvedFields(e, traits).length;
       props += Object.keys(
-        entitySchemas(e, traits, null).response.properties ?? {},
+        entitySchemas(e, traits, null, surfaceOf(e)).response.properties ?? {},
       ).length;
     }
     expect(own).toBe(426);
@@ -225,7 +233,7 @@ describe("entitySchemas over the real erp-core pack", () => {
   });
 
   it("carries the four trait fields a narrow read would omit", () => {
-    const v = entitySchemas(entity("Vendor"), traits, null);
+    const v = entitySchemas(entity("Vendor"), traits, null, surfaceOf(entity("Vendor")));
     const names = Object.keys(v.response.properties ?? {});
     for (const n of ["created_at", "updated_at", "created_by", "updated_by"]) {
       expect(names, n).toContain(n);
@@ -255,7 +263,7 @@ describe("entitySchemas over the real erp-core pack", () => {
       const fields = resolvedFields(e, traits);
       declared += fields.filter((f) => f.required === true).length;
       noDefault += fields.filter((f) => f.required === true && f.default === undefined).length;
-      required += entitySchemas(e, traits, null).create.required?.length ?? 0;
+      required += entitySchemas(e, traits, null, surfaceOf(e)).create.required?.length ?? 0;
     }
     expect(declared).toBe(395);
     expect(required).toBe(noDefault);
@@ -268,8 +276,8 @@ describe("entitySchemas over the real erp-core pack", () => {
     // settings arm that read whether a settings STORE was wired, while the fill reads the tenant's
     // own settings VALUES. Every deployment wires a store — `ResolvedStores.settingsStore` is not
     // optional — so all three were understated on every tenant until its settings were populated.
-    const inv = entitySchemas(entity("Invoice"), traits, null).create.required ?? [];
-    const bill = entitySchemas(entity("Bill"), traits, null).create.required ?? [];
+    const inv = entitySchemas(entity("Invoice"), traits, null, surfaceOf(entity("Invoice"))).create.required ?? [];
+    const bill = entitySchemas(entity("Bill"), traits, null, surfaceOf(entity("Bill"))).create.required ?? [];
     expect(inv).toContain("currency");
     expect(inv).toContain("due_date");
     expect(bill).toContain("due_date");
@@ -281,20 +289,45 @@ describe("entitySchemas over the real erp-core pack", () => {
 
   it("describes every field of every entity — nothing undescribable in any pack entity", () => {
     const undescribable = entities.flatMap(
-      (e) => entitySchemas(e, traits, null).undescribable,
+      (e) => entitySchemas(e, traits, null, surfaceOf(e)).undescribable,
     );
     expect(undescribable).toEqual([]);
   });
 
-  it("leaves an update body wholly optional and sets no additionalProperties anywhere", () => {
-    const v = entitySchemas(entity("Invoice"), traits, null);
+  it("leaves an update body wholly optional and closes both request bodies to undeclared keys", () => {
+    const v = entitySchemas(entity("Invoice"), traits, null, surfaceOf(entity("Invoice")));
     expect(v.update.required).toBeUndefined();
-    // Measured rather than cautious: an unknown key is accepted, stored and echoed by the JSONB and
-    // in-memory stores and silently dropped by the column store, so `false` would be false of two
-    // of the three and `true` would promise the column store's drop is a round trip.
+    // `false` on both requests and nothing on the response. This test used to pin all three as
+    // absent, with the reason that an unknown key was stored by the JSONB and in-memory stores and
+    // dropped by the column store — true then, and the reason it was a defect rather than a fact to
+    // describe. The create and update handlers now refuse an undeclared key 422 before any store
+    // sees it, so `false` is true of every store.
     expect(v.response.additionalProperties).toBeUndefined();
-    expect(v.create.additionalProperties).toBeUndefined();
-    expect(v.update.additionalProperties).toBeUndefined();
+    expect(v.create.additionalProperties).toBe(false);
+    expect(v.update.additionalProperties).toBe(false);
+    // Closed, the update body must still admit the concurrency token the handler strips before the
+    // write surface is asked and the console sends on every edit; the create handler has no token.
+    expect(v.update.properties?.["expectedUpdatedAt"]).toMatchObject({ type: "string" });
+    expect(v.create.properties?.["expectedUpdatedAt"]).toBeUndefined();
+  });
+
+  it("offers no request a field the server owns, and offers create the caller's own id", () => {
+    const v = entitySchemas(entity("Invoice"), traits, null, surfaceOf(entity("Invoice")));
+    // Stamped by the server on the same request, or by a write effect on the posting edge.
+    for (const owned of ["created_at", "updated_at", "created_by", "updated_by", "booking_rate", "withholding_total", "paid_at"]) {
+      expect(v.response.properties?.[owned], owned).toBeDefined();
+      expect(v.create.properties?.[owned], owned).toBeUndefined();
+      expect(v.update.properties?.[owned], owned).toBeUndefined();
+    }
+    // A sequence number is admitted on create (an import keeping legacy numbers) and refused after.
+    expect(v.create.properties?.["invoice_number"]).toBeDefined();
+    expect(v.update.properties?.["invoice_number"]).toBeUndefined();
+    // The id: create only, with the pattern the handler refuses outside of.
+    expect(v.create.properties?.["id"]?.pattern).toBe("^[A-Za-z0-9_-]{1,200}$");
+    expect(v.update.properties?.["id"]).toBeUndefined();
+    // The control: an ordinary declared field is on both.
+    expect(v.create.properties?.["total"]).toBeDefined();
+    expect(v.update.properties?.["total"]).toBeDefined();
   });
 
   it("publishes a lifecycle state field as the server enforces it, not as a free enum", () => {
@@ -304,7 +337,7 @@ describe("entitySchemas over the real erp-core pack", () => {
     // answered 422 to.
     const lifecycle = entityLifecycleShape(manifest, "Invoice");
     expect(lifecycle).toEqual({ stateField: "state", initialState: "draft" });
-    const v = entitySchemas(entity("Invoice"), traits, lifecycle);
+    const v = entitySchemas(entity("Invoice"), traits, lifecycle, surfaceOf(entity("Invoice")));
     expect(v.create.properties?.["state"]?.enum).toEqual(["draft"]);
     expect(v.create.properties?.["state"]?.description).toContain("transition");
     expect(v.update.properties?.["state"]?.readOnly).toBe(true);
@@ -314,7 +347,7 @@ describe("entitySchemas over the real erp-core pack", () => {
     // And a field that is not the state field is untouched.
     expect(v.update.properties?.["total"]?.readOnly).toBeUndefined();
     // The control: with no lifecycle the field is published as declared.
-    const bare = entitySchemas(entity("Invoice"), traits, null);
+    const bare = entitySchemas(entity("Invoice"), traits, null, surfaceOf(entity("Invoice")));
     expect(bare.create.properties?.["state"]?.enum).toHaveLength(5);
     expect(bare.update.properties?.["state"]?.readOnly).toBeUndefined();
   });
@@ -322,17 +355,17 @@ describe("entitySchemas over the real erp-core pack", () => {
   it("follows the lifecycle's own state field, which is not always `state`", () => {
     const lifecycle = entityLifecycleShape(manifest, "Opportunity");
     expect(lifecycle?.stateField).toBe("stage");
-    const v = entitySchemas(entity("Opportunity"), traits, lifecycle);
+    const v = entitySchemas(entity("Opportunity"), traits, lifecycle, surfaceOf(entity("Opportunity")));
     expect(v.create.properties?.["stage"]?.enum).toEqual([lifecycle?.initialState]);
     expect(v.update.properties?.["stage"]?.readOnly).toBe(true);
     expect(entityLifecycleShape(manifest, "Vendor")).toBeNull();
   });
 
-  it("emits no pattern for `id`, because the API does not enforce one", () => {
-    // `rec_` + base36 is the GENERATOR's shape; `resolveRecordId` keeps a caller-supplied id as
-    // given. A pattern would describe a constraint this API does not have, which is the
-    // falsely-specific direction of a falsely-complete description.
-    const id = entitySchemas(entity("Vendor"), traits, null)
+  it("emits no pattern for the RESPONSE `id`, which describes what a record carries, not what a caller sends", () => {
+    // `rec_` + base36 is the GENERATOR's shape and a caller-supplied id is kept, so the response
+    // promises a string and no narrower shape; the create request carries the pattern the handler
+    // enforces on a caller's id.
+    const id = entitySchemas(entity("Vendor"), traits, null, surfaceOf(entity("Vendor")))
       .response.properties?.["id"];
     expect(id?.type).toBe("string");
     expect(id?.pattern).toBeUndefined();

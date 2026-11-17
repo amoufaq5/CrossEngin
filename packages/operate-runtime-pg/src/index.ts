@@ -3,6 +3,7 @@ export * from "./tenant-context.js";
 export * from "./list-sql.js";
 export * from "./temporal-sql.js";
 export * from "./entity-store.js";
+export * from "./document-integrity.js";
 export * from "./column-plan.js";
 export * from "./entity-ddl.js";
 export * from "./boot-schema-targets.js";

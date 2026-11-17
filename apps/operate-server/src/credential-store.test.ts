@@ -308,41 +308,81 @@ describe("PostgresCredentialStore", () => {
     });
   });
 
-  describe("recordFailure", () => {
-    it("increments and locks in ONE statement, reading the clock from the database", async () => {
+  describe("reserveAttempt", () => {
+    it("counts the attempt and locks in ONE statement, reading the clock from the database", async () => {
       // Read-modify-write is what this must not be: the losing side of that race ADMITS an
-      // attempt, so two concurrent guesses would advance the counter by one. And the lock comes
-      // from `now()` rather than the process clock, so a drifted worker cannot unlock early.
+      // attempt. And the lock comes from `now()`, so a drifted worker cannot unlock early.
       const { conn, captured } = fakeDb([
         [{ credential_failed_attempts: 10, credential_locked_until: "2026-10-11T12:15:00.000Z" }],
       ]);
-      const store = new PostgresCredentialStore(conn);
-      const r = await store.recordFailure(USER, 10, 900);
-      expect(r).toEqual({ failedAttempts: 10, lockedUntil: "2026-10-11T12:15:00.000Z" });
+      const r = await new PostgresCredentialStore(conn).reserveAttempt(USER, 10, 900);
+      expect(r).toEqual({
+        reserved: true,
+        failedAttempts: 10,
+        lockedUntil: "2026-10-11T12:15:00.000Z",
+      });
       expect(captured).toHaveLength(1);
       const sql = captured[0]!.sql;
       expect(sql).toMatch(/^UPDATE meta\.users SET/);
-      expect(sql).toContain("credential_failed_attempts = credential_failed_attempts + 1");
       expect(sql).toContain("now() + make_interval");
       expect(sql).toContain("RETURNING");
       expect(captured[0]!.params).toEqual([USER, 10, 900]);
+    });
+
+    it("admits a row only while it is unlocked, which is what bounds concurrent guesses", async () => {
+      // The whole parallel-bypass fix is this predicate: a concurrent UPDATE re-checks it against
+      // the row the earlier one committed, so once the threshold-th reservation sets the lock every
+      // later one matches nothing and is never evaluated.
+      const { conn, captured } = fakeDb([[]]);
+      await new PostgresCredentialStore(conn).reserveAttempt(USER, 10, 900);
+      expect(captured[0]!.sql).toContain(
+        "AND (credential_locked_until IS NULL OR credential_locked_until <= now())",
+      );
+    });
+
+    it("restarts the count at 1 when the previous lock has expired, rather than continuing it", async () => {
+      // Continuing it was the persistent re-lock: the count never fell below the threshold, so one
+      // wrong guess after the window lapsed re-locked the account, for ever.
+      const { conn, captured } = fakeDb([[]]);
+      await new PostgresCredentialStore(conn).reserveAttempt(USER, 10, 900);
+      const sql = captured[0]!.sql;
+      const next =
+        "CASE WHEN credential_locked_until IS NULL THEN credential_failed_attempts + 1 ELSE 1 END";
+      expect(sql).toContain(`credential_failed_attempts = ${next}`);
       // The threshold is compared against the POST-increment value, or the lock lands one attempt
       // late and the configured figure means something other than what it says.
-      expect(sql).toContain("credential_failed_attempts + 1 >= $2");
+      expect(sql).toContain(`WHEN ${next} >= $2`);
+      // An expired lock is cleared when the new window does not reach the threshold.
+      expect(sql).toContain("ELSE NULL END");
     });
 
-    it("preserves an existing lock rather than clearing it below the threshold", async () => {
-      const { conn, captured } = fakeDb([[{ credential_failed_attempts: 1 }]]);
-      await new PostgresCredentialStore(conn).recordFailure(USER, 10, 900);
-      expect(captured[0]!.sql).toContain("ELSE credential_locked_until END");
-    });
-
-    it("answers zero for a user that does not exist", async () => {
+    it("answers not-reserved when no row matched (locked, or gone)", async () => {
       const { conn } = fakeDb([[]]);
-      expect(await new PostgresCredentialStore(conn).recordFailure(USER, 3, 30)).toEqual({
-        failedAttempts: 0,
+      expect(await new PostgresCredentialStore(conn).reserveAttempt(USER, 3, 30)).toEqual({
+        reserved: false,
+      });
+    });
+
+    it("reports no lock below the threshold", async () => {
+      const { conn } = fakeDb([[{ credential_failed_attempts: 1, credential_locked_until: null }]]);
+      expect(await new PostgresCredentialStore(conn).reserveAttempt(USER, 3, 30)).toEqual({
+        reserved: true,
+        failedAttempts: 1,
         lockedUntil: null,
       });
+    });
+  });
+
+  describe("releaseAttempt", () => {
+    it("gives one back, never below zero, and lifts the lock only below the threshold", async () => {
+      const { conn, captured } = fakeDb([[]]);
+      await new PostgresCredentialStore(conn).releaseAttempt(USER, 10);
+      const sql = captured[0]!.sql;
+      expect(sql).toContain("credential_failed_attempts = GREATEST(credential_failed_attempts - 1, 0)");
+      expect(sql).toContain(
+        "credential_locked_until = CASE WHEN credential_failed_attempts - 1 < $2 THEN NULL ELSE credential_locked_until END",
+      );
+      expect(captured[0]!.params).toEqual([USER, 10]);
     });
   });
 
@@ -391,13 +431,15 @@ describe("PostgresCredentialStore", () => {
       [{ id: USER, status: "active", credential_hash: HASH, credential_failed_attempts: 0 }],
       [{ credential_failed_attempts: 1 }],
       [],
+      [],
       [{}],
     ]);
     const store = new PostgresCredentialStore(conn);
     await store.resolveTenant("acme");
     await store.findByEmail("a@b.test");
     await store.findById(USER);
-    await store.recordFailure(USER, 3, 30);
+    await store.reserveAttempt(USER, 3, 30);
+    await store.releaseAttempt(USER, 3);
     await store.recordSuccess(USER);
     await store.setCredential(USER, HASH);
     expect(sql()).not.toContain("set_config");

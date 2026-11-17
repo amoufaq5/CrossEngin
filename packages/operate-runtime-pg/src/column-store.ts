@@ -7,15 +7,19 @@ import {
   pgpSymDecryptExpr,
   pgpSymEncryptExpr,
   type PgConnection,
+  type PgQueryResult,
 } from "@crossengin/kernel-pg";
 import {
   encodeKeyset,
   keysetOf,
   ListSurfaceUnserveable,
+  ReferencedRecordInUse,
+  ReferenceNotFound,
   UniqueViolation,
   toDateWire,
   toDecimalWire,
   toTimeWire,
+  type ConditionalUpdate,
   type DecimalSpec,
   type EntityRecord,
   type EntityStore,
@@ -25,6 +29,7 @@ import {
   type ListSort,
   type ListValueType,
   type TransactionalEntityStore,
+  type UpdatePrecondition,
 } from "@crossengin/operate-runtime";
 
 import type { OnDelete } from "@crossengin/types/meta-schema";
@@ -166,6 +171,8 @@ export class ColumnEncryptionUnavailable extends Error {
 
 /** Postgres's unique-violation SQLSTATE. One spelling, named rather than inline. */
 const PG_UNIQUE_VIOLATION = "23505";
+/** Postgres's foreign-key-violation SQLSTATE: a dangling reference on write, a referenced row on delete. */
+const PG_FOREIGN_KEY_VIOLATION = "23503";
 
 export interface ColumnMappedEntityStoreOptions {
   readonly schema?: string;
@@ -369,7 +376,35 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
         if (field !== undefined) throw new UniqueViolation(entity, field);
       }
     }
+    // The document store refuses the same write by lookup, so both stores answer one request the
+    // same way: a `23503` on *this* entity's own key is a dangling reference it was asked to write.
+    if (code === PG_FOREIGN_KEY_VIOLATION) {
+      const owner = this.foreignKeyOwner((err as { readonly constraint?: unknown }).constraint);
+      if (owner !== null && owner.entity === entity) {
+        throw new ReferenceNotFound(owner.entity, owner.field, owner.target);
+      }
+    }
     throw err;
+  }
+
+  /**
+   * The (entity, field, target) a foreign-key constraint this store emitted belongs to, by the name
+   * `emitForeignKeyDdl` gave it — truncated as Postgres truncates an identifier, since that is the
+   * name a `23503` reports.
+   */
+  private foreignKeyOwner(
+    constraint: unknown,
+  ): { readonly entity: string; readonly field: string; readonly target: string } | null {
+    if (typeof constraint !== "string") return null;
+    for (const plan of this.plans.values()) {
+      for (const col of plan.columns) {
+        if (col.referenceTarget === null) continue;
+        if (`fk_${plan.table}_${col.column}`.slice(0, 63) === constraint) {
+          return { entity: plan.entity, field: col.field, target: col.referenceTarget };
+        }
+      }
+    }
+    return null;
   }
 
   /**
@@ -550,6 +585,93 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
     id: string,
     patch: EntityRecord,
   ): Promise<EntityRecord | null> {
+    return this.updateWhere(tx, tenantId, entity, id, patch, null);
+  }
+
+  /**
+   * `updateOn` with the precondition in the `UPDATE`'s own `WHERE`. Under READ COMMITTED a row a
+   * concurrent transaction has updated is waited on and then re-checked against the predicate on
+   * its newest committed version, so a write whose precondition the winner invalidated matches no
+   * row — the compare and the set are one statement. A zero-row answer is then told apart from a
+   * missing record by one existence read, which is current as of that statement and so sees the
+   * winner's row.
+   */
+  private async updateIfOn(
+    tx: PgConnection,
+    tenantId: string,
+    entity: string,
+    id: string,
+    patch: EntityRecord,
+    expected: UpdatePrecondition,
+  ): Promise<ConditionalUpdate> {
+    const record = await this.updateWhere(tx, tenantId, entity, id, patch, expected);
+    if (record !== null) return { kind: "updated", record };
+    const plan = this.planFor(entity);
+    const exists = await tx.query(
+      `SELECT 1 FROM ${qualifyTable(plan.schema, plan.table)}
+        WHERE ${quoteIdent("tenant_id")} = $1 AND ${quoteIdent("id")} = $2`,
+      [tenantId, id],
+    );
+    return exists.rows.length > 0 ? { kind: "precondition_failed" } : { kind: "not_found" };
+  }
+
+  /**
+   * One `IS NOT DISTINCT FROM` per expected field, so an absent value (`null`, or a key the record
+   * omits) matches only a NULL column. A field the store cannot compare in SQL is refused rather
+   * than skipped: an encrypted column holds ciphertext, which no plaintext equals, and a field with
+   * no column has nothing to compare — dropping either would make the precondition silently weaker
+   * than the caller asked for.
+   */
+  private preconditionClauses(
+    entity: string,
+    expected: UpdatePrecondition,
+    params: unknown[],
+  ): string[] {
+    const idx = this.indexFor(entity);
+    const clauses: string[] = [];
+    for (const [field, value] of Object.entries(expected)) {
+      const mapping = idx.get(field);
+      if (mapping === undefined) {
+        throw new Error(`cannot compare '${entity}.${field}' in a conditional update: it has no column`);
+      }
+      if (mapping.encryptAtRest) {
+        throw new Error(
+          `cannot compare '${entity}.${field}' in a conditional update: it is encrypted at rest`,
+        );
+      }
+      // An instant is compared as this store serves it — truncated to the millisecond — because the
+      // expected value was read through `get`, and a row whose column holds microseconds (written by
+      // a pre-ADR-0334 `now()` default) would otherwise fail every conditional update on it for good:
+      // the 409 hands back the same truncated value, so a client retrying with it loops.
+      const column =
+        mapping.sqlType === "TIMESTAMPTZ"
+          ? `date_trunc('milliseconds', ${quoteIdent(mapping.column)})`
+          : quoteIdent(mapping.column);
+      if (value === undefined || value === null) {
+        clauses.push(`${column} IS NULL`);
+        continue;
+      }
+      const bound = readColumn(mapping, value);
+      const json = jsonbBinding(mapping, bound);
+      if (json !== null) {
+        params.push(json.param);
+        clauses.push(`${column} IS NOT DISTINCT FROM $${params.length.toString()}::${json.cast}`);
+      } else {
+        params.push(bound);
+        clauses.push(`${column} IS NOT DISTINCT FROM $${params.length.toString()}::${mapping.sqlType}`);
+      }
+    }
+    return clauses;
+  }
+
+  private async updateWhere(
+    tx: PgConnection,
+    tenantId: string,
+    entity: string,
+    id: string,
+    patch: EntityRecord,
+    expected: UpdatePrecondition | null,
+  ): Promise<EntityRecord | null> {
     const plan = this.planFor(entity);
     const qualified = qualifyTable(plan.schema, plan.table);
     const sets: string[] = [];
@@ -567,12 +689,14 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
     // value this store serves truncated, so a keyset cursor on it cannot round-trip and the page
     // walk does not terminate. Measured live.
     if (!stampsUpdatedAt) sets.push(`${quoteIdent("updated_at")} = ${MILLISECOND_NOW_SQL}`);
+    const where = [`${quoteIdent("tenant_id")} = $1`, `${quoteIdent("id")} = $2`];
+    if (expected !== null) where.push(...this.preconditionClauses(entity, expected, params));
     let res;
     try {
       res = await tx.query<Record<string, unknown>>(
         `UPDATE ${qualified}
           SET ${sets.join(", ")}
-        WHERE ${quoteIdent("tenant_id")} = $1 AND ${quoteIdent("id")} = $2
+        WHERE ${where.join(" AND ")}
         RETURNING ${this.selectList(plan)}`,
         params,
       );
@@ -595,13 +719,33 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
     return this.scoped(tenantId, (tx) => this.updateOn(tx, tenantId, entity, id, patch));
   }
 
+  async updateIf(
+    tenantId: string,
+    entity: string,
+    id: string,
+    patch: EntityRecord,
+    expected: UpdatePrecondition,
+  ): Promise<ConditionalUpdate> {
+    return this.scoped(tenantId, (tx) => this.updateIfOn(tx, tenantId, entity, id, patch, expected));
+  }
+
   private async removeOn(tx: PgConnection, tenantId: string, entity: string, id: string): Promise<boolean> {
     const plan = this.planFor(entity);
     const qualified = qualifyTable(plan.schema, plan.table);
-    const res = await tx.query(
-      `DELETE FROM ${qualified} WHERE ${quoteIdent("tenant_id")} = $1 AND ${quoteIdent("id")} = $2`,
-      [tenantId, id],
-    );
+    let res: PgQueryResult;
+    try {
+      res = await tx.query(
+        `DELETE FROM ${qualified} WHERE ${quoteIdent("tenant_id")} = $1 AND ${quoteIdent("id")} = $2`,
+        [tenantId, id],
+      );
+    } catch (err) {
+      // On a delete the violated key is the *referencing* table's `ON DELETE RESTRICT`.
+      if ((err as { readonly code?: unknown }).code === PG_FOREIGN_KEY_VIOLATION) {
+        const owner = this.foreignKeyOwner((err as { readonly constraint?: unknown }).constraint);
+        if (owner !== null) throw new ReferencedRecordInUse(entity, owner.entity, owner.field);
+      }
+      throw err;
+    }
     return res.rowCount > 0;
   }
 
@@ -639,6 +783,10 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
         update: (t, entity, id, patch) => {
           assertTenant(t);
           return this.updateOn(tx, t, entity, id, patch);
+        },
+        updateIf: (t, entity, id, patch, expected) => {
+          assertTenant(t);
+          return this.updateIfOn(tx, t, entity, id, patch, expected);
         },
         remove: (t, entity, id) => {
           assertTenant(t);

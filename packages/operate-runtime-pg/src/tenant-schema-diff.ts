@@ -135,6 +135,7 @@ export const TENANT_SCHEMA_CHANGE_KINDS = [
   "undeclared_column",
   "undeclared_table",
   "unservable_field_type",
+  "unadmitted_expression_default",
 ] as const;
 
 export type TenantSchemaChangeKind = (typeof TENANT_SCHEMA_CHANGE_KINDS)[number];
@@ -161,6 +162,11 @@ export type TenantSchemaChangeKind = (typeof TENANT_SCHEMA_CHANGE_KINDS)[number]
  * `TenantColumnStoreRegistry`, which is built to degrade a refused application to the JSONB
  * fallback (ADR-0314) and cannot degrade an exception. Same fact, two situations, and the situation
  * decides whether it stops the process.
+ *
+ * `unadmitted_expression_default` is the same kind of change for a different fact: a field whose
+ * `{kind: "expression"}` default is outside the kernel's admitted set, so there is no SQL to emit
+ * for it. `validateManifest` refuses it first, so it is reached only by a manifest stored before
+ * that rule; blocking, `sql` null, and its detail never carries the expression.
  */
 export interface TenantSchemaChange {
   readonly kind: TenantSchemaChangeKind;

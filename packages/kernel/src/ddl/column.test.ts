@@ -21,10 +21,16 @@ describe("columnNameForField", () => {
 });
 
 describe("emitDefault", () => {
-  it("returns an expression default verbatim", () => {
+  it("renders an admitted expression default from its lookup, not from the input", () => {
     expect(emitDefault({ kind: "expression", expression: "uuid_generate_v7()" })).toBe(
       "uuid_generate_v7()",
     );
+  });
+
+  it("refuses an expression default outside the admitted set rather than rendering it", () => {
+    expect(() =>
+      emitDefault({ kind: "expression", expression: "'a'); CREATE TABLE public.pwned(x int); --" }),
+    ).toThrow(/not one of the admitted expressions/);
   });
 
   it("quotes a string literal", () => {
@@ -33,6 +39,22 @@ describe("emitDefault", () => {
 
   it("escapes single quotes in a string literal", () => {
     expect(emitDefault({ kind: "literal", value: "it's fine" })).toBe("'it''s fine'");
+  });
+
+  it("renders a value carrying a backslash as an E-string, so `\\'` cannot close it under either setting", () => {
+    // The payload that executed on PG 16 with standard_conforming_strings off when the literal was
+    // only quote-doubled: `'\''` reads there as a one-quote string followed by SQL.
+    const payload = "\\'); CREATE TABLE public.pwned_lit(y int); --";
+    expect(emitDefault({ kind: "literal", value: payload })).toBe(
+      "E'\\\\''); CREATE TABLE public.pwned_lit(y int); --'",
+    );
+    expect(emitDefault({ kind: "literal", value: "a\\b" })).toBe("E'a\\\\b'");
+    expect(emitDefault({ kind: "literal", value: { p: "C:\\x" } })).toBe(`E'{"p":"C:\\\\\\\\x"}'::jsonb`);
+  });
+
+  it("leaves a value with no backslash in the plain form, so existing DDL does not move", () => {
+    expect(emitDefault({ kind: "literal", value: "it's fine" })).not.toMatch(/^E'/);
+    expect(emitDefault({ kind: "literal", value: { a: "b" } })).toBe(`'{"a":"b"}'::jsonb`);
   });
 
   it("renders booleans as TRUE / FALSE", () => {

@@ -145,6 +145,18 @@ export function withDatetimeWireType<S extends EntityStore>(store: S, index: Tem
       const updated = await store.update(tenantId, entity, id, map(entity, patch, "inbound"));
       return updated === null ? null : map(entity, updated, "stored");
     },
+    // `expected` holds values read through this decorator's own `get`, so it crosses inbound the
+    // way a patch does and is compared in the form the store beneath holds.
+    async updateIf(tenantId, entity, id, patch, expected) {
+      const result = await store.updateIf(
+        tenantId,
+        entity,
+        id,
+        map(entity, patch, "inbound"),
+        map(entity, expected, "inbound"),
+      );
+      return result.kind === "updated" ? { kind: "updated", record: map(entity, result.record, "stored") } : result;
+    },
     remove(tenantId, entity, id) {
       return store.remove(tenantId, entity, id);
     },

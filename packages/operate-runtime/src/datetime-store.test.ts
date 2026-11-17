@@ -257,6 +257,7 @@ describe("withDatetimeWireType", () => {
       get: async () => null,
       create: async (_t, _e, r) => r,
       update: async () => null,
+      updateIf: async () => ({ kind: "not_found" }),
       remove: async () => false,
     };
     const store = withDatetimeWireType(plain, INDEX);

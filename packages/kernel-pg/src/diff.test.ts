@@ -487,6 +487,33 @@ describe("diffSchema — no false drift on a correct schema", () => {
     const diff = diffSchema([target], { schema: "meta", tables: [drifted] });
     expect(diff.modifiedTables[0]?.removedIndexes).toEqual(["idx_widgets_adhoc"]);
   });
+
+  it("does not report an index in the table's declared runtime namespace, and still reports one outside it", () => {
+    const runtimeIndex = {
+      name: "widgets_rt_uq_0123456789abcdef",
+      columns: ["tenant_id", "(document ->> 'code'::text)"],
+      unique: true,
+      primary: false,
+      method: "btree",
+      predicate: "(entity = 'Item'::text)",
+      constraintBacked: false,
+    };
+    const live: LiveTable = { ...liveTable, indexes: [...liveTable.indexes, runtimeIndex] };
+    const withPrefix = diffSchema([{ ...target, runtimeIndexPrefix: "widgets_rt_" }], {
+      schema: "meta",
+      tables: [live],
+    });
+    expect(withPrefix.hasDrift).toBe(false);
+    // The control: the same live index against a table declaring no namespace is drift, so the
+    // silence above is the declaration's and not the diff failing to see the index.
+    const without = diffSchema([target], { schema: "meta", tables: [live] });
+    expect(without.modifiedTables[0]?.removedIndexes).toEqual([runtimeIndex.name]);
+    const elsewhere = diffSchema([{ ...target, runtimeIndexPrefix: "other_rt_" }], {
+      schema: "meta",
+      tables: [live],
+    });
+    expect(elsewhere.modifiedTables[0]?.removedIndexes).toEqual([runtimeIndex.name]);
+  });
 });
 
 describe("POLICY_DELTA_REASONS", () => {

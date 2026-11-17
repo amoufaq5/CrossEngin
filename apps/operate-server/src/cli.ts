@@ -9,6 +9,11 @@ import { REQUIRED_JWT_CLAIMS } from "@crossengin/api-gateway-runtime";
 import { REGIONS } from "@crossengin/residency";
 import { DELETION_SUBSYSTEMS, SUBSYSTEM_DISPOSITIONS } from "@crossengin/tenant-lifecycle";
 import {
+  parsePgPoolSetting,
+  pgPoolSettingForFlag,
+  type PgPoolSettings,
+} from "@crossengin/kernel-pg";
+import {
   SENSITIVE_DATA_CLASSIFICATIONS,
   type DataClassification,
 } from "@crossengin/types/meta-schema";
@@ -111,6 +116,26 @@ export interface ServeOptions {
    * settleable documents are now unguarded, because the defect being closed was the silence.
    */
   readonly allowUncoveredSettlement: boolean;
+  /**
+   * Keeps `--store pg` storing a reference to a record that does not exist and deleting a record
+   * others reference — the document store's behaviour before it enforced references.
+   *
+   * Off by default, on ADR-0338's rule read carefully: what the enforcement refuses is a write whose
+   * reference names no record (the general ledger's fallback account code, measured to post journal
+   * lines naming no account) and a delete that would leave references dangling, and neither of
+   * those was a correct answer. But one of them is a workflow a deployment runs today — sending an
+   * invoice before the tenant's ledger accounts are configured — so the old behaviour stays one
+   * announced flag away. Uniqueness is not affected by it. Refused on any store but `pg`, because
+   * the column store's foreign keys are DDL that no flag removes, and a flag that changed nothing
+   * there would read as having done something.
+   */
+  readonly allowDanglingReferences: boolean;
+  /**
+   * Refuse an approve-class transition (approve, post, mark_paid, reimburse, Payment.complete)
+   * fired by the person recorded as the record's creator. Off by default, because a single-user
+   * tenant has nobody else to approve with — on there, every bill would be unapprovable.
+   */
+  readonly segregationOfDuties: boolean;
   /**
    * How the at-rest column key is obtained (ADR-0347): `derived` recomputes it from
    * `COLUMN_ENCRYPTION_SECRET` on demand and stores nothing, `envelope` stores a wrapped per-tenant
@@ -620,6 +645,12 @@ export interface ServeOptions {
   /** Maximum buffered request body, as bytes or a size like 25mb (default 10mb, floor 1kb, ceiling 1gb). */
   readonly maxRequestBodyBytes: number | null;
   /**
+   * Overrides of the serving pool's bounds and per-session limits (`SERVING_POOL_SETTINGS` in
+   * `@crossengin/kernel-pg`); a key absent here takes that default. Only the serving connection
+   * reads these — migrate and the operator subcommands run unbounded on purpose.
+   */
+  readonly pgPool: Partial<PgPoolSettings>;
+  /**
    * Per-route body-size overrides as `<path-prefix>=<size>` (repeatable), longest prefix winning.
    *
    * ADR-0312 left "a per-route or per-tenant request-body limit is unaddressed". The cost of one
@@ -663,6 +694,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let allowPlaintextPhi = false;
   let allowCursorDisclosure = false;
   let allowUncoveredSettlement = false;
+  let allowDanglingReferences = false;
+  let segregationOfDuties = false;
   let columnKeyMode: ColumnKeyMode = "derived";
   let columnKeyTtlMs: number | null = null;
   let schema: string | null = null;
@@ -800,6 +833,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let deletionRunnerApprovedBy: string | null = null;
   let deletionRunnerBatchSize: number | null = null;
   let maxRequestBodyBytes: number | null = null;
+  const pgPool: { -readonly [K in keyof PgPoolSettings]?: number } = {};
   const maxRequestBodyRouteSpecs: string[] = [];
   let help = false;
   let version = false;
@@ -1058,6 +1092,10 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       allowCursorDisclosure = true;
     } else if (arg === ALLOW_UNCOVERED_SETTLEMENT_FLAG) {
       allowUncoveredSettlement = true;
+    } else if (arg === "--allow-dangling-references") {
+      allowDanglingReferences = true;
+    } else if (arg === "--segregation-of-duties") {
+      segregationOfDuties = true;
     } else if (arg === COLUMN_KEY_MODE_FLAG || arg.startsWith(`${COLUMN_KEY_MODE_FLAG}=`)) {
       const raw = takeValue(arg, next, COLUMN_KEY_MODE_FLAG);
       if (!(COLUMN_KEY_MODES as readonly string[]).includes(raw)) {
@@ -1677,6 +1715,20 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       if (!parsed.ok) throw new CliUsageError(`invalid --max-request-body: ${parsed.reason}`);
       maxRequestBodyBytes = parsed.bytes;
       i += consumed();
+    } else if (pgPoolSettingForFlag(arg.split("=")[0] ?? "") !== undefined) {
+      const flag = arg.split("=")[0] ?? "";
+      const key = pgPoolSettingForFlag(flag);
+      const raw = takeValue(arg, next, flag);
+      if (key === undefined) throw new CliUsageError(`unknown flag: ${flag}`);
+      // Refused rather than last-wins: which of two values bounds every statement must not depend
+      // on argv order.
+      if (pgPool[key] !== undefined) throw new CliUsageError(`${flag} given more than once`);
+      try {
+        pgPool[key] = parsePgPoolSetting(key, raw);
+      } catch (err) {
+        throw new CliUsageError(err instanceof Error ? err.message : String(err));
+      }
+      i += consumed();
     } else if (arg === "--metering-config" || arg.startsWith("--metering-config=")) {
       meteringConfig = takeValue(arg, next, "--metering-config");
       i += consumed();
@@ -1690,6 +1742,14 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
 
   if (licenseFile !== null && licenseKey === null) {
     throw new CliUsageError("--license requires --license-key (the licensor's base64 Ed25519 public key)");
+  }
+  if (allowDanglingReferences && store !== "pg") {
+    throw new CliUsageError(
+      `--allow-dangling-references applies to --store pg only: --store ${store} ` +
+        (store === "pg-columns"
+          ? "enforces references with foreign keys in its DDL, which no flag removes"
+          : "keeps no durable records whose references could dangle"),
+    );
   }
   if (platformAdmin && store === "memory") {
     throw new CliUsageError("--platform-admin requires a Postgres store (--store pg or pg-columns)");
@@ -2094,6 +2154,15 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
         " meta.notification_preferences has no in-memory equivalent",
     );
   }
+  // A pool bound with no pool is a setting read, validated and ignored, which reads to an operator
+  // as tuned.
+  const pgPoolFlagsGiven = Object.keys(pgPool);
+  if (pgPoolFlagsGiven.length > 0 && store === "memory") {
+    throw new CliUsageError(
+      "the --pg-* pool flags need a Postgres store (--store pg or pg-columns): --store memory " +
+        "opens no database connection, so they would bound nothing.",
+    );
+  }
   // The gate reads `meta.tenants`, which the memory store does not have — and unlike a scheduler
   // that would merely go quiet, a gate whose directory throws refuses *every* request with a 503.
   if (tenantStatusGate && store === "memory") {
@@ -2308,6 +2377,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     allowPlaintextPhi,
     allowCursorDisclosure,
     allowUncoveredSettlement,
+    allowDanglingReferences,
+    segregationOfDuties,
     columnKeyMode,
     columnKeyTtlMs,
     sensitiveFieldRoles,
@@ -2425,6 +2496,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     deletionRunnerApprovedBy,
     deletionRunnerBatchSize,
     maxRequestBodyBytes,
+    pgPool,
     maxRequestBodyRoutes: parsedRouteLimits.limits,
     defaultScheme,
     help,
@@ -2514,6 +2586,87 @@ export function parsePruneArgs(argv: readonly string[]): PruneOptions {
 
   return { pack, manifestPath, schema, tenantId, allTenants, dryRun, help };
 }
+
+/**
+ * Options for the `document-indexes` maintenance subcommand: build the JSONB store's per-manifest
+ * unique indexes **as the table's owner**, before the API boots.
+ *
+ * It exists because of a measured interaction between two fixes. ADR-0423 enforces a declared
+ * `unique` field on `--store pg` with one partial unique expression index per field on the shared
+ * `meta.operate_entity_records`, created from the served manifest; ADR-0424 connects the API as a
+ * confined role that owns nothing. Postgres refuses `CREATE INDEX` to a non-owner — and refuses
+ * `CREATE INDEX IF NOT EXISTS` too, even when the index exists, because the ownership check comes
+ * first. So on the shipped stack the API alone could never build one, and every declared unique
+ * field read `index_not_owner` at boot. The owner already runs two one-shots before the API
+ * (`migrate`, `app-role`); this is the third, and it is the only step that reads the manifest.
+ */
+export interface DocumentIndexesOptions {
+  readonly pack: string | null;
+  readonly manifestPath: string | null;
+  readonly schema: string | null;
+  readonly help: boolean;
+}
+
+/** Parses the argv *after* the `document-indexes` token. */
+export function parseDocumentIndexesArgs(argv: readonly string[]): DocumentIndexesOptions {
+  let pack: string | null = null;
+  let manifestPath: string | null = null;
+  let schema: string | null = null;
+  let help = false;
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === undefined) continue;
+    const next = argv[i + 1];
+    const consumed = (): number => (isInline(arg) ? 0 : 1);
+    if (arg === "--help" || arg === "-h") {
+      help = true;
+    } else if (arg === "--pack" || arg.startsWith("--pack=")) {
+      pack = takeValue(arg, next, "--pack");
+      i += consumed();
+    } else if (arg === "--manifest" || arg.startsWith("--manifest=")) {
+      manifestPath = takeValue(arg, next, "--manifest");
+      i += consumed();
+    } else if (arg === "--schema" || arg.startsWith("--schema=")) {
+      schema = takeValue(arg, next, "--schema");
+      i += consumed();
+    } else {
+      throw new CliUsageError(`unknown argument: ${arg}`);
+    }
+  }
+  if (!help) {
+    if (pack === null && manifestPath === null) {
+      throw new CliUsageError("one of --pack or --manifest is required");
+    }
+    if (pack !== null && manifestPath !== null) {
+      throw new CliUsageError("--pack and --manifest are mutually exclusive");
+    }
+  }
+  return { pack, manifestPath, schema, help };
+}
+
+export const documentIndexesHelpText = `operate-server document-indexes — build the JSONB store's unique indexes as the owner
+
+Usage:
+  operate-server document-indexes --pack <name> [--schema <name>]
+  operate-server document-indexes --manifest <file.json> [--schema <name>]
+
+Creates one partial unique index per declared unique field of the manifest on
+meta.operate_entity_records, the table --store pg serves from. Run it as the
+table's OWNER (the role that ran migrate), before the API boots: the API's own
+role owns nothing, and Postgres refuses CREATE INDEX to a non-owner even when the
+index already exists. Idempotent. Uses standard PG* env vars for the connection.
+
+A field whose existing rows already hold duplicates is reported and skipped,
+never fixed: deduplicate, then re-run. Exits 1 when an index could not be built
+for a reason other than duplicates (most often: this is not the owner), 2 on a
+usage error, 0 otherwise.
+
+Options:
+  --pack <name>        Built-in vertical pack: ${BUILTIN_PACK_NAMES.join(", ")}
+  --manifest <file>    Path to a resolved manifest JSON document
+  --schema <name>      Schema holding operate_entity_records (default meta)
+  -h, --help           Show this help
+`;
 
 export const pruneHelpText = `operate-server prune-links — remove a tenant's dangling m2m association links
 
@@ -2655,6 +2808,7 @@ Usage:
 
 Subcommands (each takes --help):
   prune-links          Remove a tenant's dangling m2m links
+  document-indexes     Build --store pg's unique indexes as the table owner (before the API)
   verify-chain         Verify the audit chain's links, signatures and anchors
   replay               Re-derive each subsystem's projections from its log and report drift
   rekey                Move one tenant's at-rest column key to a fresh random data key
@@ -2676,6 +2830,14 @@ Options:
                        says otherwise. Not applicable to pg-columns, which
                        encrypts (set COLUMN_ENCRYPTION_SECRET in the
                        environment -- never argv, which ps can read).
+  --allow-dangling-references
+                       On --store pg, keep storing a reference to a record that
+                       does not exist and deleting a record others reference.
+                       Off by default: such a write is refused 422 (or 500 when
+                       the server wrote the reference), a restrict delete 409,
+                       and cascade / set_null deletes apply as the column
+                       store's foreign keys do. Declared unique fields stay
+                       enforced either way.
   --allow-cursor-disclosure
                        Serve plaintext keyset cursors on a list whose abac
                        policy filters rows. Off by default: nextCursor is
@@ -2696,6 +2858,15 @@ Options:
                        and the two views agree -- which is why this is a flag
                        and not a refusal with no way past it. The boot survey
                        reports which documents are unguarded either way.
+  --segregation-of-duties
+                       Refuse an approve-class transition (approve, post,
+                       mark_paid, reimburse, Payment.complete) fired by the
+                       person recorded as the record's creator (422
+                       maker_cannot_approve). A record with no recorded creator
+                       -- created before creators were stamped, or by an api-key
+                       naming no person -- is refused too, because nothing shows
+                       a second person checked it. Off by default: a single-user
+                       tenant has no second person.
   --column-key-mode <m>
                        How the at-rest column key is obtained: derived | envelope
                        (default derived). derived recomputes it per tenant from
@@ -3111,6 +3282,19 @@ Options:
   --max-request-body <size>  Largest buffered request body — bytes or a size like 25mb (default
                        10mb, floor 1kb, ceiling 1gb). Not disableable; out-of-band values are
                        refused at boot rather than clamped
+  --pg-pool-max <n>    Database connections the serving pool holds (1..1000, default 10)
+  --pg-connect-timeout-ms <ms>  How long to wait to open a connection or for a free one in a full
+                       pool (1000..600000, or 0 to wait for ever; default 30000)
+  --pg-idle-timeout-ms <ms>  Close a pooled connection idle this long (1000..3600000, or 0 for
+                       never; default 10000)
+  --pg-statement-timeout-ms <ms>  Per-session statement_timeout (1000..86400000, or 0 to leave the
+                       server's default; default 300000). An Article 17 erasure of a very large
+                       tenant runs single DELETEs that can exceed it — raise it or set 0
+  --pg-lock-timeout-ms <ms>  Per-session lock_timeout (100..86400000, or 0; default 60000)
+  --pg-idle-in-transaction-timeout-ms <ms>  Per-session idle_in_transaction_session_timeout
+                       (1000..86400000, or 0; default 60000). All six bound the serving connection
+                       only and are printed at boot; migrate and the operator subcommands
+                       (rekey, replay, verify-chain, prune-links, set-credential) run unbounded
   --design-review      Expose the platform design-review queue (/v1/platform/design-reviews)
   --design-review-role <r>  Role permitted to decide reviews (repeatable; default platform_admin)
   --require-design-review   Require platform approval before a tenant activates a proposal

@@ -8,6 +8,9 @@ x-app-build: &app-build
   context: ..
   dockerfile: deploy/Dockerfile
 
+# The OWNER's connection: `extensions`, `migrate` and `app-role` create and alter the catalog, so
+# they run as POSTGRES_USER. The `api` overrides PGUSER/PGPASSWORD with the app role below and is the
+# one service that must not use these two values: as the owner every RLS policy is inert.
 x-pg-env: &pg-env
   PGHOST: db
   PGPORT: "5432"
@@ -104,6 +107,54 @@ services:
     command: ["node", "apps/architect-cli/dist/bin/crossengin.js", "apply", "--confirm"]
     restart: "no"
 
+  # The role the API connects as: NOSUPERUSER, NOBYPASSRLS, owning nothing, DML on the catalog.
+  #
+  # On every `up` and after `migrate`, for the `extensions` service's reason: the image's init hook
+  # runs once per volume, and runs before `meta` exists. Idempotent — it re-asserts the attributes,
+  # follows POSTGRES_APP_PASSWORD (so changing it and re-running `up` rotates it), and grants every
+  # table `migrate` added. It refuses by name, and `api` then never starts, when the password is
+  # empty, still the .env.example placeholder or under 16 characters, or when the role would bypass
+  # RLS anyway (it names POSTGRES_USER, is a member of it, or owns a meta table). The name and
+  # password reach psql through the environment (`\getenv`), never argv (ADR-0301).
+  app-role:
+    build:
+      context: ./postgres
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *pg-env
+      # Both fall back to the owner, so an upgraded .env that predates the split lands on the
+      # declared opt-out (the API keeps answering as it did, and its boot line says BYPASSES) rather
+      # than on a refusal that leaves `api` created and never started. A fresh .env carries both
+      # lines, the password as a placeholder this script refuses (ADR-0424).
+      CROSSENGIN_APP_DB_USER: ${POSTGRES_APP_USER:-${POSTGRES_USER}}
+      CROSSENGIN_APP_DB_PASSWORD: ${POSTGRES_APP_PASSWORD:-${POSTGRES_PASSWORD}}
+    volumes:
+      - ./postgres/roles:/roles:ro
+    entrypoint: ["psql"]
+    command: ["-v", "ON_ERROR_STOP=1", "-f", "/roles/app-role.sql"]
+    restart: "no"
+
+  # The unique indexes `--store pg` enforces a declared `unique` field with (ADR-0423). They are
+  # expression indexes on the one shared document table, so only that table's OWNER can create them
+  # -- Postgres refuses CREATE INDEX to anyone else, IF NOT EXISTS included -- and the API connects
+  # as the confined app role (ADR-0424), which owns nothing. So the owner builds them here, after
+  # `migrate` and before `api`, for the same pack the API serves. The API reads each one back from
+  # pg_index at boot and counts it enforced; `[unique]` names any it could not find. Exit 0 with a
+  # warning when existing rows already hold a duplicate: that index is left absent and reported,
+  # which is the state before this service existed, rather than a stack that will not start.
+  document-indexes:
+    build: *app-build
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *pg-env
+    command:
+      ["node", "apps/operate-server/dist/bin/operate-server.js", "document-indexes", "--pack", "${OPERATE_PACK:-erp-core}"]
+    restart: "no"
+
   api:
     build: *app-build
     depends_on:
@@ -111,8 +162,17 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      app-role:
+        condition: service_completed_successfully
+      document-indexes:
+        condition: service_completed_successfully
     environment:
       <<: *pg-env
+      # Not POSTGRES_USER: the image makes that a superuser holding BYPASSRLS and owning every table
+      # `migrate` creates, and any one of the three makes every row-level-security policy inert for
+      # the session. The boot line `[pg] row-level security:` says which this process got.
+      PGUSER: ${POSTGRES_APP_USER:-${POSTGRES_USER}}
+      PGPASSWORD: ${POSTGRES_APP_PASSWORD:-${POSTGRES_PASSWORD}}
       NODE_ENV: production
       # Credentials reach the API through the environment, not through `command`, because argv is
       # readable by anyone who can run `ps` (ADR-0301). `${VAR:-}` passes an empty value when the

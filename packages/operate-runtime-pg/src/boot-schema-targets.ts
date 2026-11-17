@@ -232,8 +232,10 @@ function emptyableOrder(
  * Pure, and issues no SQL: it names tables. Whether they exist, whether the session can see them and
  * whether they emptied is the erasure's business.
  *
- * It **throws** wherever `columnPlansForManifest` does — today only `UndecidedColumnTypeError` for a
- * `duration` field — and that is the fail-closed answer rather than an oversight: a plan this store
+ * It **throws** wherever `columnPlansForManifest` does — `UndecidedColumnTypeError` for a `duration`
+ * field, `UnresolvableUniqueScopeError` for a unique scope naming no field, and
+ * `UnadmittedDefaultError` for an expression default outside the kernel's admitted set — and that is
+ * the fail-closed answer rather than an oversight: a plan this store
  * refuses to build is a plan whose tables it never created, so returning a short list would hand the
  * erasure a target set that silently omits an entity. A deployment serving such a manifest on
  * `pg-columns` cannot boot at all, so the throw is reachable only from a caller asking about a

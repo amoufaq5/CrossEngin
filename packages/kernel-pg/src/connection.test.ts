@@ -9,8 +9,16 @@ import { rowsResult } from "./node-pg.js";
 import {
   PG_CHANNEL_ASSURANCES,
   PG_CHANNEL_ASSURANCE_DESCRIPTIONS,
+  PG_POOL_SETTING_KEYS,
+  PG_POOL_SETTING_SPECS,
   PG_SSL_MODES,
   PLATFORM_WRITE_GRANTS,
+  SERVING_POOL_SETTINGS,
+  UNBOUNDED_POOL_SETTINGS,
+  formatPgPoolSettings,
+  parsePgPoolSetting,
+  pgPoolSettingForFlag,
+  pgSessionParameters,
   isPgSslMode,
   isoCalendarDate,
   isoInstant,
@@ -627,6 +635,73 @@ describe("scopeFilterWithPlatform", () => {
   it("places its parameter where the caller says", () => {
     expect(scopeFilterWithPlatform(TENANT, 3).sql).toBe(
       "(tenant_id = $3 OR tenant_id IS NULL)",
+    );
+  });
+});
+
+describe("pool settings", () => {
+  it("gives every setting a flag, and no two settings one flag", () => {
+    expect([...PG_POOL_SETTING_KEYS].sort()).toEqual(Object.keys(SERVING_POOL_SETTINGS).sort());
+    expect([...PG_POOL_SETTING_KEYS].sort()).toEqual(Object.keys(UNBOUNDED_POOL_SETTINGS).sort());
+    const flags = PG_POOL_SETTING_KEYS.map((k) => PG_POOL_SETTING_SPECS[k].flag);
+    expect(new Set(flags).size).toBe(flags.length);
+    for (const key of PG_POOL_SETTING_KEYS) {
+      expect(pgPoolSettingForFlag(PG_POOL_SETTING_SPECS[key].flag)).toBe(key);
+    }
+    expect(pgPoolSettingForFlag("--pg-nonsense")).toBeUndefined();
+  });
+
+  it("keeps both default sets inside the bounds the flags enforce", () => {
+    for (const set of [SERVING_POOL_SETTINGS, UNBOUNDED_POOL_SETTINGS]) {
+      for (const key of PG_POOL_SETTING_KEYS) {
+        expect(parsePgPoolSetting(key, String(set[key]))).toBe(set[key]);
+      }
+    }
+  });
+
+  it("sets no session limit in the unbounded set, which migrate and the operator subcommands run with", () => {
+    expect(pgSessionParameters(UNBOUNDED_POOL_SETTINGS)).toEqual([]);
+    expect(UNBOUNDED_POOL_SETTINGS.connectTimeoutMs).toBe(0);
+  });
+
+  it("sets all three session limits in the serving set", () => {
+    expect(pgSessionParameters(SERVING_POOL_SETTINGS)).toEqual([
+      { name: "statement_timeout", valueMs: 300_000 },
+      { name: "lock_timeout", valueMs: 60_000 },
+      { name: "idle_in_transaction_session_timeout", valueMs: 60_000 },
+    ]);
+  });
+
+  it("accepts 0 as 'unset' where it has a meaning and refuses it where it does not", () => {
+    expect(parsePgPoolSetting("statementTimeoutMs", "0")).toBe(0);
+    expect(parsePgPoolSetting("connectTimeoutMs", "0")).toBe(0);
+    expect(() => parsePgPoolSetting("maxConnections", "0")).toThrow(
+      "invalid --pg-pool-max: 0 (1..1000)",
+    );
+  });
+
+  it.each([
+    ["statementTimeoutMs", "5"],
+    ["statementTimeoutMs", "-1"],
+    ["statementTimeoutMs", "1e4"],
+    ["statementTimeoutMs", "300000.5"],
+    ["statementTimeoutMs", " 300000"],
+    ["lockTimeoutMs", "86400001"],
+    ["maxConnections", "1001"],
+    ["idleTimeoutMs", ""],
+  ] as const)("refuses %s=%j, naming the flag and its bounds", (key, raw) => {
+    expect(() => parsePgPoolSetting(key, raw)).toThrow(PG_POOL_SETTING_SPECS[key].flag);
+  });
+
+  it("says every setting at boot, naming an unset limit as the server's default", () => {
+    expect(formatPgPoolSettings(SERVING_POOL_SETTINGS)).toBe(
+      "pool max 10, connect timeout 30000ms, idle close 10000ms; session statement_timeout " +
+        "300000ms, lock_timeout 60000ms, idle_in_transaction_session_timeout 60000ms",
+    );
+    expect(formatPgPoolSettings(UNBOUNDED_POOL_SETTINGS)).toBe(
+      "pool max 10, connect timeout none (waits for ever), idle close 10000ms; session " +
+        "statement_timeout server default, lock_timeout server default, " +
+        "idle_in_transaction_session_timeout server default",
     );
   });
 });

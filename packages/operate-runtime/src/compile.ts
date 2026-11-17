@@ -94,6 +94,7 @@ import { buildWhtReconciliationHandler } from "./wht-reconciliation-handler.js";
 import { buildJobInvokeHandler, type JobInvoker } from "./job-invoke-handler.js";
 import { withEntitlement, withRecordLimit, type EntitlementResolver } from "./entitlement.js";
 import type { SettingsStore, TenantSettings } from "./settings.js";
+import { transactionSettingsScope } from "./settings-snapshot.js";
 import { operationId, type CrudOperation } from "./slugs.js";
 import type { EntityStore } from "./store.js";
 import { temporalFieldIndexFromManifest, withDatetimeWireType } from "./datetime-store.js";
@@ -105,6 +106,7 @@ import {
   type UiUserIdentityResolver,
 } from "./ui-schema.js";
 import { buildClassifiedFieldIndex, type WriteMaskMode } from "./write-mask.js";
+import { buildWriteSurfaces, type EffectStamp, type WriteSurface } from "./write-surface.js";
 
 export interface OperateRuntimeOptions {
   readonly store: EntityStore;
@@ -232,6 +234,12 @@ export interface OperateRuntimeOptions {
    * its settleable documents are now unguarded, because the whole defect was the silence.
    */
   readonly allowUncoveredSettlement?: boolean;
+  /**
+   * Refuse an approve-class transition (`approveClassTransitions`) fired by the person recorded as
+   * the record's creator. Opt-in, because a single-user tenant has no second person: on, every
+   * approval there would be refused. See `--segregation-of-duties`.
+   */
+  readonly segregationOfDuties?: boolean;
   /** Side effects run after a successful write (e.g. auto-generating a reversal entry). */
   readonly writeEffects?: readonly WriteEffect[];
   /** Extra effects appended after the resolved base effects (e.g. entity-event emission) — additive. */
@@ -372,6 +380,16 @@ function declaresTransition(manifest: Manifest, entity: string, name: string): b
 
 function hasLifecycle(manifest: Manifest, entity: string): boolean {
   return lifecycleStateField(manifest, entity) !== null;
+}
+
+/** Each entity's lifecycle state field, through `lifecycleStateField` so there is one reading. */
+function lifecycleStateFieldIndex(manifest: Manifest): ReadonlyMap<string, string> {
+  const out = new Map<string, string>();
+  for (const entity of manifest.entities ?? []) {
+    const field = lifecycleStateField(manifest, entity.name);
+    if (field !== null) out.set(entity.name, field);
+  }
+  return out;
 }
 
 /**
@@ -620,14 +638,32 @@ function defaultWriteGuards(
   return guards;
 }
 
-/** Effects inferred from the manifest's shape; opt out by passing `writeEffects: []`. */
-function defaultWriteEffects(
+/**
+ * The fields the default effects stamp onto the document that triggered them. Each name is the one
+ * handed to the effect's own config below, so the stamp list and the effect read one constant.
+ */
+const STAMPED_BOOKING_RATE_FIELD = "booking_rate";
+const STAMPED_WITHHOLDING_FIELD = "withholding_total";
+const STAMPED_PAID_AT_FIELD = "paid_at";
+
+/**
+ * The fields the default write effects stamp on a document, for this manifest. Derived by building
+ * the effects and keeping only the stamp half, so the list cannot describe a set of effects other
+ * than the one that runs.
+ */
+export function defaultEffectStamps(manifest: Manifest): readonly EffectStamp[] {
+  return defaultWriteEffectsWithStamps(manifest).stamps;
+}
+
+/** Effects inferred from the manifest's shape, with what they stamp; opt out by passing `writeEffects: []`. */
+function defaultWriteEffectsWithStamps(
   manifest: Manifest,
   clock?: { now(): Date },
   settingsStore?: SettingsStore,
-): readonly WriteEffect[] {
+): { readonly effects: readonly WriteEffect[]; readonly stamps: readonly EffectStamp[] } {
   const names = new Set((manifest.entities ?? []).map((e) => e.name));
   const effects: WriteEffect[] = [];
+  const stamps: EffectStamp[] = [];
   const clockOpt = clock !== undefined ? { clock } : {};
   const hasGl = names.has("JournalEntry") && names.has("JournalLine") && names.has("LedgerAccount");
   // Maps the tenant's finance settings to an effect's account-code resolver.
@@ -681,7 +717,7 @@ function defaultWriteEffects(
           netDescription: "Invoice — revenue",
           taxDescription: "Invoice — tax payable",
           ...(hasTaxCodes && names.has("InvoiceLine")
-            ? { taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total" }, stampWithholdingField: "withholding_total", ...jurisdictionResolver }
+            ? { taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total" }, stampWithholdingField: STAMPED_WITHHOLDING_FIELD, ...jurisdictionResolver }
             : {}),
           ...clockOpt,
           ...codeResolver((f) => ({
@@ -701,6 +737,10 @@ function defaultWriteEffects(
           })),
         }),
       );
+      // The recognition effect above stamps the withholding total only when it is given tax lines.
+      if (hasTaxCodes && names.has("InvoiceLine")) {
+        stamps.push({ entity: "Invoice", field: STAMPED_WITHHOLDING_FIELD });
+      }
       // Capture the booking rate at issue so period-close revaluation is exact.
       if (hasFx) {
         effects.push(
@@ -708,10 +748,12 @@ function defaultWriteEffects(
             entity: "Invoice",
             triggerState: "sent",
             dateField: "issue_date",
+            bookingRateField: STAMPED_BOOKING_RATE_FIELD,
             ...clockOpt,
             ...functionalResolver,
           }),
         );
+        stamps.push({ entity: "Invoice", field: STAMPED_BOOKING_RATE_FIELD });
       }
     }
   }
@@ -748,10 +790,12 @@ function defaultWriteEffects(
           entity: "Bill",
           triggerState: "approved",
           dateField: "bill_date",
+          bookingRateField: STAMPED_BOOKING_RATE_FIELD,
           ...clockOpt,
           ...functionalResolver,
         }),
       );
+      stamps.push({ entity: "Bill", field: STAMPED_BOOKING_RATE_FIELD });
     }
   }
   // Payment-driven settlement (supports partial payments + realized FX gain/loss).
@@ -776,9 +820,11 @@ function defaultWriteEffects(
         documentEntity: "Invoice",
         refField: "invoice_id",
         settleableStates: ["sent", "overdue"],
+        paidAtField: STAMPED_PAID_AT_FIELD,
         ...clockOpt,
       }),
     );
+    stamps.push({ entity: "Invoice", field: STAMPED_PAID_AT_FIELD });
   }
   if (names.has("Payment") && names.has("Bill")) {
     effects.push(
@@ -786,9 +832,11 @@ function defaultWriteEffects(
         documentEntity: "Bill",
         refField: "bill_id",
         settleableStates: ["approved", "overdue"],
+        paidAtField: STAMPED_PAID_AT_FIELD,
         ...clockOpt,
       }),
     );
+    stamps.push({ entity: "Bill", field: STAMPED_PAID_AT_FIELD });
   }
   // Unrealized FX revaluation at period close: when a FiscalPeriod closes, revalue every
   // open foreign-currency receivable/payable to the period-end rate and post one balanced
@@ -840,7 +888,7 @@ function defaultWriteEffects(
       }),
     );
   }
-  return effects;
+  return { effects, stamps };
 }
 
 function buildSettingsDefaultPlans(manifest: Manifest): Map<string, SettingsDefaultPlan> {
@@ -956,6 +1004,11 @@ export interface CompiledOperateServer {
    * producer. Empty when the manifest models none of the entities a report needs.
    */
   readonly reportSurfaces: readonly ReportSurface[];
+  /**
+   * What a client may name in each entity's create and update body — the object the handlers
+   * enforce, exposed so the OpenAPI document and a boot line read the same answer.
+   */
+  readonly writeSurfaces: ReadonlyMap<string, WriteSurface>;
 }
 
 /** One mounted report route, as built. See {@link CompiledOperateServer.reportSurfaces}. */
@@ -1013,6 +1066,17 @@ export function compileOperateServer(
   // trait, which is exactly why its resolver is a required option rather than a read it performs
   // itself. One value, two readers, no second resolution to drift.
   const classifiedFieldIndex = buildClassifiedFieldIndex(manifest);
+  // A deployment passing its own `writeEffects` declares no stamps: its effects are opaque here, so
+  // a field one of them stamps stays client-writable rather than being guessed at.
+  // The effects read tenant settings through this, never through the pool directly: see
+  // `settings-snapshot.ts` for the pool deadlock a settings read inside a write transaction caused.
+  const settingsScope =
+    options.settingsStore !== undefined ? transactionSettingsScope(options.settingsStore) : undefined;
+  const effectWiring =
+    options.writeEffects !== undefined
+      ? { effects: options.writeEffects, stamps: [] as readonly EffectStamp[] }
+      : defaultWriteEffectsWithStamps(manifest, options.clock, settingsScope?.store);
+  const writeSurfaces = buildWriteSurfaces(manifest, effectWiring.stamps);
   const ctx: HandlerContext = {
     store,
     permissions: manifest.permissions ?? {},
@@ -1037,12 +1101,13 @@ export function compileOperateServer(
     writeMaskMode: options.writeMaskMode ?? "explicit_only",
     writeGuards:
       options.writeGuards ?? defaultWriteGuards(manifest, options.allowUncoveredSettlement ?? false),
-    writeEffects: [
-      ...(options.writeEffects ?? defaultWriteEffects(manifest, options.clock, options.settingsStore)),
-      ...(options.additionalWriteEffects ?? []),
-    ],
+    writeEffects: [...effectWiring.effects, ...(options.additionalWriteEffects ?? [])],
+    writeSurfaces,
+    lifecycleStateFields: lifecycleStateFieldIndex(manifest),
+    ...(options.segregationOfDuties === true ? { segregationOfDuties: true } : {}),
     ...(options.allocator !== undefined ? { allocator: options.allocator } : {}),
     ...(options.settingsStore !== undefined ? { settingsStore: options.settingsStore } : {}),
+    ...(settingsScope !== undefined ? { settingsScope } : {}),
     ...(options.policyForEntity !== undefined ? { policyForEntity: options.policyForEntity } : {}),
     ...(options.abacEvaluator !== undefined ? { abacEvaluator: options.abacEvaluator } : {}),
     ...(options.abacBatchEvaluator !== undefined
@@ -1096,7 +1161,7 @@ export function compileOperateServer(
   handlers.register(
     "meta.schema.read",
     buildUiSchemaHandler({
-      schema: buildUiSchema(manifest),
+      schema: buildUiSchema(manifest, new Date(), writeSurfaces),
       principalRoles: options.principalRoles,
       ...(options.settingsStore !== undefined ? { settingsStore: options.settingsStore } : {}),
       ...(options.userIdentity !== undefined ? { userIdentity: options.userIdentity } : {}),
@@ -1130,6 +1195,7 @@ export function compileOperateServer(
         // description, where being advisory is honest.
         version: manifestHash(manifest),
         coverage: options.openApiCoverage?.() ?? [],
+        writeSurfaces,
       }),
     }),
   );
@@ -1321,6 +1387,7 @@ export function compileOperateServer(
     routeSpecs,
     redactionOperationIds: operationIdsByEntity,
     reportSurfaces,
+    writeSurfaces,
   };
 }
 
