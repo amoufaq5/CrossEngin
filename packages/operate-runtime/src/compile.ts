@@ -7,6 +7,7 @@ import type {
 } from "@crossengin/auth";
 import type { ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { PathSegment, RouteDefinition } from "@crossengin/api-gateway";
+import { resolvedFields } from "@crossengin/kernel/ddl";
 import { manifestHash, type Manifest } from "@crossengin/kernel/manifest";
 import {
   GatewayRuntime,
@@ -37,6 +38,8 @@ import {
   type AdminContext,
 } from "./admin-handlers.js";
 import { buildSpecHandler, type HandlerContext } from "./handlers.js";
+import { approvalContentFromManifest } from "./maker-checker.js";
+import { buildSystemEntityAccess, type SystemEntityAccess } from "./system-writer.js";
 import type { CursorSealer } from "./cursor-seal.js";
 import { manifestRouteSpecs, routeFromSpec, type RouteAction, type RouteSpec } from "./operations.js";
 import {
@@ -69,6 +72,7 @@ import {
   invoiceVoidCreditNoteEffect,
   journalReversalEffect,
   paymentApplicationEffect,
+  postingReversalEffect,
   paymentSettlementGlPostingEffect,
   recognitionGlPostingEffect,
   unrealizedFxRevaluationEffect,
@@ -76,6 +80,20 @@ import {
   type WriteEffect,
 } from "./write-effects.js";
 import { lifecycleStateField } from "./list-query.js";
+import {
+  goodsReceiptCancellationEffect,
+  goodsReceiptPostingEffect,
+  grniClearingEffect,
+  inventoryPolicyFrom,
+  inventoryShape,
+  shipmentIssueEffect,
+  standardCostRevaluationEffect,
+  stockLevelEditEffect,
+  stockMovementEffect,
+  stockMovementLedgerGuard,
+  threeWayMatchGuard,
+  type InventoryConfig,
+} from "./inventory.js";
 import {
   buildOpenApiHandler,
   OPENAPI_OPERATION_ID,
@@ -95,6 +113,7 @@ import { buildJobInvokeHandler, type JobInvoker } from "./job-invoke-handler.js"
 import { withEntitlement, withRecordLimit, type EntitlementResolver } from "./entitlement.js";
 import type { SettingsStore, TenantSettings } from "./settings.js";
 import { transactionSettingsScope } from "./settings-snapshot.js";
+import type { TaxDeterminationConfig } from "./tax-determination.js";
 import { operationId, type CrudOperation } from "./slugs.js";
 import type { EntityStore } from "./store.js";
 import { temporalFieldIndexFromManifest, withDatetimeWireType } from "./datetime-store.js";
@@ -106,6 +125,7 @@ import {
   type UiUserIdentityResolver,
 } from "./ui-schema.js";
 import { buildClassifiedFieldIndex, type WriteMaskMode } from "./write-mask.js";
+import type { EntityWriteAuditor } from "./entity-audit.js";
 import { buildWriteSurfaces, type EffectStamp, type WriteSurface } from "./write-surface.js";
 
 export interface OperateRuntimeOptions {
@@ -240,6 +260,12 @@ export interface OperateRuntimeOptions {
    * approval there would be refused. See `--segregation-of-duties`.
    */
   readonly segregationOfDuties?: boolean;
+  /**
+   * Where each successful entity write is recorded, with its sensitive values withheld — see
+   * `entity-audit.ts`. Absent, nothing is recorded; present, a write whose record cannot be made is
+   * refused with a 503 and, on a transactional store, rolled back with it.
+   */
+  readonly entityAudit?: EntityWriteAuditor;
   /** Side effects run after a successful write (e.g. auto-generating a reversal entry). */
   readonly writeEffects?: readonly WriteEffect[];
   /** Extra effects appended after the resolved base effects (e.g. entity-event emission) — additive. */
@@ -382,12 +408,41 @@ function hasLifecycle(manifest: Manifest, entity: string): boolean {
   return lifecycleStateField(manifest, entity) !== null;
 }
 
-/** Each entity's lifecycle state field, through `lifecycleStateField` so there is one reading. */
+/**
+ * The entities `defaultWriteGuards` locks by a `state` field even where no lifecycle declares one —
+ * its `lockedDocumentGuard`s and the posted-entry guard, whose `stateField` defaults to `state`.
+ */
+const STATE_LOCKED_ENTITIES = [
+  "Invoice",
+  "TaxReturn",
+  "SalesOrder",
+  "PurchaseOrder",
+  "Bill",
+  "Payment",
+  "WhtCertificate",
+  "JournalEntry",
+] as const;
+
+/**
+ * The field each entity's write is decided from: its lifecycle state field, through
+ * `lifecycleStateField` so there is one reading, and for a lock-guarded entity with no lifecycle the
+ * `state` its guard reads. The second half is live on every shipped pack: `WhtCertificate` has no
+ * lifecycle, its state moves by PATCH and its clearing posting fires on entering `confirmed`, so with
+ * no precondition two concurrent confirms both landed and posted twice, and a delete decided on
+ * `draft` removed a certificate a concurrent confirm had just posted for (measured: 200/200 with the
+ * effect fired twice, and 200/204 with the record gone).
+ */
 function lifecycleStateFieldIndex(manifest: Manifest): ReadonlyMap<string, string> {
   const out = new Map<string, string>();
   for (const entity of manifest.entities ?? []) {
     const field = lifecycleStateField(manifest, entity.name);
     if (field !== null) out.set(entity.name, field);
+    else if (
+      (STATE_LOCKED_ENTITIES as readonly string[]).includes(entity.name) &&
+      resolvedFields(entity, manifest.traits ?? []).some((f) => f.name === "state")
+    ) {
+      out.set(entity.name, "state");
+    }
   }
   return out;
 }
@@ -409,22 +464,27 @@ function lifecycleStateFieldIndex(manifest: Manifest): ReadonlyMap<string, strin
  * bill voided without ever being approved is locked as well; a stored record does not say which way
  * it came, and refusing to delete a void document is the `Invoice` precedent.
  *
- * Deliberately **not** here: `Expense`, which no effect posts from in any state, and `FiscalPeriod`,
- * whose `closed` edge posts the unrealized FX revaluation. Reopening a closed period is a domain act
- * the console documents (`fetchRevaluationEntry`'s comment states that a re-close posts a second
- * entry), so a lock would either forbid reopening — a decision nobody has made — or allow it and be
- * defeated by it. The honest fix there is the revaluation reversing its own prior entry, not a lock.
+ * Deliberately **not** here: `Expense`, which no effect posts from in any state. `FiscalPeriod` is
+ * locked by its own block below and only where a lifecycle declares the reopening: there a closed
+ * period's dates are what decide which postings it holds, so editing them reopens it by another
+ * name, while `reopen` is the named, permission-gated way. With no lifecycle the status is a plain
+ * field and a lock would forbid reopening outright, which is a decision nobody has made. The
+ * revaluation posts only the difference from the period's own prior entries, so a re-close
+ * revalues the period once.
  */
 const POSTED_DOCUMENT_LOCKS = {
   Bill: { lockedStates: ["approved", "overdue", "paid", "void"], child: { entity: "BillLine", parentField: "bill_id" }, error: "bill_locked", noun: "approved bill" },
   Payment: { lockedStates: ["completed", "refunded"], child: null, error: "payment_locked", noun: "completed payment" },
   WhtCertificate: { lockedStates: ["confirmed", "void"], child: null, error: "wht_certificate_locked", noun: "confirmed WHT certificate" },
+  FiscalPeriod: { lockedStates: ["closed", "locked"], child: null, error: "fiscal_period_locked", noun: "closed fiscal period" },
 } as const;
 
 /** Guards inferred from the manifest's shape; opt out by passing `writeGuards: []`. */
 function defaultWriteGuards(
   manifest: Manifest,
   allowUncoveredSettlement: boolean,
+  stamps: readonly EffectStamp[],
+  settingsStore?: SettingsStore,
 ): readonly WriteGuard[] {
   const names = new Set((manifest.entities ?? []).map((e) => e.name));
   const guards: WriteGuard[] = [];
@@ -453,7 +513,7 @@ function defaultWriteGuards(
     jeReverses ? `${act} posts no reversal, so reverse its journal entry as well` : `${act} posts no reversal`;
   if (names.has("JournalEntry") && names.has("JournalLine")) {
     guards.push(
-      journalPostingGuard(),
+      journalPostingGuard(postingPeriodsOf(manifest) !== undefined ? { postingPeriods: {} } : {}),
       // With no lifecycle the guard's own default stands: its `posted → reversed` plain update is the
       // route a lifecycle-less entry is reversed by, so `reverse it instead` is real there.
       postedEntryImmutabilityGuard(
@@ -550,7 +610,7 @@ function defaultWriteGuards(
         noun: lock.noun,
         nounByState: { void: "void bill", paid: "paid bill", overdue: "overdue bill" },
         hintByState: correctionHints(manifest, "Bill", lock.lockedStates, {
-          void: `void it instead — ${noReversal("voiding a bill")}`,
+          void: "void it instead, which reverses its posting",
         }),
       }),
     );
@@ -565,7 +625,7 @@ function defaultWriteGuards(
         noun: lock.noun,
         nounByState: { refunded: "refunded payment" },
         hintByState: correctionHints(manifest, "Payment", lock.lockedStates, {
-          refund: `refund it if the money was returned — ${noReversal("a refund")}`,
+          refund: "refund it if the money was returned, which reverses its settlement",
         }),
       }),
     );
@@ -592,6 +652,23 @@ function defaultWriteGuards(
             : correctionHints(manifest, "WhtCertificate", lock.lockedStates, {
                 void: `void it instead — ${noReversal("voiding a certificate")}`,
               }),
+      }),
+    );
+  }
+  if (names.has("FiscalPeriod") && hasLifecycle(manifest, "FiscalPeriod")) {
+    const lock = POSTED_DOCUMENT_LOCKS.FiscalPeriod;
+    const stateField = lifecycleStateField(manifest, "FiscalPeriod");
+    guards.push(
+      lockedDocumentGuard({
+        entity: "FiscalPeriod",
+        ...(stateField !== null ? { stateField } : {}),
+        lockedStates: lock.lockedStates,
+        lockedError: lock.error,
+        noun: lock.noun,
+        nounByState: { locked: "locked fiscal period" },
+        hintByState: correctionHints(manifest, "FiscalPeriod", lock.lockedStates, {
+          reopen: "reopen it instead, which is its own permission and its own audit row",
+        }),
       }),
     );
   }
@@ -632,10 +709,60 @@ function defaultWriteGuards(
     for (const doc of SETTLEMENT_COVERAGE_DOCUMENTS) {
       if (!names.has(doc.entity)) continue;
       const stateField = lifecycleStateField(manifest, doc.entity);
-      guards.push(settlementCoverageGuard(stateField === null ? doc : { ...doc, stateField }));
+      // Withholding reduces what is owed only where an effect stamps it: a caller-written figure —
+      // a manifest with no tax codes, or a deployment passing its own effects — would otherwise let
+      // `mark_paid` through with nothing paid by typing the withholding equal to the total.
+      const { withholdingField, ...rest } = doc;
+      const withholding =
+        withholdingField !== undefined && isStamped(stamps, doc.entity, withholdingField) ? { withholdingField } : {};
+      const config = { ...rest, ...withholding };
+      guards.push(settlementCoverageGuard(stateField === null ? config : { ...config, stateField }));
     }
   }
+  // Stock: the movement ledger is append-only, a posted goods receipt is locked (it may only be
+  // cancelled, which takes back what it received, and a cancelled one is final so its entry number
+  // cannot recur), and a bill matched to order lines is checked against them on approval.
+  const inventory = inventoryShape(manifest);
+  if (inventory.ledger) guards.push(stockMovementLedgerGuard());
+  if (inventory.goodsReceipt) {
+    guards.push(
+      lockedDocumentGuard({
+        entity: "GoodsReceipt",
+        stateField: "status",
+        lockedStates: ["posted", "cancelled"],
+        allowedUpdateTransitions: { posted: ["cancelled"] },
+        lockedError: "goods_receipt_locked",
+        noun: "posted goods receipt",
+        nounByState: { cancelled: "cancelled goods receipt" },
+        hintByState: {
+          posted: "set its status to 'cancelled' instead, which takes back what it received",
+          cancelled: "record a new goods receipt instead",
+        },
+      }),
+    );
+  }
+  if (inventory.billMatch) {
+    guards.push(threeWayMatchGuard({ ...inventoryConfigFor(settingsStore), receiptsCreditGrni: inventory.goodsReceipt }));
+  }
   return guards;
+}
+
+/** The inventory postings' account codes and stock policy, read from the tenant's settings. */
+function inventoryConfigFor(settingsStore: SettingsStore | undefined): InventoryConfig {
+  if (settingsStore === undefined) return {};
+  return {
+    resolveAccountCodes: async (tenantId) => {
+      const f = (await settingsStore.get(tenantId)).finance ?? {};
+      return {
+        ...(f.inventoryAccountCode !== undefined ? { inventory: f.inventoryAccountCode } : {}),
+        ...(f.cogsAccountCode !== undefined ? { cogs: f.cogsAccountCode } : {}),
+        ...(f.grniAccountCode !== undefined ? { grni: f.grniAccountCode } : {}),
+        ...(f.inventoryVarianceAccountCode !== undefined ? { variance: f.inventoryVarianceAccountCode } : {}),
+        ...(f.expenseAccountCode !== undefined ? { expense: f.expenseAccountCode } : {}),
+      };
+    },
+    resolvePolicy: async (tenantId) => inventoryPolicyFrom((await settingsStore.get(tenantId)).inventory),
+  };
 }
 
 /**
@@ -644,7 +771,26 @@ function defaultWriteGuards(
  */
 const STAMPED_BOOKING_RATE_FIELD = "booking_rate";
 const STAMPED_WITHHOLDING_FIELD = "withholding_total";
+const STAMPED_RECEIVED_QUANTITY_FIELD = "received_quantity";
 const STAMPED_PAID_AT_FIELD = "paid_at";
+
+/**
+ * The posting-period rule reads a fiscal period's dates and status by name, as a filter. A tenant's
+ * own manifest may declare a `FiscalPeriod` without them, and there the typed store refuses a filter
+ * on a column it does not have — which would refuse every posting the deployment makes. Such a
+ * calendar cannot be resolved from a date, so it gets no date rule; a named period's own status is
+ * still checked by the guard.
+ */
+function postingPeriodsOf(manifest: Manifest): Record<string, never> | undefined {
+  const period = (manifest.entities ?? []).find((e) => e.name === "FiscalPeriod");
+  if (period === undefined) return undefined;
+  const fields = new Set(resolvedFields(period, manifest.traits ?? []).map((f) => f.name));
+  return ["start_date", "end_date", "status"].every((f) => fields.has(f)) ? {} : undefined;
+}
+
+function isStamped(stamps: readonly EffectStamp[], entity: string, field: string): boolean {
+  return stamps.some((s) => s.entity === entity && s.field === field);
+}
 
 /**
  * The fields the default write effects stamp on a document, for this manifest. Derived by building
@@ -665,6 +811,8 @@ function defaultWriteEffectsWithStamps(
   const effects: WriteEffect[] = [];
   const stamps: EffectStamp[] = [];
   const clockOpt = clock !== undefined ? { clock } : {};
+  // Every posting an effect writes is checked against the period its date falls in.
+  const periodsOpt = postingPeriodsOf(manifest) !== undefined ? { periods: {} } : {};
   const hasGl = names.has("JournalEntry") && names.has("JournalLine") && names.has("LedgerAccount");
   // Maps the tenant's finance settings to an effect's account-code resolver.
   const codeResolver = <T>(pick: (f: NonNullable<TenantSettings["finance"]>) => T) =>
@@ -680,6 +828,33 @@ function defaultWriteEffectsWithStamps(
   const hasFx = names.has("Currency") && names.has("ExchangeRate");
   // Line-level tax codes drive a per-code recognition split only when TaxCode exists.
   const hasTaxCodes = names.has("TaxCode");
+  // Exactly the condition under which recognition stamps `withholding_total` below, and so the one
+  // under which the field is a server fact rather than a figure the caller typed: only then may
+  // what is owed be read as total less it.
+  const invoiceWithholdingStamped = names.has("Invoice") && hasGl && hasTaxCodes && names.has("InvoiceLine");
+  // Tax determination from the tenant's declared jurisdiction and its rules, where the manifest
+  // declares both and there is a settings store for the tenant to declare the jurisdiction in.
+  const taxDetermination = (
+    side: "sales" | "purchase",
+    dateField: string,
+  ): { determination?: TaxDeterminationConfig } =>
+    settingsStore === undefined || !names.has("TaxRule") || !names.has("TaxJurisdiction")
+      ? {}
+      : {
+          determination: {
+            side,
+            dateField,
+            resolveJurisdictionCode: async (tenantId: string) =>
+              (await settingsStore.get(tenantId)).finance?.defaultTaxJurisdiction,
+            ...(side === "purchase"
+              ? {
+                  selfAssessedAccountRef: "tax_payable",
+                  resolveSelfAssessedAccountCode: async (tenantId: string) =>
+                    (await settingsStore.get(tenantId)).finance?.taxPayableAccountCode,
+                }
+              : {}),
+          },
+        };
   // Per-jurisdiction default tax accounts, from finance settings (jurisdiction → code).
   const jurisdictionResolver =
     settingsStore === undefined
@@ -690,12 +865,13 @@ function defaultWriteEffectsWithStamps(
         };
 
   if (names.has("JournalEntry") && names.has("JournalLine")) {
-    effects.push(journalReversalEffect(clockOpt));
+    effects.push(journalReversalEffect({ ...clockOpt, ...periodsOpt }));
   }
   if (names.has("Invoice")) {
     effects.push(
       invoiceVoidCreditNoteEffect({
         ...(names.has("InvoiceLine") ? { lineEntity: "InvoiceLine" } : {}),
+        ...(hasGl && hasTaxCodes && names.has("InvoiceLine") ? { withholdingField: STAMPED_WITHHOLDING_FIELD } : {}),
         ...clockOpt,
       }),
     );
@@ -717,9 +893,10 @@ function defaultWriteEffectsWithStamps(
           netDescription: "Invoice — revenue",
           taxDescription: "Invoice — tax payable",
           ...(hasTaxCodes && names.has("InvoiceLine")
-            ? { taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total" }, stampWithholdingField: STAMPED_WITHHOLDING_FIELD, ...jurisdictionResolver }
+            ? { taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total", ...taxDetermination("sales", "issue_date") }, stampWithholdingField: STAMPED_WITHHOLDING_FIELD, ...jurisdictionResolver }
             : {}),
           ...clockOpt,
+          ...periodsOpt,
           ...codeResolver((f) => ({
             ...(f.arAccountCode !== undefined ? { control: f.arAccountCode } : {}),
             ...(f.revenueAccountCode !== undefined ? { net: f.revenueAccountCode } : {}),
@@ -727,10 +904,12 @@ function defaultWriteEffectsWithStamps(
           })),
         }),
       );
-      // AR reversal on credit-note issuance.
+      // AR reversal on credit-note issuance: the mirror of the recognition entry above, tax included.
       effects.push(
         creditNoteGlPostingEffect({
+          recognitionEntrySuffix: "-AR",
           ...clockOpt,
+          ...periodsOpt,
           ...codeResolver((f) => ({
             ...(f.arAccountCode !== undefined ? { ar: f.arAccountCode } : {}),
             ...(f.revenueAccountCode !== undefined ? { revenue: f.revenueAccountCode } : {}),
@@ -774,14 +953,29 @@ function defaultWriteEffectsWithStamps(
         netDescription: "Bill — expense",
         taxDescription: "Bill — input tax",
         ...(hasTaxCodes && names.has("BillLine")
-          ? { taxLines: { entity: "BillLine", refField: "bill_id", netField: "amount" }, ...jurisdictionResolver }
+          ? { taxLines: { entity: "BillLine", refField: "bill_id", netField: "amount", ...taxDetermination("purchase", "bill_date") }, ...jurisdictionResolver }
           : {}),
         ...clockOpt,
+        ...periodsOpt,
         ...codeResolver((f) => ({
           ...(f.apAccountCode !== undefined ? { control: f.apAccountCode } : {}),
           ...(f.expenseAccountCode !== undefined ? { net: f.expenseAccountCode } : {}),
           ...(f.taxInputAccountCode !== undefined ? { tax: f.taxInputAccountCode } : {}),
         })),
+      }),
+    );
+    // A bill voided after approval reverses the entry its approval posted.
+    effects.push(
+      postingReversalEffect({
+        entity: "Bill",
+        fromStates: ["approved", "overdue"],
+        toState: "void",
+        numberField: "bill_number",
+        sourceSuffix: "-GL",
+        reversalSuffix: "-VOID",
+        sourceLabel: "bill",
+        ...clockOpt,
+        ...periodsOpt,
       }),
     );
     if (hasFx) {
@@ -803,12 +997,25 @@ function defaultWriteEffectsWithStamps(
     effects.push(
       paymentSettlementGlPostingEffect({
         ...clockOpt,
+        ...periodsOpt,
         ...codeResolver((f) => ({
           ...(f.cashAccountCode !== undefined ? { cash: f.cashAccountCode } : {}),
           ...(f.arAccountCode !== undefined ? { ar: f.arAccountCode } : {}),
           ...(f.apAccountCode !== undefined ? { ap: f.apAccountCode } : {}),
           ...(f.fxGainLossAccountCode !== undefined ? { fx: f.fxGainLossAccountCode } : {}),
         })),
+      }),
+      // A refund takes the money back, so it reverses the settlement the completion posted.
+      postingReversalEffect({
+        entity: "Payment",
+        fromStates: ["completed"],
+        toState: "refunded",
+        numberField: "payment_number",
+        sourceSuffix: "-SETTLE",
+        reversalSuffix: "-REFUND",
+        sourceLabel: "payment",
+        ...clockOpt,
+        ...periodsOpt,
       }),
     );
   }
@@ -821,6 +1028,9 @@ function defaultWriteEffectsWithStamps(
         refField: "invoice_id",
         settleableStates: ["sent", "overdue"],
         paidAtField: STAMPED_PAID_AT_FIELD,
+        ...(invoiceWithholdingStamped ? { withholdingField: STAMPED_WITHHOLDING_FIELD } : {}),
+        refundedState: "refunded",
+        reopenState: "sent",
         ...clockOpt,
       }),
     );
@@ -833,6 +1043,8 @@ function defaultWriteEffectsWithStamps(
         refField: "bill_id",
         settleableStates: ["approved", "overdue"],
         paidAtField: STAMPED_PAID_AT_FIELD,
+        refundedState: "refunded",
+        reopenState: "approved",
         ...clockOpt,
       }),
     );
@@ -851,7 +1063,15 @@ function defaultWriteEffectsWithStamps(
   ) {
     const fxDocuments = [
       ...(names.has("Invoice")
-        ? [{ entity: "Invoice", openStates: ["sent", "overdue"], paymentRefField: "invoice_id", side: "ar" as const }]
+        ? [
+            {
+              entity: "Invoice",
+              openStates: ["sent", "overdue"],
+              paymentRefField: "invoice_id",
+              side: "ar" as const,
+              ...(invoiceWithholdingStamped ? { withholdingField: STAMPED_WITHHOLDING_FIELD } : {}),
+            },
+          ]
         : []),
       ...(names.has("Bill")
         ? [{ entity: "Bill", openStates: ["approved", "overdue"], paymentRefField: "bill_id", side: "ap" as const }]
@@ -867,6 +1087,7 @@ function defaultWriteEffectsWithStamps(
             }
           : {}),
         ...clockOpt,
+        ...periodsOpt,
         ...codeResolver((f) => ({
           ...(f.unrealizedFxGainLossAccountCode !== undefined ? { fx: f.unrealizedFxGainLossAccountCode } : {}),
           ...(f.arAccountCode !== undefined ? { ar: f.arAccountCode } : {}),
@@ -877,10 +1098,48 @@ function defaultWriteEffectsWithStamps(
   }
   // WHT certificate clearing: confirming a certificate reclasses the withheld tax from a
   // receivable into an income-tax-recoverable credit (needs the GL).
+  // Stock and its valuation (see `inventory.ts`): each posting is wired only where the manifest has
+  // every entity and field it reads, so a tenant's own manifest lacking one gets no posting rather
+  // than a refusal on every write.
+  const inventory = inventoryShape(manifest);
+  const inventoryConfig: InventoryConfig = { ...clockOpt, ...periodsOpt, ...inventoryConfigFor(settingsStore) };
+  if (inventory.ledger) {
+    effects.push(stockMovementEffect(inventoryConfig), stockLevelEditEffect(inventoryConfig));
+    if (hasGl) effects.push(standardCostRevaluationEffect(inventoryConfig));
+  }
+  if (inventory.goodsReceipt && hasGl) {
+    effects.push(
+      goodsReceiptPostingEffect(inventoryConfig),
+      goodsReceiptCancellationEffect(inventoryConfig),
+    );
+    // The receipt is the only writer of what was received. A client-written figure is what both
+    // the receipt (outstanding = quantity − received) and the three-way match read, so typing it
+    // on a draft line would let a bill approve against goods no receipt moved, and the receipt
+    // then receive none of them.
+    stamps.push({ entity: "PurchaseOrderLine", field: STAMPED_RECEIVED_QUANTITY_FIELD });
+  }
+  if (inventory.shipment && hasGl) effects.push(shipmentIssueEffect(inventoryConfig));
+  if (inventory.billMatch && hasGl) {
+    effects.push(
+      grniClearingEffect(inventoryConfig),
+      postingReversalEffect({
+        entity: "Bill",
+        fromStates: ["approved", "overdue"],
+        toState: "void",
+        numberField: "bill_number",
+        sourceSuffix: "-GRNI",
+        reversalSuffix: "-GRNI-VOID",
+        sourceLabel: "bill",
+        ...clockOpt,
+        ...periodsOpt,
+      }),
+    );
+  }
   if (names.has("WhtCertificate") && hasGl) {
     effects.push(
       whtCertificateClearingEffect({
         ...clockOpt,
+        ...periodsOpt,
         ...codeResolver((f) => ({
           ...(f.whtReceivableAccountCode !== undefined ? { whtReceivable: f.whtReceivableAccountCode } : {}),
           ...(f.taxRecoverableAccountCode !== undefined ? { taxRecoverable: f.taxRecoverableAccountCode } : {}),
@@ -1009,6 +1268,12 @@ export interface CompiledOperateServer {
    * enforce, exposed so the OpenAPI document and a boot line read the same answer.
    */
   readonly writeSurfaces: ReadonlyMap<string, WriteSurface>;
+  /**
+   * Background work's way into this server's entities — through the same handlers, so a job's write
+   * runs every guard, effect, lifecycle rule and audit record a request's does. See
+   * `system-writer.ts`.
+   */
+  readonly systemEntityAccess: SystemEntityAccess;
 }
 
 /** One mounted report route, as built. See {@link CompiledOperateServer.reportSurfaces}. */
@@ -1100,11 +1365,15 @@ export function compileOperateServer(
     classifiedFields: classifiedFieldIndex,
     writeMaskMode: options.writeMaskMode ?? "explicit_only",
     writeGuards:
-      options.writeGuards ?? defaultWriteGuards(manifest, options.allowUncoveredSettlement ?? false),
+      options.writeGuards ??
+      defaultWriteGuards(manifest, options.allowUncoveredSettlement ?? false, effectWiring.stamps, settingsScope?.store),
     writeEffects: [...effectWiring.effects, ...(options.additionalWriteEffects ?? [])],
     writeSurfaces,
     lifecycleStateFields: lifecycleStateFieldIndex(manifest),
-    ...(options.segregationOfDuties === true ? { segregationOfDuties: true } : {}),
+    ...(options.segregationOfDuties === true
+      ? { segregationOfDuties: true, approvalContent: approvalContentFromManifest(manifest) }
+      : {}),
+    ...(options.entityAudit !== undefined ? { entityAudit: options.entityAudit } : {}),
     ...(options.allocator !== undefined ? { allocator: options.allocator } : {}),
     ...(options.settingsStore !== undefined ? { settingsStore: options.settingsStore } : {}),
     ...(settingsScope !== undefined ? { settingsScope } : {}),
@@ -1274,6 +1543,10 @@ export function compileOperateServer(
       openStates: ["sent", "overdue"],
       paymentRefField: "invoice_id",
       numberField: "invoice_number",
+      ...(isStamped(effectWiring.stamps, invoiceEntity, STAMPED_WITHHOLDING_FIELD)
+        ? { withholdingField: STAMPED_WITHHOLDING_FIELD }
+        : {}),
+      creditNote: { typeField: "document_type", typeValue: "credit_note", refField: "credit_note_of", creditedStates: ["void"] },
     };
   }
   if (agingNames.has("Bill") && agingNames.has(paymentEntity)) {
@@ -1388,6 +1661,12 @@ export function compileOperateServer(
     redactionOperationIds: operationIdsByEntity,
     reportSurfaces,
     writeSurfaces,
+    systemEntityAccess: buildSystemEntityAccess({
+      handlers,
+      routeSpecs,
+      store,
+      ...(options.clock !== undefined ? { clock: options.clock } : {}),
+    }),
   };
 }
 

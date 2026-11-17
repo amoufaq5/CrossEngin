@@ -182,16 +182,27 @@ describe("PostgresChainCheckpointStore provenance", () => {
     expect(select?.sql).toContain("ORDER BY sequence_number DESC, checkpointed_at DESC, id DESC");
   });
 
-  it("names provenance in the INSERT and binds it last", async () => {
+  it("names provenance in the INSERT and binds it eighth, ahead of the signature pair", async () => {
     const { conn, seen } = recording();
     const store = new PostgresChainCheckpointStore(conn);
     await store.record(TENANT_A, checkpoint(4, { provenance: "verified_full" }));
 
     const insert = seen.find((q) => q.sql.includes("INSERT INTO"));
-    expect(insert?.sql).toContain("provenance");
-    expect(insert?.sql).toContain("VALUES ($1, $2, $3, $4, $5, $6, $7, $8)");
-    expect(insert?.params).toHaveLength(8);
+    expect(insert?.sql).toContain("provenance, signature, signing_key_fingerprint");
+    expect(insert?.sql).toContain("VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)");
+    expect(insert?.params).toHaveLength(10);
     expect(insert?.params[7]).toBe("verified_full");
+  });
+
+  it("binds the signature and its fingerprint, and round-trips them through every read", async () => {
+    const conn = fakeChainPg();
+    const store = new PostgresChainCheckpointStore(conn);
+    const signed = { ...checkpoint(4, { provenance: "verified_full" }), signature: "c2lnbmF0dXJl", signingKeyFingerprint: "d".repeat(64) };
+    await store.record(TENANT_A, signed);
+    expect((await store.latest(TENANT_A))?.signature).toBe("c2lnbmF0dXJl");
+    expect((await store.getBySequence(TENANT_A, 4))?.signingKeyFingerprint).toBe("d".repeat(64));
+    const listed = await store.listRecent(TENANT_A);
+    expect(listed.records[0]?.signature).toBe("c2lnbmF0dXJl");
   });
 
   it("binds null for an absent provenance, so the column is NULL and not the string", async () => {
@@ -200,8 +211,11 @@ describe("PostgresChainCheckpointStore provenance", () => {
     await store.record(TENANT_A, checkpoint(4));
 
     const insert = seen.find((q) => q.sql.includes("INSERT INTO"));
-    expect(insert?.params).toHaveLength(8);
+    expect(insert?.params).toHaveLength(10);
     expect(insert?.params[7]).toBeNull();
+    // Unsigned binds two NULLs, never an empty string: a column CHECK refuses `''`, and NULL is the
+    // one value that says "this row's writer did not sign it".
+    expect(insert?.params.slice(8)).toEqual([null, null]);
   });
 
   it("asks for provenance on every read path", async () => {
@@ -665,7 +679,7 @@ describe("the statements scanCheckpoints issues", () => {
   // cannot advance, and the symptom would be a loop rather than a wrong answer.
   it("selects the id the cursor is made of beside the contract's own columns", async () => {
     const { reads } = await scanStatements(TENANT_A, [1]);
-    expect(flat(reads[0]?.sql)).toContain("provenance, id FROM");
+    expect(flat(reads[0]?.sql)).toContain("signing_key_fingerprint, id FROM");
   });
 
   // Measured on PG 16.13 over a 200k-row scope: without this conjunct the plan is

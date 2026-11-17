@@ -5,12 +5,14 @@ import {
   isAssociationReader,
   isAssociationWriter,
   isTransactional,
+  type ConditionalRemove,
   type ConditionalUpdate,
   type EntityRecord,
   type EntityStore,
   type ListPage,
   type ListQuery,
   type TransactionalEntityStore,
+  type RowLock,
   type UpdatePrecondition,
 } from "@crossengin/operate-runtime";
 
@@ -50,8 +52,16 @@ export interface TenantColumnStoreRegistryOptions {
    * provisioning a `BYTEA` column and 500ing on the first write.
    */
   readonly encryptionKey?: ColumnEncryptionKeySource;
-  /** Called once per *fresh* application (not on a memoised hit), for logging. */
-  readonly onApplication?: (application: TenantSchemaApplication) => void;
+  /**
+   * Called once per *fresh* application (not on a memoised hit), for logging. `retained` names the
+   * last applied manifest still being served when this application was refused, and is `null` for
+   * an applied one and for a refusal with nothing applied before it — the two refusals are told
+   * apart because only the second sends the tenant to the fallback store.
+   */
+  readonly onApplication?: (
+    application: TenantSchemaApplication,
+    retained: RetainedApplication | null,
+  ) => void;
   /**
    * How long a refused application is remembered before it is retried (default
    * 60s). A refusal is memoised at all so a tenant whose manifest needs a manual
@@ -72,11 +82,88 @@ export interface TenantColumnStoreRegistryOptions {
 interface RegistryEntry {
   readonly manifestHash: string;
   readonly application: TenantSchemaApplication;
-  /** Null when the application was refused — there is no schema to serve from. */
-  readonly store: ColumnMappedEntityStore | null;
   /** When a refused entry stops being trusted; Infinity for an applied one. */
   readonly validUntil: number;
 }
+
+/** The last application that succeeded for a tenant, and the store and manifest it serves. */
+interface AppliedServing {
+  readonly manifestHash: string;
+  readonly manifest: Manifest;
+  readonly application: TenantSchemaApplication;
+  readonly store: ColumnMappedEntityStore;
+}
+
+/** The last applied manifest a refused re-application left in service. */
+export interface RetainedApplication {
+  readonly manifestHash: string;
+  readonly schema: string;
+}
+
+/**
+ * What a tenant's gateway must be compiled against, after `ensureServing`.
+ *
+ * `retained` is the arm this type exists for. A re-activation whose application is refused leaves
+ * the tenant's schema exactly as the previous manifest built it — a refusal executes no DDL — so
+ * the previous manifest and its store are still a coherent pair, while the requested manifest has
+ * no store at all. Compiling the requested manifest over the fallback store is what used to
+ * happen: every read answered *absent* for rows that sit in the tenant's own tables and every write
+ * landed in a different table, so the tenant's data split across two places with nothing refused.
+ *
+ * `refused` (nothing applied before, and the tenant's schema holds no table) keeps ADR-0314's
+ * answer — the requested manifest over the fallback — because there is no earlier pair to keep and
+ * no row of the tenant's anywhere but the fallback.
+ */
+export type TenantServing =
+  | { readonly kind: "applied"; readonly manifest: Manifest; readonly application: TenantSchemaApplication }
+  | {
+      readonly kind: "retained";
+      readonly manifest: Manifest;
+      readonly retained: RetainedApplication;
+      /** The refused application of the requested manifest. */
+      readonly application: TenantSchemaApplication;
+    }
+  | { readonly kind: "refused"; readonly manifest: Manifest; readonly application: TenantSchemaApplication }
+  | {
+      /**
+       * Refused, nothing applied **by this process**, and the tenant's schema already holds tables —
+       * so some earlier application (before a restart, or on another replica) put the tenant's rows
+       * there. The fallback is not ADR-0314's degraded answer here but the wrong one, and this
+       * process does not know which manifest built those tables, so it has no coherent pair to
+       * serve. The caller refuses; see `TenantSchemaStranded`.
+       */
+      readonly kind: "stranded";
+      readonly manifest: Manifest;
+      readonly application: TenantSchemaApplication;
+    };
+
+/**
+ * A tenant whose activated manifest was refused over a schema that already holds their tables,
+ * and whose last applied manifest this process does not know.
+ *
+ * Thrown by the gateway build rather than answered with the fallback store, because that answer was
+ * measured wrong in both directions: a read through the JSONB fallback answers *absent* for rows in
+ * the tenant's own tables, and a write lands in a different table from every row before it, with a
+ * 200 either way. A refusal is the only answer that is not a wrong one.
+ */
+export class TenantSchemaStranded extends Error {
+  readonly tenantId: string;
+  readonly schema: string;
+
+  constructor(tenantId: string, schema: string) {
+    super(
+      `tenant ${tenantId}'s activated manifest was refused over schema ${schema}, which already ` +
+        `holds their tables, and this process has no applied manifest to keep serving them under. ` +
+        `Run the SQL the refusal reported, or re-activate the manifest that built ${schema}.`,
+    );
+    this.name = "TenantSchemaStranded";
+    this.tenantId = tenantId;
+    this.schema = schema;
+  }
+}
+
+const SCHEMA_HOLDS_TABLES_SQL =
+  "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_tables WHERE schemaname = $1) AS occupied";
 
 /**
  * Owns one `ColumnMappedEntityStore` per tenant that serves its own activated
@@ -91,20 +178,28 @@ interface RegistryEntry {
  *
  * `storeFor` is deliberately synchronous and deliberately does **not** provision:
  * it answers "is this tenant's schema known-good right now", so a request path
- * can route without an await and without a hidden DDL round trip. A tenant whose
- * manifest has not been ensured, or whose application was refused, reads as null
- * and the caller falls back.
+ * can route without an await and without a hidden DDL round trip. A tenant with
+ * no applied manifest — never ensured, or refused on the first activation — reads
+ * as null and the caller falls back; a refused *re*-activation keeps answering the
+ * last applied store (see `TenantServing`).
  */
 export class TenantColumnStoreRegistry {
   private readonly conn: PgConnection;
   private readonly prefix: string;
   private readonly encryptionKeyRef: string | undefined;
   private readonly encryptionKey: ColumnEncryptionKeySource | undefined;
-  private readonly onApplication: ((application: TenantSchemaApplication) => void) | null;
+  private readonly onApplication:
+    | ((application: TenantSchemaApplication, retained: RetainedApplication | null) => void)
+    | null;
   private readonly refusalRetryMs: number;
   private readonly now: () => number;
   private readonly resolveSchema: ((tenantId: string) => string | Promise<string>) | null;
   private readonly entries = new Map<string, RegistryEntry>();
+  /**
+   * Kept apart from `entries` so a refused re-application cannot overwrite it: `entries` is the
+   * memo of the latest attempt, this is what is being served.
+   */
+  private readonly applied = new Map<string, AppliedServing>();
   /** In-flight applications, so concurrent first requests for one tenant do one apply. */
   private readonly inFlight = new Map<string, Promise<TenantSchemaApplication>>();
 
@@ -156,6 +251,32 @@ export class TenantColumnStoreRegistry {
     }
   }
 
+  /**
+   * `ensure`, answering which manifest the tenant is served under — see `TenantServing`. A gateway
+   * compiled for this tenant must be compiled against `manifest` here and not against the one asked
+   * for, or the manifest it validates against and the store it writes through describe different
+   * schemas.
+   */
+  async ensureServing(tenantId: string, manifest: Manifest): Promise<TenantServing> {
+    const application = await this.ensure(tenantId, manifest);
+    if (application.applied) return { kind: "applied", manifest, application };
+    const last = this.applied.get(tenantId);
+    if (last === undefined) {
+      // `pg_tables` lists every table whatever the session's privileges, so a confined role reads
+      // the same answer an owner does. Asked here and not in `apply`, because it decides only what
+      // a refusal *means* and costs nothing on the applied path.
+      const probe = await this.conn.query(SCHEMA_HOLDS_TABLES_SQL, [application.schema]);
+      const occupied = (probe.rows[0] as { occupied?: unknown } | undefined)?.occupied === true;
+      return { kind: occupied ? "stranded" : "refused", manifest, application };
+    }
+    return {
+      kind: "retained",
+      manifest: last.manifest,
+      retained: { manifestHash: last.manifestHash, schema: last.application.schema },
+      application,
+    };
+  }
+
   private async apply(tenantId: string, manifest: Manifest, hash: string): Promise<TenantSchemaApplication> {
     const schema = this.resolveSchema === null ? undefined : await this.resolveSchema(tenantId);
     const application = await applyTenantManifestSchema(this.conn, tenantId, manifest, {
@@ -190,21 +311,32 @@ export class TenantColumnStoreRegistry {
     this.entries.set(tenantId, {
       manifestHash: hash,
       application,
-      store,
       validUntil: application.applied ? Number.POSITIVE_INFINITY : this.now() + this.refusalRetryMs,
     });
-    this.onApplication?.(application);
+    if (store !== null) {
+      this.applied.set(tenantId, { manifestHash: hash, manifest, application, store });
+    }
+    const last = this.applied.get(tenantId);
+    this.onApplication?.(
+      application,
+      store === null && last !== undefined
+        ? { manifestHash: last.manifestHash, schema: last.application.schema }
+        : null,
+    );
     return application;
   }
 
   /**
-   * The tenant's store, or null when their manifest has not been ensured, or its
-   * application was refused. Synchronous and side-effect free.
+   * The store of the tenant's last *applied* manifest, or null when nothing has ever been applied
+   * for them. Synchronous and side-effect free.
+   *
+   * A refusal does not clear it, and that is the difference from what this answered before: a
+   * refused re-activation used to replace the tenant's store with `null`, so the router sent a
+   * tenant whose rows live in their own tables to the fallback store. The refused application
+   * executed no DDL, so the last applied store still describes the schema exactly.
    */
   storeFor(tenantId: string): ColumnMappedEntityStore | null {
-    const entry = this.entries.get(tenantId);
-    if (entry === undefined || entry.validUntil <= this.now()) return null;
-    return entry.store;
+    return this.applied.get(tenantId)?.store ?? null;
   }
 
   /** The last application recorded for this tenant, for an admin or diagnostic read. */
@@ -213,18 +345,28 @@ export class TenantColumnStoreRegistry {
   }
 
   /**
-   * Drops what is remembered about one tenant, so the next `ensure` re-applies and
-   * re-introspects. Wire this to whatever notices an activation (the manifest
-   * activation poller), so a manifest activated on another replica is re-applied
-   * here rather than waiting on a hash comparison that would catch it anyway but
-   * only once the new manifest is read.
+   * Drops the memo of the latest application, so the next `ensure` re-applies and re-introspects,
+   * while the last applied store keeps serving until a new application succeeds. Wire this to
+   * whatever notices an activation (the manifest activation poller): a re-activation is a reason to
+   * try again, not evidence that the schema the tenant is being served from has gone.
+   */
+  forgetApplication(tenantId: string): void {
+    this.entries.delete(tenantId);
+  }
+
+  /**
+   * Drops everything remembered about one tenant, including the store being served — for when the
+   * schema itself is gone (an erasure), where handing out a store bound to dropped tables would fail
+   * every request instead of falling back. Not for an activation: see `forgetApplication`.
    */
   forget(tenantId: string): void {
     this.entries.delete(tenantId);
+    this.applied.delete(tenantId);
   }
 
   clear(): void {
     this.entries.clear();
+    this.applied.clear();
   }
 }
 
@@ -382,6 +524,19 @@ export class TenantColumnStoreRouter implements TransactionalEntityStore {
     return this.storeForEntity(tenantId, entity).remove(tenantId, entity, id);
   }
 
+  async removeIf(
+    tenantId: string,
+    entity: string,
+    id: string,
+    expected: UpdatePrecondition,
+  ): Promise<ConditionalRemove> {
+    return this.storeForEntity(tenantId, entity).removeIf(tenantId, entity, id, expected);
+  }
+
+  async getLocked(tenantId: string, entity: string, id: string, lock: RowLock): Promise<EntityRecord | null> {
+    return this.storeForEntity(tenantId, entity).getLocked(tenantId, entity, id, lock);
+  }
+
   /**
    * Routes the atomic unit to the tenant's store. A fallback that cannot offer one
    * runs the callback against itself unwrapped — the same non-atomic behaviour it
@@ -533,6 +688,14 @@ function guardPlaintextEntities(
     remove: (t, entity, id) => {
       check(entity);
       return inner.remove(t, entity, id);
+    },
+    removeIf: (t, entity, id, expected) => {
+      check(entity);
+      return inner.removeIf(t, entity, id, expected);
+    },
+    getLocked: (t, entity, id, lock) => {
+      check(entity);
+      return inner.getLocked(t, entity, id, lock);
     },
   };
 }

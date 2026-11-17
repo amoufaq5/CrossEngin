@@ -14,13 +14,38 @@ import type { PostgresChainLogReader } from "./chain-log-store.js";
  */
 export interface PublicKeyResolver {
   resolveByFingerprint(fingerprint: string): Promise<string | null>;
+  /**
+   * Whether this resolver vouches for the key a fingerprint names, asked **before** resolving it.
+   * Present on a pinned resolver and absent on the registry one, and the absence is the registry's
+   * real semantics rather than a permissive default: a registry resolves whatever is registered in
+   * scope, which is exactly why it cannot be the trust root — a tenant-context session can insert a
+   * key into `meta.crypto_keys` and sign a forged entry under it (H-18).
+   */
+  trusts?(fingerprint: string): boolean;
 }
+
+/**
+ * A resolver over the deployment's own chain keys and nothing else. It reads no table: the keys
+ * come from the deployment's configuration, so a row a database writer adds to `meta.crypto_keys`
+ * cannot make an entry it signed verify. An entry signed by any other key is `untrusted_key` —
+ * distinct from `unresolved_key`, because "this deployment did not sign this" and "the registry has
+ * no row for this key" send an operator to different places.
+ */
+export function pinnedKeyResolver(trustedKeys: ReadonlyMap<string, string>): PublicKeyResolver {
+  return {
+    trusts: (fingerprint) => trustedKeys.has(fingerprint),
+    resolveByFingerprint: async (fingerprint) => trustedKeys.get(fingerprint) ?? null,
+  };
+}
+
+export const ENTRY_SIGNATURE_FAILURES = ["unresolved_key", "untrusted_key", "bad_signature"] as const;
+export type EntrySignatureFailure = (typeof ENTRY_SIGNATURE_FAILURES)[number];
 
 export interface EntrySignatureResult {
   readonly sequenceNumber: number;
   readonly fingerprint: string;
   readonly ok: boolean;
-  readonly reason?: "unresolved_key" | "bad_signature";
+  readonly reason?: EntrySignatureFailure;
 }
 
 export interface ChainSignatureVerdict {
@@ -68,6 +93,16 @@ export async function verifyChainSignatures(
 
   for (const entry of entries) {
     const fingerprint = entry.signingKeyFingerprint;
+    if (resolver.trusts !== undefined && !resolver.trusts(fingerprint)) {
+      allOk = false;
+      results.push({
+        sequenceNumber: entry.sequenceNumber,
+        fingerprint,
+        ok: false,
+        reason: "untrusted_key",
+      });
+      continue;
+    }
     let publicKey = cache.get(fingerprint);
     if (publicKey === undefined) {
       publicKey = await resolver.resolveByFingerprint(fingerprint);

@@ -19,7 +19,8 @@ export interface RenderedExpressions {
   /**
    * Keyed by `expressionKey`. A null value means Postgres would not accept the expression against
    * that table at all — a missing column, a type error — which is itself a difference worth
-   * reporting rather than a reason to guess.
+   * reporting rather than a reason to guess. An **absent** key means the probe could not answer
+   * (see `uncompared`), and a comparison reads absence as *not compared*, never as drift.
    */
   readonly byRequest: ReadonlyMap<string, string | null>;
   /**
@@ -37,18 +38,44 @@ export interface RenderedExpressions {
    * means the probe itself could not read `conkey` back.
    */
   readonly columnsByRequest?: ReadonlyMap<string, readonly string[] | null>;
+  /**
+   * Expressions the probe could not answer, with the error that stopped it (H-23). Before this every
+   * probe error was read as *the expression cannot be applied*, so a privilege the session lacked or
+   * a lock it could not take reported a correct index or policy as drifted and planned its rebuild.
+   */
+  readonly uncompared?: readonly UncomparedExpression[];
+}
+
+/** An expression left out of the comparison, and why. */
+export interface UncomparedExpression {
+  readonly table: string;
+  readonly expression: string;
+  readonly sqlstate: string | null;
+  readonly reason: string;
 }
 
 export const NO_RENDERED_EXPRESSIONS: RenderedExpressions = {
   byRequest: new Map(),
   columnsByRequest: new Map(),
+  uncompared: [],
 };
 
-/** One expression as Postgres renders and parses it. */
-interface ProbeResult {
-  readonly rendering: string | null;
-  readonly columns: readonly string[] | null;
+/**
+ * How long a probe waits for the lock its `CREATE TEMP TABLE … (LIKE …)` takes on the real table.
+ * That lock is `ACCESS SHARE`, which conflicts only with `ACCESS EXCLUSIVE`, so this bounds the wait
+ * behind somebody else's migration rather than protecting traffic, which the probe no longer blocks.
+ */
+export const DEFAULT_PROBE_LOCK_TIMEOUT_MS = 5_000;
+
+export interface RenderExpressionsOptions {
+  /** 0 waits indefinitely. */
+  readonly lockTimeoutMs?: number;
 }
+
+/** One expression as Postgres renders and parses it. */
+type ProbeResult =
+  | { readonly kind: "rendered"; readonly rendering: string | null; readonly columns: readonly string[] | null }
+  | { readonly kind: "uncompared"; readonly uncompared: UncomparedExpression };
 
 /** Thrown to force the probe transaction to roll back; never escapes `renderExpressions`. */
 class RollbackProbe extends Error {
@@ -68,30 +95,48 @@ class RollbackProbe extends Error {
  * writing a SQL parser, and getting it subtly wrong means either missing real drift or inventing
  * false drift on a correct schema.
  *
- * So the declared side is deparsed by the same deparser. Each expression is attached to the table as
- * a `CHECK … NOT VALID` constraint inside a savepoint, read back with `pg_get_constraintdef`, and
- * rolled away. `NOT VALID` is what keeps it cheap: Postgres records the constraint without scanning
- * a single row, so the probe costs the same on an empty table and a large one. The rendering is
- * character-identical to what `pg_get_expr` reports for an index predicate or a policy clause —
- * verified against both.
+ * So the declared side is deparsed by the same deparser: each expression is attached as a
+ * `CHECK … NOT VALID` constraint, read back with `pg_get_constraintdef`, and rolled away.
  *
- * Nothing is committed: every probe is undone by its savepoint, and the surrounding transaction is
- * rolled back whether or not the probes succeeded.
+ * **Against a session-private copy of the table, not the table** (H-23). `ADD CONSTRAINT` takes
+ * `ACCESS EXCLUSIVE`, and this ran once per declared expression on the real table — so `drift` or
+ * `apply --plan`, both read-only in intent, queued an exclusive lock behind any open reader and every
+ * later query on that table queued behind it: measured, a plain `SELECT` waited 6 s behind a plan.
+ * `CREATE TEMP TABLE … (LIKE t)` copies the column names and types the deparser resolves against
+ * and takes only `ACCESS SHARE` on `t`; the constraint goes on the copy. The rendering is
+ * character-identical (verified over the whole catalog: a converged database still reads as no
+ * drift). It also asks for less: `SELECT` on the table rather than ownership of it.
+ *
+ * It cannot be a `READ ONLY` transaction — Postgres refuses `CREATE TABLE` in one, temporary or not.
+ * What it writes is the session's own temporary catalog entries, inside a transaction that is always
+ * rolled back. Each table's copy lives in its own savepoint, released before the next, so the locks
+ * do not accumulate across the catalog.
  */
 export async function renderExpressions(
   conn: PgConnection,
   schema: string,
   requests: readonly ExpressionRequest[],
+  options: RenderExpressionsOptions = {},
 ): Promise<RenderedExpressions> {
   if (requests.length === 0) return NO_RENDERED_EXPRESSIONS;
-  const unique = new Map<string, ExpressionRequest>();
-  for (const req of requests) unique.set(expressionKey(req.table, req.expr), req);
+  const lockTimeoutMs = options.lockTimeoutMs ?? DEFAULT_PROBE_LOCK_TIMEOUT_MS;
+  if (!Number.isInteger(lockTimeoutMs) || lockTimeoutMs < 0) {
+    throw new Error(`lockTimeoutMs must be a non-negative integer, got ${String(lockTimeoutMs)}`);
+  }
+  const byTable = new Map<string, Map<string, ExpressionRequest>>();
+  for (const req of requests) {
+    const forTable = byTable.get(req.table) ?? new Map<string, ExpressionRequest>();
+    forTable.set(expressionKey(req.table, req.expr), req);
+    byTable.set(req.table, forTable);
+  }
 
   try {
     await conn.transaction(async (tx) => {
+      await tx.query(`SET LOCAL lock_timeout = '${String(lockTimeoutMs)}ms'`);
       const rendered = new Map<string, ProbeResult>();
-      for (const [key, req] of unique) {
-        rendered.set(key, await probeOne(tx, schema, req));
+      let copy = 0;
+      for (const [table, forTable] of byTable) {
+        await probeTable(tx, schema, table, `_crossengin_probe_${String(copy++)}`, forTable, rendered);
       }
       // The probes are a read dressed up as DDL; nothing here may survive.
       throw new RollbackProbe(rendered);
@@ -100,11 +145,16 @@ export async function renderExpressions(
     if (err instanceof RollbackProbe) {
       const byRequest = new Map<string, string | null>();
       const columnsByRequest = new Map<string, readonly string[] | null>();
+      const uncompared: UncomparedExpression[] = [];
       for (const [key, result] of err.rendered) {
-        byRequest.set(key, result.rendering);
-        columnsByRequest.set(key, result.columns);
+        if (result.kind === "rendered") {
+          byRequest.set(key, result.rendering);
+          columnsByRequest.set(key, result.columns);
+        } else {
+          uncompared.push(result.uncompared);
+        }
       }
-      return { byRequest, columnsByRequest };
+      return { byRequest, columnsByRequest, uncompared };
     }
     throw err;
   }
@@ -112,7 +162,69 @@ export async function renderExpressions(
   throw new Error("expression probe did not roll back");
 }
 
-const UNRENDERABLE: ProbeResult = { rendering: null, columns: null };
+const UNRENDERABLE: ProbeResult = { kind: "rendered", rendering: null, columns: null };
+
+/**
+ * Whether an error raised while attaching or reading the probe says the **expression** is wrong for
+ * the table, rather than that the probe could not run.
+ *
+ * Class 42 is the parser's (an undefined column or function, a type mismatch) — except `42501`,
+ * which is a privilege and says nothing about the expression. Class 22 is a literal that does not
+ * coerce, and `0A000` a construct a CHECK may not hold. Everything else — a lock timeout, a
+ * cancellation, a lost connection, an error with no SQLSTATE at all — is *not compared*, because
+ * reading it as "cannot be applied" is what planned a rebuild of a correct object.
+ */
+export function errorMeansExpressionInapplicable(sqlstate: string | null): boolean {
+  if (sqlstate === null) return false;
+  if (sqlstate === "42501") return false;
+  return sqlstate.startsWith("42") || sqlstate.startsWith("22") || sqlstate === "0A000";
+}
+
+function sqlstateOf(err: unknown): string | null {
+  const code = (err as { readonly code?: unknown } | null)?.code;
+  return typeof code === "string" && /^[0-9A-Z]{5}$/.test(code) ? code : null;
+}
+
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+async function probeTable(
+  tx: PgConnection,
+  schema: string,
+  table: string,
+  copyName: string,
+  requests: ReadonlyMap<string, ExpressionRequest>,
+  rendered: Map<string, ProbeResult>,
+): Promise<void> {
+  const source = `${quoteIdent(schema)}.${quoteIdent(table)}`;
+  const copy = quoteIdent(copyName);
+  await tx.query("SAVEPOINT crossengin_expr_table");
+  try {
+    try {
+      await tx.query(`CREATE TEMP TABLE ${copy} (LIKE ${source})`);
+    } catch (err) {
+      // The copy could not be made — the session cannot read the table, or could not take the lock
+      // in time. Nothing about any of its expressions is known.
+      const sqlstate = sqlstateOf(err);
+      const reason = `could not copy ${schema}.${table} to probe it: ${messageOf(err)}`;
+      for (const [key, req] of requests) {
+        rendered.set(key, {
+          kind: "uncompared",
+          uncompared: { table, expression: req.expr, sqlstate, reason },
+        });
+      }
+      return;
+    }
+    for (const [key, req] of requests) {
+      rendered.set(key, await probeOne(tx, copyName, req));
+    }
+  } finally {
+    // Undoes the copy and releases the lock its `LIKE` took on the real table before the next one.
+    await tx.query("ROLLBACK TO SAVEPOINT crossengin_expr_table");
+    await tx.query("RELEASE SAVEPOINT crossengin_expr_table");
+  }
+}
 
 /**
  * `conkey` comes back alongside the rendering because the probe is the only place either can be
@@ -137,31 +249,36 @@ const PROBE_QUERY = `
 
 async function probeOne(
   tx: PgConnection,
-  schema: string,
+  copyName: string,
   req: ExpressionRequest,
 ): Promise<ProbeResult> {
-  const fq = `${quoteIdent(schema)}.${quoteIdent(req.table)}`;
   const probe = quoteIdent(PROBE_CONSTRAINT);
   await tx.query("SAVEPOINT crossengin_expr_probe");
   try {
     await tx.query(
-      `ALTER TABLE ${fq} ADD CONSTRAINT ${probe} CHECK (${req.expr}) NOT VALID`,
+      `ALTER TABLE ${quoteIdent(copyName)} ADD CONSTRAINT ${probe} CHECK (${req.expr}) NOT VALID`,
     );
     const result = await tx.query<{ def: string; cols: readonly string[] | null }>(
       PROBE_QUERY,
-      [PROBE_CONSTRAINT, `${schema}.${req.table}`],
+      [PROBE_CONSTRAINT, `pg_temp.${copyName}`],
     );
     const row = result.rows[0];
     if (row === undefined) return UNRENDERABLE;
     return {
+      kind: "rendered",
       rendering: stripCheckWrapper(row.def),
       columns: row.cols ?? null,
     };
-  } catch {
-    // An expression the table cannot carry is reported as unrenderable, not as a thrown pass.
-    return UNRENDERABLE;
+  } catch (err) {
+    const sqlstate = sqlstateOf(err);
+    if (errorMeansExpressionInapplicable(sqlstate)) return UNRENDERABLE;
+    return {
+      kind: "uncompared",
+      uncompared: { table: req.table, expression: req.expr, sqlstate, reason: messageOf(err) },
+    };
   } finally {
     await tx.query("ROLLBACK TO SAVEPOINT crossengin_expr_probe");
+    await tx.query("RELEASE SAVEPOINT crossengin_expr_probe");
   }
 }
 

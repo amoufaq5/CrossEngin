@@ -422,6 +422,11 @@ export interface ServeOptions {
   readonly integrityProofConfig: string | null;
   /** `--checkpoints`' sibling for the integrity proof; same literal shape, same reason. */
   readonly integrityProof: boolean;
+  /**
+   * `--integrity-proof`'s `fullFoldEveryPasses` (H-18): fold the whole chain on the first pass and
+   * every Nth, 0 never. Null keeps the default. The file route states it in the file.
+   */
+  readonly integrityProofFullEvery: number | null;
   /** Refresh interval (ms) for live per-tenant audit sampling read from meta.operate_tenant_settings; enables the live policy cache (needs --store pg + --audit-chain-config). Null disables it. */
   readonly auditSamplingRefreshMs: number | null;
   /** Expose the platform super-admin tenant-management routes under /v1/platform (list/create/suspend/archive/reactivate tenants + stats over meta.tenants; needs --store pg|pg-columns). */
@@ -439,6 +444,14 @@ export interface ServeOptions {
    * every deployment got when the role was hardcoded, so declaring nothing changes nothing.
    */
   readonly adminRoles: readonly string[];
+  /**
+   * The role(s) background jobs act as when they write — the primary first. A job's write goes
+   * through the same handler a request is served by, so these roles are checked against the
+   * manifest's own grants exactly as a person's are: a job may do what this role may do, and a
+   * reviewer reads that off the manifest rather than out of handler code. Repeatable; defaults to
+   * `erp_admin`, which every shipped pack declares and grants the writes the shipped handlers make.
+   */
+  readonly jobActorRoles: readonly string[];
   /** Expose the in-product AI Architect routes under /v1/ai — describe a business, get a validated manifest proposal, activate it (over meta.operate_tenant_manifests; needs --store pg|pg-columns; the designer needs ANTHROPIC_API_KEY or OPENAI_API_KEY [+ optional OPENAI_BASE_URL]). Implies per-tenant manifest serving. */
   readonly aiDesign: boolean;
   /** Roles allowed to call the AI-design routes (repeatable; default erp_admin + platform_admin). */
@@ -460,6 +473,8 @@ export interface ServeOptions {
   readonly designReviewRoles: readonly string[];
   /** Require platform approval before a tenant can activate an AI proposal. */
   readonly requireDesignReview: boolean;
+  /** Let the principal that requested a design approve it (H-28's hatch; off by default). */
+  readonly allowDesignSelfApproval: boolean;
   /** Path to a JSON metering config ({meter?, source?, tenantSubscriptions, countStatuses?, flushIntervalMs?}) — meters the live request stream into billing usage (needs --store pg). */
   readonly meteringConfig: string | null;
   /** Path to a JSON Stripe usage-sync config ({intervalMs?, tenants, subscriptionItems}) — periodically reports persisted usage records to Stripe (needs --store pg + --stripe-api-key). */
@@ -772,10 +787,12 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let integrityProofConfig: string | null = null;
   let checkpoints = false;
   let integrityProof = false;
+  let integrityProofFullEvery: number | null = null;
   let auditSamplingRefreshMs: number | null = null;
   let platformAdmin = false;
   const platformAdminRoles: string[] = [];
   const adminRoles: string[] = [];
+  const jobActorRoles: string[] = [];
   let aiDesign = false;
   const aiDesignRoles: string[] = [];
   let perTenantManifests = false;
@@ -788,6 +805,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   const integrityVerdictTenantRoles: string[] = [];
   const designReviewRoles: string[] = [];
   let requireDesignReview = false;
+  let allowDesignSelfApproval = false;
   let meteringConfig: string | null = null;
   let stripeUsageSyncConfig: string | null = null;
   let aiMaxRequestDollars: number | null = null;
@@ -1288,6 +1306,14 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       checkpoints = true;
     } else if (arg === "--integrity-proof") {
       integrityProof = true;
+    } else if (arg === "--integrity-proof-full-every" || arg.startsWith("--integrity-proof-full-every=")) {
+      const raw = takeValue(arg, next, "--integrity-proof-full-every");
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 0) {
+        throw new CliUsageError(`invalid --integrity-proof-full-every: ${raw} (an integer >= 0; 0 never)`);
+      }
+      integrityProofFullEvery = n;
+      i += consumed();
     } else if (arg === "--audit-sampling-refresh-ms" || arg.startsWith("--audit-sampling-refresh-ms=")) {
       const raw = takeValue(arg, next, "--audit-sampling-refresh-ms");
       const n = Number(raw);
@@ -1303,6 +1329,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       i += consumed();
     } else if (arg === "--admin-role" || arg.startsWith("--admin-role=")) {
       adminRoles.push(takeValue(arg, next, "--admin-role"));
+      i += consumed();
+    } else if (arg === "--job-actor-role" || arg.startsWith("--job-actor-role=")) {
+      jobActorRoles.push(takeValue(arg, next, "--job-actor-role"));
       i += consumed();
     } else if (arg === "--ai-design") {
       aiDesign = true;
@@ -1338,6 +1367,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--require-design-review") {
       requireDesignReview = true;
       designReview = true;
+    } else if (arg === "--allow-design-self-approval") {
+      allowDesignSelfApproval = true;
     } else if (arg === "--manifest-refresh-ms" || arg.startsWith("--manifest-refresh-ms=")) {
       const raw = takeValue(arg, next, "--manifest-refresh-ms");
       const n = Number(raw);
@@ -1785,6 +1816,14 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
         " reviewable proposal is the Architect, so the queue would never be non-empty",
     );
   }
+  // The hatch relaxes a rule only the review routes enforce, so without them it would be a flag
+  // that reads as a decision and changes nothing.
+  if (allowDesignSelfApproval && !designReview) {
+    throw new CliUsageError(
+      "--allow-design-self-approval requires --design-review or --require-design-review: it relaxes a" +
+        " rule only the review routes enforce",
+    );
+  }
   if (tenantDeletionRoutes && store === "memory") {
     throw new CliUsageError(
       "--tenant-deletion-routes requires a Postgres store (--store pg or pg-columns)",
@@ -2222,6 +2261,15 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   if (integrityProof && integrityProofConfig !== null) {
     throw new CliUsageError("--integrity-proof and --integrity-proof-config are mutually exclusive");
   }
+  // Refused rather than ignored: on the file route the cadence is the file's `fullFoldEveryPasses`,
+  // and with no proof mounted at all the flag would be inert while reading as configured.
+  if (integrityProofFullEvery !== null && !integrityProof) {
+    throw new CliUsageError(
+      integrityProofConfig !== null
+        ? "--integrity-proof-full-every applies to --integrity-proof; with --integrity-proof-config set fullFoldEveryPasses in the file"
+        : "--integrity-proof-full-every needs --integrity-proof",
+    );
+  }
 
   const declaredCapabilities = Object.keys(deletionCapabilityDeclarations);
   if (declaredCapabilities.length > 0 && deletionCapabilities !== null) {
@@ -2417,6 +2465,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     integrityProofConfig,
     checkpoints,
     integrityProof,
+    integrityProofFullEvery,
     auditSamplingRefreshMs,
     platformAdmin,
     platformAdminRoles: platformAdminRoles.length > 0 ? platformAdminRoles : ["platform_admin"],
@@ -2425,6 +2474,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     // `platform_admin` a tenant's settings on every deployment, which is a privilege decision
     // rather than a default.
     adminRoles: adminRoles.length > 0 ? adminRoles : ["erp_admin"],
+    jobActorRoles: jobActorRoles.length > 0 ? jobActorRoles : ["erp_admin"],
     aiDesign,
     aiDesignRoles: aiDesignRoles.length > 0 ? aiDesignRoles : ["erp_admin", "platform_admin"],
     perTenantManifests: perTenantManifests || aiDesign,
@@ -2437,6 +2487,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     integrityVerdictTenantRoles,
     designReviewRoles: designReviewRoles.length > 0 ? designReviewRoles : ["platform_admin"],
     requireDesignReview,
+    allowDesignSelfApproval,
     meteringConfig,
     stripeUsageSyncConfig,
     aiMaxRequestDollars,
@@ -3104,6 +3155,13 @@ Options:
                        served manifest does not define is WARNED about at boot and not refused:
                        platform_admin is such a role on all seven packs and is a legitimate value
                        here, so a refusal would refuse a correct deployment
+  --job-actor-role <role>  Role background job handlers act as when they write (repeatable, primary
+                       first; default erp_admin). A job's write runs through the same handler a
+                       request does — the manifest's grants, the write guards, the effects, the
+                       lifecycle rule and the audit row — so this role is authorized exactly as a
+                       person holding it would be; the audit row names the job run, never a person.
+                       A role the served manifest does not declare registers no job handler at all,
+                       said at boot
   --ai-design          Expose the in-product AI Architect under /v1/ai — POST a business description,
                        get a validated manifest proposal, activate it as the tenant's live system
                        (needs --store pg|pg-columns + ANTHROPIC_API_KEY or OPENAI_API_KEY, optional
@@ -3299,6 +3357,9 @@ Options:
   --design-review-role <r>  Role permitted to decide reviews (repeatable; default platform_admin)
   --require-design-review   Require platform approval before a tenant activates a proposal
                        (implies --design-review)
+  --allow-design-self-approval  Let the principal that requested a design approve it. Off by
+                       default: the requester is refused 403 designer_cannot_approve. For a
+                       deployment run by one person; said at boot either way
   --per-tenant-manifests  Serve each tenant's activated custom manifest (meta.operate_tenant_manifests),
                        falling back to the boot pack for tenants without one (needs --store pg|pg-columns)
   --region <id>        This instance's serving region (e.g. eu-central) — with --residency-file,
@@ -3373,6 +3434,10 @@ Options:
                        literal, same reason. No escalation block, so a deployment that wants a page
                        declares the alert policy itself. Mutually exclusive with
                        --integrity-proof-config
+  --integrity-proof-full-every <n>  Fold the whole chain on the first pass after boot and every
+                       Nth pass per scope, even where a signed checkpoint would keep the pass
+                       bounded (default 24, a day at the hourly interval; 0 never). Needs
+                       --integrity-proof; the config file's field is fullFoldEveryPasses
   --audit-sampling-refresh-ms <n>  Refresh interval (ms, >=1000) for live per-tenant audit sampling read
                        from meta.operate_tenant_settings (overrides the config map without a redeploy);
                        enables the live policy cache (needs --store pg + --audit-chain-config)

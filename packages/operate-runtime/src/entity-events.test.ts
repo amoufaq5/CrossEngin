@@ -158,11 +158,11 @@ describe("entityEventEffect ↔ producibleEntityEventNames", () => {
     );
   });
 
-  it("is 230 names for erp-core = 51 entities × 3 verbs + 77 distinct transition targets", async () => {
+  it("is 234 names for erp-core = 51 entities × 3 verbs + 81 distinct transition targets", async () => {
     const emitted = await namesEmittedFor(resolvedCore);
     expect(resolvedCore.entities).toHaveLength(51);
-    expect(emitted.size).toBe(230);
-    expect(emitted.size - (resolvedCore.entities ?? []).length * 3).toBe(77);
+    expect(emitted.size).toBe(234);
+    expect(emitted.size - (resolvedCore.entities ?? []).length * 3).toBe(81);
   });
 
   it("names a lifecycle target only where that pack declares it", async () => {

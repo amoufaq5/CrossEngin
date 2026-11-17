@@ -5,7 +5,12 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { InMemoryKeyStore } from "@crossengin/crypto";
 import { PostgresKeyRegistry } from "@crossengin/crypto-pg";
-import type { ChainCheckpoint } from "@crossengin/forensics";
+import {
+  checkpointSignatureStanding,
+  signCheckpoint,
+  trustedChainKeys,
+  type ChainCheckpoint,
+} from "@crossengin/forensics";
 import {
   PostgresChainCheckpointStore,
   PostgresChainLogStore,
@@ -19,7 +24,11 @@ import type { PgConnection, PgQueryResult, RowRead } from "@crossengin/kernel-pg
 import { assertBindArity } from "@crossengin/testing";
 
 import { auditAnchors, type AnchorAuditReport } from "./anchor-audit.js";
-import type { ChainFullReason, ChainVerificationReport } from "./chain-verify.js";
+import {
+  PinnedChainKeys,
+  type ChainFullReason,
+  type ChainVerificationReport,
+} from "./chain-verify.js";
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
 import {
   buildCheckpointLifecycle,
@@ -187,6 +196,8 @@ function fakeChainPg(
               external_anchor_reference: p[5] ?? null,
               algorithm: p[6],
               provenance: p[7] ?? null,
+              signature: p[8] ?? null,
+              signing_key_fingerprint: p[9] ?? null,
             });
           }
           return { rows: [], rowCount: exists ? 0 : 1 };
@@ -272,6 +283,8 @@ function fakeChainPg(
 interface ChainFixture {
   readonly conn: PgConnection;
   readonly signer: ChainSigner;
+  /** The signer's public half, for the tests that pin the trust set to it. */
+  readonly publicKeyBase64: string;
   readonly registry: PostgresKeyRegistry;
   readonly checkpointStore: PostgresChainCheckpointStore;
 }
@@ -430,6 +443,7 @@ async function newChainFixture(
   return {
     conn,
     signer,
+    publicKeyBase64: record.publicKeyBase64,
     registry: new PostgresKeyRegistry(conn, {}),
     checkpointStore: new PostgresChainCheckpointStore(conn, {}),
   };
@@ -866,12 +880,17 @@ describe("CheckpointScheduler verification", () => {
       readonly onRefused: (scope: string | null, verification: ChainVerificationReport) => void;
       readonly onAnchorFindings?: (scope: string | null, audit: AnchorAuditReport) => void;
       readonly onError?: (err: unknown) => void;
+      /** Null by default: signing is asserted by its own tests, and these are about something else. */
+      readonly signer?: ChainSigner | null;
+      readonly trustedKeys?: ReadonlyMap<string, string> | null;
     },
   ): CheckpointScheduler {
     return new CheckpointScheduler({
       logStore: opts.logStore ?? new PostgresChainLogStore(fixture.conn, fixture.signer, {}),
       checkpointStore: opts.checkpointStore ?? fixture.checkpointStore,
       verify: opts.verify,
+      signer: opts.signer ?? null,
+      trustedKeys: opts.trustedKeys ?? null,
       scopes: () => opts.scopes,
       intervalMs: 1000,
       checkpointedBy: "operate-server",
@@ -1188,7 +1207,7 @@ describe("CheckpointScheduler verification", () => {
       // pass took the verdict from `compromised` to `verified` with the row untouched on disk; the
       // row is still untouched and the finding is still there, because the reader is no longer one
       // row wide. Without this line the test above would pass on a detector that had been buried.
-      const after = await auditAnchors(TENANT_A, store, null);
+      const after = await auditAnchors(TENANT_A, store, null, null);
       expect(after.scanned).toBe(2);
       expect(after.refusedCount).toBe(1);
     });
@@ -1415,6 +1434,8 @@ describe("CheckpointScheduler lifecycle", () => {
       logStore: new PostgresChainLogStore(conn, signer, {}),
       checkpointStore,
       verify: async (scope) => report(scope, "full", true),
+      signer: null,
+      trustedKeys: null,
       scopes: () => [TENANT_A],
       intervalMs: 1000,
       checkpointedBy: "operate-server",
@@ -1464,5 +1485,85 @@ describe("DEFAULT_CHECKPOINT_CONFIG", () => {
     // ...and `allTenants` is what makes `node.ts` replace that list with the live registry, which
     // `configScopes` cannot show — so the field, not this list, is the assertion above.
     expect(DEFAULT_CHECKPOINT_CONFIG.allTenants).toBe(true);
+  });
+});
+
+describe("checkpoint signing (H-18)", () => {
+  it("signs every checkpoint it records with the chain key, over the bytes a verifier rebuilds", async () => {
+    const fx = await newChainFixture();
+    await seed(fx.conn, fx.signer, TENANT_A, 3);
+    const pin = trustedChainKeys([fx.publicKeyBase64]);
+    const { runOnce } = buildCheckpointLifecycle(fx.conn, { ...BASE_CONFIG, tenants: [TENANT_A] }, {
+      signer: fx.signer,
+      registry: new PinnedChainKeys(pin),
+      onRefused: () => undefined,
+      onAnchorFindings: () => undefined,
+      now: () => new Date(AT),
+    });
+    expect((await runOnce())[0]?.outcome).toBe("recorded");
+    const stored = await fx.checkpointStore.latest(TENANT_A);
+    expect(stored?.signingKeyFingerprint).toBe(fx.signer.fingerprint);
+    // Read back through the store, so the signature survives the round trip and not only the write.
+    expect(stored !== null && checkpointSignatureStanding(TENANT_A, stored, pin)).toBe("signed");
+  });
+
+  it("anchors again on the next pass over its own signed anchor, staying bounded", async () => {
+    const fx = await newChainFixture();
+    await seed(fx.conn, fx.signer, TENANT_A, 3);
+    const { runOnce } = buildCheckpointLifecycle(fx.conn, { ...BASE_CONFIG, tenants: [TENANT_A] }, {
+      signer: fx.signer,
+      registry: new PinnedChainKeys(trustedChainKeys([fx.publicKeyBase64])),
+      onRefused: () => undefined,
+      onAnchorFindings: () => undefined,
+    });
+    await runOnce();
+    await seed(fx.conn, fx.signer, TENANT_A, 2);
+    const second = await runOnce();
+    expect(second[0]?.outcome).toBe("recorded");
+    expect(second[0]?.verification?.mode).toBe("from_checkpoint");
+  });
+
+  it("refuses to build when the signer's key is not one the pin trusts", async () => {
+    const fx = await newChainFixture();
+    const other = await newChainFixture();
+    expect(() =>
+      buildCheckpointLifecycle(fx.conn, { ...BASE_CONFIG, tenants: [TENANT_A] }, {
+        signer: fx.signer,
+        registry: new PinnedChainKeys(trustedChainKeys([other.publicKeyBase64])),
+        onRefused: () => undefined,
+        onAnchorFindings: () => undefined,
+      }),
+    ).toThrow("is not in the pinned chain trust set");
+  });
+
+  it("reports a mis-signed anchor through onAnchorFindings, and takes no prefix from it", async () => {
+    const fx = await newChainFixture();
+    const other = await newChainFixture();
+    await seed(fx.conn, fx.signer, TENANT_A, 3);
+    // An anchor signed by a key the pin does not hold, written into the table directly.
+    const findings: AnchorAuditReport[] = [];
+    const recorded: ChainCheckpoint[] = [];
+    const store = new PostgresChainCheckpointStore(fx.conn, {});
+    const cp = await signCheckpoint(
+      TENANT_A,
+      { sequenceNumber: 1, rootHash: "e".repeat(64), checkpointedAt: AT, checkpointedBy: "x", algorithm: "sha256", provenance: "verified_full" },
+      other.signer,
+    );
+    await store.record(TENANT_A, cp);
+    await buildCheckpointLifecycle(fx.conn, { ...BASE_CONFIG, tenants: [TENANT_A] }, {
+      signer: fx.signer,
+      registry: new PinnedChainKeys(trustedChainKeys([fx.publicKeyBase64])),
+      onRefused: () => undefined,
+      onAnchorFindings: (_scope, audit) => findings.push(audit),
+      onCheckpoint: (_scope, checkpoint) => recorded.push(checkpoint),
+    }).runOnce();
+    expect(findings).toHaveLength(1);
+    expect(findings[0]?.signatures?.missigned).toEqual([{ kind: "untrusted_key", sequenceNumber: 1 }]);
+    // The forged row claimed `verified_full` at sequence 1; the pass folds from genesis instead and
+    // anchors the real tail under its own key, so the next bounded pass stands on that.
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]?.sequenceNumber).toBe(2);
+    expect(recorded[0]?.provenance).toBe("verified_full");
+    expect(recorded[0]?.signingKeyFingerprint).toBe(fx.signer.fingerprint);
   });
 });

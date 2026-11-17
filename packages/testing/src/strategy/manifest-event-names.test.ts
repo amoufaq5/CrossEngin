@@ -211,30 +211,30 @@ describe("scanPackEventFacts — the walk", () => {
     for (const defect of scan.defects) expect(SCAN_DEFECT_KINDS).toContain(defect.kind);
   });
 
-  it("agrees with resolveManifest on erp-core: 51 entities, 19 lifecycles, 230 producible names", () => {
+  it("agrees with resolveManifest on erp-core: 51 entities, 20 lifecycles, 234 producible names", () => {
     // Measured against the real async `resolveManifest` over the seven built packs, with the
     // grammar re-implemented in a throwaway oracle so a wrong scan could not confirm itself. Exact
     // rather than a floor: a dead `: Entity = {` const would add three names nothing can emit, and
     // over-reporting the producible set is the direction that *under*-reports findings.
     const core = pack("operate-erp/core");
     expect(core.entities.length).toBe(51);
-    expect(core.lifecycles.length).toBe(19);
-    expect(core.producibleEventNames.length).toBe(230);
+    expect(core.lifecycles.length).toBe(20);
+    expect(core.producibleEventNames.length).toBe(234);
   });
 
-  it("decomposes core's 230 as 51 entities x 3 verbs plus 77 transition targets, with no collision", () => {
+  it("decomposes core's 234 as 51 entities x 3 verbs plus 81 transition targets, with no collision", () => {
     const core = pack("operate-erp/core");
     const pairs = new Set(
       core.lifecycles.flatMap((l) => l.targets.map((t) => `${l.entity}|${t}`)),
     );
-    expect(pairs.size).toBe(77);
+    expect(pairs.size).toBe(81);
     expect(core.entities.length * 3 + pairs.size).toBe(core.producibleEventNames.length);
   });
 
   it("reads transition targets and not states, which is an 18-name difference on core alone", () => {
     // `producibleEntityEventNames`' whole content: a state nothing transitions *to* is reached by a
-    // create and emits `created`. Core has 95 (entity, state) pairs against 77 (entity, target)
-    // ones, so reading `states` would answer 248. `perishablelot.received` is the live member —
+    // create and emits `created`. Core has 99 (entity, state) pairs against 81 (entity, target)
+    // ones, so reading `states` would answer 252. `perishablelot.received` is the live member —
     // PerishableLot's initial state — and it is absent from grocery's producible set.
     expect(pack("operate-erp/grocery").producibleEventNames).not.toContain(
       "perishablelot.received",
@@ -246,19 +246,19 @@ describe("scanPackEventFacts — the walk", () => {
     expect(
       Object.fromEntries(scan.packs.map((p) => [p.pack, p.producibleEventNames.length])),
     ).toEqual({
-      "operate-erp/construction": 233,
-      "operate-erp/core": 230,
-      "operate-erp/education": 243,
-      "operate-erp/government": 243,
-      "operate-erp/grocery": 247,
-      "operate-erp/healthcare": 243,
-      "operate-erp/retail": 238,
+      "operate-erp/construction": 237,
+      "operate-erp/core": 234,
+      "operate-erp/education": 247,
+      "operate-erp/government": 247,
+      "operate-erp/grocery": 251,
+      "operate-erp/healthcare": 247,
+      "operate-erp/retail": 242,
     });
   });
 
-  it("unions to 294 names across the seven packs", () => {
+  it("unions to 298 names across the seven packs", () => {
     const union = new Set(scan.packs.flatMap((p) => p.producibleEventNames));
-    expect(union.size).toBe(294);
+    expect(union.size).toBe(298);
   });
 
   it("merges workflows by key, so an overlay that re-keys a lifecycle takes its targets away", () => {

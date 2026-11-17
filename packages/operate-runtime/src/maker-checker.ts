@@ -1,6 +1,9 @@
+import { resolvedFields } from "@crossengin/kernel/ddl";
 import type { Manifest } from "@crossengin/kernel/manifest";
 
-import { CREATED_BY_FIELD } from "./write-surface.js";
+import { drainList } from "./list-drain.js";
+import type { EntityRecord, EntityStore } from "./store.js";
+import { CREATED_BY_FIELD, UPDATED_BY_FIELD } from "./write-surface.js";
 
 /**
  * The transitions that commit the business to something another person should have checked: an
@@ -106,6 +109,160 @@ export function makerCheckerRefusal(
   return null;
 }
 
+/** A record whose rows are part of what its parent's approval approves: a bill's lines, an entry's. */
+export interface ApprovalContentChild {
+  readonly entity: string;
+  readonly parentField: string;
+}
+
+/**
+ * What else an approver must not have written, beyond the record's creation.
+ *
+ * `editorAttributable` maps `Entity.transition` to the from-states **no transition enters**. In
+ * such a state `updated_by` can only have been set by the record's creation or a field edit, so it
+ * names the last person to change what is being approved — and an approver who is that person
+ * approved their own figures (ADR-0421's open bypass: Bob creates a bill for 1, Alice PATCHes it to
+ * 100 000, Alice approves). In a state a transition enters, `updated_by` is whoever fired that
+ * transition, and refusing them would make an ordinary two-person flow impossible (the creator
+ * submits an expense, the approver approves it, and then neither could reimburse it), so those
+ * states are not read — which is the residual this rule leaves, stated rather than closed.
+ *
+ * `children` maps an approving entity to the records it owns by composition — a relation that
+ * cascades a delete from the parent — whose authorship is authorship of the approved content: a
+ * person who wrote a line of an entry wrote part of the entry.
+ */
+export interface ApprovalContent {
+  readonly editorAttributable: ReadonlyMap<string, ReadonlySet<string>>;
+  /** The approve-class transitions with a from-state a transition enters, sorted: the residual. */
+  readonly editorUnread: readonly string[];
+  readonly children: ReadonlyMap<string, readonly ApprovalContentChild[]>;
+}
+
+export function approvalContentFromManifest(manifest: Manifest): ApprovalContent {
+  const editorAttributable = new Map<string, ReadonlySet<string>>();
+  const editorUnread = new Set<string>();
+  const approving = new Set<string>();
+  for (const wf of Object.values(manifest.workflows ?? {})) {
+    if (wf.kind !== "entityLifecycle") continue;
+    const entered = new Set(wf.transitions.map((t) => t.to));
+    for (const t of wf.transitions) {
+      if (!isApproveClassTransition(wf.entity, t.name)) continue;
+      approving.add(wf.entity);
+      const froms = Array.isArray(t.from) ? t.from : [t.from];
+      editorAttributable.set(`${wf.entity}.${t.name}`, new Set(froms.filter((f) => !entered.has(f))));
+      if (froms.some((f) => entered.has(f))) editorUnread.add(`${wf.entity}.${t.name}`);
+    }
+  }
+  const entities = new Map((manifest.entities ?? []).map((e) => [e.name, e]));
+  const traits = manifest.traits ?? [];
+  const referenceTo = (child: string, parent: string): string | null => {
+    const entity = entities.get(child);
+    if (entity === undefined) return null;
+    const refs = resolvedFields(entity, traits).filter(
+      (f) => f.type.kind === "reference" && f.type.target === parent,
+    );
+    return refs.length === 1 ? refs[0]!.name : null;
+  };
+  const children = new Map<string, ApprovalContentChild[]>();
+  const add = (parent: string, child: ApprovalContentChild): void => {
+    if (!approving.has(parent)) return;
+    const list = children.get(parent) ?? [];
+    if (!list.some((c) => c.entity === child.entity && c.parentField === child.parentField)) list.push(child);
+    children.set(parent, list);
+  };
+  for (const r of manifest.relations ?? []) {
+    if (r.kind === "many_to_many" || r.onDelete !== "cascade") continue;
+    if (r.kind === "many_to_one") add(r.to, { entity: r.from, parentField: r.field });
+    else {
+      const field = referenceTo(r.to, r.from);
+      if (field !== null) add(r.from, { entity: r.to, parentField: field });
+    }
+  }
+  return { editorAttributable, editorUnread: [...editorUnread].sort(), children };
+}
+
+/** The largest number of child rows read for one approval before it refuses as unverifiable. */
+export const APPROVAL_CONTENT_CEILING = 50_000;
+
+export interface ApprovalContentInput {
+  readonly content: ApprovalContent;
+  readonly store: Pick<EntityStore, "listPage">;
+  readonly tenantId: string;
+  readonly entity: string;
+  readonly transition: string;
+  readonly id: string;
+  readonly record: Readonly<EntityRecord>;
+  /** The state the record is approved from, as the handler read it. */
+  readonly fromState: string;
+  /** A non-null actor: a null one is refused by {@link makerCheckerRefusal} before this is asked. */
+  readonly actorId: string;
+  readonly stampsActor: (entity: string) => boolean;
+}
+
+/**
+ * The second half of the maker-checker rule: refused when the approver last edited the record in
+ * a state only edits reach, or wrote any of the records it owns. Asked after
+ * {@link makerCheckerRefusal}, and only of an approve-class transition with the switch on.
+ *
+ * A child set that cannot be read in full, or a child entity whose authorship is not server-stamped,
+ * is unverifiable rather than passed — the creator rule's own direction.
+ */
+export async function approvalContentRefusal(input: ApprovalContentInput): Promise<MakerCheckerRefusal | null> {
+  const { content, entity, transition, actorId } = input;
+  const same = (v: unknown): boolean => typeof v === "string" && v.toLowerCase() === actorId.toLowerCase();
+  if (content.editorAttributable.get(`${entity}.${transition}`)?.has(input.fromState) === true) {
+    const editor = input.record[UPDATED_BY_FIELD];
+    if (typeof editor !== "string" || editor.length === 0) {
+      return {
+        error: MAKER_CHECKER_ERRORS.unverifiable,
+        detail: `'${transition}' on ${entity} requires a different person from the one who last edited it, and this record has no recorded editor`,
+      };
+    }
+    if (same(editor)) {
+      return {
+        error: MAKER_CHECKER_ERRORS.same_person,
+        detail: `'${transition}' on ${entity} must be fired by someone other than the person who last edited it`,
+      };
+    }
+  }
+  for (const child of content.children.get(entity) ?? []) {
+    const stamped = input.stampsActor(child.entity);
+    const seen: { found: "none" | "authored" | "unstamped" } = { found: "none" };
+    const read = await drainList(
+      input.store,
+      input.tenantId,
+      child.entity,
+      { sort: [], filters: [{ field: child.parentField, op: "eq", value: input.id }] },
+      { ceiling: APPROVAL_CONTENT_CEILING },
+      (rows) => {
+        for (const row of rows) {
+          if (row[child.parentField] !== input.id || seen.found !== "none") continue;
+          const author = row[CREATED_BY_FIELD];
+          if (!stamped || typeof author !== "string" || author.length === 0) seen.found = "unstamped";
+          else if (same(author) || same(row[UPDATED_BY_FIELD])) seen.found = "authored";
+        }
+      },
+    );
+    const found = seen.found;
+    if (found === "authored") {
+      return {
+        error: MAKER_CHECKER_ERRORS.same_person,
+        detail: `'${transition}' on ${entity} must be fired by someone other than anyone who wrote one of its ${child.entity} records`,
+      };
+    }
+    if (found === "unstamped" || !read.complete) {
+      return {
+        error: MAKER_CHECKER_ERRORS.unverifiable,
+        detail:
+          found === "unstamped"
+            ? `'${transition}' on ${entity} requires a different person from those who wrote its ${child.entity} records, and one of them has no recorded author`
+            : `'${transition}' on ${entity} requires a different person from those who wrote its ${child.entity} records, and there are more than ${APPROVAL_CONTENT_CEILING.toString()} of them`,
+      };
+    }
+  }
+  return null;
+}
+
 /**
  * The boot line, said either way. On, it names every transition the rule now gates and the one
  * consequence an operator meets first: a record created before actor stamping carries no creator,
@@ -121,10 +278,14 @@ export function formatSegregationOfDuties(manifest: Manifest, enabled: boolean):
       ` (${gated.length} approve-class transition(s): ${list}); --segregation-of-duties turns it on`
     );
   }
+  const residual = approvalContentFromManifest(manifest).editorUnread;
   return (
     `[sod] segregation of duties: on — ${gated.length} approve-class transition(s) refuse the` +
-    ` record's own creator (${MAKER_CHECKER_ERRORS.same_person}): ${list}. A record with no recorded` +
-    ` creator, or a request whose credential names no person, is refused` +
-    ` (${MAKER_CHECKER_ERRORS.unverifiable})`
+    ` record's own creator, its last editor where only edits reach the state it is approved from, and` +
+    ` the author of any record it owns (${MAKER_CHECKER_ERRORS.same_person}): ${list}. A record with` +
+    ` no recorded creator, or a request whose credential names no person, is refused` +
+    ` (${MAKER_CHECKER_ERRORS.unverifiable}). From a state a transition enters, the last editor is not` +
+    ` refused, because updated_by there names whoever fired that transition` +
+    (residual.length === 0 ? "" : ` (${residual.join(", ")})`)
   );
 }

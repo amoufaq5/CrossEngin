@@ -204,6 +204,10 @@ export const BILL_LINE_ENTITY: Entity = {
     // Optional per-line TaxCode: drives a per-code input-tax line in the bill's
     // recognition GL posting (VAT/GST breakdown).
     { name: "tax_code_id", type: { kind: "reference", target: "TaxCode" }, indexed: true },
+    // Optional: the purchase order line this bill line invoices. When set, approving the bill
+    // matches the line against the order's price and its received quantity (three-way match), and
+    // clears the receipt's received-not-invoiced credit.
+    { name: "purchase_order_line_id", type: { kind: "reference", target: "PurchaseOrderLine" }, indexed: true },
   ],
   indexes: [{ fields: ["bill_id"] }],
 };

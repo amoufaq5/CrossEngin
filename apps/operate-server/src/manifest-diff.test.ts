@@ -1,14 +1,18 @@
 import {
   MANIFEST_SECTION_NAMES,
   MANIFEST_SECTION_REACH_MEANINGS,
+  ManifestSchema,
+  type Manifest,
   type ManifestSectionName,
 } from "@crossengin/kernel/manifest";
 import { describe, expect, it } from "vitest";
 
 import {
+  DIFF_BASELINES,
   DIFF_IMPACTS,
   EMPTY_DIFF_VIEW,
   SECTION_DETAIL_LAYER,
+  buildDiffLineage,
   diffManifests,
   relationLabel,
   type DiffWarningCode,
@@ -181,14 +185,25 @@ describe("constants", () => {
     expect(EMPTY_DIFF_VIEW.rolesRemoved).toEqual([]);
     expect(EMPTY_DIFF_VIEW.lifecycleChanges).toEqual([]);
     expect(EMPTY_DIFF_VIEW.counts).toEqual({ added: 0, removed: 0, modified: 0, warnings: 0 });
+    expect(EMPTY_DIFF_VIEW.roleChanges).toEqual([]);
+    expect(EMPTY_DIFF_VIEW.obligationChanges).toEqual([]);
+    expect(EMPTY_DIFF_VIEW.baseline).toBe("none");
+  });
+
+  it("names the four baselines a diff can have been taken against", () => {
+    expect(DIFF_BASELINES).toEqual(["active_manifest", "deployment_manifest", "unreadable", "none"]);
   });
 });
 
 describe("no active manifest", () => {
-  it("reports the first activation as incomparable", () => {
+  it("reports the first activation as incomparable, naming that there was no baseline", () => {
+    // This function was given nothing to compare against; the route supplies the deployment's own
+    // manifest as the baseline (see design-review-routes' diffFragment), so `none` is what a caller
+    // with no lineage gets — never what a reviewer of a first activation is shown.
     const view = diffManifests(null, base());
     expect(view).toEqual(EMPTY_DIFF_VIEW);
     expect(view.comparable).toBe(false);
+    expect(view.baseline).toBe("none");
   });
 
   it("hands back a fresh view so a caller cannot corrupt the shared constant", () => {
@@ -212,6 +227,9 @@ describe("unchanged manifests", () => {
     expect(view.relationChanges).toEqual([]);
     expect(view.lifecycleChanges).toEqual([]);
     expect(view.counts).toEqual({ added: 0, removed: 0, modified: 0, warnings: 0 });
+    expect(view.roleChanges).toEqual([]);
+    expect(view.obligationChanges).toEqual([]);
+    expect(view.baseline).toBe("active_manifest");
   });
 
   it("compares a minimal manifest that declares no relations, roles or workflows", () => {
@@ -231,6 +249,9 @@ describe("malformed input", () => {
     const view = diffManifests({ manifestVersion: "0.9" }, base());
     expect(view.comparable).toBe(false);
     expect(view.impact).toBe("none");
+    // There *was* an active manifest — it is the one that would not parse — so the baseline is not
+    // `none`, which would read as "first system".
+    expect(view.baseline).toBe("active_manifest");
   });
 
   it("falls back to incomparable when the next manifest does not parse", () => {
@@ -382,12 +403,19 @@ describe("field modification", () => {
 });
 
 describe("classification", () => {
-  it("raises a warning when an unclassified field becomes phi", () => {
+  it("treats an unclassified field becoming phi as breaking, because its storage moves", () => {
+    // Was pinned `additive`. On `--store pg-columns` a phi field is a `bytea` ciphertext column, so
+    // this is the text-to-ciphertext change `tenant-schema-diff.ts` reports as a blocking
+    // `column_encryption_change` — the reviewer was told it was additive while the deployment's own
+    // schema diff refused to apply it.
     const next = base();
     field(next, "Customer", "notes")["classification"] = "phi";
     const view = diffManifests(base(), next);
-    expect(view.impact).toBe("additive");
+    expect(view.impact).toBe("breaking");
     expect(codes(view)).toContain("classification_raised");
+    expect(view.warnings.find((w) => w.code === "classification_raised")?.message).toContain(
+      "ciphertext",
+    );
     expect(fieldChange(view, "Customer", "notes")).toEqual({
       entity: "Customer",
       field: "notes",
@@ -412,14 +440,74 @@ describe("classification", () => {
     });
   });
 
-  it("records a move between two sensitive classes without a boundary warning", () => {
+  it("warns on a move between two sensitive classes, which used to read as nothing", () => {
+    // Rewritten rather than deleted: this test pinned the defect. pii → phi is neither "newly
+    // classified" nor "loses its classification", so it raised no warning and read additive —
+    // while the roles privileged for the field change (ADR-0329) and the column becomes ciphertext.
     const next = base();
     field(next, "Customer", "contact_email")["classification"] = "phi";
     const view = diffManifests(base(), next);
     expect(fieldChange(view, "Customer", "contact_email").to).toBe("phi");
     expect(codes(view)).not.toContain("classification_raised");
     expect(codes(view)).not.toContain("classification_removed");
+    expect(codes(view)).toContain("classification_moved");
+    const warning = view.warnings.find((w) => w.code === "classification_moved");
+    expect(warning?.message).toContain("pii to phi");
+    expect(warning?.message).toContain("ciphertext");
+    expect(view.impact).toBe("breaking");
+  });
+
+  it("warns on a move between two non-encrypted sensitive classes, without a storage clause", () => {
+    const next = base();
+    field(next, "Customer", "contact_email")["classification"] = "commercial_sensitive";
+    const view = diffManifests(base(), next);
+    const warning = view.warnings.find((w) => w.code === "classification_moved");
+    expect(warning?.impact).toBe("breaking");
+    expect(warning?.message).not.toContain("ciphertext");
+  });
+
+  it("says nothing for a move between two non-sensitive classes", () => {
+    const active = base();
+    field(active, "Customer", "notes")["classification"] = "public";
+    const next = base();
+    field(next, "Customer", "notes")["classification"] = "internal";
+    const view = diffManifests(active, next);
+    expect(fieldChange(view, "Customer", "notes").to).toBe("internal");
+    expect(view.warnings).toEqual([]);
     expect(view.impact).toBe("additive");
+  });
+
+  it("reports a classification carried by a trait, which the field diff missed", () => {
+    // Before: a trait field weakened pii → public showed `fieldChanges: []` and reached the
+    // reviewer only as a coarse `traits` census entry, with nothing naming the field.
+    const withTrait = (classification: string | null): Record<string, unknown> => {
+      const m = base();
+      m["traits"] = [
+        {
+          name: "contactable",
+          fields: [
+            {
+              name: "mobile",
+              type: { kind: "text", maxLength: 40 },
+              ...(classification === null ? {} : { classification }),
+            },
+          ],
+        },
+      ];
+      (entity(m, "Customer")["traits"] as string[]).push("contactable");
+      return m;
+    };
+    const view = diffManifests(withTrait("pii"), withTrait("public"));
+    expect(fieldChange(view, "Customer", "mobile")).toEqual({
+      entity: "Customer",
+      field: "mobile",
+      change: "classification_changed",
+      from: "pii",
+      to: "public",
+    });
+    const warning = view.warnings.find((w) => w.code === "classification_removed");
+    expect(warning?.message).toContain("trait");
+    expect(view.impact).toBe("breaking");
   });
 
   it("marks the entity modified even when only its classification moved", () => {
@@ -1125,39 +1213,16 @@ describe("SECTION_DETAIL_LAYER", () => {
 
 // Every one of these changes a covered section, is a change the census would upgrade on, and is
 // invisible to that section's own detail layer — so before the layer-silence rule each read
-// `additive` while taking something away. Measured against the committed tree; four of the five
-// covered sections have a member.
+// `additive` while taking something away. An ABAC obligation and a role's `inherits` were members
+// too until H-28 gave both a detail layer; they are asserted to *speak* below instead, which is the
+// stronger property — the census is a backstop, and a reviewer shown `breaking` with no detail
+// line still cannot see what was taken away.
 const SILENT_LAYER_CASES: readonly {
   readonly name: string;
   readonly section: ManifestSectionName;
   readonly mutateActive?: (active: Record<string, unknown>) => void;
   readonly mutate: (next: Record<string, unknown>) => void;
 }[] = [
-  {
-    // The sharpest member: ADR-0340 refuses an undischargeable obligation at boot, so for a tenant
-    // whose deployment declares no evaluator this is a permanent 503 approved as additive.
-    name: "an abac obligation added to a list grant",
-    section: "permissions",
-    mutate: (next) => {
-      permissions(next, "Customer")["list"] = {
-        roles: ["app_admin", "app_user"],
-        abac: "own_rows",
-      };
-    },
-  },
-  {
-    name: "a role losing its inherits",
-    section: "roles",
-    mutateActive: (active) => {
-      (active["roles"] as Record<string, Record<string, unknown>>)["app_user"] = {
-        name: "app_user",
-        inherits: ["app_admin"],
-      };
-    },
-    mutate: () => {
-      /* next keeps the plain role, so the change is the removal */
-    },
-  },
   {
     // A real unique index since ADR-0360: existing duplicates stop being updatable and a create
     // that would collide answers 409.
@@ -1188,6 +1253,148 @@ const SILENT_LAYER_CASES: readonly {
     },
   },
 ];
+
+describe("the two detail layers that used to be silent", () => {
+  it("names an abac obligation added to a list grant", () => {
+    // ADR-0340 refuses an undischargeable obligation at boot, so for a tenant whose deployment
+    // declares no evaluator this is a permanent 503 — approved behind a bare census line before.
+    const next = base();
+    permissions(next, "Customer")["list"] = { roles: ["app_admin", "app_user"], abac: "own_rows" };
+    const view = diffManifests(base(), next);
+    expect(view.obligationChanges).toEqual([
+      { entity: "Customer", operation: "list", from: null, to: "own_rows" },
+    ]);
+    expect(layerCount(view, "permissions")).toBe(1);
+    const warning = view.warnings.find((w) => w.code === "abac_obligation_changed");
+    expect(warning?.impact).toBe("breaking");
+    expect(warning?.message).toContain("own_rows");
+    expect(view.impact).toBe("breaking");
+  });
+
+  it("names an obligation removed, which widens the grant to every holder of the role", () => {
+    const active = base();
+    permissions(active, "Customer")["read"] = { roles: ["app_admin", "app_user"], abac: "own_rows" };
+    const view = diffManifests(active, base());
+    expect(view.obligationChanges).toEqual([
+      { entity: "Customer", operation: "read", from: "own_rows", to: null },
+    ]);
+    expect(view.warnings.find((w) => w.code === "abac_obligation_changed")?.message).toContain(
+      "unconditional",
+    );
+  });
+
+  it("does not restate an obligation on an entity that is removed outright", () => {
+    const active = base();
+    permissions(active, "Customer")["read"] = { roles: ["app_admin"], abac: "own_rows" };
+    const next = base();
+    next["entities"] = entities(next).filter((candidate) => candidate["name"] !== "Customer");
+    delete (next["permissions"] as Record<string, unknown>)["Customer"];
+    const view = diffManifests(active, next);
+    expect(view.obligationChanges).toEqual([]);
+    expect(codes(view)).not.toContain("abac_obligation_changed");
+  });
+
+  it("names the role whose inherits changed, and what it gained and lost", () => {
+    const active = base();
+    (active["roles"] as Record<string, Record<string, unknown>>)["app_user"] = {
+      name: "app_user",
+      inherits: ["app_admin"],
+    };
+    const lost = diffManifests(active, base());
+    expect(lost.roleChanges).toEqual([{ role: "app_user", inheritsGained: [], inheritsLost: ["app_admin"] }]);
+    expect(layerCount(lost, "roles")).toBe(1);
+    expect(lost.warnings.find((w) => w.code === "role_inherits_changed")?.message).toContain(
+      "no longer inherits app_admin",
+    );
+    expect(lost.impact).toBe("breaking");
+
+    const gained = diffManifests(base(), active);
+    expect(gained.roleChanges).toEqual([{ role: "app_user", inheritsGained: ["app_admin"], inheritsLost: [] }]);
+    // Gaining a parent is an escalation as wide as that parent's grants, delete included.
+    expect(gained.warnings.find((w) => w.code === "role_inherits_changed")?.impact).toBe("breaking");
+  });
+});
+
+describe("field defaults", () => {
+  it("reports a default added as an additive field change with both renderings", () => {
+    // Before: `fieldChanges: []` and impact `none` — a default changes what every create that omits
+    // the field stores, and no surface a reviewer reads said so.
+    const next = base();
+    field(next, "Customer", "notes")["default"] = { kind: "literal", value: "n/a" };
+    const view = diffManifests(base(), next);
+    expect(fieldChange(view, "Customer", "notes")).toEqual({
+      entity: "Customer",
+      field: "notes",
+      change: "default_changed",
+      from: null,
+      to: 'literal "n/a"',
+    });
+    expect(codes(view)).toContain("field_default_changed");
+    expect(view.entitiesModified).toEqual(["Customer"]);
+    expect(view.impact).toBe("additive");
+  });
+
+  it("treats a required field losing its default as breaking", () => {
+    const active = base();
+    field(active, "Customer", "display_name")["default"] = { kind: "literal", value: "Unnamed" };
+    const view = diffManifests(active, base());
+    const warning = view.warnings.find((w) => w.code === "field_default_changed");
+    expect(warning?.impact).toBe("breaking");
+    expect(warning?.message).toContain("refused");
+    expect(view.impact).toBe("breaking");
+  });
+
+  it("is silent when a default is unchanged", () => {
+    const active = base();
+    field(active, "Customer", "notes")["default"] = { kind: "literal", value: "n/a" };
+    const next = base();
+    field(next, "Customer", "notes")["default"] = { kind: "literal", value: "n/a" };
+    expect(diffManifests(active, next).fieldChanges).toEqual([]);
+  });
+});
+
+describe("buildDiffLineage", () => {
+  const parent = (): Manifest => ManifestSchema.parse(base());
+  const childOf = (): Record<string, unknown> => ({
+    manifestVersion: "1.0",
+    meta: {
+      name: "Child",
+      slug: "generated/child",
+      version: "0.1.0",
+      extends: ["generated/field-service"],
+    },
+    entities: [{ name: "Tag", fields: [{ name: "label", type: { kind: "text" } }] }],
+  });
+
+  it("hands back the deployment manifest and composes a child's lineage onto it", async () => {
+    const deployment = parent();
+    const registry = {
+      async getManifest(slug: string): Promise<Manifest | null> {
+        return slug === "generated/field-service" ? deployment : null;
+      },
+    };
+    const lineage = buildDiffLineage(deployment, registry);
+    expect(lineage.deploymentManifest).toBe(deployment);
+    const resolved = await lineage.resolve(childOf());
+    const names = ((resolved["entities"] ?? []) as { name: string }[]).map((e) => e.name).sort();
+    expect(names).toEqual(["Customer", "Tag", "WorkOrder"]);
+    // A first activation compared against the deployment's manifest: the child keeps the pack's
+    // entities, so the reviewer sees an addition rather than a replacement.
+    const view = diffManifests(lineage.deploymentManifest, resolved);
+    expect(view.entitiesAdded).toEqual(["Tag"]);
+    expect(view.entitiesRemoved).toEqual([]);
+  });
+
+  it("throws on a parent the registry does not know, and on an unparseable manifest", async () => {
+    const lineage = buildDiffLineage(parent(), {
+      async getManifest(): Promise<Manifest | null> {
+        return null;
+      },
+    });
+    await expect(lineage.resolve(childOf())).rejects.toThrow();
+    await expect(lineage.resolve({ nonsense: true })).rejects.toThrow();
+  });
+});
 
 describe("a silent layer is not a verdict", () => {
   for (const probe of SILENT_LAYER_CASES) {

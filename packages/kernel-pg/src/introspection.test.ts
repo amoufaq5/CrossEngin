@@ -55,6 +55,11 @@ describe("query constants", () => {
     expect(POLICY_QUERY).toContain("nspname = $1");
   });
 
+  it("reads an index's validity from both catalog flags", () => {
+    // A failed concurrent build can stop before the index is ready or after it; either is unusable.
+    expect(INDEX_QUERY).toContain("(x.indisvalid AND x.indisready) AS is_valid");
+  });
+
   it("use pg_catalog views without database name interpolation", () => {
     for (const q of [TABLE_QUERY, COLUMN_QUERY, INDEX_QUERY, POLICY_QUERY]) {
       expect(q).not.toMatch(/postgres|crossengin|tenant/i);
@@ -98,6 +103,7 @@ describe("parseLiveSchema", () => {
         is_unique: true,
         is_primary: true,
         constraint_backed: true,
+        is_valid: true,
         method: "btree",
         predicate: null,
         columns: ["id"],
@@ -126,6 +132,31 @@ describe("parseLiveSchema", () => {
     expect(table.policies[0]?.name).toBe("tenant_isolation");
     expect(table.policies[0]?.command).toBe("ALL");
     expect(table.policies[0]?.roles).toEqual(["PUBLIC"]);
+  });
+
+  it("reads an explicit is_valid = false as invalid and only that as invalid", () => {
+    const tables: TableRow[] = [{ schema: "meta", name: "t", rls_enabled: false }];
+    const row = (index_name: string, is_valid: boolean | undefined): IndexRow =>
+      ({
+        table_name: "t",
+        index_name,
+        is_unique: false,
+        is_primary: false,
+        constraint_backed: false,
+        is_valid,
+        method: "btree",
+        predicate: null,
+        columns: ["x"],
+      }) as IndexRow;
+    const live = parseLiveSchema("meta", tables, [], [row("bad", false), row("ok", true), row("old", undefined)], []);
+    const valid = new Map(live.tables[0]!.indexes.map((i) => [i.name, i.valid] as const));
+    // A failed CREATE INDEX CONCURRENTLY leaves exactly this row; read as valid, it would be compared
+    // by name and shape alone and never rebuilt.
+    expect(valid.get("bad")).toBe(false);
+    expect(valid.get("ok")).toBe(true);
+    // A row missing the column is not evidence of an invalid index, and reading it as one would plan
+    // a drop and rebuild of a working index.
+    expect(valid.get("old")).toBe(true);
   });
 
   it("distributes columns to their owning tables", () => {

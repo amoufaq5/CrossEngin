@@ -53,6 +53,11 @@ export const FinanceSettingsSchema = z
     accountingStandard: z.enum(ACCOUNTING_STANDARDS).optional(),
     multiCurrencyEnabled: z.boolean().optional(),
     pricesIncludeTax: z.boolean().optional(),
+    /**
+     * A `TaxJurisdiction.code`. When set, invoice and bill recognition determine each line's tax from
+     * that jurisdiction's `TaxRule`s on the document's date, and refuse a posting they cannot
+     * determine (`tax-determination.ts`). Unset, codes are taken at face value.
+     */
     defaultTaxJurisdiction: z.string().max(32).optional(),
     defaultPaymentTermsDays: z.number().int().min(0).max(365).optional(),
     rounding: z.enum(ROUNDING_MODES).optional(),
@@ -78,6 +83,22 @@ export const FinanceSettingsSchema = z
     whtReceivableAccountCode: z.string().max(32).optional(),
     /** LedgerAccount.account_code for income tax recoverable — debited when a WHT certificate clears. */
     taxRecoverableAccountCode: z.string().max(32).optional(),
+    /**
+     * LedgerAccount.account_code debited by the monthly depreciation run. Unlike the codes above it
+     * has no literal fallback: a depreciation entry posted to a code that names no account is a
+     * charge nobody can find, so the run refuses until both of these are set.
+     */
+    depreciationExpenseAccountCode: z.string().max(32).optional(),
+    /** LedgerAccount.account_code (a contra-asset) credited by the monthly depreciation run. */
+    accumulatedDepreciationAccountCode: z.string().max(32).optional(),
+    /** LedgerAccount.account_code for stock on hand, valued at standard cost (goods receipt, shipment, adjustment). */
+    inventoryAccountCode: z.string().max(32).optional(),
+    /** LedgerAccount.account_code debited with the standard cost of goods shipped. */
+    cogsAccountCode: z.string().max(32).optional(),
+    /** LedgerAccount.account_code credited at goods receipt and cleared when the matched bill is approved. */
+    grniAccountCode: z.string().max(32).optional(),
+    /** LedgerAccount.account_code for purchase price variance, stock adjustments and standard-cost revaluation. */
+    inventoryVarianceAccountCode: z.string().max(32).optional(),
     /**
      * Per-jurisdiction default tax GL accounts: maps a TaxCode's `jurisdiction` to a
      * LedgerAccount.account_code. Sits between the per-code `gl_account_code` (most
@@ -144,6 +165,23 @@ export const NotificationSettingsSchema = z
 
 export type NotificationSettings = z.infer<typeof NotificationSettingsSchema>;
 
+/**
+ * Per-tenant stock policy. Every field is optional and absent means the strict answer: no negative
+ * on-hand stock, and a bill line matched to an order line must agree with it exactly.
+ */
+export const InventorySettingsSchema = z
+  .object({
+    /** Lets a shipment or an issue take on-hand quantity below zero instead of refusing it. */
+    allowNegativeStock: z.boolean().optional(),
+    /** Percent by which billed quantity may exceed received quantity on a matched bill line. */
+    matchQuantityTolerancePct: z.number().min(0).max(100).optional(),
+    /** Percent by which a matched bill line's unit price may differ from its order line's. */
+    matchPriceTolerancePct: z.number().min(0).max(100).optional(),
+  })
+  .strict();
+
+export type InventorySettings = z.infer<typeof InventorySettingsSchema>;
+
 export const TenantSettingsSchema = z
   .object({
     company: CompanyProfileSchema.optional(),
@@ -157,6 +195,8 @@ export const TenantSettingsSchema = z
     auditSampling: AuditSamplingSettingsSchema.optional(),
     /** Quiet hours + digest batching, consulted by the notification delivery drain. */
     notifications: NotificationSettingsSchema.optional(),
+    /** Stock policy read by the inventory postings and the three-way match. */
+    inventory: InventorySettingsSchema.optional(),
   })
   .strict();
 

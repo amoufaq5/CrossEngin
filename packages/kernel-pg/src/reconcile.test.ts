@@ -3,6 +3,7 @@ import {
   META_SCHEMA_NAME,
   META_TABLES,
   emitBootstrapSql,
+  emitIndex,
   emitSchemaCreate,
   type TableDefinition,
 } from "@crossengin/kernel/bootstrap";
@@ -10,10 +11,16 @@ import {
 import { diffSchema } from "./diff.js";
 import { expressionKey } from "./expression-render.js";
 import type { LiveSchema, LiveTable } from "./introspection.js";
+import { statementRunsOutsideTransaction } from "./applier.js";
 import {
   RECONCILE_STEP_KINDS,
   UNRECONCILED_REASONS,
+  applierStatementsFor,
+  concurrentIndexSql,
+  applyExitCode,
+  driftExitCode,
   formatReconciliationPlan,
+  formatUncomparedApplyOutcome,
   planLiveReconciliation,
   planSchemaReconciliation,
   wideningProofKey,
@@ -36,8 +43,9 @@ function probeOf(
   wideningProofs: ReadonlyMap<string, WideningSafety> = new Map(),
   confinedTables: ReadonlySet<string> = new Set(),
   wideningImplications: ReadonlyMap<string, WideningImplication> = new Map(),
+  emptyTables: ReadonlySet<string> = new Set(),
 ): ReconciliationProbe {
-  return { rowCounts, wideningProofs, confinedTables, wideningImplications };
+  return { rowCounts, wideningProofs, confinedTables, wideningImplications, emptyTables };
 }
 
 const SAFE: WideningSafety = {
@@ -120,10 +128,10 @@ function liveWidgets(over: Partial<LiveTable> = {}): LiveTable {
       { name: "kind", dataType: "text", isNullable: false, defaultExpr: "'basic'::text" },
     ],
     indexes: [
-      { name: "widgets_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true },
-      { name: "idx_widgets_label", columns: ["label"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false },
-      { name: "widgets_code_key", columns: ["code"], unique: true, primary: false, method: "btree", predicate: null, constraintBacked: true },
-      { name: "widgets_tenant_code_key", columns: ["tenant_id", "code"], unique: true, primary: false, method: "btree", predicate: null, constraintBacked: true },
+      { name: "widgets_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true, valid: true },
+      { name: "idx_widgets_label", columns: ["label"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false, valid: true },
+      { name: "widgets_code_key", columns: ["code"], unique: true, primary: false, method: "btree", predicate: null, constraintBacked: true, valid: true },
+      { name: "widgets_tenant_code_key", columns: ["tenant_id", "code"], unique: true, primary: false, method: "btree", predicate: null, constraintBacked: true, valid: true },
     ],
     policies: [{ name: "widgets_isolation", using: "(tenant_id = ...)", check: null, command: "ALL", roles: ["PUBLIC"], permissive: true }],
     foreignKeys: [],
@@ -164,6 +172,7 @@ describe("RECONCILE_STEP_KINDS", () => {
       "replace_table_constraint",
       "add_column_check",
       "replace_column_check",
+      "rebuild_invalid_index",
     ]);
   });
 
@@ -251,14 +260,28 @@ describe("planSchemaReconciliation — additive differences", () => {
     expect(step?.sql).toContain("DEFAULT 'basic'");
   });
 
-  it("creates a missing plain index with CREATE INDEX", () => {
+  it("creates a missing index CONCURRENTLY when nothing says the table is empty (H-23)", () => {
     const stale = liveWidgets({
       indexes: liveWidgets().indexes.filter((i) => i.name !== "idx_widgets_label"),
     });
     const plan = planFor([WIDGETS], live([stale]));
     const step = plan.steps.find((s) => s.kind === "create_index");
     expect(step?.target).toBe("idx_widgets_label");
-    expect(step?.sql).toContain("CREATE INDEX");
+    expect(step?.sql).toBe('CREATE INDEX CONCURRENTLY "idx_widgets_label" ON "meta"."widgets" ("label");');
+  });
+
+  it("creates a missing index with a plain CREATE INDEX on a table the probe saw empty", () => {
+    const stale = liveWidgets({
+      indexes: liveWidgets().indexes.filter((i) => i.name !== "idx_widgets_label"),
+    });
+    const plan = planSchemaReconciliation(
+      diffSchema([WIDGETS], live([stale])),
+      [WIDGETS],
+      probeOf(new Map(), new Map(), new Set(), new Map(), new Set(["widgets"])),
+    );
+    const step = plan.steps.find((s) => s.kind === "create_index");
+    expect(step?.sql).toBe('CREATE INDEX "idx_widgets_label" ON "meta"."widgets" ("label");');
+    expect(statementRunsOutsideTransaction(step?.sql ?? "")).toBe(false);
   });
 
   it("repairs a missing UNIQUE constraint with ADD CONSTRAINT, not CREATE INDEX", () => {
@@ -388,7 +411,7 @@ describe("planSchemaReconciliation — what it refuses", () => {
     const stale = liveWidgets({
       indexes: [
         ...liveWidgets().indexes,
-        { name: "idx_widgets_adhoc", columns: ["kind"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false },
+        { name: "idx_widgets_adhoc", columns: ["kind"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false, valid: true },
       ],
     });
     const plan = planFor([WIDGETS], live([stale]));
@@ -532,7 +555,7 @@ function liveChild(over: Partial<LiveTable> = {}): LiveTable {
       { name: "owner_id", dataType: "uuid", isNullable: true, defaultExpr: null },
       { name: "label", dataType: "text", isNullable: true, defaultExpr: null },
     ],
-    indexes: [{ name: "children_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true }],
+    indexes: [{ name: "children_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true, valid: true }],
     policies: [],
     foreignKeys: [
       {
@@ -1270,7 +1293,7 @@ describe("a column arriving with the constraints ADD COLUMN carries", () => {
       name: "flags",
       columns: [{ name: "id", dataType: "uuid", isNullable: false, defaultExpr: null }],
       indexes: [
-        { name: "flags_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true },
+        { name: "flags_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true, valid: true },
       ],
       policies: [],
       foreignKeys: [],
@@ -1383,8 +1406,8 @@ describe("table-level constraints — planning", () => {
         { name: "bounces_count", dataType: "integer", isNullable: false, defaultExpr: null },
       ],
       indexes: [
-        { name: "comms_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true },
-        { name: "comms_pair_key", columns: ["tenant_id", "id"], unique: true, primary: false, method: "btree", predicate: null, constraintBacked: true },
+        { name: "comms_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true, valid: true },
+        { name: "comms_pair_key", columns: ["tenant_id", "id"], unique: true, primary: false, method: "btree", predicate: null, constraintBacked: true, valid: true },
       ],
       policies: [],
       foreignKeys: [
@@ -1818,8 +1841,8 @@ describe("allowLoosening — what it does not reach", () => {
       { name: "legacy", dataType: "text", isNullable: true, defaultExpr: null },
     ],
     indexes: [
-      { name: "widgets_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true },
-      { name: "idx_adhoc", columns: ["legacy"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false },
+      { name: "widgets_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true, valid: true },
+      { name: "idx_adhoc", columns: ["legacy"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false, valid: true },
     ],
     policies: [{ name: "adhoc_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"], permissive: true }],
     foreignKeys: [],
@@ -1883,8 +1906,8 @@ describe("renaming a column", () => {
         { name: columnName, dataType: "jsonb", isNullable: false, defaultExpr: null },
       ],
       indexes: [
-        { name: "flags_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true },
-        { name: "idx_flags_default", columns: [columnName], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false },
+        { name: "flags_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true, valid: true },
+        { name: "idx_flags_default", columns: [columnName], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false, valid: true },
       ],
       policies: [],
       foreignKeys: [
@@ -2092,7 +2115,7 @@ describe("planSchemaReconciliation — column-level CHECK expressions", () => {
             { name: "seq", dataType: "integer", isNullable: false, defaultExpr: null },
           ],
           indexes: [
-            { name: "events_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true },
+            { name: "events_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true, valid: true },
           ],
           policies: [],
           foreignKeys: [],
@@ -2388,6 +2411,8 @@ describe("planLiveReconciliation — the row count a column-check finding needs"
       readonly violating?: number;
       readonly confined?: boolean;
       readonly implied?: boolean;
+      /** What `SELECT EXISTS (SELECT 1 FROM …)` answers; unset answers no row at all. */
+      readonly populated?: boolean;
     } = {},
   ): PgConnection {
     const respond = (sql: string): PgQueryResult => {
@@ -2451,7 +2476,7 @@ describe("planLiveReconciliation — the row count a column-check finding needs"
       if (sql.includes("pg_get_indexdef")) {
         return {
           rows: [
-            { table_name: "events", index_name: "events_pkey", is_unique: true, is_primary: true, method: "btree", predicate: null, constraint_backed: true, columns: ["id"] },
+            { table_name: "events", index_name: "events_pkey", is_unique: true, is_primary: true, method: "btree", predicate: null, constraint_backed: true, is_valid: true, columns: ["id"] },
           ],
           rowCount: 1,
         };
@@ -2473,6 +2498,11 @@ describe("planLiveReconciliation — the row count a column-check finding needs"
         };
       }
       if (sql.includes("count(*)")) return { rows: [{ count: rowCount }], rowCount: 1 };
+      if (sql.startsWith("SELECT EXISTS (SELECT 1 FROM")) {
+        return opts.populated === undefined
+          ? { rows: [], rowCount: 0 }
+          : { rows: [{ populated: opts.populated }], rowCount: 1 };
+      }
       return { rows: [], rowCount: 0 };
     };
     const tx: PgConnection = {
@@ -2575,11 +2605,201 @@ describe("planLiveReconciliation — the row count a column-check finding needs"
     expect(plan.unreconciled[0]?.reason).toBe("constraint_needs_validation");
   });
 
-  it("probes the column check's expression against its own table", async () => {
+  it("probes the column check's expression against a copy of its own table", async () => {
     const capture: Captured[] = [];
     await planLiveReconciliation(fakeConnection(capture, "0"), "meta", [TARGET]);
+    expect(capture.map((c) => c.sql)).toContain(
+      'CREATE TEMP TABLE "_crossengin_probe_0" (LIKE "meta"."events")',
+    );
     const probe = capture.find((c) => c.sql.includes("_crossengin_expr_probe") && c.sql.includes("ADD CONSTRAINT"));
     expect(probe?.sql).toContain("CHECK (kind IN ('a', 'b'))");
     expect(probe?.sql).toContain("NOT VALID");
+    expect(probe?.sql).toContain('ALTER TABLE "_crossengin_probe_0"');
+  });
+
+  // H-23. A plain CREATE INDEX holds SHARE for the whole build, blocking every write to the table.
+  const INDEXED: TableDefinition = {
+    ...TARGET,
+    columns: [
+      { name: "id", type: "UUID", notNull: true },
+      { name: "kind", type: "TEXT", notNull: true },
+    ],
+    indexes: [{ name: "idx_events_kind", columns: ["kind"] }],
+  };
+
+  it("builds an index added to a populated table CONCURRENTLY", async () => {
+    const capture: Captured[] = [];
+    const plan = await planLiveReconciliation(
+      fakeConnection(capture, "0", { populated: true }),
+      "meta",
+      [INDEXED],
+    );
+    expect(capture.map((c) => c.sql)).toContain(
+      'SELECT EXISTS (SELECT 1 FROM "meta"."events") AS populated',
+    );
+    const step = plan.steps.find((s) => s.kind === "create_index");
+    expect(step?.sql).toBe('CREATE INDEX CONCURRENTLY "idx_events_kind" ON "meta"."events" ("kind");');
+  });
+
+  it("keeps the plain, transactional form for a table seen empty", async () => {
+    const plan = await planLiveReconciliation(
+      fakeConnection([], "0", { populated: false }),
+      "meta",
+      [INDEXED],
+    );
+    const step = plan.steps.find((s) => s.kind === "create_index");
+    expect(step?.sql).toBe('CREATE INDEX "idx_events_kind" ON "meta"."events" ("kind");');
+  });
+
+  it("builds concurrently when the emptiness question went unanswered", async () => {
+    const plan = await planLiveReconciliation(fakeConnection([], "0"), "meta", [INDEXED]);
+    expect(plan.steps.find((s) => s.kind === "create_index")?.sql).toContain("CONCURRENTLY");
+  });
+
+  it("never asks a confined session whether the table is empty, and builds concurrently", async () => {
+    const capture: Captured[] = [];
+    const plan = await planLiveReconciliation(
+      fakeConnection(capture, "0", { confined: true, populated: false }),
+      "meta",
+      [INDEXED],
+    );
+    // A confined session sees no row in a table that holds some; "empty" would plan a blocking build.
+    expect(capture.some((c) => c.sql.startsWith("SELECT EXISTS"))).toBe(false);
+    expect(plan.steps.find((s) => s.kind === "create_index")?.sql).toContain("CONCURRENTLY");
+  });
+
+  it("carries the expressions the probe could not compare onto the plan", async () => {
+    const conn = fakeConnection([], "0");
+    const original = conn.transaction;
+    // The copy is refused, as it is for a role without SELECT on the table.
+    conn.transaction = (async <T>(fn: (c: PgConnection) => Promise<T>) =>
+      original(async (tx) =>
+        fn({
+          ...tx,
+          query: (async (sql: string, params?: readonly unknown[]) => {
+            if (sql.startsWith("CREATE TEMP TABLE")) {
+              throw Object.assign(new Error("permission denied for table events"), { code: "42501" });
+            }
+            return tx.query(sql, params);
+          }) as PgConnection["query"],
+        }),
+      )) as PgConnection["transaction"];
+    const plan = await planLiveReconciliation(conn, "meta", [TARGET]);
+    expect(plan.uncompared).toEqual([
+      expect.objectContaining({ table: "events", expression: "kind IN ('a', 'b')", sqlstate: "42501" }),
+    ]);
+    // Not compared means not planned: before H-23 this read as "cannot be applied" and as drift.
+    expect(plan.steps).toEqual([]);
+    expect(formatReconciliationPlan(plan)).toContain("1 declared expression(s) not compared");
+  });
+});
+
+describe("rebuilding an invalid index (H-23)", () => {
+  it("drops and rebuilds an invalid index concurrently, in two statements", () => {
+    // What a failed CREATE INDEX CONCURRENTLY leaves: the declared name and shape, marked invalid.
+    const stale = liveWidgets({
+      indexes: liveWidgets().indexes.map((i) =>
+        i.name === "idx_widgets_label" ? { ...i, valid: false } : i,
+      ),
+    });
+    const plan = planFor([WIDGETS], live([stale]));
+    expect(plan.steps.map((s) => [s.kind, s.sql])).toEqual([
+      ["rebuild_invalid_index", 'DROP INDEX CONCURRENTLY IF EXISTS "meta"."idx_widgets_label";'],
+      ["rebuild_invalid_index", 'CREATE INDEX CONCURRENTLY "idx_widgets_label" ON "meta"."widgets" ("label");'],
+    ]);
+    expect(plan.steps.every((s) => statementRunsOutsideTransaction(s.sql))).toBe(true);
+  });
+
+  it("plans nothing for a valid index of the declared shape", () => {
+    expect(planFor([WIDGETS], live([liveWidgets()])).steps).toEqual([]);
+  });
+
+  it("says the step is concurrent when it prints the plan", () => {
+    const stale = liveWidgets({
+      indexes: liveWidgets().indexes.map((i) =>
+        i.name === "idx_widgets_label" ? { ...i, valid: false } : i,
+      ),
+    });
+    expect(formatReconciliationPlan(planFor([WIDGETS], live([stale])))).toContain(
+      "rebuild_invalid_index widgets.idx_widgets_label (2 statements) [concurrent]",
+    );
+  });
+});
+
+describe("concurrentIndexSql", () => {
+  it("adds CONCURRENTLY to a plain and to a unique index", () => {
+    expect(concurrentIndexSql('CREATE INDEX "i" ON "s"."t" ("a");')).toBe(
+      'CREATE INDEX CONCURRENTLY "i" ON "s"."t" ("a");',
+    );
+    expect(concurrentIndexSql('CREATE UNIQUE INDEX "i" ON "s"."t" ("a");')).toBe(
+      'CREATE UNIQUE INDEX CONCURRENTLY "i" ON "s"."t" ("a");',
+    );
+  });
+
+  it("refuses a statement it does not recognise rather than passing it through blocking", () => {
+    expect(() => concurrentIndexSql('CREATE INDEX IF NOT EXISTS "i" ON t (a);')).not.toThrow();
+    expect(() => concurrentIndexSql('CREATE INDEX CONCURRENTLY "i" ON t (a);')).toThrow(/not a CREATE INDEX/);
+    expect(() => concurrentIndexSql("ALTER TABLE t ADD c INT;")).toThrow(/not a CREATE INDEX/);
+  });
+
+  it("matches what emitIndex writes for every declared index in the catalog", () => {
+    for (const table of META_TABLES) {
+      for (const idx of table.indexes ?? []) {
+        const sql = concurrentIndexSql(emitIndex(table, idx));
+        expect(statementRunsOutsideTransaction(sql)).toBe(true);
+      }
+    }
+  });
+});
+
+describe("applierStatementsFor", () => {
+  it("names the schema-qualified table each statement touches", () => {
+    const stale = liveWidgets({
+      indexes: liveWidgets().indexes.filter((i) => i.name !== "idx_widgets_label"),
+    });
+    const plan = planFor([WIDGETS], live([stale]));
+    expect(applierStatementsFor(plan)).toEqual(
+      plan.steps.map((s) => ({ sql: s.sql, subject: "meta.widgets" })),
+    );
+  });
+});
+
+describe("exit codes over uncompared expressions (H-23)", () => {
+  const uncompared = [
+    {
+      table: "invoices",
+      expression: "tenant_id = current_setting('app.current_tenant_id', true)::uuid",
+      sqlstate: "42501",
+      reason: "permission denied to create temporary tables",
+    },
+  ];
+  const clean = { preconditions: { ok: true }, failed: 0 } as const;
+
+  it("drift exits 1 when an expression was not compared, even with no drift found", () => {
+    // Measured: with TEMPORARY revoked a policy edited to USING (true) went unreported, so a 0 here
+    // would have told a CI guard that tenant isolation matched the catalog.
+    expect(driftExitCode(false, uncompared, false)).toBe(1);
+    expect(driftExitCode(false, [], false)).toBe(0);
+    expect(driftExitCode(true, [], false)).toBe(1);
+  });
+
+  it("drift honours --exit-zero-on-drift for both reasons", () => {
+    expect(driftExitCode(true, uncompared, true)).toBe(0);
+    expect(driftExitCode(false, uncompared, true)).toBe(0);
+  });
+
+  it("apply exits 1 when a declared expression was not compared, and 0 only on a full comparison", () => {
+    expect(applyExitCode(clean, uncompared)).toBe(1);
+    expect(applyExitCode(clean, [])).toBe(0);
+    expect(applyExitCode({ preconditions: { ok: false }, failed: 0 }, [])).toBe(1);
+    expect(applyExitCode({ preconditions: { ok: true }, failed: 2 }, [])).toBe(1);
+  });
+
+  it("apply says why it exited 1 and names both remedies, or says nothing", () => {
+    expect(formatUncomparedApplyOutcome([])).toBeNull();
+    const line = formatUncomparedApplyOutcome(uncompared)!;
+    expect(line).toContain("1 declared expression(s) were not compared");
+    expect(line).toContain("55P03");
+    expect(line).toContain("42501");
   });
 });

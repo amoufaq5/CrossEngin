@@ -193,6 +193,17 @@ export interface SurveyManifestJobsInput {
    * operator that runs were accumulating when nothing was enqueueing them.
    */
   readonly mountedProducers: Iterable<JobProducer>;
+  /**
+   * The mounted producers this deployment has narrowed to the declarations it serves.
+   *
+   * **Required**, and the empty set is the claim *every mounted producer enqueues every declaration
+   * of its kind* — which is what a producer does with the list it is given. A deployment that hands
+   * a producer only its served declarations (the serving binary does, so `meta.job_runs` stops
+   * accumulating runs nothing can claim) must say so here, or `handler_missing` tells an operator
+   * that runs are accumulating for a declaration that is never enqueued — `producer_unmounted`'s
+   * defect one level in, where the producer *is* mounted and still does not reach the declaration.
+   */
+  readonly servedOnlyProducers: Iterable<JobProducer>;
 }
 
 /**
@@ -218,8 +229,9 @@ export function surveyManifestJobs(input: SurveyManifestJobsInput): ManifestJobS
   const handledKinds = new Set(input.handledJobKinds ?? []);
   const producibleEvents = new Set(input.producibleEventNames);
   const mounted = new Set<JobProducer>(input.mountedProducers);
+  const servedOnly = new Set<JobProducer>(input.servedOnlyProducers);
   const findings = input.jobs.map((job) =>
-    classify(job, handledIds, handledKinds, producibleEvents, mounted),
+    classify(job, handledIds, handledKinds, producibleEvents, mounted, servedOnly),
   );
   const idsWhere = (disposition: "served" | "unservable"): readonly string[] =>
     findings.filter((f) => VERDICT_DISPOSITION[f.verdict] === disposition).map((f) => f.jobId);
@@ -281,6 +293,7 @@ function classify(
   handledKinds: ReadonlySet<string>,
   producibleEvents: ReadonlySet<string>,
   mountedProducers: ReadonlySet<JobProducer>,
+  servedOnlyProducers: ReadonlySet<JobProducer>,
 ): ManifestJobFinding {
   const kind = job.trigger.kind;
   if (job.deprecated === true) {
@@ -307,6 +320,20 @@ function classify(
     };
   }
   if (!mountedProducers.has(producer)) {
+    // A handler being registered does not change the verdict — the job still never runs — but it
+    // halves the remedy, and naming a handler as missing when one is registered sends an operator
+    // looking for code that exists.
+    if (handledIds.has(job.id) || handledKinds.has(kind)) {
+      return {
+        jobId: job.id,
+        kind,
+        verdict: "producer_unmounted",
+        detail:
+          `'${job.id}' is enqueued by ${producer}, which this deployment does not mount — so it ` +
+          "never becomes a run, and no pending row accumulates either. A handler for it is " +
+          "registered, so mounting the producer is the whole remedy",
+      };
+    }
     return {
       jobId: job.id,
       kind,
@@ -347,6 +374,19 @@ function classify(
       detail:
         `no handler names '${job.id}', but one is registered for every '${kind}' job and will ` +
         "serve it as a fallback",
+    };
+  }
+  // Here and not at `producer_unmounted`, because the producer *is* mounted and the remedy is a
+  // handler alone: once one is registered the narrowed producer reaches the declaration.
+  if (servedOnlyProducers.has(producer)) {
+    return {
+      jobId: job.id,
+      kind,
+      verdict: "handler_missing",
+      detail:
+        `no handler is registered for '${job.id}', and ${producer} enqueues only the declarations ` +
+        "this deployment serves — so it never becomes a run, and no pending row accumulates either. " +
+        "Registering a handler for this id is the whole remedy: the producer then enqueues it",
     };
   }
   return {

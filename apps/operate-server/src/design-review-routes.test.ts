@@ -4,11 +4,18 @@ import { describe, expect, it } from "vitest";
 
 import { diffManifests, type ManifestDiffView } from "./manifest-diff.js";
 import {
+  DesignerCannotApproveError,
+  FOUR_EYES_OUTCOMES,
   buildDesignReviewRoutes,
+  diffFragment,
+  formatFourEyesLine,
+  fourEyesOutcome,
+  type DiffLineageLike,
   type DesignReviewContext,
   type DesignDecisionNoticeLike,
   type DesignDecisionNotifier,
   type DesignReviewCountsLike,
+  type DesignApprovalInput,
   type DesignReviewDecisionInput,
   type DesignReviewListPageLike,
   type DesignReviewListQueryLike,
@@ -26,6 +33,7 @@ import {
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const OTHER_TENANT = "00000000-0000-4000-8000-000000000002";
 const REVIEWER = "00000000-0000-4000-8000-0000000000aa";
+const DESIGNER = "00000000-0000-4000-8000-0000000000dd";
 
 const MANIFEST: Record<string, unknown> = {
   meta: { slug: "acme/crm" },
@@ -35,7 +43,7 @@ const MANIFEST: Record<string, unknown> = {
 class FakeReviewStore implements DesignReviewStoreLike {
   readonly records = new Map<string, DesignReviewRecordLike>();
   readonly listCalls: DesignReviewListQueryLike[] = [];
-  readonly approveCalls: Array<{ id: string; input: DesignReviewDecisionInput }> = [];
+  readonly approveCalls: Array<{ id: string; input: DesignApprovalInput }> = [];
   readonly rejectCalls: Array<{ id: string; input: DesignReviewDecisionInput }> = [];
   private seq = 0;
 
@@ -55,6 +63,7 @@ class FakeReviewStore implements DesignReviewStoreLike {
       reviewedAt: null,
       reviewNotes: null,
       providerLabel: "anthropic/claude-sonnet-4-6",
+      designedBy: DESIGNER,
       createdAt: at,
       updatedAt: at,
       ...overrides,
@@ -118,7 +127,7 @@ class FakeReviewStore implements DesignReviewStoreLike {
     return next;
   }
 
-  async approve(id: string, input: DesignReviewDecisionInput): Promise<DesignReviewRecordLike | null> {
+  async approve(id: string, input: DesignApprovalInput): Promise<DesignReviewRecordLike | null> {
     this.approveCalls.push({ id, input });
     return this.decide(id, "approved", input);
   }
@@ -151,6 +160,7 @@ function makeCtx(): Harness {
     store,
     principalRoles: (p: ResolvedPrincipal | null) => ({ primaryRole: p?.grantedScopes[0] ?? "anon" }),
     adminRoles: new Set(["platform_admin"]),
+    selfApproval: "refused" as const,
     assessRisk: (manifest: Record<string, unknown>): RiskReportLike => {
       riskCalls.push(manifest);
       return riskOf(manifest);
@@ -431,8 +441,10 @@ describe("design-review-routes — approve", () => {
     expect(review.reviewStatus).toBe("approved");
     expect(review.reviewedBy).toBe(REVIEWER);
     expect(store.approveCalls).toEqual([
-      { id: seeded.id, input: { reviewedBy: REVIEWER, notes: null } },
+      { id: seeded.id, input: { reviewedBy: REVIEWER, notes: null, selfApproval: "refused" } },
     ]);
+    // The seed names a designer who is not the reviewer, so the 200 says two people looked.
+    expect(out.body["fourEyes"]).toBe("distinct_principals");
   });
 
   it("ignores a body-supplied reviewedBy — attribution comes from the principal only", async () => {
@@ -673,7 +685,7 @@ describe("design-review-routes — schema projection", () => {
     const seeded = store.seed({ reviewStatus: "pending" });
     const approved = await call(withSchema, "platform.designReviews.approve", { params: { id: seeded.id } });
     expect(approved.status).toBe(200);
-    expect(Object.keys(approved.body)).toEqual(["review"]);
+    expect(Object.keys(approved.body)).toEqual(["review", "fourEyes"]);
     const rejected = await call(withSchema, "platform.designReviews.reject", { params: { id: seeded.id } });
     expect(rejected.status).toBe(200);
     expect(Object.keys(rejected.body)).toEqual(["review"]);
@@ -709,6 +721,9 @@ const STUB_DIFF: ManifestDiffViewLike = {
   rolesAdded: [],
   rolesRemoved: [],
   lifecycleChanges: [],
+  roleChanges: [],
+  obligationChanges: [],
+  baseline: "active_manifest",
   sectionChanges: [
     {
       section: "entities",
@@ -946,7 +961,7 @@ describe("design-review-routes — activation diff", () => {
     expect(differ.calls).toEqual([{ active: null, next: MANIFEST }]);
   });
 
-  it("still 200s with a null-active diff when resolving the active manifest throws", async () => {
+  it("still 200s when resolving the active manifest throws, and says the baseline was unreadable", async () => {
     const { ctx, store } = makeCtx();
     const differ = recordingDiffer();
     const active = recordingActiveSource(ACTIVE_MANIFEST, true);
@@ -958,7 +973,10 @@ describe("design-review-routes — activation diff", () => {
     const seeded = store.seed();
     const out = await call(withDiff, "platform.designReviews.get", { params: { id: seeded.id } });
     expect(out.status).toBe(200);
-    expect(out.body["diff"]).toBe(STUB_DIFF);
+    // Rewritten: this pinned the STUB_DIFF identity, i.e. a read failure passed through as an
+    // ordinary null-active diff — which the page rendered as "This is the first system for this
+    // tenant" for a tenant that has one.
+    expect(out.body["diff"]).toEqual({ ...STUB_DIFF, baseline: "unreadable" });
     expect(differ.calls).toEqual([{ active: null, next: MANIFEST }]);
   });
 
@@ -1027,7 +1045,7 @@ describe("design-review-routes — activation diff", () => {
     }
     expect(Object.keys((await call(withDiff, "platform.designReviews.stats")).body)).toEqual(["counts"]);
     const approved = await call(withDiff, "platform.designReviews.approve", { params: { id: seeded.id } });
-    expect(Object.keys(approved.body)).toEqual(["review"]);
+    expect(Object.keys(approved.body)).toEqual(["review", "fourEyes"]);
     const rejected = await call(withDiff, "platform.designReviews.reject", { params: { id: seeded.id } });
     expect(Object.keys(rejected.body)).toEqual(["review"]);
     expect(differ.calls).toHaveLength(0);
@@ -1148,7 +1166,7 @@ describe("design-review-routes — decision notification", () => {
     const seeded = store.seed({ reviewStatus: "pending" });
     const out = await call(withNotify, "platform.designReviews.approve", { params: { id: seeded.id } });
     expect(out.status).toBe(200);
-    expect(Object.keys(out.body)).toEqual(["review"]);
+    expect(Object.keys(out.body)).toEqual(["review", "fourEyes"]);
     expect((out.body["review"] as DesignReviewRecordLike).reviewStatus).toBe("approved");
     expect(errors).toEqual([seeded.id]);
   });
@@ -1172,7 +1190,7 @@ describe("design-review-routes — decision notification", () => {
     const seeded = store.seed({ reviewStatus: "pending" });
     const out = await call(withNotify, "platform.designReviews.approve", { params: { id: seeded.id } });
     expect(out.status).toBe(200);
-    expect(Object.keys(out.body)).toEqual(["review"]);
+    expect(Object.keys(out.body)).toEqual(["review", "fourEyes"]);
     expect(notifier.calls).toHaveLength(1);
   });
 
@@ -1181,7 +1199,7 @@ describe("design-review-routes — decision notification", () => {
     const seeded = store.seed({ reviewStatus: "pending" });
     const out = await call(ctx, "platform.designReviews.approve", { params: { id: seeded.id } });
     expect(out.status).toBe(200);
-    expect(Object.keys(out.body)).toEqual(["review"]);
+    expect(Object.keys(out.body)).toEqual(["review", "fourEyes"]);
     expect((out.body["review"] as DesignReviewRecordLike).reviewStatus).toBe("approved");
   });
 
@@ -1222,5 +1240,172 @@ describe("design-review-routes — decision notification", () => {
       ).status,
     ).toBe(400);
     expect(notifier.calls).toHaveLength(0);
+  });
+});
+
+describe("design-review-routes — four-eyes", () => {
+  function asDesigner(seededId: string): HandlerInput {
+    return {
+      request: { query: {} } as never,
+      route: {} as never,
+      principal: {
+        principalId: DESIGNER, tenantId: TENANT, principalKind: "user",
+        authScheme: "api_key_header", grantedScopes: ["platform_admin"],
+        mfaProofAgeSeconds: null, resolvedAt: "2026-06-01T00:00:00.000Z",
+      } as ResolvedPrincipal,
+      params: { id: seededId },
+      parsedBody: null,
+    };
+  }
+
+  it("403s an approval by the principal that requested the design, before the store is asked", async () => {
+    const { ctx, store } = makeCtx();
+    const seeded = store.seed({ reviewStatus: "pending" });
+    const out = (await findHandler(ctx, "platform.designReviews.approve")(asDesigner(seeded.id))) as JsonOut;
+    expect(out.status).toBe(403);
+    expect(out.body["error"]).toBe("designer_cannot_approve");
+    expect(store.approveCalls).toHaveLength(0);
+    expect(store.records.get(seeded.id)?.reviewStatus).toBe("pending");
+  });
+
+  it("lets the designer reject their own design, which withholds nothing", async () => {
+    const { ctx, store } = makeCtx();
+    const seeded = store.seed({ reviewStatus: "pending" });
+    const out = (await findHandler(ctx, "platform.designReviews.reject")(asDesigner(seeded.id))) as JsonOut;
+    expect(out.status).toBe(200);
+    expect(Object.keys(out.body)).toEqual(["review"]);
+  });
+
+  it("admits the designer's approval when self-approval is permitted, and records it as such", async () => {
+    const { ctx, store } = makeCtx();
+    const permitted: DesignReviewContext = { ...ctx, selfApproval: "permitted" };
+    const seeded = store.seed({ reviewStatus: "pending" });
+    const out = (await findHandler(permitted, "platform.designReviews.approve")(asDesigner(seeded.id))) as JsonOut;
+    expect(out.status).toBe(200);
+    expect(out.body["fourEyes"]).toBe("self_approved");
+    expect(store.approveCalls[0]?.input.selfApproval).toBe("permitted");
+  });
+
+  it("admits an approval of a proposal with no recorded designer and says so rather than claiming two people", async () => {
+    const { ctx, store } = makeCtx();
+    const seeded = store.seed({ reviewStatus: "pending", designedBy: null });
+    const out = (await findHandler(ctx, "platform.designReviews.approve")(asDesigner(seeded.id))) as JsonOut;
+    expect(out.status).toBe(200);
+    expect(out.body["fourEyes"]).toBe("designer_unrecorded");
+  });
+
+  it("answers the store's own refusal with the same 403, so the second layer is not a 500", async () => {
+    const { ctx, store } = makeCtx();
+    const seeded = store.seed({ reviewStatus: "pending", designedBy: null });
+    store.approve = async (id) => {
+      throw new DesignerCannotApproveError(id);
+    };
+    const out = await call(ctx, "platform.designReviews.approve", { params: { id: seeded.id } });
+    expect(out.status).toBe(403);
+    expect(out.body["error"]).toBe("designer_cannot_approve");
+  });
+
+  it("classifies the two principals of an approval", () => {
+    expect(fourEyesOutcome(null, "a")).toBe("designer_unrecorded");
+    expect(fourEyesOutcome("a", "a")).toBe("self_approved");
+    expect(fourEyesOutcome("a", "b")).toBe("distinct_principals");
+    expect(new Set(FOUR_EYES_OUTCOMES).size).toBe(3);
+  });
+
+  it("says the policy at boot either way, louder when it is off", () => {
+    const on = formatFourEyesLine("refused");
+    expect(on.level).toBe("info");
+    expect(on.line).toContain("designer_cannot_approve");
+    const off = formatFourEyesLine("permitted");
+    expect(off.level).toBe("warn");
+    expect(off.line).toContain("--allow-design-self-approval");
+  });
+});
+
+describe("diffFragment — lineage", () => {
+  const DEPLOYMENT: Record<string, unknown> = { meta: { slug: "operate-erp/core" }, entities: [{ name: "Account" }] };
+  const RESOLVED: Record<string, unknown> = { meta: { slug: "acme/crm" }, entities: [{ name: "Account" }, { name: "Lead" }] };
+
+  function lineage(fail: "never" | "next" | "active" = "never"): DiffLineageLike & { resolved: unknown[] } {
+    const resolved: unknown[] = [];
+    return {
+      resolved,
+      deploymentManifest: DEPLOYMENT,
+      async resolve(manifest: Record<string, unknown>): Promise<Record<string, unknown>> {
+        resolved.push(manifest);
+        if (fail === "next" && manifest === MANIFEST) throw new Error("extends unknown parent 'x'");
+        if (fail === "active" && manifest === ACTIVE_MANIFEST) throw new Error("cannot compose");
+        return manifest === MANIFEST ? RESOLVED : { ...manifest, resolved: true };
+      },
+    };
+  }
+
+  it("compares a first activation against the deployment's manifest, both sides served", async () => {
+    // Before: `diffManifests(null, next)` — no diff at all for the activation that decides whether a
+    // design extends the pack or replaces it.
+    const differ = recordingDiffer();
+    const out = await diffFragment(differ.diff, recordingActiveSource(null).source, TENANT, MANIFEST, lineage());
+    expect(differ.calls).toEqual([{ active: DEPLOYMENT, next: RESOLVED }]);
+    expect(out.diff?.baseline).toBe("deployment_manifest");
+  });
+
+  it("composes both sides when the tenant has a live manifest", async () => {
+    const differ = recordingDiffer();
+    const out = await diffFragment(differ.diff, recordingActiveSource().source, TENANT, MANIFEST, lineage());
+    expect(differ.calls).toEqual([{ active: { ...ACTIVE_MANIFEST, resolved: true }, next: RESOLVED }]);
+    expect(out.diff?.baseline).toBe("active_manifest");
+  });
+
+  it("compares stored against stored, with a warning, when the live manifest no longer composes", async () => {
+    // This compared the stored live manifest with the *composed* proposal, so every inherited
+    // entity read as added — on erp-core 51 entities and 377 grant warnings, with no warning that
+    // the two sides were composed differently.
+    const differ = recordingDiffer();
+    const out = await diffFragment(differ.diff, recordingActiveSource().source, TENANT, MANIFEST, lineage("active"));
+    expect(differ.calls).toEqual([{ active: ACTIVE_MANIFEST, next: MANIFEST }]);
+    expect(out.diff?.baseline).toBe("active_manifest");
+    expect(out.diff?.impact).toBe("breaking");
+    expect(out.diff?.warnings[0]?.code).toBe("lineage_unresolved");
+    expect(out.diff?.warnings[0]?.message).toContain("live manifest cannot be composed");
+    expect(out.diff?.warnings[0]?.message).toContain("cannot compose");
+  });
+
+  it("compares stored against stored when the proposal does not compose and a live manifest exists", async () => {
+    const differ = recordingDiffer();
+    const out = await diffFragment(differ.diff, recordingActiveSource().source, TENANT, MANIFEST, lineage("next"));
+    expect(differ.calls).toEqual([{ active: ACTIVE_MANIFEST, next: MANIFEST }]);
+    expect(out.diff?.warnings[0]?.code).toBe("lineage_unresolved");
+    expect(out.diff?.warnings[0]?.message).toContain("between the two manifests as stored");
+  });
+
+  it("warns, breaking, when the proposal's own lineage cannot be composed", async () => {
+    const differ = recordingDiffer();
+    const out = await diffFragment(differ.diff, recordingActiveSource(null).source, TENANT, MANIFEST, lineage("next"));
+    expect(differ.calls).toEqual([{ active: DEPLOYMENT, next: MANIFEST }]);
+    expect(out.diff?.impact).toBe("breaking");
+    expect(out.diff?.warnings[0]?.code).toBe("lineage_unresolved");
+    expect(out.diff?.warnings[0]?.message).toContain("extends unknown parent");
+    expect(out.diff?.counts.warnings).toBe(STUB_DIFF.counts.warnings + 1);
+  });
+
+  it("keeps the unlined behaviour when no lineage is wired", async () => {
+    const differ = recordingDiffer();
+    const out = await diffFragment(differ.diff, recordingActiveSource(null).source, TENANT, MANIFEST);
+    expect(differ.calls).toEqual([{ active: null, next: MANIFEST }]);
+    expect(out.diff).toBe(STUB_DIFF);
+  });
+
+  it("reaches the route: get passes the context's lineage", async () => {
+    const { ctx, store } = makeCtx();
+    const differ = recordingDiffer();
+    const withLineage: DesignReviewContext = {
+      ...ctx,
+      diffManifests: differ.diff,
+      activeManifests: recordingActiveSource(null).source,
+      diffLineage: lineage(),
+    };
+    const seeded = store.seed();
+    const out = await call(withLineage, "platform.designReviews.get", { params: { id: seeded.id } });
+    expect((out.body["diff"] as ManifestDiffViewLike).baseline).toBe("deployment_manifest");
   });
 });

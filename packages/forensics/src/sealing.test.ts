@@ -1,13 +1,29 @@
 import { InMemoryKeyStore, generateEd25519Keypair } from "@crossengin/crypto";
 import { describe, expect, it } from "vitest";
 
-import { GENESIS_HASH, verifyChainIntegrity } from "./tamper-evident-logs.js";
+import { ed25519PublicKeyFingerprint, signEd25519 } from "@crossengin/crypto";
+
 import {
+  ChainCheckpointSchema,
+  GENESIS_HASH,
+  earliestChainBreak,
+  verifyChainIntegrity,
+  type ChainCheckpoint,
+  type ChainedLogEntry,
+} from "./tamper-evident-logs.js";
+import {
+  CHECKPOINT_SIGNATURE_STANDINGS,
   buildChainEntry,
   buildChainWithKeyStore,
+  canonicalCheckpointBytes,
+  checkpointSignatureStanding,
   computePayloadSha256,
+  recomputeEntryHash,
   sealEvidence,
   sealEvidenceWithStore,
+  signCheckpoint,
+  trustedChainKeys,
+  verifyChainEntryHashes,
   verifyChainEntrySignature,
   verifyEvidenceSeal,
 } from "./sealing.js";
@@ -295,5 +311,177 @@ describe("sealEvidenceWithStore", () => {
         sealedAt: "2026-05-16T12:00:00.000Z",
       }),
     ).rejects.toThrow(/evidence_sealing/);
+  });
+});
+
+async function realChain(count: number): Promise<{
+  readonly entries: ChainedLogEntry[];
+  readonly publicKeyBase64: string;
+  readonly privateKeyBase64: string;
+}> {
+  const kp = generateEd25519Keypair();
+  const fingerprint = ed25519PublicKeyFingerprint(kp.publicKeyBase64);
+  const entries: ChainedLogEntry[] = [];
+  let prior = GENESIS_HASH;
+  for (let i = 0; i < count; i += 1) {
+    const sealed = await buildChainEntry({
+      sequenceNumber: i,
+      priorEntryHash: prior,
+      entry: {
+        kind: "audit_event",
+        recordedAt: "2026-05-16T12:00:00.000Z",
+        actorReference: "gw",
+        payloadBytes: `p${i.toString()}`,
+      },
+      signingKeyFingerprint: fingerprint,
+      sign: async (b) => signEd25519(kp.privateKeyBase64, kp.publicKeyBase64, b),
+    });
+    entries.push(sealed.entry);
+    prior = sealed.entry.entryHash;
+  }
+  return { entries, ...kp };
+}
+
+describe("recomputeEntryHash + verifyChainEntryHashes", () => {
+  it("recomputes exactly the hash buildChainEntry stored", async () => {
+    const { entries } = await realChain(3);
+    for (const e of entries) expect(recomputeEntryHash(e)).toBe(e.entryHash);
+    expect(verifyChainEntryHashes(entries)).toEqual({ valid: true, brokenAt: null });
+  });
+
+  it("catches a rewritten tail entry_hash that both the link fold and the signature accept", async () => {
+    // The tamper this check exists for: the signature covers the canonical bytes and not
+    // `entryHash`, and the tail has no later entry whose `priorEntryHash` could disagree.
+    const { entries, publicKeyBase64 } = await realChain(4);
+    const tampered = entries.map((e, i) => (i === 3 ? { ...e, entryHash: "a".repeat(64) } : e));
+    expect(verifyChainIntegrity(tampered).valid).toBe(true);
+    expect(tampered.every((e) => verifyChainEntrySignature(e, publicKeyBase64))).toBe(true);
+    expect(verifyChainEntryHashes(tampered)).toEqual({
+      valid: false,
+      brokenAt: 3,
+      reason: "entry hash does not match its content",
+    });
+  });
+
+  it("catches an edited column re-linked by rewriting the next entry's prior hash", async () => {
+    const { entries } = await realChain(4);
+    const edited = { ...entries[1]!, actorReference: "forger" };
+    const relinked = { ...edited, entryHash: recomputeEntryHash(edited) };
+    const tampered = [entries[0]!, relinked, { ...entries[2]!, priorEntryHash: relinked.entryHash }, entries[3]!];
+    // The link fold breaks only at 3 (entry 2's stored hash no longer follows from its new prior);
+    // the content check names entry 2, whose own hash its content no longer produces.
+    expect(verifyChainEntryHashes(tampered).brokenAt).toBe(2);
+  });
+
+  it("is vacuously valid over no entries", () => {
+    expect(verifyChainEntryHashes([])).toEqual({ valid: true, brokenAt: null });
+  });
+});
+
+describe("earliestChainBreak", () => {
+  const ok = { valid: true, brokenAt: null } as const;
+  it("answers the earliest broken position, whichever argument it came from", () => {
+    expect(earliestChainBreak(ok, ok)).toBe(ok);
+    const at5 = { valid: false, brokenAt: 5, reason: "a" };
+    const at2 = { valid: false, brokenAt: 2, reason: "b" };
+    expect(earliestChainBreak(at5, at2)).toBe(at2);
+    expect(earliestChainBreak(at2, at5)).toBe(at2);
+    expect(earliestChainBreak(ok, at5)).toBe(at5);
+  });
+
+  it("ranks a break that names no row below one that does", () => {
+    const nowhere = { valid: false, brokenAt: null, reason: "x" };
+    const at7 = { valid: false, brokenAt: 7, reason: "y" };
+    expect(earliestChainBreak(nowhere, at7)).toBe(at7);
+    expect(earliestChainBreak(at7, nowhere)).toBe(at7);
+  });
+});
+
+describe("checkpoint signatures", () => {
+  const SCOPE = "00000000-0000-4000-8000-0000000000aa";
+  const base: ChainCheckpoint = ChainCheckpointSchema.parse({
+    sequenceNumber: 7,
+    rootHash: "b".repeat(64),
+    checkpointedAt: "2026-05-16T12:00:00.000Z",
+    checkpointedBy: "system:checkpoint",
+    provenance: "verified_full",
+  });
+
+  function signerFor(kp: { publicKeyBase64: string; privateKeyBase64: string }) {
+    return {
+      fingerprint: ed25519PublicKeyFingerprint(kp.publicKeyBase64),
+      sign: async (b: Uint8Array) => signEd25519(kp.privateKeyBase64, kp.publicKeyBase64, b),
+    };
+  }
+
+  it("signs and verifies under a trusted key, and the standings are the declared four", async () => {
+    expect(CHECKPOINT_SIGNATURE_STANDINGS).toEqual(["signed", "unsigned", "untrusted_key", "bad_signature"]);
+    const kp = generateEd25519Keypair();
+    const signed = await signCheckpoint(SCOPE, base, signerFor(kp));
+    expect(signed.signingKeyFingerprint).toBe(ed25519PublicKeyFingerprint(kp.publicKeyBase64));
+    expect(checkpointSignatureStanding(SCOPE, signed, trustedChainKeys([kp.publicKeyBase64]))).toBe("signed");
+  });
+
+  it("reads a row with no signature as unsigned, which is a gap and not a forgery", () => {
+    expect(checkpointSignatureStanding(SCOPE, base, trustedChainKeys([]))).toBe("unsigned");
+  });
+
+  it("refuses a signature by a key the verifier does not trust, however valid", async () => {
+    const tenantKey = generateEd25519Keypair();
+    const deployment = generateEd25519Keypair();
+    const signed = await signCheckpoint(SCOPE, base, signerFor(tenantKey));
+    expect(
+      checkpointSignatureStanding(SCOPE, signed, trustedChainKeys([deployment.publicKeyBase64])),
+    ).toBe("untrusted_key");
+  });
+
+  it("binds every signed field: sequence, root hash, provenance, instant and scope", async () => {
+    const kp = generateEd25519Keypair();
+    const trusted = trustedChainKeys([kp.publicKeyBase64]);
+    const signed = await signCheckpoint(SCOPE, base, signerFor(kp));
+    const edits: ChainCheckpoint[] = [
+      { ...signed, sequenceNumber: 99 },
+      { ...signed, rootHash: "c".repeat(64) },
+      { ...signed, provenance: "verified_suffix" },
+      { ...signed, checkpointedAt: "2026-05-16T12:00:01.000Z" },
+    ];
+    for (const e of edits) expect(checkpointSignatureStanding(SCOPE, e, trusted)).toBe("bad_signature");
+    expect(checkpointSignatureStanding(null, signed, trusted)).toBe("bad_signature");
+    expect(
+      checkpointSignatureStanding("00000000-0000-4000-8000-0000000000bb", signed, trusted),
+    ).toBe("bad_signature");
+    // Outside the bytes on purpose: none decides what a verifier does with the anchor.
+    expect(checkpointSignatureStanding(SCOPE, { ...signed, checkpointedBy: "x" }, trusted)).toBe("signed");
+  });
+
+  it("treats the scope as the UUID it is, so a case difference is not a forgery", async () => {
+    // `verify-chain --tenant` and a static `tenants` list take whatever case was typed, and the
+    // database answers the same rows for either; an honest row must not read `bad_signature`.
+    const kp = generateEd25519Keypair();
+    const trusted = trustedChainKeys([kp.publicKeyBase64]);
+    const signed = await signCheckpoint(SCOPE, base, signerFor(kp));
+    expect(checkpointSignatureStanding(SCOPE.toUpperCase(), signed, trusted)).toBe("signed");
+    const signedUpper = await signCheckpoint(SCOPE.toUpperCase(), base, signerFor(kp));
+    expect(checkpointSignatureStanding(SCOPE, signedUpper, trusted)).toBe("signed");
+  });
+
+  it("signs an absent provenance as null, so it cannot collide with an omitted key", () => {
+    const { provenance: _omitted, ...withoutProvenance } = base;
+    const text = new TextDecoder().decode(canonicalCheckpointBytes(null, withoutProvenance));
+    expect(text).toContain('"provenance":null');
+  });
+
+  it("refuses a checkpoint carrying a signature without its fingerprint, or the reverse", () => {
+    expect(() => ChainCheckpointSchema.parse({ ...base, signature: "sig" })).toThrow(/together/);
+    expect(() =>
+      ChainCheckpointSchema.parse({ ...base, signingKeyFingerprint: "d".repeat(64) }),
+    ).toThrow(/together/);
+  });
+
+  it("trustedChainKeys derives each fingerprint and names a malformed key by position", () => {
+    const kp = generateEd25519Keypair();
+    const keys = trustedChainKeys([kp.publicKeyBase64]);
+    expect([...keys.keys()]).toEqual([ed25519PublicKeyFingerprint(kp.publicKeyBase64)]);
+    expect(() => trustedChainKeys([kp.publicKeyBase64, "not-a-key"])).toThrow(/#2/);
   });
 });

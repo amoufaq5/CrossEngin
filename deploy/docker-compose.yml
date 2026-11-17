@@ -8,6 +8,23 @@ x-app-build: &app-build
   context: ..
   dockerfile: deploy/Dockerfile
 
+# Memory: every long-running service carries a `mem_limit`, overridable from .env (DB_, API_, WEB_,
+# BACKUP_, CADDY_MEMORY_LIMIT), so one runaway process is killed and restarted rather than taking the
+# host — and the database — down with it. Measured idle after 300 API and 200 web requests on
+# erp-core: api 101 MiB, web 106 MiB, db 80 MiB, backup 2 MiB between runs. The defaults are about
+# ten times that for the API, whose integrity proof loads a scope's whole chain into the heap, and
+# five times for the rest; Node sizes its heap from the container limit, so the limit also caps it.
+# The one-shot services run for seconds and carry none.
+#
+# Every service logs through this. Docker's default json-file driver keeps a container's log for
+# ever, so a long-lived `api` fills the disk the database lives on; 5 x 10 MB per container is a
+# bound, and `docker compose logs` still reads it.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 # The OWNER's connection: `extensions`, `migrate` and `app-role` create and alter the catalog, so
 # they run as POSTGRES_USER. The `api` overrides PGUSER/PGPASSWORD with the app role below and is the
 # one service that must not use these two values: as the owner every RLS policy is inert.
@@ -60,6 +77,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 30
+    mem_limit: ${DB_MEMORY_LIMIT:-1g}
+    logging: *logging
     restart: unless-stopped
 
   # One-shot, on EVERY `up`: makes sure uuid_generate_v7() exists before the migrate step needs it.
@@ -92,6 +111,7 @@ services:
       - ./postgres/init:/init:ro
     entrypoint: ["psql"]
     command: ["-v", "ON_ERROR_STOP=1", "-f", "/init/00-extension.sql"]
+    logging: *logging
     restart: "no"
 
   # One-shot: applies the meta-schema (idempotent — safe to re-run on every `up`).
@@ -104,7 +124,12 @@ services:
         condition: service_completed_successfully
     environment:
       <<: *pg-env
+    # Each statement waits at most 5 s for its lock (retried twice) and runs at most 10 minutes, so
+    # an upgrade beside a busy API fails and names the table rather than queueing every query behind
+    # it; add --lock-timeout-ms 0 to wait indefinitely. README: "Before an upgrade that changes the
+    # schema", which is also where the backup goes — there is no down-migration.
     command: ["node", "apps/architect-cli/dist/bin/crossengin.js", "apply", "--confirm"]
+    logging: *logging
     restart: "no"
 
   # The role the API connects as: NOSUPERUSER, NOBYPASSRLS, owning nothing, DML on the catalog.
@@ -134,6 +159,7 @@ services:
       - ./postgres/roles:/roles:ro
     entrypoint: ["psql"]
     command: ["-v", "ON_ERROR_STOP=1", "-f", "/roles/app-role.sql"]
+    logging: *logging
     restart: "no"
 
   # The unique indexes `--store pg` enforces a declared `unique` field with (ADR-0423). They are
@@ -153,6 +179,7 @@ services:
       <<: *pg-env
     command:
       ["node", "apps/operate-server/dist/bin/operate-server.js", "document-indexes", "--pack", "${OPERATE_PACK:-erp-core}"]
+    logging: *logging
     restart: "no"
 
   api:
@@ -574,6 +601,8 @@ services:
       timeout: 5s
       retries: 6
       start_period: 40s
+    mem_limit: ${API_MEMORY_LIMIT:-1g}
+    logging: *logging
     restart: unless-stopped
 
   web:
@@ -597,16 +626,75 @@ services:
       # fail closed.
       OPERATE_API_URL: http://api:8787
     # next start binds 0.0.0.0:3000 by default; Caddy reaches it as web:3000.
-    command: ["pnpm", "--filter", "@crossengin/operate-web", "start"]
+    # `node` and the Next binary directly: the runtime image carries no pnpm (deploy/Dockerfile), so
+    # the `pnpm --filter … start` this used to run would not start at all.
+    working_dir: /app/apps/operate-web
+    command: ["node", "node_modules/next/dist/bin/next", "start", "-p", "3000"]
     expose:
       - "3000"
+    # /login and not /: the login page is served without a session and without calling the API, so
+    # it answers 200 exactly when Next itself is serving. `/` redirects to it with no cookie, and a
+    # page that proxies to the API would make this a second check of `api`'s.
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/login').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    mem_limit: ${WEB_MEMORY_LIMIT:-512m}
+    logging: *logging
+    restart: unless-stopped
+
+  # A verified dump of the database every BACKUP_INTERVAL_SECONDS (a day by default), kept for
+  # BACKUP_RETENTION_DAYS (14). Each dump is RESTORED into a scratch database and its table count
+  # compared with the source before it is kept, so what this directory holds is a tested restore;
+  # a failed run leaves the previous dumps untouched and the service unhealthy until the next one
+  # succeeds. It runs as the owner, because the API's app role is confined by RLS and its dump would
+  # silently omit every tenant's rows. The dumps are on THIS host's disk: copy them somewhere else
+  # (deploy/README.md, "Backups"), because a backup on the disk it protects survives nothing that
+  # loses the disk.
+  backup:
+    build:
+      context: ./postgres
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *pg-env
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+      BACKUP_RETRY_SECONDS: ${BACKUP_RETRY_SECONDS:-600}
+      BACKUP_RESTORE_CHECK: ${BACKUP_RESTORE_CHECK:-1}
+    user: postgres
+    entrypoint: ["crossengin-backup"]
+    volumes:
+      - ${BACKUP_DIR:-db-backups}:/backups
+    # Healthy while the newest verified dump is younger than two intervals AND the latest run did not
+    # fail. The age alone kept a failing service healthy for up to two days after its last good run
+    # (measured: FAILED in the log, `(healthy)` in `ps`); the script writes .last-failed on a failed
+    # run and removes it on a successful one. The start period is long because the first run happens
+    # at start and includes a full restore.
+    healthcheck:
+      test: ["CMD-SHELL", "test ! -e /backups/.last-failed && test $$(( $$(date +%s) - $$(cat /backups/.last-verified 2>/dev/null || echo 0) )) -lt $$(( $${BACKUP_INTERVAL_SECONDS:-86400} * 2 ))"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 15m
+    mem_limit: ${BACKUP_MEMORY_LIMIT:-512m}
+    logging: *logging
     restart: unless-stopped
 
   caddy:
-    image: caddy:2
+    # Pinned to an exact release, like the Node and Postgres bases: `caddy:2` is whatever 2.x was
+    # last pushed, so two hosts built a month apart terminated TLS with different code.
+    image: caddy:2.11.9
     depends_on:
-      - web
-      - api
+      # Healthy, not merely started: Caddy otherwise serves the public domain a 502 while either
+      # upstream is still booting or has refused to boot.
+      web:
+        condition: service_healthy
+      api:
+        condition: service_healthy
     ports:
       - "80:80"
       - "443:443"
@@ -617,9 +705,12 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
+    mem_limit: ${CADDY_MEMORY_LIMIT:-256m}
+    logging: *logging
     restart: unless-stopped
 
 volumes:
   db-data:
+  db-backups:
   caddy-data:
   caddy-config:

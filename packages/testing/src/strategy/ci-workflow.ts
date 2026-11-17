@@ -1,12 +1,14 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
+  CI_AUDIT_EXCEPTIONS,
   CI_JOB_TRIGGERS,
   criticalPathMinutes,
   fitsBudget,
   type CiJobTrigger,
   type CiPipeline,
+  type AuditException,
   type CiStep,
 } from "./ci.js";
 import { REPO_ROOT } from "./workspace-sql-scan.js";
@@ -657,4 +659,80 @@ export function auditCiWorkflow(
  */
 export function readCiWorkflow(root: string = REPO_ROOT): ParsedCiWorkflow {
   return parseCiWorkflow(readFileSync(join(root, CI_WORKFLOW_PATH), "utf8"));
+}
+
+/**
+ * What `pnpm audit` is told to ignore, and the workspace facts a `dev_tooling_not_shipped` exception
+ * rests on, read from disk for the reason every rule here is: nothing in this package may import a
+ * workspace member.
+ */
+export interface AuditExceptionInputs {
+  /** `pnpm.auditConfig.ignoreGhsas` in the root `package.json`, or `null` when the key is absent. */
+  readonly ignoredAdvisories: readonly string[] | null;
+  /** Every workspace member's name and the names in its `dependencies` (not dev, not peer). */
+  readonly members: readonly { readonly name: string; readonly dependencies: readonly string[] }[];
+}
+
+export function readAuditExceptionInputs(root: string = REPO_ROOT): AuditExceptionInputs {
+  const rootPkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
+    readonly pnpm?: { readonly auditConfig?: { readonly ignoreGhsas?: readonly string[] } };
+  };
+  const members: { name: string; dependencies: string[] }[] = [];
+  for (const group of ["packages", "apps"]) {
+    for (const entry of readdirSync(join(root, group), { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const path = join(root, group, entry.name, "package.json");
+      if (!existsSync(path)) continue;
+      const pkg = JSON.parse(readFileSync(path, "utf8")) as {
+        readonly name?: string;
+        readonly dependencies?: Readonly<Record<string, string>>;
+      };
+      if (pkg.name === undefined) continue;
+      members.push({ name: pkg.name, dependencies: Object.keys(pkg.dependencies ?? {}) });
+    }
+  }
+  return { ignoredAdvisories: rootPkg.pnpm?.auditConfig?.ignoreGhsas ?? null, members };
+}
+
+/**
+ * Both directions between `CI_AUDIT_EXCEPTIONS` and what `pnpm audit` ignores, plus the premise of
+ * every `dev_tooling_not_shipped` entry: the member it is reached through is a dependency of no other
+ * member, so no app's runtime closure includes it. An empty array is the only passing result.
+ */
+export function auditExceptionDisagreements(
+  exceptions: readonly AuditException[] = CI_AUDIT_EXCEPTIONS,
+  inputs: AuditExceptionInputs = readAuditExceptionInputs(),
+): readonly string[] {
+  const out: string[] = [];
+  const declared = new Set(exceptions.map((e) => e.advisory));
+  if (declared.size !== exceptions.length) out.push("an advisory is declared twice");
+  const ignored = new Set(inputs.ignoredAdvisories ?? []);
+  if (inputs.ignoredAdvisories === null && exceptions.length > 0) {
+    out.push("package.json has no pnpm.auditConfig.ignoreGhsas, so no declared exception is applied");
+  }
+  for (const a of ignored) {
+    if (!declared.has(a)) out.push(`package.json ignores ${a}, which no CI_AUDIT_EXCEPTIONS entry justifies`);
+  }
+  for (const a of declared) {
+    if (inputs.ignoredAdvisories !== null && !ignored.has(a)) {
+      out.push(`CI_AUDIT_EXCEPTIONS justifies ${a}, which package.json does not ignore`);
+    }
+  }
+  const names = new Set(inputs.members.map((m) => m.name));
+  for (const e of exceptions) {
+    if (e.reason === "dev_tooling_not_shipped") {
+      if (e.via === null || !names.has(e.via)) {
+        out.push(`${e.advisory} is dev_tooling_not_shipped through ${String(e.via)}, which is not a workspace member`);
+        continue;
+      }
+      for (const m of inputs.members) {
+        if (m.dependencies.includes(e.via)) {
+          out.push(`${e.advisory} is dev_tooling_not_shipped through ${e.via}, which ${m.name} lists in its dependencies`);
+        }
+      }
+    } else if (e.via !== null) {
+      out.push(`${e.advisory} names a member (${e.via}) although its reason does not rest on one`);
+    }
+  }
+  return out.sort();
 }

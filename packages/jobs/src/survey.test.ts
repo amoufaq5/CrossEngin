@@ -89,6 +89,7 @@ function runCase(c: SurveyCase) {
     handledJobKinds: c.kinds,
     producibleEventNames: c.events,
     mountedProducers: c.mounted,
+    servedOnlyProducers: [],
   });
 }
 
@@ -154,6 +155,7 @@ describe("surveyManifestJobs", () => {
       handledJobIds: ["sweep-invoices"],
       producibleEventNames: EMITS_BOTH,
       mountedProducers: ALL_PRODUCERS,
+      servedOnlyProducers: [],
     });
     expect(survey.findings[0]?.verdict).toBe("handler_registered");
     expect(survey.unservable).toEqual([]);
@@ -166,6 +168,7 @@ describe("surveyManifestJobs", () => {
       handledJobIds: [],
       producibleEventNames: EMITS_BOTH,
       mountedProducers: ALL_PRODUCERS,
+      servedOnlyProducers: [],
     });
     expect(survey.findings.map((f) => f.verdict)).toEqual(["handler_missing", "handler_missing"]);
     expect(survey.unservable).toEqual(["sweep-invoices", "on-payment"]);
@@ -178,8 +181,62 @@ describe("surveyManifestJobs", () => {
       handledJobIds: [],
       producibleEventNames: EMITS_BOTH,
       mountedProducers: ALL_PRODUCERS,
+      servedOnlyProducers: [],
     });
     expect(survey.findings[0]?.detail).toContain("cron_scheduler");
+  });
+
+  it("does not claim runs accumulate when the mounted producer enqueues only served declarations", () => {
+    const narrowed = surveyManifestJobs({
+      jobs: [scheduled, evented],
+      handledJobIds: [],
+      producibleEventNames: EMITS_BOTH,
+      mountedProducers: ALL_PRODUCERS,
+      servedOnlyProducers: ["cron_scheduler", "event_emitter"],
+    });
+    // Still unservable: the declaration has no handler either way. What changes is the sentence.
+    expect(narrowed.findings.map((f) => f.verdict)).toEqual(["handler_missing", "handler_missing"]);
+    expect(narrowed.unservable).toEqual([scheduled.id, evented.id]);
+    for (const f of narrowed.findings) {
+      expect(f.detail).not.toMatch(/accumulates a pending run/);
+      expect(f.detail).toMatch(/enqueues only the declarations this deployment serves/);
+    }
+    // Narrowing one producer leaves the other's claim intact, because it still enqueues everything.
+    const one = surveyManifestJobs({
+      jobs: [scheduled, evented],
+      handledJobIds: [],
+      producibleEventNames: EMITS_BOTH,
+      mountedProducers: ALL_PRODUCERS,
+      servedOnlyProducers: ["cron_scheduler"],
+    });
+    expect(one.findings[0]?.detail).toMatch(/enqueues only the declarations/);
+    expect(one.findings[1]?.detail).toMatch(/every fire accumulates a pending run/);
+  });
+
+  it("does not ask for a handler that is registered when only the producer is missing", () => {
+    const survey = surveyManifestJobs({
+      jobs: [scheduled, evented],
+      handledJobIds: [scheduled.id],
+      producibleEventNames: EMITS_BOTH,
+      mountedProducers: [],
+      servedOnlyProducers: [],
+    });
+    expect(survey.findings.map((f) => f.verdict)).toEqual(["producer_unmounted", "producer_unmounted"]);
+    expect(survey.findings[0]?.detail).toMatch(/A handler for it is registered, so mounting the producer is the whole remedy/);
+    expect(survey.findings[0]?.detail).not.toMatch(/register a handler/);
+    expect(survey.findings[1]?.detail).toMatch(/Both halves are the remedy/);
+  });
+
+  it("still reports a served declaration as served when its producer is narrowed", () => {
+    const survey = surveyManifestJobs({
+      jobs: [scheduled],
+      handledJobIds: [scheduled.id],
+      producibleEventNames: EMITS_BOTH,
+      mountedProducers: ALL_PRODUCERS,
+      servedOnlyProducers: ["cron_scheduler"],
+    });
+    expect(survey.findings[0]?.verdict).toBe("handler_registered");
+    expect(survey.served).toEqual([scheduled.id]);
   });
 
   it("falls back to a kind handler, and says it is a fallback", () => {
@@ -189,6 +246,7 @@ describe("surveyManifestJobs", () => {
       handledJobKinds: ["scheduled"],
       producibleEventNames: EMITS_BOTH,
       mountedProducers: ALL_PRODUCERS,
+      servedOnlyProducers: [],
     });
     expect(survey.findings[0]?.verdict).toBe("served_by_kind_handler");
     expect(survey.findings[0]?.detail).toContain("fallback");
@@ -202,6 +260,7 @@ describe("surveyManifestJobs", () => {
       handledJobKinds: ["scheduled"],
       producibleEventNames: EMITS_BOTH,
       mountedProducers: ALL_PRODUCERS,
+      servedOnlyProducers: [],
     });
     expect(survey.findings[0]?.verdict).toBe("handler_registered");
   });
@@ -213,6 +272,7 @@ describe("surveyManifestJobs", () => {
       handledJobKinds: ["scheduled"],
       producibleEventNames: EMITS_BOTH,
       mountedProducers: ALL_PRODUCERS,
+      servedOnlyProducers: [],
     });
     expect(survey.findings[0]?.verdict).toBe("handler_missing");
   });
@@ -224,6 +284,7 @@ describe("surveyManifestJobs", () => {
       handledJobIds: [],
       producibleEventNames: EMITS_BOTH,
       mountedProducers: ALL_PRODUCERS,
+      servedOnlyProducers: [],
     });
     expect(survey.findings[0]?.verdict).toBe("deprecated");
     expect(survey.unservable).toEqual([]);
@@ -237,6 +298,7 @@ describe("surveyManifestJobs", () => {
       handledJobIds: ["old-sweep"],
       producibleEventNames: EMITS_BOTH,
       mountedProducers: ALL_PRODUCERS,
+      servedOnlyProducers: [],
     });
     expect(survey.findings[0]?.verdict).toBe("deprecated");
   });
@@ -247,6 +309,7 @@ describe("surveyManifestJobs", () => {
       handledJobIds: [],
       producibleEventNames: EMITS_BOTH,
       mountedProducers: ALL_PRODUCERS,
+      servedOnlyProducers: [],
     });
     expect(survey.findings.map((f) => f.verdict)).toEqual(["no_producer", "no_producer"]);
     expect(survey.unservable).toEqual(["step-work", "on-row"]);
@@ -258,6 +321,7 @@ describe("surveyManifestJobs", () => {
       handledJobIds: ["on-row"],
       producibleEventNames: EMITS_BOTH,
       mountedProducers: ALL_PRODUCERS,
+      servedOnlyProducers: [],
     });
     expect(survey.findings[0]?.verdict).toBe("no_producer");
     expect(survey.served).toEqual([]);
@@ -270,6 +334,7 @@ describe("surveyManifestJobs", () => {
       handledJobIds: [],
       producibleEventNames: EMITS_BOTH,
       mountedProducers: ALL_PRODUCERS,
+      servedOnlyProducers: [],
     });
     expect(survey.findings).toHaveLength(all.length);
     expect(survey.findings.map((f) => f.kind)).toEqual([
@@ -288,6 +353,7 @@ describe("surveyManifestJobs", () => {
       handledJobIds: ["sweep-invoices"],
       producibleEventNames: EMITS_BOTH,
       mountedProducers: ALL_PRODUCERS,
+      servedOnlyProducers: [],
     });
     expect(survey.findings.map((f) => f.jobId)).toEqual(["on-payment", "sweep-invoices", "after-signup"]);
     expect(survey.unservable).toEqual(["on-payment", "after-signup"]);
@@ -299,6 +365,7 @@ describe("surveyManifestJobs", () => {
       handledJobIds: ["anything"],
       producibleEventNames: EMITS_BOTH,
       mountedProducers: ALL_PRODUCERS,
+      servedOnlyProducers: [],
     });
     expect(survey).toEqual({ findings: [], unservable: [], served: [] });
   });
@@ -309,6 +376,7 @@ describe("surveyManifestJobs", () => {
       handledJobIds: ["typo-in-the-wiring"],
       producibleEventNames: EMITS_BOTH,
       mountedProducers: ALL_PRODUCERS,
+      servedOnlyProducers: [],
     });
     expect(survey.findings[0]?.verdict).toBe("handler_missing");
   });
@@ -320,6 +388,7 @@ describe("surveyManifestJobs", () => {
       handledJobKinds: new Map([["scheduled", 1]]).keys(),
       producibleEventNames: new Set(EMITS_BOTH).values(),
       mountedProducers: ALL_PRODUCERS,
+      servedOnlyProducers: [],
     });
     expect(survey.findings.map((f) => f.verdict)).toEqual(["handler_registered", "handler_missing"]);
   });
@@ -332,6 +401,7 @@ describe("event_unproducible", () => {
       handledJobIds: [],
       producibleEventNames: ["billing.payment_settled"],
       mountedProducers: ALL_PRODUCERS,
+      servedOnlyProducers: [],
     });
     expect(survey.findings[0]?.verdict).toBe("event_unproducible");
     expect(survey.unservable).toEqual(["on-payment"]);
@@ -352,6 +422,7 @@ describe("event_unproducible", () => {
       handledJobIds: [],
       producibleEventNames: [EVENTED_NAME],
       mountedProducers: ALL_PRODUCERS,
+      servedOnlyProducers: [],
     });
     expect(survey.findings[0]?.verdict).toBe("event_unproducible");
     expect(survey.findings[0]?.detail).toContain(DELAYED_NAME);
@@ -366,6 +437,7 @@ describe("event_unproducible", () => {
       handledJobIds: [],
       producibleEventNames: [],
       mountedProducers: ALL_PRODUCERS,
+      servedOnlyProducers: [],
     });
     expect(survey.findings.map((f) => f.verdict)).toEqual([
       "event_unproducible",
@@ -388,6 +460,7 @@ describe("event_unproducible", () => {
         handledJobKinds: handlers.kinds,
         producibleEventNames: [],
         mountedProducers: ALL_PRODUCERS,
+        servedOnlyProducers: [],
       });
       expect(survey.findings[0]?.verdict).toBe("event_unproducible");
       expect(survey.served).toEqual([]);
@@ -401,6 +474,7 @@ describe("event_unproducible", () => {
       handledJobIds: [],
       producibleEventNames: [],
       mountedProducers: ALL_PRODUCERS,
+      servedOnlyProducers: [],
     });
     expect(survey.findings[0]?.verdict).toBe("deprecated");
     expect(survey.unservable).toEqual([]);
@@ -426,6 +500,7 @@ describe("event_unproducible", () => {
         handledJobIds: [],
         producibleEventNames: [],
         mountedProducers: ALL_PRODUCERS,
+        servedOnlyProducers: [],
       });
       expect(survey.findings[0]?.verdict).toBe("no_producer");
     }
@@ -437,6 +512,7 @@ describe("event_unproducible", () => {
       handledJobIds: [],
       producibleEventNames: [EVENTED_NAME],
       mountedProducers: ALL_PRODUCERS,
+      servedOnlyProducers: [],
     });
     expect(missing.findings[0]?.verdict).toBe("handler_missing");
     const served = surveyManifestJobs({
@@ -444,6 +520,7 @@ describe("event_unproducible", () => {
       handledJobIds: [evented.id],
       producibleEventNames: [EVENTED_NAME],
       mountedProducers: ALL_PRODUCERS,
+      servedOnlyProducers: [],
     });
     expect(served.findings[0]?.verdict).toBe("handler_registered");
   });

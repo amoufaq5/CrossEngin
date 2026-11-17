@@ -81,7 +81,7 @@ export const TAX_CALCULATION_JOB = job(
 export const EINVOICE_SUBMISSION_JOB = job(
   "erp-core-einvoice-submission",
   "E-invoice submission",
-  "On invoice issue, submits a compliant e-invoice to the government/clearance portal (Peppol/ZATCA/SAT) and stores the clearance reference.",
+  "On invoice issue, would submit a compliant e-invoice to a government clearance portal (Peppol/ZATCA/ETA/SAT/UAE FTA) and store the clearance reference. No clearance client ships with the platform — each portal needs its own API client, the tenant's portal registration and signing certificate, and the portal's document format — so no invoice is cleared until a deployment registers a handler for this job.",
   event("erp.invoice_issued"),
   { inputDataClass: "commercial_sensitive", alertChannel: "finance-ops" },
 );

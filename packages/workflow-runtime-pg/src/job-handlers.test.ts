@@ -62,15 +62,17 @@ const onPayment = job("on-payment", EVENT);
 function buildWith(
   input: Omit<
     Parameters<typeof buildJobHandlerRegistry>[0],
-    "producibleEventNames" | "mountedProducers"
+    "producibleEventNames" | "mountedProducers" | "servedOnlyProducers"
   > & {
     readonly producibleEventNames?: Iterable<string>;
     readonly mountedProducers?: Iterable<JobProducer>;
+    readonly servedOnlyProducers?: Iterable<JobProducer>;
   },
 ): ReturnType<typeof buildJobHandlerRegistry> {
   return buildJobHandlerRegistry({
     producibleEventNames: [],
     mountedProducers: JOB_PRODUCERS,
+    servedOnlyProducers: [],
     ...input,
   });
 }
@@ -336,6 +338,18 @@ describe("buildJobHandlerRegistry", () => {
       mountedProducers: ["cron_scheduler"],
     });
     expect(mountedOnly.survey.findings.map((f) => f.verdict)).toEqual(["handler_missing"]);
+  });
+
+  it("passes the narrowed producers to the survey, so it does not claim runs accumulate", () => {
+    const narrowed = buildWith({
+      jobs: [sweep],
+      providers: [],
+      mountedProducers: ["cron_scheduler"],
+      servedOnlyProducers: ["cron_scheduler"],
+    });
+    expect(narrowed.survey.findings.map((f) => f.verdict)).toEqual(["handler_missing"]);
+    expect(narrowed.survey.findings[0]?.detail).toContain("enqueues only the declarations this deployment serves");
+    expect(narrowed.survey.findings[0]?.detail).not.toContain("accumulates a pending run");
   });
 
   it("mounting one producer leaves the others' jobs unmounted", () => {

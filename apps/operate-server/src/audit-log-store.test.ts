@@ -301,12 +301,15 @@ describe("audit-log-store — emit is append-only", () => {
       "constructor",
       "countSince",
       "emit",
+      // Both append: one into a transaction it opens, one into the caller's. Neither rewrites.
+      "emitWithin",
       "inScope",
       "listAnchoredForScope",
       "listAnchoredForTenant",
       "listForTenant",
       "table",
       "whereFor",
+      "writeIn",
     ]);
   });
 
@@ -398,6 +401,63 @@ describe("audit-log-store — emit is append-only", () => {
       }),
     );
     expect(insert?.params[12]).toBe("allow=true");
+  });
+});
+
+describe("audit-log-store — emitWithin joins the caller's transaction", () => {
+  it("writes on the caller's transaction and opens none of its own", async () => {
+    const db = fakeAuditDb();
+    const emitter = new PostgresAuditEmitter(db.conn);
+    await db.conn.transaction(async (tx) => {
+      await tx.query("SELECT set_config('app.current_tenant_id', $1, true)", [TENANT_A]);
+      await emitter.emitWithin(tx, entryOf());
+    });
+    expect(db.rows).toHaveLength(1);
+    // One set_config — the caller's. emitWithin set no context of its own.
+    expect(db.captured.filter(isSetConfig)).toHaveLength(1);
+    expect(statements(db.captured).every((c) => c.inTx)).toBe(true);
+  });
+
+  it("is refused by the isolation policy inside another tenant's transaction", async () => {
+    const db = fakeAuditDb();
+    const emitter = new PostgresAuditEmitter(db.conn);
+    await expect(
+      db.conn.transaction(async (tx) => {
+        await tx.query("SELECT set_config('app.current_tenant_id', $1, true)", [TENANT_B]);
+        await emitter.emitWithin(tx, entryOf());
+      }),
+    ).rejects.toThrow(/row-level security/);
+    expect(db.rows).toHaveLength(0);
+  });
+
+  it("refuses a platform-scope entry before any SQL, rather than claiming an elevation", async () => {
+    const db = fakeAuditDb();
+    const emitter = new PostgresAuditEmitter(db.conn);
+    await expect(
+      db.conn.transaction((tx) => emitter.emitWithin(tx, entryOf({ tenantId: null as never }))),
+    ).rejects.toThrow(/tenant-scope entries only/);
+    expect(db.captured).toHaveLength(0);
+  });
+
+  it("carries before and diff through auditEntry to their columns", async () => {
+    const db = fakeAuditDb();
+    const emitter = new PostgresAuditEmitter(db.conn);
+    const entry = auditEntry({
+      id: ENTRY_2,
+      tenantId: TENANT_A,
+      occurredAt: OCCURRED_AT,
+      actor: auditActor({ userId: USER_A }),
+      operation: "patient.update",
+      entity: "Patient",
+      entityId: "rec_1",
+      before: { status: "a", mrn: { $redacted: "phi" } },
+      after: { status: "b", mrn: { $redacted: "phi" } },
+      diff: { status: { from: "a", to: "b" } },
+    });
+    await emitter.emit(entry);
+    const back = auditEntryFromRow(db.rows[0]!);
+    expect(back.before).toEqual(entry.before);
+    expect(back.diff).toEqual(entry.diff);
   });
 });
 

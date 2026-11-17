@@ -1703,3 +1703,156 @@ describe("the owner builds --store pg's unique indexes before the confined API s
     expect(overlay).toMatch(/ {6}document-indexes:\n {8}condition: service_completed_successfully/);
   });
 });
+
+describe("the image and the stack are hardened (audit M-24)", () => {
+  const DOCKERFILE = resolve(here, "../../../deploy/Dockerfile");
+  const PG_DOCKERFILE = resolve(here, "../../../deploy/postgres/Dockerfile");
+  const AI_COMPOSE = resolve(here, "../../../deploy/docker-compose.ai.yml");
+  const live = (path: string): string =>
+    readFileSync(path, "utf8")
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("#"))
+      .join("\n");
+  const dockerfile = live(DOCKERFILE);
+
+  it("builds in two stages and runs the second as the unprivileged node user", () => {
+    // Measured on the image: 1.41 GB and uid 0 before, 644 MB and uid 1000 after; /app 827 MB → 252 MB.
+    const froms = [...dockerfile.matchAll(/^FROM .* AS (\w+)$/gm)].map((m) => m[1]);
+    expect(froms).toEqual(["build", "runtime"]);
+    const runtime = dockerfile.slice(dockerfile.lastIndexOf("FROM "));
+    expect(runtime).toMatch(/^USER node$/m);
+    // Nothing in the runtime stage installs or builds: every command there is `node <file>`.
+    expect(runtime).not.toMatch(/pnpm|corepack|npm /);
+  });
+
+  it("reinstalls only the three apps' production dependencies before copying them across", () => {
+    // `--prod` alone over the existing tree left vitest, TypeScript and eslint in the virtual store,
+    // and a whole-workspace `--prod` still installed them through @crossengin/testing and
+    // @crossengin/config; `--filter-prod` from the three apps is what keeps both out.
+    expect(dockerfile).toMatch(/rm -rf node_modules apps\/\*\/node_modules packages\/\*\/node_modules/);
+    expect(dockerfile).toContain("--frozen-lockfile --prod --ignore-scripts");
+    for (const app of ["operate-server", "architect-cli", "operate-web"]) {
+      expect(dockerfile).toContain(`--filter-prod "@crossengin/${app}..."`);
+    }
+  });
+
+  it("pins every base image and every service image to an exact release, never latest", () => {
+    const images = [
+      ...[...dockerfile.matchAll(/^ARG NODE_IMAGE=(\S+)$/gm)].map((m) => m[1] ?? ""),
+      ...[...live(PG_DOCKERFILE).matchAll(/^ARG POSTGRES_IMAGE=(\S+)$/gm)].map((m) => m[1] ?? ""),
+      ...[...live(COMPOSE).matchAll(/^\s+image: (\S+)$/gm)].map((m) => m[1] ?? ""),
+      ...[...live(AI_COMPOSE).matchAll(/^\s+image: (\S+)$/gm)].map((m) => m[1] ?? ""),
+    ];
+    // node, postgres, caddy, and ollama twice: five references, so a floor of five keeps a broken
+    // matcher from passing over nothing.
+    expect(images.length).toBeGreaterThanOrEqual(5);
+    for (const image of images) {
+      const tag = image.split(":")[1] ?? "";
+      expect(tag, image).not.toBe("latest");
+      expect(tag, `${image} is not pinned to an exact release`).toMatch(/^\d+\.\d+(\.\d+)?(-[a-z]+)*$/);
+    }
+    // Both FROMs go through the pinned ARG, so the pin is the image and not a default nobody uses.
+    expect(dockerfile.match(/^FROM \$\{NODE_IMAGE\} AS /gm)?.length).toBe(2);
+    expect(live(PG_DOCKERFILE)).toMatch(/^FROM \$\{POSTGRES_IMAGE\}$/m);
+  });
+
+  it("rotates every service's logs, in both compose files", () => {
+    const compose = readFileSync(COMPOSE, "utf8");
+    // The services: block only. The top-level `volumes:` names and the `x-logging` anchor's own
+    // `options:` are also two-space keys, so the slice keeps them out.
+    const section = compose.slice(compose.indexOf("\nservices:\n"), compose.indexOf("\nvolumes:\n"));
+    const services = [...section.matchAll(/^ {2}([a-z][a-z0-9-]*):\n/gm)].map((m) => m[1] ?? "");
+    expect(services.length).toBeGreaterThanOrEqual(9);
+    for (const name of services) {
+      expect(liveLines(composeService(COMPOSE, name)), name).toContain("logging: *logging");
+    }
+    expect(compose).toMatch(/max-size: "10m"\n\s+max-file: "5"/);
+    for (const name of ["ollama", "ai-pull"]) {
+      expect(liveLines(composeService(AI_COMPOSE, name)), name).toMatch(/max-size: "10m"/);
+    }
+  });
+
+  it("caps the memory of every long-running service, overridably, and of no one-shot", () => {
+    // Measured idle after light load: api 101 MiB, web 106 MiB, db 80 MiB, backup 2 MiB; and Node
+    // sized the API's heap at 524 MiB under the 1g default, so the limit caps the heap as well.
+    const compose = readFileSync(COMPOSE, "utf8");
+    const section = compose.slice(compose.indexOf("\nservices:\n"), compose.indexOf("\nvolumes:\n"));
+    const names = [...section.matchAll(/^ {2}([a-z][a-z0-9-]*):\n/gm)].map((m) => m[1] ?? "");
+    const longRunning = names.filter((n) =>
+      liveLines(composeService(COMPOSE, n)).includes("restart: unless-stopped"),
+    );
+    expect(longRunning.sort()).toEqual(["api", "backup", "caddy", "db", "web"]);
+    for (const name of names) {
+      const block = liveLines(composeService(COMPOSE, name));
+      if (longRunning.includes(name)) {
+        expect(block, name).toMatch(/mem_limit: \$\{[A-Z]+_MEMORY_LIMIT:-\d+[mg]\}/);
+      } else {
+        expect(block, name).not.toContain("mem_limit");
+      }
+    }
+  });
+
+  it("starts web without pnpm, health-checks it, and holds Caddy until both upstreams are healthy", () => {
+    const web = liveLines(composeService(COMPOSE, "web"));
+    expect(web).not.toContain("pnpm");
+    expect(web).toContain('command: ["node", "node_modules/next/dist/bin/next", "start", "-p", "3000"]');
+    expect(web).toContain("http://127.0.0.1:3000/login");
+    const caddy = liveLines(composeService(COMPOSE, "caddy"));
+    expect(caddy).toMatch(/ {6}web:\n {8}condition: service_healthy/);
+    expect(caddy).toMatch(/ {6}api:\n {8}condition: service_healthy/);
+  });
+});
+
+describe("the scheduled backup service (audit H-22)", () => {
+  const SCRIPT = resolve(here, "../../../deploy/postgres/backup/run-backups.sh");
+  const script = readFileSync(SCRIPT, "utf8")
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("#"))
+    .join("\n");
+  const backup = liveLines(composeService(COMPOSE, "backup"));
+
+  it("runs as the owner, as the image's postgres user, into a volume, with a health check", () => {
+    // The owner because the app role is RLS-confined and its dump would omit every tenant's rows.
+    expect(backup).toContain("<<: *pg-env");
+    expect(backup).not.toMatch(/PGUSER:/);
+    expect(backup).toContain("user: postgres");
+    expect(backup).toContain('entrypoint: ["crossengin-backup"]');
+    expect(backup).toContain("${BACKUP_DIR:-db-backups}:/backups");
+    expect(backup).toContain("/backups/.last-verified");
+  });
+
+  it("dumps without a pipe, restores before keeping, and prunes only after a verified dump", () => {
+    expect(script).toContain("set -euo pipefail");
+    // `-f` and no pipe, so pg_dump's own status is the status (ORACLE.md's dump.sh lesson).
+    expect(script).toMatch(/pg_dump -Fc --no-password -f "\$tmp"/);
+    expect(script).not.toMatch(/pg_dump[^\n]*\|/);
+    const restore = script.indexOf("pg_restore --exit-on-error");
+    const move = script.indexOf('mv -- "$tmp" "$out"');
+    const prune = script.indexOf("-mtime +\"$retention_days\" -print -delete");
+    expect(restore).toBeGreaterThan(0);
+    expect(move).toBeGreaterThan(restore);
+    expect(prune).toBeGreaterThan(move);
+    // A restore that created nothing also exits 0, so the table count is compared.
+    expect(script).toContain('[ "$want" != "$got" ]');
+  });
+
+  it("checks every step by hand, because set -e does not reach a function called as an if condition", () => {
+    // Measured with a psql failing both count queries: the unchecked form compared "" with "",
+    // logged "restore check passed:  tables" and kept the dump.
+    expect(script).toMatch(/\[ -z "\$want" \] \|\| \[ -z "\$got" \]/);
+    expect(script).toContain('case "$want$got" in *[!0-9]*)');
+    // An unchecked `mv` that failed would stamp .last-verified and prune the older dumps anyway.
+    expect(script).toMatch(/if ! mv -- "\$tmp" "\$out"; then/);
+    expect(script).toContain('date +%s > "$dir/.last-verified" || return 1');
+  });
+
+  it("is unhealthy as soon as a run fails, and honours the retry interval the README documents", () => {
+    // The age check alone kept a failing service `(healthy)` for up to two intervals after its last
+    // good run; measured on a stack whose every run since had logged FAILED.
+    expect(script).toContain('date +%s > "$dir/.last-failed"');
+    expect(script).toContain('rm -f "$dir/.last-failed"');
+    expect(backup).toContain("test ! -e /backups/.last-failed &&");
+    // The script reads BACKUP_RETRY_SECONDS and the README documents it, so compose must pass it.
+    expect(backup).toContain("BACKUP_RETRY_SECONDS: ${BACKUP_RETRY_SECONDS:-600}");
+  });
+});

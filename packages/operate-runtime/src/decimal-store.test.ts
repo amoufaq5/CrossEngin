@@ -178,6 +178,8 @@ describe("withDecimalWireType", () => {
       update: async () => null,
       updateIf: async () => ({ kind: "not_found" }),
       remove: async () => false,
+      removeIf: async () => ({ kind: "not_found" }),
+      getLocked: async () => null,
     };
     expect((withDecimalWireType(plain, INDEX) as { withTransaction?: unknown }).withTransaction).toBeUndefined();
   });

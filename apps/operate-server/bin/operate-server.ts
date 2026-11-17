@@ -141,7 +141,7 @@ async function runVerify(argv: readonly string[]): Promise<number> {
   process.stdout.write(
     options.format === "json"
       ? `${JSON.stringify(report, null, 2)}\n`
-      : `${formatChainVerification(report.chain)}\n${[
+      : `${report.trust}\n${formatChainVerification(report.chain)}\n${[
           ...formatAnchorAudit(report.anchors),
           ...formatChainTruncation(report.truncation),
         ]

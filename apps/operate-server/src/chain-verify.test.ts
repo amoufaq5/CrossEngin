@@ -5,6 +5,8 @@ import {
   CHECKPOINT_PROVENANCES,
   ChainCheckpointSchema,
   checkpointAnchorsBoundedProof,
+  signCheckpoint,
+  trustedChainKeys,
   type ChainCheckpoint,
   type CheckpointProvenance,
 } from "@crossengin/forensics";
@@ -19,6 +21,8 @@ import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import {
   CHAIN_FULL_REASONS,
   CHAIN_FULL_REASON_PHRASES,
+  PinnedChainKeys,
+  requirePinnedChainKeys,
   formatChainVerification,
   keyRegistryResolver,
   verifyChainForAudit,
@@ -148,7 +152,7 @@ async function seededChain(count = 3, scope: string | null = TENANT) {
   const append = (n: number) =>
     store.append({ tenantId: scope, kind: "audit_event", actorReference: "gw", recordedAt: AT, payload: `e${n.toString()}` });
   for (let n = 0; n < count; n += 1) await append(n);
-  return { conn, entries, store, append, scope, fingerprint: signer.fingerprint, publicKeyBase64 };
+  return { conn, entries, store, append, scope, signer, fingerprint: signer.fingerprint, publicKeyBase64 };
 }
 
 /**
@@ -522,10 +526,15 @@ describe("verifyChainFromCheckpoint refuses an anchor it cannot trust", () => {
     expect(trusted.mode).toBe("from_checkpoint");
     expect(trusted.signatures.checked).toBe(2);
     expect(trusted.ok).toBe(true);
-    // Refusing it: integrity still passes — the tamper is invisible to the hash links — and the
-    // signature over the rewritten row is what fails.
+    // Refusing it: the hash links still fold, and since H-18 the fold also recomputes each entry's
+    // hash from its content, so the rewrite fails there as well as at the signature — two
+    // independent detectors on one row, where this assertion used to pin the content fold blind.
     expect(refused.mode).toBe("full");
-    expect(refused.integrity.valid).toBe(true);
+    expect(refused.integrity).toEqual({
+      valid: false,
+      brokenAt: 1,
+      reason: "entry hash does not match its content",
+    });
     expect(refused.signatures.valid).toBe(false);
     expect(refused.ok).toBe(false);
     expect(refused.signatures.results.filter((r) => !r.ok).map((r) => r.sequenceNumber)).toEqual([1]);
@@ -696,5 +705,157 @@ describe("formatChainVerification", () => {
     // Unreachable from this module, which always names a reason; the type admits it, and the
     // honest rendering is the one that claims nothing.
     expect(formatChainVerification({ ...base, fullBecause: null })).toContain("[full]");
+  });
+});
+
+describe("H-18: the content fold, the pinned key set and the signed anchor", () => {
+  /** A second signer whose key a registry would accept and the chain's pin does not. */
+  async function forgerSigner() {
+    const keyStore = new InMemoryKeyStore();
+    const record = await keyStore.createKey({ tenantId: null, algorithm: "ed25519", purpose: "evidence_sealing" });
+    return {
+      signer: keyStoreChainSigner(keyStore, record, null),
+      publicKeyBase64: await keyStore.getPublicMaterial(record.handle),
+    };
+  }
+
+  it("refuses an empty pin, which would refuse every entry", () => {
+    expect(() => new PinnedChainKeys(new Map())).toThrow("at least one key");
+  });
+
+  it("requirePinnedChainKeys hands back a pin and refuses its absence rather than defaulting to the registry", async () => {
+    const { publicKeyBase64 } = await seededChain(1);
+    const pin = new PinnedChainKeys(trustedChainKeys([publicKeyBase64]));
+    expect(requirePinnedChainKeys(pin)).toBe(pin);
+    expect(() => requirePinnedChainKeys(null)).toThrow("without the deployment's pinned chain keys");
+  });
+
+  it("catches an entry_hash rewritten at the tail, which the links and every signature pass", async () => {
+    const { store, entries, fingerprint, publicKeyBase64 } = await seededChain(3);
+    storedEntry(entries, 2)["entry_hash"] = "e".repeat(64);
+    const report = await verifyChainFull(store, fakeRegistry({ [fingerprint]: { publicKeyBase64 } }), TENANT);
+    expect(report.signatures.valid).toBe(true);
+    expect(report.integrity).toEqual({
+      valid: false,
+      brokenAt: 2,
+      reason: "entry hash does not match its content",
+    });
+    expect(report.ok).toBe(false);
+  });
+
+  it("accepts a forger's entry through the registry and refuses it pinned", async () => {
+    const { conn, store, fingerprint, publicKeyBase64 } = await seededChain(2);
+    const forger = await forgerSigner();
+    // The forger appends through the same table, so the link fold and the content fold both pass:
+    // the only fact separating its entry is whose key signed it.
+    await new PostgresChainLogStore(conn, forger.signer).append({
+      tenantId: TENANT,
+      kind: "audit_event",
+      actorReference: "gw",
+      recordedAt: AT,
+      payload: "forged",
+    });
+    const registry = fakeRegistry({
+      [fingerprint]: { publicKeyBase64 },
+      [forger.signer.fingerprint]: { publicKeyBase64: forger.publicKeyBase64 },
+    });
+    const unpinned = await verifyChainFull(store, registry, TENANT);
+    expect(unpinned.ok).toBe(true);
+
+    const pinned = await verifyChainFull(store, new PinnedChainKeys(trustedChainKeys([publicKeyBase64])), TENANT);
+    expect(pinned.integrity.valid).toBe(true);
+    expect(pinned.ok).toBe(false);
+    expect(pinned.signatures.results.filter((r) => !r.ok)).toEqual([
+      expect.objectContaining({ sequenceNumber: 2, reason: "untrusted_key" }),
+    ]);
+    // Not an unresolved key: the fingerprint resolved to nothing *trusted*, which is a different
+    // fact with a different remedy, and the line says which.
+    expect(pinned.signatures.unresolvedFingerprints).toEqual([]);
+    expect(formatChainVerification(pinned)).toContain("AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS");
+  });
+
+  it("reports a periodic full fold under its own reason", async () => {
+    const { store, publicKeyBase64 } = await seededChain(2);
+    const report = await verifyChainFull(
+      store,
+      new PinnedChainKeys(trustedChainKeys([publicKeyBase64])),
+      TENANT,
+      "periodic",
+    );
+    expect(report.fullBecause).toBe("periodic");
+    expect(formatChainVerification(report)).toContain("[full: periodic full re-fold]");
+  });
+
+  describe("a pinned bounded pass takes its prefix only from an anchor the chain key signed", () => {
+    async function anchored() {
+      const fx = await seededChain(3);
+      const cp = await anchorAt(fx.store, "verified_full");
+      const pin = new PinnedChainKeys(trustedChainKeys([fx.publicKeyBase64]));
+      return { ...fx, cp, pin };
+    }
+
+    it("stays bounded on a signed anchor", async () => {
+      const { store, cp, pin, signer } = await anchored();
+      const signed = await signCheckpoint(TENANT, cp, signer);
+      const report = await verifyChainFromCheckpoint(store, pin, fakeCheckpoints(signed), TENANT);
+      expect(report.mode).toBe("from_checkpoint");
+      expect(report.ok).toBe(true);
+    });
+
+    it("recomputes the suffix it reads, so a tail entry_hash rewrite above a signed anchor is caught", async () => {
+      // The suffix fold compares stored links only and the signature does not cover `entry_hash`, so
+      // without the content check here a rewritten tail passes a bounded pass with every signature
+      // valid — the call site, not only the function, has to recompute.
+      const { store, cp, pin, signer, append, entries } = await anchored();
+      const signed = await signCheckpoint(TENANT, cp, signer);
+      await append(3);
+      await append(4);
+      storedEntry(entries, 4)["entry_hash"] = "e".repeat(64);
+      const report = await verifyChainFromCheckpoint(store, pin, fakeCheckpoints(signed), TENANT);
+      expect(report.mode).toBe("from_checkpoint");
+      expect(report.signatures.valid).toBe(true);
+      expect(report.integrity).toEqual({
+        valid: false,
+        brokenAt: 4,
+        reason: "entry hash does not match its content",
+      });
+      expect(report.ok).toBe(false);
+    });
+
+    it("folds from genesis on an unsigned anchor, which every pre-upgrade row is", async () => {
+      const { store, cp, pin } = await anchored();
+      const report = await verifyChainFromCheckpoint(store, pin, fakeCheckpoints(cp), TENANT);
+      expect(report.fullBecause).toBe("anchor_unsigned");
+      expect(report.ok).toBe(true);
+    });
+
+    it("folds from genesis on an anchor whose stored fields its signature does not cover", async () => {
+      // `verified_full` over a forged root hash is the row a writer without the key can produce;
+      // the provenance column alone would have admitted it.
+      const { store, cp, pin, signer } = await anchored();
+      const signed = await signCheckpoint(TENANT, cp, signer);
+      const edited = ChainCheckpointSchema.parse({ ...signed, rootHash: "e".repeat(64) });
+      const report = await verifyChainFromCheckpoint(store, pin, fakeCheckpoints(edited), TENANT);
+      expect(report.fullBecause).toBe("anchor_signature_invalid");
+    });
+
+    it("folds from genesis on an anchor signed by any other key", async () => {
+      const { store, cp, pin } = await anchored();
+      const forger = await forgerSigner();
+      const signed = await signCheckpoint(TENANT, cp, forger.signer);
+      const report = await verifyChainFromCheckpoint(store, pin, fakeCheckpoints(signed), TENANT);
+      expect(report.fullBecause).toBe("anchor_signature_invalid");
+    });
+
+    it("keeps the provenance-only admission when unpinned, which is the auditor fallback", async () => {
+      const { store, cp, fingerprint, publicKeyBase64 } = await anchored();
+      const report = await verifyChainFromCheckpoint(
+        store,
+        fakeRegistry({ [fingerprint]: { publicKeyBase64 } }),
+        fakeCheckpoints(cp),
+        TENANT,
+      );
+      expect(report.mode).toBe("from_checkpoint");
+    });
   });
 });

@@ -7,6 +7,8 @@ import { PostgresChainLogReader, PostgresChainLogStore } from "./chain-log-store
 import { keyStoreChainSigner } from "./signer.js";
 import { fakeChainPg } from "./test-fakes.js";
 import {
+  ENTRY_SIGNATURE_FAILURES,
+  pinnedKeyResolver,
   verifyChainSignatures,
   verifyStoredChainSignatures,
   type PublicKeyResolver,
@@ -399,5 +401,51 @@ describe("verifyStoredChainSignatures", () => {
     expect(verdict.unreadable).toEqual([]);
     expect(verdict.results.filter((r) => !r.ok).map((r) => r.sequenceNumber)).toEqual([1]);
     expect(verdict.results[1]!.reason).toBe("bad_signature");
+  });
+});
+
+describe("a pinned resolver", () => {
+  it("verifies entries signed by the deployment's own key", async () => {
+    const { store, publicKeyBase64, fingerprint } = await newStore();
+    await append(store, TENANT_A, 0);
+    await append(store, TENANT_A, 1);
+    const read = await store.loadChain(TENANT_A);
+    const verdict = await verifyChainSignatures(
+      read.entries,
+      pinnedKeyResolver(new Map([[fingerprint, publicKeyBase64]])),
+      EVERY_ROW_READ,
+    );
+    expect(verdict.valid).toBe(true);
+    expect(verdict.checked).toBe(2);
+  });
+
+  it("refuses an entry signed by any other key as untrusted_key, without resolving it", async () => {
+    // The H-18 forgery: a key a tenant registered verifies its own signature perfectly well, and
+    // the registry resolver hands it back. A pinned resolver never asks.
+    const forger = await newStore();
+    await append(forger.store, TENANT_A, 0);
+    const deployment = generateEd25519Keypair();
+    const read = await forger.store.loadChain(TENANT_A);
+    const viaRegistry = await verifyChainSignatures(
+      read.entries,
+      mapResolver(new Map([[forger.fingerprint, forger.publicKeyBase64]])),
+      EVERY_ROW_READ,
+    );
+    expect(viaRegistry.valid).toBe(true);
+    const pinned = pinnedKeyResolver(
+      new Map([["e".repeat(64), deployment.publicKeyBase64]]),
+    );
+    const verdict = await verifyChainSignatures(read.entries, pinned, EVERY_ROW_READ);
+    expect(verdict.valid).toBe(false);
+    expect(verdict.results).toEqual([
+      { sequenceNumber: 0, fingerprint: forger.fingerprint, ok: false, reason: "untrusted_key" },
+    ]);
+    // Not an unresolved key: that would send an operator to the registry, and the registry is not
+    // the trust root.
+    expect(verdict.unresolvedFingerprints).toEqual([]);
+  });
+
+  it("names three failure reasons", () => {
+    expect(ENTRY_SIGNATURE_FAILURES).toEqual(["unresolved_key", "untrusted_key", "bad_signature"]);
   });
 });

@@ -45,7 +45,10 @@ import {
   LicenseEntitlementResolver,
   buildPlanCatalog,
   entityEventEffect,
+  formatInventoryAccounting,
   formatSegregationOfDuties,
+  inventoryPostsToLedger,
+  inventoryShape,
   type WriteEffect,
   type BillingPortalWiring,
   type EntitlementResolver,
@@ -68,6 +71,7 @@ import {
   PostgresSubscriptionStore,
   TenantColumnStoreRegistry,
   TenantColumnStoreRouter,
+  TenantSchemaStranded,
   bootSchemaErasurePlan,
   encryptedEntityNames,
   eraseTenantSchema,
@@ -246,6 +250,9 @@ import { PostgresSuppressionStore } from "./suppression-store.js";
 import { PostgresDigestStore } from "./digest-store.js";
 import { PostgresTemplateStore } from "./template-store.js";
 import { PostgresAuditEmitter, auditActor, auditEntry } from "./audit-log-store.js";
+import { AmbientTransactions } from "./ambient-transaction.js";
+import { buildEntityAuditRecorder, type EntityAuditRecorder } from "./entity-audit-recorder.js";
+import { buildLoginAuditRecorder } from "./login-audit.js";
 import {
   TENANT_SCOPE_DENIED_OPERATION,
   TENANT_SCOPE_GRANTED_OPERATION,
@@ -383,7 +390,11 @@ import {
 import { PostgresTenantManifestStore, manifestSummary } from "./tenant-manifests.js";
 import { buildDesignDesigner, buildDesignProviderFromEnv } from "./ai-design.js";
 import { buildAiDesignRoutes } from "./ai-design-routes.js";
-import { TenantGatewayCache, buildPerTenantDispatch } from "./tenant-gateway-cache.js";
+import {
+  TenantGatewayCache,
+  bearerTenantVerifier,
+  buildPerTenantDispatch,
+} from "./tenant-gateway-cache.js";
 import { buildTenantManifestLineage } from "./tenant-manifest-lineage.js";
 import {
   ManifestActivationPoller,
@@ -392,7 +403,7 @@ import {
 import { DEFAULT_AI_DESIGN_MAX_USD_PER_MONTH, buildAiDesignBudget } from "./ai-design-budget.js";
 import { PostgresDesignJobStore } from "./design-jobs.js";
 import { PostgresDesignReviewStore } from "./design-review-store.js";
-import { buildDesignReviewRoutes } from "./design-review-routes.js";
+import { buildDesignReviewRoutes, formatFourEyesLine } from "./design-review-routes.js";
 import { buildIntegrityVerdictRoutes } from "./integrity-verdict-routes.js";
 import { buildJobCancelRoutes } from "./job-cancel-routes.js";
 import { buildTenantErasureRoutes } from "./tenant-erasure-routes.js";
@@ -444,12 +455,12 @@ import { PostgresNotificationTemplateStore } from "./notification-template-store
 import { PostgresIntegrityVerdictStore } from "./integrity-verdict-store.js";
 import { assessManifestRisk } from "./design-review.js";
 import { projectManifestView } from "./manifest-view.js";
-import { diffManifests } from "./manifest-diff.js";
+import { buildDiffLineage, diffManifests } from "./manifest-diff.js";
 import { enrolNewProposalsForReview } from "./review-enrolment.js";
 import { buildDesignDecisionDispatch } from "./design-notifications.js";
 import { PostgresNotificationStore } from "./notification-store.js";
 import { buildNotificationRoutes } from "./notification-routes.js";
-import { startDesignJob } from "./design-runner.js";
+import { startDesignJob, type DesignRunnerInput } from "./design-runner.js";
 import {
   PostgresEstimateInflationStore,
   PostgresTenantCostStore,
@@ -508,7 +519,9 @@ import {
 import {
   AUDIT_CHAIN_SIGNING_KEY_VAR,
   KEY_SOURCE_EXPOSES_A_LAYER,
+  chainTrustFromEnv,
   formatAuditChain,
+  formatChainTrust,
   loadAuditChainFile,
   resolveAuditChain,
 } from "./audit-chain-env.js";
@@ -518,7 +531,10 @@ import {
   formatChainScopes,
   surveyChainScopes,
 } from "./chain-scope-survey.js";
-import { registerAuditChainKey } from "./audit-chain-key-registration.js";
+import {
+  registerAuditChainKey,
+  untrustedRegisteredChainKeys,
+} from "./audit-chain-key-registration.js";
 import {
   DEFAULT_CHECKPOINT_CONFIG,
   buildCheckpointLifecycle,
@@ -546,7 +562,9 @@ import {
   type TenantAuditPolicyLifecycle,
 } from "./audit-sampling-policy-source.js";
 import {
+  PinnedChainKeys,
   formatChainVerification,
+  requirePinnedChainKeys,
   verifyChainForAudit,
   type ChainVerificationReport,
 } from "./chain-verify.js";
@@ -564,6 +582,7 @@ import {
   type StripeUsageSync,
 } from "./stripe-usage-sync.js";
 import { PostgresJobInvoker, buildActionRoleMap, mergeActionRoleMaps } from "./job-invoke.js";
+import { buildErpJobProviders, erpJobCoverage, type JobAccessResolver } from "./erp-job-handlers.js";
 import { invokeRolesByAction, isUnservableJobVerdict, type JobProducer } from "@crossengin/jobs";
 
 function firstHeader(v: string | readonly string[] | undefined): string | undefined {
@@ -780,6 +799,8 @@ interface ResolvedStores {
    * cache, rather than a second one.
    */
   readonly columnKey?: ColumnEncryptionKeySource;
+  /** Which transaction a caller is inside, over `conn` (present exactly when `conn` is). */
+  readonly ambient?: AmbientTransactions;
 }
 
 async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<ResolvedStores> {
@@ -864,7 +885,12 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
   // abandoned all hold a connection and its locks, and here they are said at boot either way.
   const pgPool = { ...SERVING_POOL_SETTINGS, ...options.pgPool };
   console.info(`[pg] ${formatPgPoolSettings(pgPool)} — tune with --pg-* flags (see --help)`);
-  const conn = createNodePgConnection(pgConfig, { pool: pgPool });
+  // Wrapped once, here, so every store and every emitter built from this connection reports which
+  // transaction it is running inside — the entity audit recorder joins the write's own transaction
+  // through it rather than opening a second one (`ambient-transaction.ts`).
+  const ambient = new AmbientTransactions();
+  const pooled = createNodePgConnection(pgConfig, { pool: pgPool });
+  const conn = ambient.wrap(pooled);
   const schema = options.schema ?? undefined;
   // The envelope is built here and not beside the derivation, because it needs the connection the
   // derivation does not. The derived source stays live either way: in envelope mode it is the
@@ -945,7 +971,7 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
     });
     await store.ensureSchema();
     sayUniqueEnforcement(manifest, "pg-columns", [], store);
-    return { store, allocator, settingsStore, conn, columnKey };
+    return { store, allocator, settingsStore, conn, columnKey, ambient };
   }
   const store = new PostgresEntityStore(conn, {
     ...(options.schema !== null ? { schema: options.schema } : {}),
@@ -976,7 +1002,7 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
     ),
   );
   sayReferenceIntegrity(store, options.allowDanglingReferences);
-  return { store, allocator, settingsStore, conn };
+  return { store, allocator, settingsStore, conn, ambient };
 }
 
 /** Each way a document-store index build can fail, as the boot survey's reason for it. */
@@ -1149,7 +1175,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   console.info(
     `[auth] ${formatEdgeTrustSurvey(options.trustedEdgeClientCert, mtlsClients)}`,
   );
-  const { store, allocator, settingsStore, conn, columnKey } = await resolveStore(
+  const { store, allocator, settingsStore, conn, columnKey, ambient } = await resolveStore(
     options,
     manifest,
   );
@@ -1408,6 +1434,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   });
   if (adminGrant.level === "warn") console.warn(adminGrant.message);
   else console.info(adminGrant.message);
+  // H-14: stock accounting refuses writes a deployment made before it (a shipment below zero, a bill
+  // billing past what was received), so it is announced with the tenant settings that relax it.
+  console.info(formatInventoryAccounting(inventoryShape(manifest), inventoryPostsToLedger(manifest)));
   const apiKeys = apiKeySource.specs.map(parseApiKeySpec);
   // ADR-0358. Resolved *before* the JWKS, because the public half of this deployment's own signing
   // key is one of the JWKS entries and is derived from the seed rather than configured beside it.
@@ -1700,8 +1729,18 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // (and delayed) jobs into job_runs. Best-effort (a failed enqueue never fails the write), appended
   // after the manifest's default financial effects. Enabled by --emit-entity-events over a pg store.
   const additionalWriteEffects: WriteEffect[] = [];
+  // Which of the manifest's job declarations this binary has a handler for, decided from the
+  // manifest and `--job-actor-role` alone so it can be asked here, before anything is compiled, and
+  // gives one answer on every replica of the deployment. Both producers below enqueue **only** these:
+  // a run for a declaration nothing in this binary serves would sit `pending` in `meta.job_runs` for
+  // ever, which is what every producer did for every declaration until handlers existed (P1.6
+  // measured 148 such rows per tenant per day from `--schedule-ms` alone on `erp-core`).
+  const erpJobs = erpJobCoverage(manifest, options.jobActorRoles, {
+    segregationOfDuties: options.segregationOfDuties,
+  });
+  const jobsThisBinaryServes = Object.values(manifest.jobs ?? {}).filter((j) => erpJobs.handled.includes(j.id));
   if (options.emitEntityEvents && conn !== undefined) {
-    const sink = new PostgresEntityEventSink(conn, Object.values(manifest.jobs ?? {}), {
+    const sink = new PostgresEntityEventSink(conn, jobsThisBinaryServes, {
       ...schemaOpt,
       // The same omission as the scheduler's, one file over and with a worse consequence, because
       // this one is on the request path: `emit` swallows every failure by contract so that a
@@ -1837,6 +1876,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // audit-log emitter anchors into the SAME chain and needs it at wiring time. Both paths
   // appending to one chain per tenant is the point: a single tamper-evident trail, not two.
   let auditConfig: AuditChainConfig | null = null;
+  let chainTrust: PinnedChainKeys | null = null;
   let auditChainProducer: ReturnType<typeof auditChainStore> | null = null;
   // The keypair is resolved from the environment and the file **together** (ADR-0406), so the
   // resolution runs whether or not `--audit-chain-config` was passed — `AUDIT_CHAIN_SIGNING_KEY`
@@ -1871,6 +1911,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     } else {
       auditConfig = auditChainResolution.material.config;
       auditChainProducer = auditChainStore(conn, auditConfig);
+      // The keys both chain passes accept an entry or a checkpoint from (H-18): this key's public
+      // half plus any declared, and never the registry. A malformed declared key throws here.
+      const trust = chainTrustFromEnv(process.env, auditConfig.publicKeyBase64);
+      chainTrust = new PinnedChainKeys(trust.keys);
+      console.info(`[audit-chain] ${formatChainTrust(trust)}`);
     }
   }
   // Built for every Postgres deployment, gated on nothing else (ADR-0327 — see
@@ -1882,6 +1927,33 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       // unproven rather than pretending they are intact (ADR-0286).
       ...(auditChainProducer !== null ? { chain: auditChainProducer } : {}),
     });
+  }
+  // Every entity write leaves a `meta.audit_log` row in its own transaction (C-05). Gated on the
+  // same condition as the emitter — a connection — and said at boot either way, because on
+  // `--store memory` there is no audit table and "writes are audited" must not be inferred there.
+  let entityAudit: EntityAuditRecorder | null = null;
+  if (auditEmitter !== null && ambient !== undefined) {
+    entityAudit = buildEntityAuditRecorder({
+      sink: auditEmitter,
+      currentTransaction: () => ambient.current(),
+      onRefused: (event, reason) =>
+        console.error(
+          `[audit] ${event.operationId} on ${event.entity}${event.recordId === null ? "" : ` ${event.recordId}`}` +
+            ` (tenant ${event.tenantId}) could not be recorded: ${reason} — ` +
+            (event.inTransaction ? "the write was rolled back" : "the write stands without its record"),
+        ),
+    });
+    console.info(
+      `[audit] entity writes: recorded in each write's own transaction, before/after with` +
+        ` sensitive values withheld; ${auditEmitter.anchors() ? "anchored into the tenant's chain" : "unanchored (no audit chain key)"};` +
+        ` an unrecordable write is refused with 503. Unclassified values are copied in the clear, and` +
+        ` meta.audit_log is retained by the Article 17 erasure, so they outlive a tenant deletion`,
+    );
+  } else {
+    console.warn(
+      "[audit] entity writes: NOT recorded — no Postgres store, so there is no audit table;" +
+        " pass --store pg or --store pg-columns",
+    );
   }
   /**
    * The emitter, for a surface that has already established it has a connection.
@@ -3286,9 +3358,19 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         store: reviewStore,
         principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
         adminRoles: new Set(options.designReviewRoles),
+        selfApproval: options.allowDesignSelfApproval ? "permitted" : "refused",
         assessRisk: assessManifestRisk,
         projectSchema: projectManifestView,
-        ...(manifestStore !== null ? { diffManifests, activeManifests: manifestStore } : {}),
+        // The lineage is the gateway cache's own (`tenantLineage`), so the diff compares what the
+        // tenant will be served, and a first activation is compared against the boot manifest it is
+        // served today rather than against nothing (H-28).
+        ...(manifestStore !== null
+          ? {
+              diffManifests,
+              activeManifests: manifestStore,
+              diffLineage: buildDiffLineage(manifest, tenantLineage.registry),
+            }
+          : {}),
         // A decision the tenant never hears about is not a decision they can act on. The notice
         // rides the platform's existing notification ledger (meta.notification_dispatches), whose
         // unique (tenant_id, idempotency_key) makes re-deciding the same way a no-op.
@@ -3302,6 +3384,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           : {}),
       }),
     );
+    const fourEyes = formatFourEyesLine(options.allowDesignSelfApproval ? "permitted" : "refused");
+    if (fourEyes.level === "warn") console.warn(fourEyes.line);
+    else console.info(fourEyes.line);
   }
   // Tenant-facing read side: GET /v1/meta/notifications. The dispatch row stores only a hash of
   // the message variables, so the readable content is joined from the proposal at read time.
@@ -3513,12 +3598,13 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         projectSchema: projectManifestView,
         diffManifests,
         activeManifests: manifestStore,
+        diffLineage: buildDiffLineage(manifest, tenantLineage.registry),
         ...(budget !== undefined ? { budget } : {}),
         ...(options.requireDesignReview && reviewStore !== null ? { reviewGate: reviewStore } : {}),
         ...(designJobs !== undefined && designer !== null
           ? {
               jobs: designJobs,
-              startJob: (tenantId: string, jobId: string, input: { description: string; name: string }): void =>
+              startJob: (tenantId: string, jobId: string, input: DesignRunnerInput): void =>
                 startDesignJob(
                   {
                     jobs: designJobs,
@@ -3846,12 +3932,26 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       store: auditChainProducer,
       onError: (err) => console.error("[audit-chain] append error", err),
       ...(auditPolicy !== null ? { policyCache: auditPolicy.cache } : {}),
+      // A request whose entity write is already anchored with its record id, actor and redacted
+      // before/after is not anchored a second time as a thinner request-level entry.
+      ...(entityAudit !== null ? { supersedes: (e: PipelineExecution) => entityAudit.supersedes(e) } : {}),
     });
     // Register the sealing key's public half into the platform key registry (best-effort — a registry
     // failure must not stop serving) so a chain entry's signingKeyFingerprint resolves to a known key.
     try {
       const registered = await registerAuditChainKey(new PostgresKeyRegistry(conn), auditConfig);
       console.info(`[audit-chain] registered sealing key ${registered.keyId}`);
+      if (chainTrust !== null) {
+        const untrusted = await untrustedRegisteredChainKeys(new PostgresKeyRegistry(conn), chainTrust.keys);
+        if (untrusted.length > 0) {
+          console.warn(
+            `[audit-chain] ${untrusted.length.toString()} registered chain key(s) are not trusted by the` +
+              ` pinned passes [${untrusted.map((f) => f.slice(0, 16)).join(", ")}] — entries they signed` +
+              " read untrusted_key; if one is a key this deployment rotated away from, add its public" +
+              " half to AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS",
+          );
+        }
+      }
     } catch (err) {
       console.error("[audit-chain] key registration failed", err);
     }
@@ -3911,7 +4011,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         // The verification's key resolver, not a composed `verify` seam: `buildCheckpointLifecycle`
         // owns both chain stores, so it composes the verifier over the same pair it anchors
         // (ADR-0371). Same line and same reason as the integrity proof's two blocks down.
-        registry: new PostgresKeyRegistry(conn),
+        registry: requirePinnedChainKeys(chainTrust),
         ...liveScopes,
         // `provenance` is the anchor's own statement of what verified its prefix, so the line that
         // says a checkpoint was written says which of the two folds earned it.
@@ -3965,7 +4065,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       const proofConfig =
         options.integrityProofConfig !== null
           ? await loadIntegrityProofConfig(options.integrityProofConfig)
-          : DEFAULT_INTEGRITY_PROOF_CONFIG;
+          : options.integrityProofFullEvery !== null
+            ? { ...DEFAULT_INTEGRITY_PROOF_CONFIG, fullFoldEveryPasses: options.integrityProofFullEvery }
+            : DEFAULT_INTEGRITY_PROOF_CONFIG;
       const statuses = chainScopeStatuses(proofConfig.tenantStatuses);
       // The same line as the checkpoint block's, for the same reason and read off this block's own
       // resolver. Both are needed rather than one: the two configs are independent, so a deployment
@@ -4033,7 +4135,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       };
       integrityProof = buildIntegrityProofLifecycle(conn, proofConfig, {
         signer: ed25519ChainSigner(auditConfig),
-        registry: new PostgresKeyRegistry(conn),
+        registry: requirePinnedChainKeys(chainTrust),
         ...liveScopes,
         // The mode and its reason ride on the hourly line, not only on `onFinding`'s COMPROMISED
         // one: a deployment whose anchors cannot be trusted folds from genesis on every pass and
@@ -4310,6 +4412,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     writeMaskMode,
     allowUncoveredSettlement: options.allowUncoveredSettlement,
     segregationOfDuties: options.segregationOfDuties,
+    ...(entityAudit !== null ? { entityAudit } : {}),
     ...(abac !== undefined ? { abac } : {}),
     ...(sessionRevocation !== undefined ? { sessionRevocation } : {}),
     // Unconditional, so a drop at this literal is a compile error rather than a silent safe
@@ -4405,14 +4508,34 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // and `buildJobHandlerRegistry` reads all of that off the declaration and refuses a provider that
   // restates any of it, so the queue cannot disagree with the manifest a reviewer approved.
   //
-  // The shipped provider list is **empty, and that is the honest state rather than a gap**: all 25
-  // declarations across the seven packs are tenant-domain ERP work (eight are third-party
-  // integrations with no client in this repo, the rest need `operate-runtime`'s entity store and the
-  // packs have no runtime layer to hold the behaviour). None duplicates one of this app's in-process
-  // schedulers, which are platform work. No noop handler ships: a run reported `completed` having
-  // done nothing is exactly the surface-reports-success-and-records-nothing class ADR-0332 and
-  // ADR-0333 exist to end.
-  const JOB_HANDLER_PROVIDERS: readonly JobHandlerProvider[] = [];
+  // The providers are `erp-job-handlers.ts`' — real work for the five `erp-core` declarations the
+  // shipped entities can express, each writing **through the gateway's own handlers** as the
+  // `--job-actor-role` principal, so a job's write meets the same grants, guards, effects, lifecycle
+  // rule and audit row a person's does. The other nine are declined with the fact that decides each
+  // (eight need a third-party client this repository does not have; one is already done in the
+  // Payment write's own transaction). No noop handler ships: a run reported `completed` having done
+  // nothing is the class ADR-0332 and ADR-0333 exist to end.
+  //
+  // The access is resolved **per run**, because a tenant serving its own activated manifest is
+  // served by its own compiled gateway (ADR-0314): writing that tenant's rows through the
+  // deployment's would apply another manifest's grants and guards to them.
+  const resolveJobAccess: JobAccessResolver = async (tenantId) => {
+    const cache = gatewayCache;
+    if (cache === null) return { kind: "access", access: gateway.systemEntityAccess };
+    const resolved = await cache.serverFor(tenantId);
+    if (resolved.kind === "server") return { kind: "access", access: resolved.server.systemEntityAccess };
+    if (resolved.kind === "none") return { kind: "access", access: gateway.systemEntityAccess };
+    return {
+      kind: "unavailable",
+      reason: `this tenant's own activated manifest cannot be served (${resolved.reason}), so no job writes for it`,
+      retryable: resolved.reason === "unknown",
+    };
+  };
+  const JOB_HANDLER_PROVIDERS: readonly JobHandlerProvider[] = buildErpJobProviders({
+    coverage: erpJobs,
+    resolveAccess: resolveJobAccess,
+    settings: settingsStore,
+  });
   // The names this deployment's emitter can actually produce, for `event_unproducible` (ADR-0362).
   // Computed from the same `--event-prefix` `entityEventEffect` is given above, because a prefix on
   // one side and not the other makes every produced name three-segment and every enumerated one
@@ -4459,6 +4582,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     providers: JOB_HANDLER_PROVIDERS,
     producibleEventNames,
     mountedProducers,
+    // The scheduler and the event sink are handed `jobsThisBinaryServes`, so neither enqueues a
+    // declaration nothing here serves; the invoke route is handed every declaration. Without this
+    // the survey told an operator that runs were accumulating for the nine declined declarations.
+    servedOnlyProducers: mountedProducers.filter((p) => p !== "invoke_route"),
   });
   // ADR-0331's rule applied to jobs: a declaration that will never run is named with the reason,
   // never passed over. Said **either way, including when nothing is served**, because "0 of 14
@@ -4472,7 +4599,18 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       `${mountedProducers.length > 0 ? mountedProducers.join(", ") : "none"}`,
   );
   if (jobHandlers.servedJobIds.length > 0) {
-    console.info(`[jobs] handlers registered: ${jobHandlers.servedJobIds.join(", ")}`);
+    console.info(
+      `[jobs] handlers registered, writing through the gateway as ${erpJobs.actorRoles.join("+")}: ` +
+        `${jobHandlers.servedJobIds.join(", ")}`,
+    );
+  }
+  for (const note of erpJobs.partial) console.warn(`[jobs] ${note.jobId} is served partly: ${note.reason}`);
+  for (const absence of erpJobs.declined) console.info(`[jobs] ${absence.jobId} has no handler: ${absence.reason}`);
+  if (mountedProducers.length > 0) {
+    console.info(
+      `[jobs] the producers enqueue only the ${erpJobs.handled.length.toString()} declaration(s) this binary handles;` +
+        " a run for any other would stay pending for ever with nothing to claim it",
+    );
   }
   for (const finding of jobHandlers.survey.findings) {
     // `isUnservableJobVerdict` and never a list of verdict names. The hand-maintained
@@ -4496,7 +4634,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       : new StaticTenantSource(options.scheduleTenants);
     jobScheduler = new JobScheduler({
       conn,
-      jobs: manifestJobs,
+      jobs: jobsThisBinaryServes,
       tenants,
       intervalMs: options.scheduleMs,
       ...schemaOpt,
@@ -4521,26 +4659,20 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           err,
         ),
     });
-    // Said at boot, because the comment above has been describing a fleet that did not exist: the
-    // scheduler's enqueue is idempotent and durable, so with nothing claiming, `meta.job_runs`
-    // accumulates `pending` rows indefinitely and the manifest's scheduled jobs have never run in
-    // this binary. --workflow-workers is what drains it — and even then the job worker refuses
-    // while no job handler is registered in this process, which is still the case.
-    // Two independent reasons the queue will not drain, and they need different fixes: no worker is
-    // mounted at all, or one is mounted and no handler serves the jobs being enqueued.
-    const unservedJobs = jobHandlers.survey.unservable;
+    // Said at boot: the enqueue is idempotent and durable, so with nothing claiming, `meta.job_runs`
+    // accumulates `pending` rows indefinitely. --workflow-workers is what drains it.
+    //
+    // The scheduler is given only the declarations this binary handles, and that is a change of
+    // position worth stating. The old one was that the enqueue must not be gated on the local
+    // registry, because a worker tier and a web tier are a legitimate split — true, and still
+    // honoured: the gate is the handler set compiled into this binary and decided from the manifest
+    // and `--job-actor-role`, so every tier of one deployment computes the same set and none refuses
+    // what another serves. What the old position cost was 144 of 148 rows per tenant per day on
+    // `erp-core` belonging to two polling jobs no binary can serve, pending for ever.
     if (!options.workflowWorkers) {
       console.warn(
         "[jobs] --schedule-ms enqueues job runs into meta.job_runs, and no worker in this process" +
           " claims them: they will stay pending. Mount --workflow-workers to drain the queue",
-      );
-    } else if (unservedJobs.length > 0) {
-      console.warn(
-        `[jobs] --schedule-ms will enqueue runs for ${unservedJobs.length.toString()} job(s) no` +
-          ` handler in this process serves (${unservedJobs.slice(0, 5).join(", ")}): those runs stay` +
-          " pending. The enqueue is deliberately not gated on the local registry — a worker tier and" +
-          " a web tier are a legitimate split, so the producer must not refuse what another replica" +
-          " serves",
       );
     }
   }
@@ -5106,7 +5238,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         // which case a tenant activating a manifest with a classified field is refused by the
         // store's own constructor — named, rather than 500ing on their first PHI write.
         ...(columnKey !== undefined ? { encryptionKey: columnKey } : {}),
-        onApplication: (application) => {
+        onApplication: (application, retained) => {
           if (application.applied) {
             console.info(
               `[tenant-schema] ${application.tenantId} applied to ${application.schema}` +
@@ -5128,12 +5260,19 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             }
             return;
           }
-          // A refusal is not a failure to report once and forget: the tenant is being served from
-          // the fallback store until an operator runs the reported SQL, so it is logged loudly with
-          // the reason attached.
+          // A refusal is not a failure to report once and forget: the tenant is served something
+          // other than what they activated until an operator runs the reported SQL, so it is logged
+          // loudly with the reason attached — and the sentence says *which* something, because a
+          // refused re-activation keeps the last applied manifest in service (the schema is exactly
+          // as that manifest built it) while a refused first activation is served from the JSONB
+          // fallback. The old sentence named the fallback for both.
           const blocking = application.changes.filter((c) => c.blocking);
           console.error(
-            `[tenant-schema] ${application.tenantId} REFUSED; serving from the JSONB fallback. ` +
+            `[tenant-schema] ${application.tenantId} REFUSED; ` +
+              (retained !== null
+                ? `still serving the last applied manifest ${retained.manifestHash.slice(0, 12)} from ` +
+                  `${retained.schema} — the re-activation does not take effect until this is resolved. `
+                : `serving from the JSONB fallback. `) +
               blocking.map((c) => `${c.table}.${c.column ?? "-"}: ${c.detail}`).join("; "),
           );
         },
@@ -5170,9 +5309,14 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       // design, platform admin), the subscription gate, the residency guard, the per-request
       // observer chain (SLO burn/latency, usage metering, audit chain), write effects and job
       // invocation — so activating a custom manifest never drops a tenant out of enforcement,
-      // billing, or the tamper-evident audit trail. Only the deployment-wide singletons that
-      // are not per-request (the Stripe webhook + billing-portal routes) stay on the default
-      // server, which still handles them for every tenant.
+      // billing, or the tamper-evident audit trail. Only the Stripe webhook stays on the default
+      // server, because it is matched ahead of the gateway and carries no tenant credential, so
+      // no request for it is ever routed here.
+      //
+      // That sentence used to name the billing-portal route as the second such singleton, and it
+      // is not one: `POST /v1/meta/billing-portal` is a *gateway* route called with the tenant's own
+      // credential, so it is routed to this gateway whenever the tenant has an activated manifest —
+      // where it was not registered, a 404 for the one route a lapsed tenant uses to pay.
       //
       // That last sentence named two exceptions and there were **four**: `idempotencyStore` and
       // `rateLimitChecker` were absent from the literal below and are per-request, so the claim
@@ -5184,10 +5328,26 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         // Provision before compiling, not on first request: `storeFor` is synchronous and does not
         // provision, so a gateway built before `ensure` resolved would route that tenant's very
         // first requests to the fallback store and then silently switch tables under them.
-        if (tenantStoreRegistry !== null) await tenantStoreRegistry.ensure(tenantId, tenantManifest);
+        //
+        // And compile against the manifest the registry is *serving*, not the one requested: a
+        // re-activation whose application is refused leaves the tenant's schema as the previous
+        // manifest built it, so that manifest and its store are the coherent pair. Compiling the
+        // requested one used to route this tenant to the JSONB fallback — reads answering absent for
+        // rows in their own tables, writes landing in another table — with a 200 on every request.
+        // A refusal this process has no applied pair for, over a schema that already holds the
+        // tenant's tables (a restart, or another replica), is refused outright: the fallback is the
+        // flip itself there, and a 503 is the one answer that is not a wrong one.
+        let served = tenantManifest;
+        if (tenantStoreRegistry !== null) {
+          const serving = await tenantStoreRegistry.ensureServing(tenantId, tenantManifest);
+          if (serving.kind === "stranded") {
+            throw new TenantSchemaStranded(tenantId, serving.application.schema);
+          }
+          served = serving.manifest;
+        }
         return buildOperateHttpServer({
-          manifest: tenantManifest,
-          store: tenantStoreFor(tenantManifest),
+          manifest: served,
+          store: tenantStoreFor(served),
           // The deployment's, not the tenant's: the secret is one deployment secret and the key is
           // derived per tenant inside the sealer, so an activated manifest gets sealed cursors on
           // the same terms — and the boot refusal travels with it, since this is the function that
@@ -5211,6 +5371,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           // A deployment's maker-checker rule, so a tenant's own manifest gets it on its own
           // approve-class transitions — the rule reads transition names, not the boot pack.
           segregationOfDuties: options.segregationOfDuties,
+          // The same recorder, so a tenant serving its own manifest has its writes recorded too.
+          ...(entityAudit !== null ? { entityAudit } : {}),
           // One policy layer for every gateway: a policy key is a deployment declaration and an
           // attribute is a fact about a membership in the tenant being served, so neither varies
           // with whose manifest is compiled. The per-tenant manifest's own obligations are checked
@@ -5220,21 +5382,23 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           // `buildOperateHttpServer`: a tenant serving its own activated manifest serves the same
           // tenant's users, so a revoked membership must stop working there as well.
           ...(sessionRevocation !== undefined ? { sessionRevocation } : {}),
-          // And the signing keys, for the same reason one notch stronger: a key id *names its
-          // tenant*, so the lookup resolves `ctx.tenantId` from the credential exactly as an api key
-          // does — which means a signed request is routed to a tenant's own gateway and would then
-          // find no scheme to authenticate it. Dropping it here is the shape ADR-0392's addendum
-          // found live at this very call site with `openApiCoverage`, so the two travel together.
+          // And the signing keys: a key id *names its tenant*, so the lookup resolves
+          // `ctx.tenantId` from the credential exactly as an api key does. This said a signed request
+          // "is routed to a tenant's own gateway", and it is not: `resolveRequestTenant` reads an api
+          // key and a verified Bearer and neither the signature header nor the forwarded
+          // certificate, so a signed or certificate-authenticated request is served by the
+          // deployment's gateway under the deployment's manifest even for a tenant with one of their
+          // own — this item's defect on two more credential forms, latent while no compose passes
+          // `--hmac-key` or `--mtls-client`. Passed anyway, so routing them later needs no second
+          // edit here; the shape ADR-0392's addendum found live at this call site.
           // The trust declaration is a property of the **deployment's network position**, not of a
           // tenant, so a per-tenant gateway gets the same answer the boot one does: the hop in front
           // of this process is the same hop whichever tenant's manifest is being served. Required at
           // both ends, so this is a compile error if dropped rather than the silent revert the two
           // comments below record happening twice at this very literal.
           edgeTrust: options.trustedEdgeClientCert ? "trusted" : "untrusted",
-          // And the enrolled certificates, for the signing keys' reason one credential over: an
-          // `--mtls-client` spec *names its tenant*, so the lookup resolves `ctx.tenantId` from the
-          // credential and a certificate-authenticated request is routed to that tenant's own
-          // gateway — which would then find no registry to resolve it against.
+          // And the enrolled certificates, for the signing keys' reason and with the same caveat:
+          // an `--mtls-client` spec names its tenant, and nothing routes on it yet.
           ...(mtlsClients.kind === "configured"
             ? { mtlsClients: { lookup: mtlsClients.lookup, clients: mtlsClientSpecs } }
             : {}),
@@ -5283,6 +5447,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           ...(jwt !== null ? { jwt } : {}),
           ...(extraRoutes !== undefined ? { extraRoutes } : {}),
           ...(entitlementResolver !== undefined ? { entitlementResolver } : {}),
+          // The same Stripe client and subscription store as the boot gateway: the handler resolves
+          // the customer from `ctx.tenantId`, so one wiring serves every tenant's own gateway.
+          ...(billingPortal !== undefined ? { billingPortal } : {}),
           ...(regionGuard !== undefined ? { regionGuard } : {}),
           ...(additionalWriteEffects.length > 0 ? { additionalWriteEffects } : {}),
           ...(jobInvoker !== undefined ? { jobInvoker } : {}),
@@ -5374,9 +5541,14 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           // Forget the schema too, not just the compiled gateway. A *changed* manifest has a
           // different hash and would re-apply regardless; what this catches is the re-activation of
           // an *unchanged* one, which is exactly what happens after an operator runs the SQL a
-          // refused application reported. Without it that tenant stays on the fallback store until
-          // the refusal memo expires, having already done the thing that fixes it.
-          tenantStoreRegistry?.forget(tenantId);
+          // refused application reported. Without it that tenant stays on whatever the refusal left
+          // them — the last applied manifest, the fallback store or a 503 — until the refusal memo
+          // expires, having already done the thing that fixes it.
+          //
+          // `forgetApplication` and not `forget`: a re-activation is a reason to re-apply, not
+          // evidence the schema is gone, so the last applied store keeps serving until the new
+          // application succeeds. `forget` also drops that store, which is right only for an erasure.
+          tenantStoreRegistry?.forgetApplication(tenantId);
           console.info(`[manifest-refresh] tenant ${tenantId} activated elsewhere; cache invalidated`);
         },
         onError: (err) => console.error("[manifest-refresh] poll error", err),
@@ -5387,6 +5559,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         defaultDispatch: (raw, body) => httpServer.dispatch(raw, body),
         cache: gatewayCache,
         apiKeys,
+        // The same `JwtVerifyConfig` every gateway authenticates with, so a browser session — which
+        // carries its tenant only in the token's claim — reaches its tenant's own gateway. Without
+        // it every JWT without an `x-tenant-id` header was served the deployment's manifest.
+        verifyBearer: jwt !== null ? bearerTenantVerifier(jwt) : null,
       }),
     };
   }
@@ -5568,6 +5744,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         }
       },
       admission: loginAdmission,
+      // `--credential-login` is refused without a Postgres store, so the emitter is always here;
+      // `null` stays expressible because the field states the claim rather than defaulting it.
+      audit: auditEmitter !== null ? buildLoginAuditRecorder(auditEmitter) : null,
       onShed: buildShedReporter(loginAdmission, (line) => console.warn(line), 10_000),
       // Neither the password nor the minted token may reach a log line. The refusal reason is what
       // separates a misconfigured deployment from a wrong password, and it is the only thing an
@@ -6055,6 +6234,12 @@ function buildReplayRunners(
  * never read that table. The weaker command caught it and the stronger did not.
  */
 export interface VerifyChainReport {
+  /**
+   * Which keys this run accepted signatures from — pinned to the deployment's chain key(s) from the
+   * environment, or unpinned through the registry, where any registered key verifies (H-18). The
+   * boot line's sentence, so the two cannot describe one trust set differently.
+   */
+  readonly trust: string;
   readonly chain: ChainVerificationReport;
   readonly anchors: AnchorAuditReport;
   /**
@@ -6076,7 +6261,17 @@ export async function runVerifyChain(options: VerifyChainOptions): Promise<Verif
   try {
     const schemaOpt = options.schema !== null ? { schema: options.schema } : {};
     const reader = new PostgresChainLogReader(conn, schemaOpt);
-    const registry = new PostgresKeyRegistry(conn);
+    // Pinned whenever the environment names a chain key — the seed, or the public halves an auditor
+    // holds without it — and unpinned through the registry otherwise, said on the output's first
+    // line. A refused seed pins nothing rather than throwing: this is a by-hand reader, and the
+    // public-key variable is still honoured.
+    const seeded = resolveAuditChain({ env: process.env, file: null });
+    const trust = chainTrustFromEnv(
+      process.env,
+      seeded.kind === "resolved" ? seeded.material.config.publicKeyBase64 : null,
+    );
+    const registry = trust.keys.size > 0 ? new PinnedChainKeys(trust.keys) : new PostgresKeyRegistry(conn);
+    const trustedKeys = trust.keys.size > 0 ? trust.keys : null;
     const tenantId = options.platform ? null : options.tenantId;
     // Built in **both** modes now. It used to be built only for `--from-checkpoint`, because only a
     // bounded fold needed an anchor; the audit needs the table whichever fold ran.
@@ -6101,14 +6296,19 @@ export async function runVerifyChain(options: VerifyChainOptions): Promise<Verif
       options.fromCheckpoint,
     );
     const chain = verification.report;
-    const anchors = await auditAnchors(tenantId, checkpoints, verification.correspondenceChain);
+    const anchors = await auditAnchors(
+      tenantId,
+      checkpoints,
+      verification.correspondenceChain,
+      trustedKeys,
+    );
     // After the audit, so the witness is read before the tail it is compared against — and widening
     // that gap cannot manufacture a finding, since `truncated` needs `tail < witness`, so an append
     // in the window only ever clears the check while a delete in it is a truncation that really
     // happened (`proveScopeIntegrity`'s own ordering argument, one caller across).
     const tail = await reader.tail(tenantId);
     const truncation = chainTruncation(anchors.witnessSequence, tail?.sequenceNumber ?? null);
-    return { chain, anchors, truncation };
+    return { trust: formatChainTrust(trust), chain, anchors, truncation };
   } finally {
     await conn.close();
   }

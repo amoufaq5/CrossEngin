@@ -2,11 +2,18 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { PgConnection, PgQueryResult } from "./connection.js";
 import {
+  DEFAULT_PROBE_LOCK_TIMEOUT_MS,
   NO_RENDERED_EXPRESSIONS,
+  errorMeansExpressionInapplicable,
   expressionKey,
   renderExpressions,
   stripCheckWrapper,
 } from "./expression-render.js";
+
+/** An error carrying a SQLSTATE the way node-postgres raises one. */
+function pgError(code: string, message: string): Error {
+  return Object.assign(new Error(message), { code });
+}
 
 interface Captured {
   sql: string;
@@ -98,14 +105,60 @@ describe("renderExpressions", () => {
     expect(conn.transaction).not.toHaveBeenCalled();
   });
 
-  it("probes with a NOT VALID check so no row is ever scanned", async () => {
+  it("probes a session-private copy of the table, never the table itself (H-23)", async () => {
+    // `ADD CONSTRAINT` on the real table takes ACCESS EXCLUSIVE; measured on PG 16, a plain SELECT
+    // queued 6 s behind a plan that was waiting to take it. The copy's LIKE takes ACCESS SHARE.
     const capture: Captured[] = [];
     const conn = probeConnection(capture, rendering("CHECK ((a = 1)) NOT VALID"));
     await renderExpressions(conn, "meta", [{ table: "widgets", expr: "a = 1" }]);
-    const alter = capture.find((c) => c.sql.includes("ADD CONSTRAINT"));
-    expect(alter?.sql).toContain('ALTER TABLE "meta"."widgets"');
-    expect(alter?.sql).toContain("CHECK (a = 1)");
-    expect(alter?.sql).toContain("NOT VALID");
+    expect(capture.map((c) => c.sql)).toContain(
+      'CREATE TEMP TABLE "_crossengin_probe_0" (LIKE "meta"."widgets")',
+    );
+    const alters = capture.filter((c) => c.sql.startsWith("ALTER TABLE"));
+    expect(alters).toHaveLength(1);
+    expect(alters[0]?.sql).toBe(
+      'ALTER TABLE "_crossengin_probe_0" ADD CONSTRAINT "_crossengin_expr_probe" CHECK (a = 1) NOT VALID',
+    );
+    expect(capture.some((c) => c.sql.includes('ALTER TABLE "meta"'))).toBe(false);
+    const read = capture.find((c) => c.sql.includes("pg_get_constraintdef"));
+    expect(read?.params).toEqual(["_crossengin_expr_probe", "pg_temp._crossengin_probe_0"]);
+  });
+
+  it("makes one copy per table, rolled back and released before the next", async () => {
+    const capture: Captured[] = [];
+    const conn = probeConnection(capture, rendering("CHECK ((a = 1)) NOT VALID"));
+    await renderExpressions(conn, "meta", [
+      { table: "widgets", expr: "a = 1" },
+      { table: "widgets", expr: "b = 2" },
+      { table: "gadgets", expr: "a = 1" },
+    ]);
+    const sqls = capture.map((c) => c.sql);
+    expect(sqls.filter((q) => q.startsWith("CREATE TEMP TABLE"))).toEqual([
+      'CREATE TEMP TABLE "_crossengin_probe_0" (LIKE "meta"."widgets")',
+      'CREATE TEMP TABLE "_crossengin_probe_1" (LIKE "meta"."gadgets")',
+    ]);
+    const secondCopy = sqls.indexOf('CREATE TEMP TABLE "_crossengin_probe_1" (LIKE "meta"."gadgets")');
+    expect(sqls.slice(0, secondCopy).slice(-3)).toEqual([
+      "ROLLBACK TO SAVEPOINT crossengin_expr_table",
+      "RELEASE SAVEPOINT crossengin_expr_table",
+      "SAVEPOINT crossengin_expr_table",
+    ]);
+  });
+
+  it("bounds its lock wait, transaction-locally, before anything else", async () => {
+    const capture: Captured[] = [];
+    const conn = probeConnection(capture, rendering("CHECK ((a = 1)) NOT VALID"));
+    await renderExpressions(conn, "meta", [{ table: "widgets", expr: "a = 1" }]);
+    expect(capture[0]?.sql).toBe(`SET LOCAL lock_timeout = '${String(DEFAULT_PROBE_LOCK_TIMEOUT_MS)}ms'`);
+    await renderExpressions(conn, "meta", [{ table: "widgets", expr: "a = 1" }], { lockTimeoutMs: 0 });
+    expect(capture.filter((c) => c.sql === "SET LOCAL lock_timeout = '0ms'")).toHaveLength(1);
+  });
+
+  it("refuses a lock timeout that is not a non-negative integer", async () => {
+    const conn = probeConnection([], rendering("CHECK ((a = 1)) NOT VALID"));
+    await expect(
+      renderExpressions(conn, "meta", [{ table: "w", expr: "a = 1" }], { lockTimeoutMs: -1 }),
+    ).rejects.toThrow(/non-negative integer/);
   });
 
   it("returns Postgres's rendering keyed by table and expression", async () => {
@@ -114,13 +167,16 @@ describe("renderExpressions", () => {
     expect(out.byRequest.get(expressionKey("widgets", "a = 1"))).toBe("(a = 1)");
   });
 
-  it("wraps every probe in a savepoint and rolls it back", async () => {
+  it("wraps every probe in a savepoint, rolls it back and releases it", async () => {
     const capture: Captured[] = [];
     const conn = probeConnection(capture, rendering("CHECK ((a = 1)) NOT VALID"));
     await renderExpressions(conn, "meta", [{ table: "widgets", expr: "a = 1" }]);
     const sqls = capture.map((c) => c.sql);
-    expect(sqls[0]).toContain("SAVEPOINT");
-    expect(sqls[sqls.length - 1]).toContain("ROLLBACK TO SAVEPOINT");
+    expect(sqls[1]).toBe("SAVEPOINT crossengin_expr_table");
+    expect(sqls).toContain("SAVEPOINT crossengin_expr_probe");
+    expect(sqls).toContain("ROLLBACK TO SAVEPOINT crossengin_expr_probe");
+    expect(sqls).toContain("RELEASE SAVEPOINT crossengin_expr_probe");
+    expect(sqls[sqls.length - 1]).toBe("RELEASE SAVEPOINT crossengin_expr_table");
   });
 
   it("rolls the whole transaction back, so a probe can never commit", async () => {
@@ -157,7 +213,7 @@ describe("renderExpressions", () => {
     const conn = probeConnection(capture, (sql) => {
       if (sql.includes("ADD CONSTRAINT") && first) {
         first = false;
-        throw new Error('column "nope" does not exist');
+        throw pgError("42703", 'column "nope" does not exist');
       }
       return sql.includes("pg_get_constraintdef")
         ? { rows: [{ def: "CHECK ((b = 2)) NOT VALID" }], rowCount: 1 }
@@ -212,7 +268,7 @@ describe("renderExpressions", () => {
 
   it("reports the column set as unknown when the probe could not be applied", async () => {
     const conn = probeConnection([], (sql) => {
-      if (sql.includes("ADD CONSTRAINT")) throw new Error('column "nope" does not exist');
+      if (sql.includes("ADD CONSTRAINT")) throw pgError("42703", 'column "nope" does not exist');
       return { rows: [], rowCount: 0 };
     });
     const out = await renderExpressions(conn, "meta", [{ table: "widgets", expr: "nope = 1" }]);
@@ -230,10 +286,80 @@ describe("renderExpressions", () => {
     expect(out.columnsByRequest?.get(expressionKey("widgets", "a = 1"))).toBeNull();
   });
 
+  it.each([
+    ["42501", "permission denied for table widgets"],
+    ["55P03", "canceling statement due to lock timeout"],
+    ["57014", "canceling statement due to statement timeout"],
+  ])("leaves the expression uncompared, never drifted, on %s (H-23)", async (code, message) => {
+    // Before this, any probe error read as "cannot be applied", which the diff reports as drift and
+    // the planner turns into a rebuild of a correct index or policy.
+    const conn = probeConnection([], (sql) => {
+      if (sql.includes("ADD CONSTRAINT")) throw pgError(code, message);
+      return { rows: [], rowCount: 0 };
+    });
+    const out = await renderExpressions(conn, "meta", [{ table: "widgets", expr: "a = 1" }]);
+    expect(out.byRequest.has(expressionKey("widgets", "a = 1"))).toBe(false);
+    expect(out.uncompared).toEqual([
+      { table: "widgets", expression: "a = 1", sqlstate: code, reason: message },
+    ]);
+  });
+
+  it("leaves an error that carries no SQLSTATE uncompared rather than calling it inapplicable", async () => {
+    const conn = probeConnection([], (sql) => {
+      if (sql.includes("ADD CONSTRAINT")) throw new Error("connection terminated");
+      return { rows: [], rowCount: 0 };
+    });
+    const out = await renderExpressions(conn, "meta", [{ table: "widgets", expr: "a = 1" }]);
+    expect(out.byRequest.size).toBe(0);
+    expect(out.uncompared?.[0]?.sqlstate).toBeNull();
+  });
+
+  it("marks every expression of a table uncompared when the copy itself cannot be made", async () => {
+    const capture: Captured[] = [];
+    const conn = probeConnection(capture, (sql) => {
+      if (sql.includes('(LIKE "meta"."widgets")')) {
+        throw pgError("42501", "permission denied for table widgets");
+      }
+      return rendering("CHECK ((a = 1)) NOT VALID")(sql);
+    });
+    const out = await renderExpressions(conn, "meta", [
+      { table: "widgets", expr: "a = 1" },
+      { table: "widgets", expr: "b = 2" },
+      { table: "gadgets", expr: "a = 1" },
+    ]);
+    expect(out.uncompared?.map((u) => u.expression)).toEqual(["a = 1", "b = 2"]);
+    expect(out.uncompared?.[0]?.reason).toMatch(/could not copy meta\.widgets/);
+    expect(out.byRequest.get(expressionKey("gadgets", "a = 1"))).toBe("(a = 1)");
+    // No probe was attempted against the table the copy failed for.
+    expect(capture.filter((c) => c.sql.includes("ADD CONSTRAINT"))).toHaveLength(1);
+  });
+
   it("refuses an unsafe schema or table identifier", async () => {
     const conn = probeConnection([], rendering("CHECK ((a = 1)) NOT VALID"));
     await expect(
       renderExpressions(conn, "meta", [{ table: 'od"d', expr: "a = 1" }]),
     ).rejects.toThrow(/unsafe SQL identifier/);
+  });
+});
+
+describe("errorMeansExpressionInapplicable", () => {
+  it.each([
+    ["42703", true],
+    ["42883", true],
+    ["42804", true],
+    ["42601", true],
+    ["22P02", true],
+    ["0A000", true],
+    ["42501", false],
+    ["55P03", false],
+    ["57014", false],
+    ["40P01", false],
+    ["08006", false],
+  ])("answers %s → %s", (code, expected) => {
+    expect(errorMeansExpressionInapplicable(code)).toBe(expected);
+  });
+
+  it("answers false for an error with no SQLSTATE", () => {
+    expect(errorMeansExpressionInapplicable(null)).toBe(false);
   });
 });

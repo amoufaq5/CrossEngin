@@ -2,7 +2,7 @@ import type { ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 import type { RoleName } from "@crossengin/auth";
 
-import { computeAging, type AgingReport } from "./aging.js";
+import { computeAging, type AgingReport, type CreditNoteShape } from "./aging.js";
 import { drainList, type BoundedReadDeclaration } from "./list-drain.js";
 import type { EntityRecord, EntityStore } from "./store.js";
 import { readAppliedPayments } from "./write-guards.js";
@@ -17,6 +17,9 @@ export interface AgingSpec {
   readonly paymentRefField: string;
   readonly numberField: string;
   readonly dueDateField?: string;
+  readonly withholdingField?: string;
+  /** Credit notes in the open set, and the states their credited originals are fetched from. */
+  readonly creditNote?: CreditNoteShape & { readonly creditedStates: readonly string[] };
 }
 
 export interface AgingHandlerContext {
@@ -175,12 +178,30 @@ export function buildAgingHandler(ctx: AgingHandlerContext): Handler {
         },
       );
       if (!docOutcome.complete) bounded.push(name);
+      // A credit note's original is voided by the act that issued it, so it is not in the open set:
+      // fetched by reference so the pair can be aged together. One read per credit note, bounded by
+      // the open set already drained.
+      const cn = spec.creditNote;
+      if (cn !== undefined) {
+        const have = new Set(open.map((d) => String(d["id"] ?? "")));
+        for (const d of [...open]) {
+          const ref = d[cn.typeField] === cn.typeValue ? d[cn.refField] : undefined;
+          if (typeof ref !== "string" || have.has(ref)) continue;
+          const original = await ctx.store.get(tenantId, spec.entity, ref);
+          if (original !== null && cn.creditedStates.includes(String(original["state"] ?? ""))) {
+            open.push(original);
+            have.add(ref);
+          }
+        }
+      }
       report[name] = computeAging({
         documents: open,
         appliedByDocument: applied,
         asOf,
         numberField: spec.numberField,
         ...(spec.dueDateField !== undefined ? { dueDateField: spec.dueDateField } : {}),
+        ...(spec.withholdingField !== undefined ? { withholdingField: spec.withholdingField } : {}),
+        ...(cn !== undefined ? { creditNote: { typeField: cn.typeField, typeValue: cn.typeValue, refField: cn.refField } } : {}),
       });
     }
     // `complete` is derived from the one list rather than accumulated beside it, so the claim and

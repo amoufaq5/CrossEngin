@@ -1001,7 +1001,10 @@ describe("the catalog's own emission is unchanged", () => {
     // Named rather than counted, so a table gaining one by accident still fails here. The sixth
     // member is ADR-0402's: `workflow_timers` carried none while `WorkflowTimerSchema` declared
     // nine cross-field clauses, and `incident_communications` went from two of fifteen to twelve.
+    // The seventh is H-18's: a checkpoint's signature and its key fingerprint are written together
+    // or not at all.
     expect(declaring).toEqual([
+      "forensic_chain_checkpoints",
       "incident_communications",
       "notification_read_watermarks",
       "notification_user_quiet_hours",

@@ -18,6 +18,7 @@ import {
   type WriteApprovalRequest,
   type WriteApprover,
 } from "./tools.js";
+import { visibleLine } from "./unified-diff.js";
 
 /**
  * The slice of an `LlmProvider` / `LlmRouter` the chat engine needs — just
@@ -224,10 +225,12 @@ export interface StreamRenderer {
 export function plainTextRenderer(io: IoStreams): StreamRenderer {
   return {
     onText(chunk) {
-      io.stdout.write(chunk);
+      // The model's text reaches the same terminal as the write-approval prompt; an SGR conceal or a
+      // cursor move streamed before a tool call would hide or overwrite the diff a person approves.
+      io.stdout.write(visibleLine(chunk));
     },
     onToolCallStart(_id, name) {
-      io.stdout.write(`\n[tool_call:${name}]`);
+      io.stdout.write(`\n[tool_call:${visibleLine(name)}]`);
     },
     onToolCallArg(_id, _delta) {
       // Suppress raw arg deltas in human mode; UI tools render them.
@@ -424,14 +427,17 @@ export function interactiveApprover(opts: {
   readonly reader: LineReader;
 }): WriteApprover {
   return {
+    showsDiffToPerson: true,
     async approve(req: WriteApprovalRequest): Promise<boolean> {
       const action = req.isNew ? "CREATE" : "UPDATE";
       opts.io.stdout.write(
-        `\n[propose_manifest_edit] ${action} ${req.path}\n` +
+        `\n[propose_manifest_edit] ${action} ${visibleLine(req.path)}\n` +
           `  hash:    ${req.newHash}\n` +
           `  entities: +${req.diffSummary.entitiesAdded.toString()} ` +
           `-${req.diffSummary.entitiesRemoved.toString()} ` +
           `~${req.diffSummary.entitiesModified.toString()}\n` +
+          req.details.map((line) => `    ${visibleLine(line)}\n`).join("") +
+          req.unifiedDiff.map((line) => `${visibleLine(line)}\n`).join("") +
           `Apply? [y/N]: `,
       );
       const line = await opts.reader.next();
@@ -809,7 +815,9 @@ function announceToolResult(
     return;
   }
   const status = result.isError ? "ERROR" : "OK";
-  opts.io.stdout.write(`\n[tool ${call.name} ${status}] ${truncateForDisplay(result.output)}\n`);
+  opts.io.stdout.write(
+    `\n[tool ${visibleLine(call.name)} ${status}] ${visibleLine(truncateForDisplay(result.output))}\n`,
+  );
 }
 
 function truncateForDisplay(text: string, limit = 240): string {

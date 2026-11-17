@@ -1887,6 +1887,22 @@ describe("table column shapes", () => {
     expect(uncovered).toEqual(["id", "tenant_id", "created_at"]);
   });
 
+  it("META_FORENSIC_CHAIN_CHECKPOINTS carries a nullable signature pair, all-or-nothing (H-18)", () => {
+    const col = (n: string) => META_FORENSIC_CHAIN_CHECKPOINTS.columns.find((c) => c.name === n);
+    // Nullable: every checkpoint written before the columns existed is unsigned, which is a gap.
+    expect(col("signature")?.notNull).toBeUndefined();
+    expect(col("signing_key_fingerprint")?.notNull).toBeUndefined();
+    expect(col("signature")?.check).toBe("char_length(signature) >= 1");
+    expect(col("signing_key_fingerprint")?.check).toBe("signing_key_fingerprint ~ '^[0-9a-f]{64}$'");
+    expect(META_FORENSIC_CHAIN_CHECKPOINTS.constraints).toEqual([
+      {
+        kind: "check",
+        name: "forensic_chain_checkpoints_signature_pair",
+        expression: "(signature IS NULL) = (signing_key_fingerprint IS NULL)",
+      },
+    ]);
+  });
+
   it("META_GDPR_DELETION_REQUESTS outlives the verifier and names its proof", () => {
     const col = (n: string) => META_GDPR_DELETION_REQUESTS.columns.find((c) => c.name === n);
     // A deletion erases the tenant's users, and ON DELETE RESTRICT would have made the verifier

@@ -10,8 +10,8 @@ import {
   FAST_CI_BUDGET_MINUTES,
   fitsBudget,
   kindsCovered,
+  measuredJobSeconds,
   measuredStepDisagreements,
-  measuredSuiteSeconds,
   topologicalOrder,
 } from "./ci.js";
 
@@ -89,12 +89,32 @@ describe("the measurement the budget is derived from", () => {
     expect(Object.keys(CI_MEASURED_STEP_SECONDS)).toContain("pnpm install --frozen-lockfile");
   });
 
-  it("derives the declared ceiling rather than restating it", () => {
+  it("derives every job's ceiling from its own steps rather than restating it", () => {
     // The literal `targetMinutes: 9` this replaced was the declaration compared against itself by
-    // `criticalPathMinutes` — one job, so the critical path *is* that number.
-    expect(CI_PIPELINE.jobs.map((j) => j.targetMinutes)).toEqual([
-      Math.ceil(measuredSuiteSeconds() / 60),
+    // `criticalPathMinutes`. Per job now, because the jobs run in parallel on separate runners and
+    // a sum over the whole map would charge `verify` for `lint`'s build.
+    expect(CI_PIPELINE.jobs.map((j) => j.targetMinutes)).toEqual(
+      CI_PIPELINE.jobs.map((j) => Math.ceil(measuredJobSeconds(j.steps) / 60)),
+    );
+    expect(CI_PIPELINE.jobs.map((j) => [j.id, j.targetMinutes])).toEqual([
+      ["verify", 9],
+      ["lint", 5],
+      ["deploy-smoke", Math.ceil((CI_MEASURED_STEP_SECONDS["bash deploy/ci-smoke.sh"] ?? 0) / 60)],
     ]);
+  });
+
+  it("charges a command to every job that runs it, and an action to none", () => {
+    // `pnpm -r build` is in two jobs and both runners pay it; install is the null claim.
+    const lint = CI_PIPELINE.jobs.find((j) => j.id === "lint");
+    expect(lint).toBeDefined();
+    expect(measuredJobSeconds(lint?.steps ?? [])).toBeCloseTo(149.3 + 96.0, 5);
+    expect(measuredJobSeconds([{ kind: "action", uses: "actions/checkout@v4", with: {} }])).toBe(0);
+  });
+
+  it("would put verify over the budget if lint were one of its steps, which is why it is a job", () => {
+    const verify = CI_PIPELINE.jobs.find((j) => j.id === "verify");
+    const withLint = [...(verify?.steps ?? []), { kind: "command" as const, run: "pnpm lint" }];
+    expect(Math.ceil(measuredJobSeconds(withLint) / 60)).toBeGreaterThan(FAST_CI_BUDGET_MINUTES);
   });
 
   it("crosses the budget at a re-measured 601 s, which is the event the check fires on", () => {

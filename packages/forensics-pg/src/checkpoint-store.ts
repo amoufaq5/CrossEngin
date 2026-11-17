@@ -18,7 +18,7 @@ const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 const TABLE = "forensic_chain_checkpoints";
 
 const READ_COLUMNS = `sequence_number, root_hash, checkpointed_at, checkpointed_by,
-  external_anchor_reference, algorithm, provenance`;
+  external_anchor_reference, algorithm, provenance, signature, signing_key_fingerprint`;
 
 const DEFAULT_LIST_LIMIT = 50;
 
@@ -128,6 +128,8 @@ export function rowToCheckpoint(row: Record<string, unknown>): ChainCheckpoint {
   const anchor = row["external_anchor_reference"];
   const algorithm = row["algorithm"];
   const provenance = row["provenance"];
+  const signature = row["signature"];
+  const signingKeyFingerprint = row["signing_key_fingerprint"];
   // An out-of-enum provenance is handed to the parse to refuse rather than coerced to `undefined`:
   // absent says this row's columns do not cover the question, which is false of a row that answered
   // it and said something this binary does not know.
@@ -139,6 +141,9 @@ export function rowToCheckpoint(row: Record<string, unknown>): ChainCheckpoint {
     externalAnchorReference: anchor == null ? undefined : String(anchor),
     algorithm: algorithm == null ? undefined : String(algorithm),
     provenance: provenance == null ? undefined : String(provenance),
+    signature: signature == null ? undefined : String(signature),
+    signingKeyFingerprint:
+      signingKeyFingerprint == null ? undefined : String(signingKeyFingerprint).trim(),
   });
 }
 
@@ -259,8 +264,8 @@ export class PostgresChainCheckpointStore {
       conn.query(
         `INSERT INTO ${this.schema}.${TABLE}
           (tenant_id, sequence_number, root_hash, checkpointed_at, checkpointed_by,
-           external_anchor_reference, algorithm, provenance)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           external_anchor_reference, algorithm, provenance, signature, signing_key_fingerprint)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          ON CONFLICT (tenant_id, sequence_number) DO NOTHING`,
         [
           tenantId,
@@ -271,6 +276,8 @@ export class PostgresChainCheckpointStore {
           valid.externalAnchorReference ?? null,
           valid.algorithm,
           valid.provenance ?? null,
+          valid.signature ?? null,
+          valid.signingKeyFingerprint ?? null,
         ],
       ),
     );

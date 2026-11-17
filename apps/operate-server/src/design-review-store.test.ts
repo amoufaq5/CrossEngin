@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { PgConnection } from "@crossengin/kernel-pg";
 import { describe, expect, it } from "vitest";
 
+import { DesignerCannotApproveError } from "./design-review-routes.js";
 import { PostgresDesignReviewStore, withPlatformReview } from "./design-review-store.js";
 
 const TENANT_A = "00000000-0000-4000-8000-000000000001";
@@ -74,6 +75,7 @@ function fakeReviewDb(): FakeDb {
       reviewed_at: null,
       review_notes: null,
       provider_label: null,
+      designed_by: null,
       created_at: at,
       updated_at: at,
       ...overrides,
@@ -189,6 +191,7 @@ function scriptedManifestConn(manifestValue: unknown, id: string): PgConnection 
     reviewed_at: null,
     review_notes: null,
     provider_label: null,
+    designed_by: null,
     created_at: new Date(Date.UTC(2026, 5, 1)),
     updated_at: new Date(Date.UTC(2026, 5, 1)),
   };
@@ -379,6 +382,7 @@ describe("design-review-store — approve / reject", () => {
     const record = await new PostgresDesignReviewStore(conn).approve(String(row["id"]), {
       reviewedBy: "ops@crossengin.dev",
       notes: "looks good",
+      selfApproval: "refused",
     });
     expect(record?.reviewStatus).toBe("approved");
     expect(record?.reviewedBy).toBe("ops@crossengin.dev");
@@ -417,7 +421,7 @@ describe("design-review-store — approve / reject", () => {
     // its own scope (`scopeFilter`'s rule) instead of relying on the session setting in silence.
     expect(captured.map((c) => c.sql)).toEqual([
       SET_PLATFORM_SQL,
-      `SELECT tenant_id FROM meta.operate_tenant_manifests WHERE id = $1`,
+      `SELECT tenant_id, designed_by FROM meta.operate_tenant_manifests WHERE id = $1`,
       "SELECT set_config('app.current_tenant_id', $1, true)",
       expect.stringContaining("WHERE id = $1 AND tenant_id = $2") as unknown as string,
     ]);
@@ -452,7 +456,7 @@ describe("design-review-store — approve / reject", () => {
     const store = new PostgresDesignReviewStore(conn);
     const first = seed({ review_status: "pending" });
     const second = seed({ review_status: "pending" });
-    const omitted = await store.approve(String(first["id"]), { reviewedBy: "ops" });
+    const omitted = await store.approve(String(first["id"]), { reviewedBy: "ops", selfApproval: "refused" });
     const explicit = await store.reject(String(second["id"]), { reviewedBy: "ops", notes: null });
     expect(omitted?.reviewNotes).toBeNull();
     expect(explicit?.reviewNotes).toBeNull();
@@ -467,7 +471,7 @@ describe("design-review-store — approve / reject", () => {
     const { conn, seed } = fakeReviewDb();
     seed();
     const store = new PostgresDesignReviewStore(conn);
-    expect(await store.approve(randomUUID(), { reviewedBy: "ops" })).toBeNull();
+    expect(await store.approve(randomUUID(), { reviewedBy: "ops", selfApproval: "refused" })).toBeNull();
     expect(await store.reject(randomUUID(), { reviewedBy: "ops" })).toBeNull();
   });
 
@@ -502,11 +506,59 @@ describe("design-review-store — approve / reject", () => {
     expect(row["review_status"]).toBe("approved");
   });
 
+  it("refuses an approval by the principal who designed the proposal, before any write", async () => {
+    // Four-eyes at the store (H-28): the route checks first, and this is the fence for a caller
+    // that reaches the store some other way. Refused inside the transaction that read the row, so
+    // the designer it compares against is the one stored, never one a caller supplied.
+    const { conn, captured, seed } = fakeReviewDb();
+    const row = seed({ review_status: "pending", designed_by: "designer-1" });
+    const store = new PostgresDesignReviewStore(conn);
+    await expect(
+      store.approve(String(row["id"]), { reviewedBy: "designer-1", selfApproval: "refused" }),
+    ).rejects.toBeInstanceOf(DesignerCannotApproveError);
+    expect(captured.some((c) => c.sql.startsWith("UPDATE"))).toBe(false);
+    expect(row["review_status"]).toBe("pending");
+  });
+
+  it("admits the designer's approval when self-approval is permitted, and a distinct reviewer always", async () => {
+    const { conn, seed } = fakeReviewDb();
+    const store = new PostgresDesignReviewStore(conn);
+    const own = seed({ review_status: "pending", designed_by: "designer-1" });
+    const other = seed({ review_status: "pending", designed_by: "designer-1" });
+    const self = await store.approve(String(own["id"]), {
+      reviewedBy: "designer-1",
+      selfApproval: "permitted",
+    });
+    expect(self?.reviewStatus).toBe("approved");
+    expect(self?.designedBy).toBe("designer-1");
+    const distinct = await store.approve(String(other["id"]), {
+      reviewedBy: "reviewer-2",
+      selfApproval: "refused",
+    });
+    expect(distinct?.reviewStatus).toBe("approved");
+  });
+
+  it("never gates a rejection, and admits an approval of a proposal with no recorded designer", async () => {
+    const { conn, seed } = fakeReviewDb();
+    const store = new PostgresDesignReviewStore(conn);
+    const own = seed({ review_status: "pending", designed_by: "designer-1" });
+    expect((await store.reject(String(own["id"]), { reviewedBy: "designer-1" }))?.reviewStatus).toBe(
+      "rejected",
+    );
+    const legacy = seed({ review_status: "pending" });
+    const approved = await store.approve(String(legacy["id"]), {
+      reviewedBy: "designer-1",
+      selfApproval: "refused",
+    });
+    expect(approved?.reviewStatus).toBe("approved");
+    expect(approved?.designedBy).toBeNull();
+  });
+
   it("does not gate on the current review status — the route layer owns the transition", async () => {
     const { conn, seed } = fakeReviewDb();
     const row = seed({ review_status: "not_required" });
     const store = new PostgresDesignReviewStore(conn);
-    const approved = await store.approve(String(row["id"]), { reviewedBy: "ops" });
+    const approved = await store.approve(String(row["id"]), { reviewedBy: "ops", selfApproval: "refused" });
     expect(approved?.reviewStatus).toBe("approved");
     const flipped = await store.reject(String(row["id"]), { reviewedBy: "ops2" });
     expect(flipped?.reviewStatus).toBe("rejected");
@@ -598,6 +650,7 @@ describe("design-review-store — row mapping", () => {
     expect(before?.createdAt).toBe((row["created_at"] as Date).toISOString());
     const after = await new PostgresDesignReviewStore(conn).approve(String(row["id"]), {
       reviewedBy: "ops",
+      selfApproval: "refused",
     });
     expect(after?.reviewedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState, type ReactElement } from "react";
+import { use, useCallback, useEffect, useState, type ReactElement } from "react";
 
 import { Badge } from "@/components/Badge";
 import { Topbar } from "@/components/Topbar";
@@ -155,9 +155,9 @@ interface CredentialRefusal {
 export default function PlatformUserDetailPage({
   params,
 }: {
-  params: { id: string };
+  params: Promise<{ id: string }>;
 }): ReactElement {
-  const { id } = params;
+  const { id } = use(params);
   const [user, setUser] = useState<PlatformUser | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState<string | null>(null);

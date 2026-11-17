@@ -141,7 +141,7 @@ export const ERP_EXT_PERMISSIONS: Readonly<Record<string, EntityPermissions>> = 
   Currency: crud(GL_READERS, GL_WRITERS),
   ExchangeRate: crud(GL_READERS, GL_WRITERS),
   FiscalYear: crud(GL_READERS, GL_WRITERS),
-  FiscalPeriod: crud(GL_READERS, GL_WRITERS),
+  FiscalPeriod: crud(GL_READERS, GL_WRITERS, { transitionsFor: "FiscalPeriod" }),
   AccountingBook: crud(GL_READERS, GL_WRITERS),
   CostCenter: crud(GL_READERS, GL_WRITERS),
   // Country tax rules + filing

@@ -91,7 +91,11 @@ export interface RemovedForeignKey {
   readonly target: string;
 }
 
-export const INDEX_DELTA_REASONS = ["columns", "unique", "method", "predicate"] as const;
+/**
+ * `invalid` is the one reason that is not about the definition: the live index has the declared
+ * shape and Postgres does not use it, which is what a failed `CREATE INDEX CONCURRENTLY` leaves.
+ */
+export const INDEX_DELTA_REASONS = ["columns", "unique", "method", "predicate", "invalid"] as const;
 export type IndexDeltaReason = (typeof INDEX_DELTA_REASONS)[number];
 
 export interface IndexDelta {
@@ -603,6 +607,10 @@ function diffOneTable(
     if (predicateDelta !== null) {
       reasons.push("predicate");
       details.push(predicateDelta);
+    }
+    if (!liveIdx.valid) {
+      reasons.push("invalid");
+      details.push("Postgres marks the live index invalid (a failed concurrent build) and uses it for nothing");
     }
     if (reasons.length > 0) {
       changedIndexes.push({

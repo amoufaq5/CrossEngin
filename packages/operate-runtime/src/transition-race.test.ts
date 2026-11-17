@@ -76,6 +76,18 @@ class BarrierStore extends InMemoryEntityStore {
   }
 }
 
+/**
+ * A barrier store that takes no row lock, as a store on a connection with no transaction would: the
+ * transition reads its record through `getLocked`, and the record lock alone would make the second
+ * transition wait for the first (`row-lock-race.test.ts`). Without it the compare-and-set is the
+ * only thing between two transitions that both read the record, which is what this exercises.
+ */
+class LocklessBarrierStore extends BarrierStore {
+  override async getLocked(tenantId: string, entity: string, id: string): Promise<EntityRecord | null> {
+    return this.get(tenantId, entity, id);
+  }
+}
+
 function serverOver(store: InMemoryEntityStore, effects: readonly WriteEffect[]): CompiledOperateServer {
   return compileOperateServer(resolved, { store, principalRoles, writeEffects: effects });
 }
@@ -83,7 +95,7 @@ function serverOver(store: InMemoryEntityStore, effects: readonly WriteEffect[])
 async function invoke(
   server: CompiledOperateServer,
   opId: string,
-  opts: { params?: Record<string, string>; body?: Record<string, unknown> },
+  opts: { params?: Record<string, string>; body?: Record<string, unknown>; role?: string },
 ): Promise<HandlerOutput> {
   const spec = server.routeSpecs.find((s) => s.operationId === opId);
   if (spec === undefined) throw new Error(`no route for ${opId}`);
@@ -103,7 +115,7 @@ async function invoke(
   return handler({
     request,
     route: routeFromSpec(spec),
-    principal: principal("store_manager"),
+    principal: principal(opts.role ?? "store_manager"),
     params: opts.params ?? {},
     parsedBody: opts.body ?? null,
   });
@@ -124,7 +136,7 @@ async function cartOrder(server: CompiledOperateServer): Promise<string> {
 
 describe("concurrent transitions", () => {
   it("lets exactly one of two racing transitions fire, and runs its effects exactly once", async () => {
-    const store = new BarrierStore();
+    const store = new LocklessBarrierStore();
     const fired: string[] = [];
     const server = serverOver(store, [
       async (input) => {
@@ -309,6 +321,68 @@ describe("InMemoryEntityStore.updateIf", () => {
     expect((await store.updateIf(TENANT, "Doc", id, { n: 2 }, { state: null })).kind).toBe("updated");
     expect((await store.updateIf(TENANT, "Doc", id, { n: 3 }, { state: undefined })).kind).toBe("updated");
     expect((await store.updateIf(TENANT, "Doc", id, { n: 4 }, { state: "" })).kind).toBe("precondition_failed");
-    expect((await store.updateIf(TENANT, "Doc", id, { n: 5 }, { n: "3" })).kind).toBe("precondition_failed");
+    // A figure is compared as a figure, as the column store compares a NUMERIC column: the stored 3
+    // and a "3" read back through the decimal wire type are one value, and a different one is not.
+    expect((await store.updateIf(TENANT, "Doc", id, { n: 5 }, { n: "4" })).kind).toBe("precondition_failed");
+    expect((await store.updateIf(TENANT, "Doc", id, { n: 5 }, { n: "3" })).kind).toBe("updated");
+  });
+});
+
+/**
+ * `WhtCertificate` has no lifecycle on any shipped pack, so its state moves by PATCH and its
+ * clearing posting fires on entering `confirmed`: the write is decided from `state` exactly as a
+ * transition's is, and must be conditional on it the same way.
+ */
+describe("a lock-guarded entity with no lifecycle", () => {
+  async function certificate(store: InMemoryEntityStore): Promise<string> {
+    const created = await store.create(TENANT, "WhtCertificate", {
+      certificate_number: "WHT-RACE",
+      invoice_id: "inv_1",
+      account_id: "acc_1",
+      amount: "5.00",
+      currency: "USD",
+      issue_date: "2026-06-01",
+      state: "draft",
+    });
+    return String(created["id"]);
+  }
+
+  function confirmations(fired: string[]): WriteEffect {
+    return async (input) => {
+      if (input.entity === "WhtCertificate" && input.after["state"] === "confirmed" && input.before?.["state"] !== "confirmed") {
+        fired.push(input.operation);
+      }
+    };
+  }
+
+  it("lets one of two racing confirmations land, so its posting fires once", async () => {
+    const store = new BarrierStore();
+    const fired: string[] = [];
+    const server = serverOver(store, [confirmations(fired)]);
+    const id = await certificate(store);
+    store.arm("WhtCertificate", 2);
+    const [a, b] = await Promise.all([
+      invoke(server, "whtCertificate.update", { params: { id }, body: { state: "confirmed" }, role: "erp_admin" }),
+      invoke(server, "whtCertificate.update", { params: { id }, body: { state: "confirmed" }, role: "erp_admin" }),
+    ]);
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+    expect(bodyOf(a.status === 409 ? a : b)["error"]).toBe("state_changed");
+    expect(fired).toEqual(["update"]);
+  });
+
+  it("does not let a delete decided on a draft remove a certificate a concurrent confirmation posted for", async () => {
+    const store = new BarrierStore();
+    const fired: string[] = [];
+    const server = serverOver(store, [confirmations(fired)]);
+    const id = await certificate(store);
+    store.arm("WhtCertificate", 2);
+    const [confirm, del] = await Promise.all([
+      invoke(server, "whtCertificate.update", { params: { id }, body: { state: "confirmed" }, role: "erp_admin" }),
+      invoke(server, "whtCertificate.delete", { params: { id }, role: "erp_admin" }),
+    ]);
+    expect(fired).toEqual(["update"]);
+    expect([confirm.status, del.status]).toEqual([200, 409]);
+    expect(bodyOf(del)["error"]).toBe("state_changed");
+    expect((await store.get(TENANT, "WhtCertificate", id))?.["state"]).toBe("confirmed");
   });
 });

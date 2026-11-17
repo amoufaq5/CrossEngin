@@ -12118,9 +12118,39 @@ export const META_FORENSIC_CHAIN_CHECKPOINTS: TableDefinition = {
       type: "TEXT",
       check: "provenance IN ('verified_full', 'verified_suffix', 'unverified')",
     },
+    /**
+     * The chain signer's Ed25519 signature over `(scope, sequence_number, root_hash, provenance,
+     * checkpointed_at)` and the fingerprint of the key that made it (H-18). Without it an anchor was
+     * a row any session able to write this table could author — the isolation arm is `ALL`-scope, so
+     * a tenant-context `INSERT` or `UPDATE` lands — and a bounded proof takes its prefix on trust
+     * from the newest one, so an inserted `verified_full` anchor at the tail licensed skipping every
+     * entry above the previous one.
+     *
+     * Nullable with no default, `provenance`'s reason: every row written before the columns existed
+     * is unsigned, and an absent signature is a gap, not a forgery. The pair is all-or-nothing by
+     * the table constraint below, and each half is non-empty or well-formed because `''` would read
+     * back as a value the contract refuses (ADR-0374's rule, inherited).
+     */
+    {
+      name: "signature",
+      type: "TEXT",
+      check: "char_length(signature) >= 1",
+    },
+    {
+      name: "signing_key_fingerprint",
+      type: "CHAR(64)",
+      check: "signing_key_fingerprint ~ '^[0-9a-f]{64}$'",
+    },
     { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
   ],
   primaryKey: ["id"],
+  constraints: [
+    {
+      kind: "check",
+      name: "forensic_chain_checkpoints_signature_pair",
+      expression: "(signature IS NULL) = (signing_key_fingerprint IS NULL)",
+    },
+  ],
   uniqueConstraints: [
     {
       name: "forensic_chain_checkpoints_tenant_seq_key",
@@ -12194,6 +12224,16 @@ export const META_OPERATE_TENANT_MANIFESTS: TableDefinition = {
       check: "source IN ('ai', 'manual')",
     },
     { name: "provider_label", type: "TEXT", notNull: false },
+    // The principal that requested the design, which is what lets the review route refuse that
+    // same principal's approval (H-28's four-eyes). TEXT and unreferenced on ADR-0335's rule — a
+    // column recording who performed an act must not make the actor undeletable — and nullable
+    // because every proposal stored before the column existed records nobody.
+    {
+      name: "designed_by",
+      type: "TEXT",
+      notNull: false,
+      check: "char_length(designed_by) >= 1",
+    },
     {
       name: "review_status",
       type: "TEXT",

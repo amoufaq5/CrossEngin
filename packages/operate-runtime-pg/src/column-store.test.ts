@@ -254,6 +254,55 @@ describe("ColumnMappedEntityStore — CRUD maps fields to typed columns", () => 
     expect(cap.calls.filter((c) => c.sql.includes("UPDATE"))).toEqual([]);
   });
 
+  it("getLocked reads the row with the lock it names, so a transition and a line writer serialise", async () => {
+    for (const [lock, clause] of [
+      ["share", "FOR SHARE"],
+      ["exclusive", "FOR NO KEY UPDATE"],
+    ] as const) {
+      const cap = capturePg([{ id: "w1", sku: "S1" }]);
+      expect(await store(cap).getLocked(TENANT, "Widget", "w1", lock)).toMatchObject({ id: "w1" });
+      const sel = cap.calls.find((c) => c.sql.includes("SELECT") && c.sql.includes('"widget"'))!;
+      expect(sel.sql).toMatch(new RegExp(`LIMIT 1 ${clause}$`));
+      expect(sel.params).toEqual([TENANT, "w1"]);
+    }
+    // `get` itself takes no lock.
+    const cap = capturePg([{ id: "w1" }]);
+    await store(cap).get(TENANT, "Widget", "w1");
+    expect(cap.calls.some((c) => /FOR (SHARE|NO KEY UPDATE|UPDATE)/.test(c.sql))).toBe(false);
+  });
+
+  it("removeIf puts the precondition in the DELETE's own WHERE and tells a changed row from a missing one", async () => {
+    const cap = capturePg();
+    expect(await store(cap).removeIf(TENANT, "Widget", "w1", { status: "active" })).toEqual({ kind: "removed" });
+    const del = cap.calls.find((c) => c.sql.includes("DELETE"))!;
+    expect(del.sql).toMatch(/WHERE "tenant_id" = \$1 AND "id" = \$2 AND "status" IS NOT DISTINCT FROM \$3::TEXT/);
+    expect(del.params).toEqual([TENANT, "w1", "active"]);
+    for (const [present, kind] of [
+      [true, "precondition_failed"],
+      [false, "not_found"],
+    ] as const) {
+      const cap2 = capturePg();
+      const inner = cap2.conn.query;
+      const conn: PgConnection = {
+        ...cap2.conn,
+        query: (async (sql: string, params?: readonly unknown[]) => {
+          if (sql.includes("DELETE")) {
+            await inner(sql, params);
+            return { rows: [], rowCount: 0 };
+          }
+          if (sql.includes("SELECT 1")) {
+            await inner(sql, params);
+            return { rows: present ? [{ "?column?": 1 }] : [], rowCount: present ? 1 : 0 };
+          }
+          return inner(sql, params);
+        }) as PgConnection["query"],
+      };
+      conn.transaction = (async <T>(fn: (tx: PgConnection) => Promise<T>) => fn(conn)) as PgConnection["transaction"];
+      const s = new ColumnMappedEntityStore(conn, MANIFEST, { schema: "tenant_app", encryptionKey: () => KEY });
+      expect(await s.removeIf(TENANT, "Widget", "w1", { status: "active" })).toEqual({ kind });
+    }
+  });
+
   it("remove reports whether a row was deleted", async () => {
     const cap = capturePg();
     expect(await store(cap).remove(TENANT, "Widget", "w1")).toBe(true);

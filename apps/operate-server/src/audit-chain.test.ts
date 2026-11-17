@@ -385,6 +385,26 @@ describe("AuditChainObserver", () => {
     }
   });
 
+  it("skips a request whose entity write is already anchored, and asks even for a filtered one", async () => {
+    const store = new PostgresChainLogStore(fakeChainPg(), ed25519ChainSigner(keypair));
+    const asked: string[] = [];
+    const observer = new AuditChainObserver(store, config({ outcomes: ["pass"] }), {
+      supersedes: (e) => {
+        asked.push(e.requestId);
+        return e.requestId === "req_aaaaaaaa11111111";
+      },
+    });
+    observer.record(execution({ requestId: "req_aaaaaaaa11111111" }));
+    observer.record(execution({ requestId: "req_bbbbbbbb22222222" }));
+    // Filtered out by the policy, and still asked — answering is what consumes the recorder's mark.
+    observer.record(execution({ requestId: "req_cccccccc33333333", finalOutcome: "deny" }));
+    await observer.drain();
+    expect(asked).toEqual(["req_aaaaaaaa11111111", "req_bbbbbbbb22222222", "req_cccccccc33333333"]);
+    const chain = await store.loadChain(TENANT);
+    expect(chain.entries).toHaveLength(1);
+    expect(chain.entries[0]?.payloadSha256).toBeDefined();
+  });
+
   it("a filtered-out request appends nothing and never touches the queues", async () => {
     const store = new PostgresChainLogStore(fakeChainPg(), ed25519ChainSigner(keypair));
     const observer = new AuditChainObserver(store, config({ outcomes: ["deny", "error"] }));

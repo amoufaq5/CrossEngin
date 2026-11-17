@@ -1,10 +1,11 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
-import type { Manifest } from "@crossengin/kernel/manifest";
+import { manifestHash, type Manifest } from "@crossengin/kernel/manifest";
 import {
   isAssociationCounter,
   isAssociationReader,
   isAssociationWriter,
   isTransactional,
+  type ConditionalRemove,
   type ConditionalUpdate,
   type EntityRecord,
   type EntityStore,
@@ -27,6 +28,7 @@ import {
   PlaintextFallbackRefused,
   TenantColumnStoreRegistry,
   TenantColumnStoreRouter,
+  TenantSchemaStranded,
 } from "./tenant-store-registry.js";
 
 const TENANT = "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8";
@@ -252,6 +254,180 @@ describe("TenantColumnStoreRegistry", () => {
   });
 });
 
+/** What V1 left in the tenant's schema: `sku` is TEXT, as V1 declared it. */
+function appliedV1Live(): readonly Record<string, unknown>[] {
+  return [
+    { table_name: "widget", column_name: "tenant_id", formatted_type: "uuid", not_null: true },
+    { table_name: "widget", column_name: "id", formatted_type: "text", not_null: true },
+    { table_name: "widget", column_name: "sku", formatted_type: "text", not_null: true },
+  ];
+}
+
+/** A re-activation the live schema refuses: `sku` declared INTEGER over V1's TEXT column. */
+const V3_RETYPED = {
+  entities: [{ ...WIDGET, fields: [{ name: "sku", type: { kind: "integer" }, required: true }] }],
+} as unknown as Manifest;
+
+describe("TenantColumnStoreRegistry — a refused re-activation keeps the last applied pair", () => {
+  async function appliedThenRefused(): Promise<{
+    cap: Captured;
+    registry: TenantColumnStoreRegistry;
+    first: ColumnMappedEntityStore | null;
+    seen: { applied: boolean; retained: string | null }[];
+  }> {
+    const cap = capturePg();
+    const seen: { applied: boolean; retained: string | null }[] = [];
+    const registry = new TenantColumnStoreRegistry(cap.conn, {
+      onApplication: (a, retained) => seen.push({ applied: a.applied, retained: retained?.manifestHash ?? null }),
+    });
+    expect((await registry.ensure(TENANT, V1)).applied).toBe(true);
+    const first = registry.storeFor(TENANT);
+    cap.setLive(appliedV1Live());
+    return { cap, registry, first, seen };
+  }
+
+  it("keeps serving the last applied store when a re-activation is refused, instead of null", async () => {
+    const { registry, first } = await appliedThenRefused();
+    expect(first).not.toBeNull();
+    expect((await registry.ensure(TENANT, V3_RETYPED)).applied).toBe(false);
+    expect(registry.storeFor(TENANT)).toBe(first);
+  });
+
+  it("answers `retained` with the LAST APPLIED manifest, so a gateway is compiled against the store's schema", async () => {
+    const { registry } = await appliedThenRefused();
+    const serving = await registry.ensureServing(TENANT, V3_RETYPED);
+    expect(serving.kind).toBe("retained");
+    expect(serving.manifest).toBe(V1);
+    expect(serving.application.applied).toBe(false);
+    if (serving.kind === "retained") {
+      expect(serving.retained.manifestHash).toBe(manifestHash(V1));
+      expect(serving.retained.schema).toBe(tenantSchemaName(TENANT));
+    }
+  });
+
+  it("tells the logger which manifest is still being served, and nothing for a first refusal", async () => {
+    const { registry, seen } = await appliedThenRefused();
+    await registry.ensure(TENANT, V3_RETYPED);
+    expect(seen.map((x) => x.applied)).toEqual([true, false]);
+    expect(seen[0]?.retained).toBeNull();
+    expect(seen[1]?.retained).not.toBeNull();
+
+    const cap = capturePg();
+    cap.setLive(driftedWidget());
+    const firstSeen: (string | null)[] = [];
+    const fresh = new TenantColumnStoreRegistry(cap.conn, {
+      onApplication: (_a, retained) => firstSeen.push(retained?.manifestHash ?? null),
+    });
+    await fresh.ensure(TENANT, V1);
+    expect(firstSeen).toEqual([null]);
+  });
+
+  it("answers `refused` with the REQUESTED manifest when nothing was ever applied (ADR-0314's fallback)", async () => {
+    const cap = capturePg();
+    cap.setLive(driftedWidget());
+    const registry = new TenantColumnStoreRegistry(cap.conn);
+    const serving = await registry.ensureServing(TENANT, V1);
+    expect(serving.kind).toBe("refused");
+    expect(serving.manifest).toBe(V1);
+    expect(registry.storeFor(TENANT)).toBeNull();
+  });
+
+  it("answers `stranded` when nothing was applied HERE but the schema already holds the tenant's tables", async () => {
+    // A restart, or another replica: this process applied nothing, the stored manifest is the
+    // refused re-activation, and the rows are in the tenant's own tables. The fallback would be
+    // the flip — so this arm exists for the caller to refuse instead.
+    const cap = capturePg();
+    cap.setLive(driftedWidget());
+    const conn: PgConnection = {
+      ...cap.conn,
+      query: (async (sql: string, params?: readonly unknown[]) =>
+        sql.includes("pg_catalog.pg_tables")
+          ? { rows: [{ occupied: true }], rowCount: 1 }
+          : cap.conn.query(sql, params as unknown[])) as PgConnection["query"],
+    };
+    const registry = new TenantColumnStoreRegistry(conn);
+    const serving = await registry.ensureServing(TENANT, V1);
+    expect(serving.kind).toBe("stranded");
+    expect(registry.storeFor(TENANT)).toBeNull();
+  });
+
+  it("asks the probe the tenant's own schema, and only on a refusal with nothing applied", async () => {
+    const cap = capturePg();
+    cap.setLive(driftedWidget());
+    const registry = new TenantColumnStoreRegistry(cap.conn);
+    await registry.ensureServing(TENANT, V1);
+    const probe = cap.calls.find((c) => c.sql.includes("pg_catalog.pg_tables"));
+    expect(probe?.params).toEqual([tenantSchemaName(TENANT)]);
+
+    const clean = capturePg();
+    await new TenantColumnStoreRegistry(clean.conn).ensureServing(TENANT, V1);
+    expect(clean.sqls.some((q) => q.includes("pg_catalog.pg_tables"))).toBe(false);
+  });
+
+  it("names the tenant and the schema in TenantSchemaStranded, and carries its own name", () => {
+    const err = new TenantSchemaStranded(TENANT, "t_abc");
+    expect(err.name).toBe("TenantSchemaStranded");
+    expect(err.message).toContain(TENANT);
+    expect(err.message).toContain("t_abc");
+  });
+
+  it("answers `applied` with the requested manifest when the application succeeds", async () => {
+    const registry = new TenantColumnStoreRegistry(capturePg().conn);
+    const serving = await registry.ensureServing(TENANT, V1);
+    expect(serving.kind).toBe("applied");
+    expect(serving.manifest).toBe(V1);
+  });
+
+  it("replaces the retained pair once the re-activation is applied", async () => {
+    const { cap, registry, first } = await appliedThenRefused();
+    await registry.ensure(TENANT, V3_RETYPED);
+    // The operator ran the reported ALTER; the re-activation is noticed and retried.
+    cap.setLive([]);
+    registry.forgetApplication(TENANT);
+    const serving = await registry.ensureServing(TENANT, V3_RETYPED);
+    expect(serving.kind).toBe("applied");
+    expect(registry.storeFor(TENANT)).not.toBe(first);
+    expect(registry.storeFor(TENANT)).not.toBeNull();
+  });
+
+  it("forgetApplication() re-applies on the next ensure and keeps the store in service meanwhile", async () => {
+    const cap = capturePg();
+    const registry = new TenantColumnStoreRegistry(cap.conn);
+    await registry.ensure(TENANT, V1);
+    const store = registry.storeFor(TENANT);
+    const sent = cap.sqls.length;
+    registry.forgetApplication(TENANT);
+    expect(registry.storeFor(TENANT)).toBe(store);
+    await registry.ensure(TENANT, V1);
+    expect(cap.sqls.length).toBeGreaterThan(sent);
+  });
+
+  it("forget() drops the retained store too, because the erasure that calls it dropped the schema", async () => {
+    const { registry } = await appliedThenRefused();
+    await registry.ensure(TENANT, V3_RETYPED);
+    registry.forget(TENANT);
+    expect(registry.storeFor(TENANT)).toBeNull();
+    expect((await registry.ensureServing(TENANT, V3_RETYPED)).kind).toBe("refused");
+  });
+
+  it("clear() drops the retained stores too", async () => {
+    const { registry } = await appliedThenRefused();
+    await registry.ensure(TENANT, V3_RETYPED);
+    registry.clear();
+    expect(registry.storeFor(TENANT)).toBeNull();
+  });
+
+  it("routes a refused re-activation to the tenant's own tables and never the fallback", async () => {
+    const { registry } = await appliedThenRefused();
+    const fallback = new RecordingStore("fallback");
+    const router = new TenantColumnStoreRouter({ registry, fallback });
+    await registry.ensure(TENANT, V3_RETYPED);
+    await router.list(TENANT, "Widget");
+    expect(fallback.calls).toEqual([]);
+    expect(router.isTenantScoped(TENANT)).toBe(true);
+  });
+});
+
 /** Records which store a call landed on, so the router's routing is observable. */
 class RecordingStore implements EntityStore {
   readonly calls: string[] = [];
@@ -283,6 +459,14 @@ class RecordingStore implements EntityStore {
   async remove(): Promise<boolean> {
     this.calls.push(`${this.label}:remove`);
     return false;
+  }
+  async removeIf(): Promise<ConditionalRemove> {
+    this.calls.push(`${this.label}:removeIf`);
+    return { kind: "not_found" };
+  }
+  async getLocked(): Promise<EntityRecord | null> {
+    this.calls.push(`${this.label}:getLocked`);
+    return null;
   }
 }
 
@@ -343,6 +527,8 @@ describe("TenantColumnStoreRouter", () => {
     await router.create(OTHER, "Widget", { id: "w" });
     await router.update(OTHER, "Widget", "w", {});
     await router.remove(OTHER, "Widget", "w");
+    await router.removeIf(OTHER, "Widget", "w", {});
+    await router.getLocked(OTHER, "Widget", "w", "share");
     expect(fallback.calls).toEqual([
       "fallback:list",
       "fallback:listPage",
@@ -350,6 +536,8 @@ describe("TenantColumnStoreRouter", () => {
       "fallback:create",
       "fallback:update",
       "fallback:remove",
+      "fallback:removeIf",
+      "fallback:getLocked",
     ]);
   });
 
@@ -558,7 +746,7 @@ describe("TenantColumnStoreRouter — the plaintext fallback and PHI", () => {
     expect(fallback.calls).toEqual([]);
   });
 
-  it("refuses update, updateIf and remove as well, so all seven methods are covered", async () => {
+  it("refuses update, updateIf, remove, removeIf and getLocked as well, so every method is covered", async () => {
     const { router, fallback } = await phiRouted({ declare: true });
     await expect(router.update(OTHER, "Widget", "w1", { mrn: "x" })).rejects.toThrow(
       PlaintextFallbackRefused,
@@ -570,6 +758,14 @@ describe("TenantColumnStoreRouter — the plaintext fallback and PHI", () => {
       router.withTransaction(OTHER, async (tx) => tx.updateIf(OTHER, "Widget", "w1", { mrn: "x" }, {})),
     ).rejects.toThrow(PlaintextFallbackRefused);
     await expect(router.remove(OTHER, "Widget", "w1")).rejects.toThrow(PlaintextFallbackRefused);
+    await expect(router.removeIf(OTHER, "Widget", "w1", {})).rejects.toThrow(PlaintextFallbackRefused);
+    await expect(router.getLocked(OTHER, "Widget", "w1", "exclusive")).rejects.toThrow(PlaintextFallbackRefused);
+    await expect(
+      router.withTransaction(OTHER, async (tx) => tx.removeIf(OTHER, "Widget", "w1", {})),
+    ).rejects.toThrow(PlaintextFallbackRefused);
+    await expect(
+      router.withTransaction(OTHER, async (tx) => tx.getLocked(OTHER, "Widget", "w1", "share")),
+    ).rejects.toThrow(PlaintextFallbackRefused);
     expect(fallback.calls).toEqual([]);
   });
 

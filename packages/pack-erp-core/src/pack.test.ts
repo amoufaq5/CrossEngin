@@ -95,8 +95,8 @@ describe("buildErpCorePack — counts", () => {
     expect(granted.size).toBe(entities.length);
   });
 
-  it("has 19 workflows", () => {
-    expect(Object.keys(buildErpCorePack().workflows ?? {})).toHaveLength(19);
+  it("has 20 workflows", () => {
+    expect(Object.keys(buildErpCorePack().workflows ?? {})).toHaveLength(20);
   });
 
   it("has 14 jobs", () => {

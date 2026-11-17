@@ -23,9 +23,9 @@ import {
 } from "@crossengin/kernel-pg";
 import { PostgresDrReadinessStore } from "@crossengin/dr-runtime-pg";
 import { withTenantContext } from "@crossengin/access-reviews-runtime-pg";
-import { verifyChainIntegrity } from "@crossengin/forensics";
 import {
   PostgresChainLogReader,
+  foldWithContent,
   unreadableEntryVerdict,
   type ChainRead,
 } from "@crossengin/forensics-pg";
@@ -307,7 +307,7 @@ export interface ForensicChainReader {
 /**
  * Verifies a persisted tamper-evident hash-chain. An **empty** chain yields no evidence (the audit
  * control stays `not_assessed` — a valid-by-vacuity empty log must not read as a satisfied control);
- * a non-empty chain is folded from genesis by `verifyChainIntegrity`.
+ * a non-empty chain is folded from genesis by `foldWithContent` — links and content.
  *
  * **"Every row refused" is not an empty chain**, which is why the vacuity guard asks both halves.
  * Reading it as empty would make the control `not_assessed` for a chain whose every entry the
@@ -325,7 +325,9 @@ export function forensicChainSource(
       return [
         evidenceFromForensicChain(
           controlId,
-          unreadableEntryVerdict(read.unreadable) ?? verifyChainIntegrity(read.entries),
+          // The content fold and not the bare link fold (H-18): the links compare stored column
+          // against stored column, so an `entry_hash` rewritten at the tail read as an intact log.
+          unreadableEntryVerdict(read.unreadable) ?? foldWithContent(read.entries),
           at,
         ),
       ];

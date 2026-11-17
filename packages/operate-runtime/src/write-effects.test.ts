@@ -77,7 +77,7 @@ describe("journalReversalEffect", () => {
     expect((await store.list(TENANT, "JournalEntry")).length).toBe(1);
   });
 
-  it("creates a mirror posted entry numbered <orig>-REV in the same book/period", async () => {
+  it("creates a mirror posted entry numbered <orig>-REV in the same book, dated today", async () => {
     const { store, id, entry } = await postedEntryWithLines();
     await effect(reverseInput(store, id, entry));
     const entries = await store.list(TENANT, "JournalEntry");
@@ -85,7 +85,9 @@ describe("journalReversalEffect", () => {
     const rev = entries.find((e) => e.entry_number === "JE-2026-00007-REV")!;
     expect(rev.state).toBe("posted");
     expect(rev.book_id).toBe("book1");
-    expect(rev.fiscal_period_id).toBe("p1");
+    // Not the original's period: a reversal dated today belongs to today's, resolved from the date
+    // when a fiscal calendar is configured. With none, it names no period at all.
+    expect(rev.fiscal_period_id).toBeUndefined();
     expect(rev.memo).toBe("Reversal of JE-2026-00007");
     expect(rev.entry_date).toBe("2026-06-21");
   });
@@ -187,7 +189,11 @@ describe("invoiceVoidCreditNoteEffect", () => {
     const cnLines = (await store.list(TENANT, "InvoiceLine")).filter((l) => l.invoice_id === cn.id);
     expect(cnLines.length).toBe(1);
     expect(cnLines[0]?.description).toBe("Partial credit");
-    expect(cnLines[0]?.line_total).toBe(40);
+    // The original's tax is carried in proportion (100 + 5 → 40 is 38.10 net + 1.90 tax), rather
+    // than the whole credit being written as net with no tax, which is what this pinned before.
+    expect(cn.subtotal).toBe(38.1);
+    expect(cn.tax_total).toBe(1.9);
+    expect(cnLines[0]?.line_total).toBe(38.1);
   });
 
   it("credits the full total when credit_amount >= total", async () => {
@@ -384,15 +390,15 @@ describe("computeLineTaxBreakdown", () => {
     expect(b.netTotal).toBe(400);
     expect(b.taxTotal).toBe(65); // (300×20%) + (100×5%) = 60 + 5
     expect(b.groups).toEqual([
-      { label: "VAT20", tax: 60, accountCode: null, jurisdiction: null, withholding: false },
-      { label: "VAT5", tax: 5, accountCode: null, jurisdiction: null, withholding: false },
+      { label: "VAT20", tax: 60, accountCode: null, jurisdiction: null, withholding: false, selfAssessed: false },
+      { label: "VAT5", tax: 5, accountCode: null, jurisdiction: null, withholding: false, selfAssessed: false },
     ]);
   });
 
   it("carries the per-code GL account code onto its group", () => {
     const codes = new Map([["wht", { rate: 10, label: "WHT10", accountCode: "2155" }]]);
     const b = computeLineTaxBreakdown([{ net: 100, taxCodeId: "wht", flatRatePct: null }], codes);
-    expect(b.groups).toEqual([{ label: "WHT10", tax: 10, accountCode: "2155", jurisdiction: null, withholding: false }]);
+    expect(b.groups).toEqual([{ label: "WHT10", tax: 10, accountCode: "2155", jurisdiction: null, withholding: false, selfAssessed: false }]);
   });
 
   it("separates withholding tax from regular tax in the totals", () => {
@@ -411,8 +417,8 @@ describe("computeLineTaxBreakdown", () => {
     expect(b.taxTotal).toBe(200); // VAT only, part of total
     expect(b.withholdingTotal).toBe(100); // WHT contra, not part of total
     expect(b.groups).toEqual([
-      { label: "VAT20", tax: 200, accountCode: null, jurisdiction: null, withholding: false },
-      { label: "WHT10", tax: 100, accountCode: "2155", jurisdiction: null, withholding: true },
+      { label: "VAT20", tax: 200, accountCode: null, jurisdiction: null, withholding: false, selfAssessed: false },
+      { label: "WHT10", tax: 100, accountCode: "2155", jurisdiction: null, withholding: true, selfAssessed: false },
     ]);
   });
 
@@ -420,7 +426,7 @@ describe("computeLineTaxBreakdown", () => {
     const b = computeLineTaxBreakdown([{ net: 100, taxCodeId: null, flatRatePct: 10 }], new Map());
     expect(b.taxTotal).toBe(10);
     expect(b.withholdingTotal).toBe(0);
-    expect(b.groups).toEqual([{ label: "10%", tax: 10, accountCode: null, jurisdiction: null, withholding: false }]);
+    expect(b.groups).toEqual([{ label: "10%", tax: 10, accountCode: null, jurisdiction: null, withholding: false, selfAssessed: false }]);
   });
 
   it("ignores zero-rate lines", () => {
@@ -913,6 +919,20 @@ describe("unrealizedFxRevaluationEffect", () => {
     expect((await store.list(TENANT, "JournalEntry")).length).toBe(0);
   });
 
+  it("reads back only the period's revaluations, not every entry posted in it", async () => {
+    // Every posting carries its period now, so a period-only read of the prior revaluations would
+    // drain the whole month's journal and refuse a busy tenant's close at the ceiling.
+    const { store, usdId, eurId } = await fxStore();
+    await store.create(TENANT, "ExchangeRate", { from_currency_id: eurId, to_currency_id: usdId, rate: 1.1, rate_date: "2026-06-29" });
+    await store.create(TENANT, "Invoice", { invoice_number: "INV-1", state: "sent", total: 1000, currency: "EUR" });
+    const period = await store.create(TENANT, "FiscalPeriod", { status: "closing", end_date: "2026-06-30", name: "2026-06" });
+    for (const n of [1, 2, 3]) {
+      await store.create(TENANT, "JournalEntry", { entry_number: `INV-${n}-AR`, source: "invoice", state: "posted", fiscal_period_id: String(period.id) });
+    }
+    await unrealizedFxRevaluationEffect({ functionalCurrency: "USD", clock, maxRows: 2 })(closeInput(store, String(period.id)));
+    expect((await store.list(TENANT, "JournalEntry")).filter((e) => e.source === "fx_revaluation").length).toBe(2);
+  });
+
   it("posts a balanced FXREVAL entry for an open foreign-currency invoice (rate > 1)", async () => {
     const { store, usdId, eurId } = await fxStore();
     await store.create(TENANT, "ExchangeRate", { from_currency_id: eurId, to_currency_id: usdId, rate: 1.1, rate_date: "2026-06-29" });
@@ -921,15 +941,19 @@ describe("unrealizedFxRevaluationEffect", () => {
 
     await effect(closeInput(store, String(period.id)));
 
+    // The revaluation, and its own reversal on the next period's first day — an unreversed one
+    // would be counted again by the next close, which revalues from the booking rate afresh.
     const entries = await store.list(TENANT, "JournalEntry");
-    expect(entries.length).toBe(1);
+    expect(entries.map((e) => [e.entry_number, e.entry_date])).toEqual([
+      ["2026-06-FXREVAL", "2026-06-30"],
+      ["2026-06-FXREVALR", "2026-07-01"],
+    ]);
     const entry = entries[0]!;
-    expect(entry.entry_number).toBe("2026-06-FXREVAL");
     expect(entry.state).toBe("posted");
     expect(entry.source).toBe("fx_revaluation");
-    expect(entry.entry_date).toBe("2026-06-30");
+    expect(entry.fiscal_period_id).toBe(String(period.id));
 
-    const lines = await store.list(TENANT, "JournalLine");
+    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
     expect(lines.length).toBe(2);
     const totalDebit = lines.reduce((s, l) => s + Number(l.debit), 0);
     const totalCredit = lines.reduce((s, l) => s + Number(l.credit), 0);
@@ -992,7 +1016,8 @@ describe("unrealizedFxRevaluationEffect", () => {
     const period = await store.create(TENANT, "FiscalPeriod", { status: "closing", end_date: "2026-06-30", name: "2026-06" });
 
     await effect(closeInput(store, String(period.id)));
-    const lines = await store.list(TENANT, "JournalLine");
+    const entry = (await store.list(TENANT, "JournalEntry")).find((e) => e.entry_number === "2026-06-FXREVAL")!;
+    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
     expect(lines.length).toBe(2);
     const totalDebit = lines.reduce((s, l) => s + Number(l.debit), 0);
     const totalCredit = lines.reduce((s, l) => s + Number(l.credit), 0);
@@ -1292,6 +1317,8 @@ function pagedAt(inner: InMemoryEntityStore, size: number): EntityStore {
     update: (t, e, id, patch) => inner.update(t, e, id, patch),
     updateIf: (t, e, id, patch, expected) => inner.updateIf(t, e, id, patch, expected),
     remove: (t, e, id) => inner.remove(t, e, id),
+    removeIf: (t, e, id, x) => inner.removeIf(t, e, id, x),
+    getLocked: (t, e, id, l) => inner.getLocked(t, e, id, l),
     list: (t, e) => inner.list(t, e),
   };
 }
@@ -1741,6 +1768,8 @@ describe("resolveAccountId — no positional fallback", () => {
       update: (t, e, id, patch) => store.update(t, e, id, patch),
       updateIf: (t, e, id, patch, expected) => store.updateIf(t, e, id, patch, expected),
       remove: (t, e, id) => store.remove(t, e, id),
+      removeIf: (t, e, id, x) => store.removeIf(t, e, id, x),
+      getLocked: (t, e, id, l) => store.getLocked(t, e, id, l),
       list: (t, e) => store.list(t, e),
     };
     const inv = await store.create(TENANT, "Invoice", {

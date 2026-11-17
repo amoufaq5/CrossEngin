@@ -114,7 +114,7 @@ export function fakeChainPg(): PgConnection {
         const refusal = writeRefusal((p[0] as string | null) ?? null);
         if (refusal !== null) throw new Error(refusal);
         if (sql.includes(CHECKPOINTS)) {
-          assertModelsEveryParam(p, 8, CHECKPOINTS);
+          assertModelsEveryParam(p, 10, CHECKPOINTS);
           const tenant = (p[0] as string | null) ?? null;
           const seq = Number(p[1]);
           // `ON CONFLICT (tenant_id, sequence_number) DO NOTHING` **never fires for a platform
@@ -133,7 +133,7 @@ export function fakeChainPg(): PgConnection {
           if (!exists) {
             checkpointRows.push({
               // Defaulted by the table (`uuid_generate_v7()`) rather than bound, so it is minted
-              // here — and `assertModelsEveryParam` still counts the 8 the statement binds.
+              // here — and `assertModelsEveryParam` still counts the 10 the statement binds.
               id: syntheticRowId(nextCheckpointRowId),
               tenant_id: p[0] ?? null,
               sequence_number: p[1],
@@ -143,6 +143,8 @@ export function fakeChainPg(): PgConnection {
               external_anchor_reference: p[5] ?? null,
               algorithm: p[6],
               provenance: p[7] ?? null,
+              signature: p[8] ?? null,
+              signing_key_fingerprint: p[9] ?? null,
             });
             nextCheckpointRowId += 1;
           }

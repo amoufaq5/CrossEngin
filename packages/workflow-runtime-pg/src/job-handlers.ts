@@ -102,6 +102,13 @@ export interface BuildJobHandlerRegistryInput {
    */
   readonly mountedProducers: Iterable<JobProducer>;
   /**
+   * The mounted producers this deployment hands only its served declarations, for the survey's
+   * `handler_missing` sentence. Required with the empty set as the claim, for `mountedProducers`'
+   * reason: a producer narrowed and not declared here makes the survey say runs accumulate for a
+   * declaration nothing enqueues.
+   */
+  readonly servedOnlyProducers: Iterable<JobProducer>;
+  /**
    * The `[0,1)` sampler backing a declared `retry.backoff.jitter`. Injected for determinism in
    * tests; `Math.random` by default, because `retryDelayMs` skips jitter entirely when no sampler is
    * supplied — so every deployment up to now declared `jitter: true` on all of its jobs and got
@@ -220,6 +227,7 @@ export function buildJobHandlerRegistry(
     handledJobIds: handled,
     producibleEventNames: input.producibleEventNames,
     mountedProducers: input.mountedProducers,
+    servedOnlyProducers: input.servedOnlyProducers,
   });
   return { registry, survey, servedJobIds: survey.served };
 }

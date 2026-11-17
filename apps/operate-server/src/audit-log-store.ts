@@ -210,7 +210,9 @@ export function auditEntry(input: {
   readonly operation: string;
   readonly entity: string;
   readonly entityId?: string | null;
+  readonly before?: Readonly<Record<string, unknown>> | null;
   readonly after?: Readonly<Record<string, unknown>> | null;
+  readonly diff?: Readonly<Record<string, unknown>> | null;
   readonly reason?: string;
 }): AuditLogEntry {
   const base: AuditLogEntry = {
@@ -221,9 +223,9 @@ export function auditEntry(input: {
     operation: input.operation,
     entity: input.entity,
     entityId: input.entityId ?? null,
-    before: null,
+    before: input.before ?? null,
     after: input.after ?? null,
-    diff: null,
+    diff: input.diff ?? null,
   };
   // The key is omitted, not set to undefined: an entry with `reason: undefined`
   // round-trips through JSON as a different shape than one without it.
@@ -366,43 +368,64 @@ export class PostgresAuditEmitter implements AuditEmitter {
 
   async emit(entry: AuditLogEntry): Promise<void> {
     assertEmittable(entry);
-    await this.inScope(entry.tenantId, "write", async (tx) => {
-      // The anchor is appended BEFORE the row, so the row can be inserted with its chain
-      // coordinates already known — no UPDATE, which would give this append-only table a
-      // rewrite path. Both statements are in the caller's transaction: a failed anchor rolls
-      // the row back, so `emit` throwing means nothing was written, and ADR-0279's fail-closed
-      // caller (503 `audit_unavailable`) covers an unanchorable record too.
-      const anchor =
-        this.chain === null
-          ? null
-          : await this.chain.appendWithin(tx, {
-              tenantId: entry.tenantId,
-              kind: "audit_event",
-              actorReference: entry.actor.userId ?? "system",
-              recordedAt: entry.occurredAt,
-              payload: canonicalAuditEntryPayload(entry),
-            });
-      const sql = `INSERT INTO ${this.table} (${INSERT_COLUMNS}) VALUES (${INSERT_VALUES})`;
-      await tx.query(sql, [
-        entry.tenantId,
-        entry.id,
-        // The caller's clock is the event time. Defaulting to the database's
-        // `now()` would misdate a record queued or retried after the fact.
-        entry.occurredAt,
-        JSON.stringify(entry.actor),
-        entry.operation,
-        entry.entity,
-        entry.entityId,
-        entry.before === null ? null : JSON.stringify(entry.before),
-        entry.after === null ? null : JSON.stringify(entry.after),
-        entry.diff === null ? null : JSON.stringify(entry.diff),
-        entry.reason ?? null,
-        entry.eSignature === undefined ? null : JSON.stringify(entry.eSignature),
-        entry.regoDecisionTrace ?? null,
-        anchor === null ? null : anchor.sequenceNumber,
-        anchor === null ? null : anchor.entryHash,
-      ]);
-    });
+    await this.inScope(entry.tenantId, "write", (tx) => this.writeIn(tx, entry));
+  }
+
+  /**
+   * `emit`, inside a transaction the caller already holds — so the record shares the fate of
+   * whatever else that transaction writes (an entity write and its audit row commit together or not
+   * at all). `appendWithin`'s shape, one table across.
+   *
+   * Tenant scope only, and the caller's transaction must already carry that tenant's context: this
+   * sets none. Setting it here would re-scope every statement the caller issues after this one, and a
+   * platform-scope entry would need `app.platform_audit_write` claimed inside a transaction that is
+   * about some tenant's data — a write elevation the caller never asked for. A transaction scoped to
+   * another tenant is refused by the isolation policy (`42501`), which is the right answer.
+   */
+  async emitWithin(tx: PgConnection, entry: AuditLogEntry): Promise<void> {
+    assertEmittable(entry);
+    if (entry.tenantId === null) {
+      throw new Error("emitWithin records tenant-scope entries only; a platform entry uses emit");
+    }
+    await this.writeIn(tx, entry);
+  }
+
+  private async writeIn(tx: PgConnection, entry: AuditLogEntry): Promise<void> {
+    // The anchor is appended BEFORE the row, so the row can be inserted with its chain
+    // coordinates already known — no UPDATE, which would give this append-only table a
+    // rewrite path. Both statements are in the caller's transaction: a failed anchor rolls
+    // the row back, so `emit` throwing means nothing was written, and ADR-0279's fail-closed
+    // caller (503 `audit_unavailable`) covers an unanchorable record too.
+    const anchor =
+      this.chain === null
+        ? null
+        : await this.chain.appendWithin(tx, {
+            tenantId: entry.tenantId,
+            kind: "audit_event",
+            actorReference: entry.actor.userId ?? "system",
+            recordedAt: entry.occurredAt,
+            payload: canonicalAuditEntryPayload(entry),
+          });
+    const sql = `INSERT INTO ${this.table} (${INSERT_COLUMNS}) VALUES (${INSERT_VALUES})`;
+    await tx.query(sql, [
+      entry.tenantId,
+      entry.id,
+      // The caller's clock is the event time. Defaulting to the database's
+      // `now()` would misdate a record queued or retried after the fact.
+      entry.occurredAt,
+      JSON.stringify(entry.actor),
+      entry.operation,
+      entry.entity,
+      entry.entityId,
+      entry.before === null ? null : JSON.stringify(entry.before),
+      entry.after === null ? null : JSON.stringify(entry.after),
+      entry.diff === null ? null : JSON.stringify(entry.diff),
+      entry.reason ?? null,
+      entry.eSignature === undefined ? null : JSON.stringify(entry.eSignature),
+      entry.regoDecisionTrace ?? null,
+      anchor === null ? null : anchor.sequenceNumber,
+      anchor === null ? null : anchor.entryHash,
+    ]);
   }
 
   /**

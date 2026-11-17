@@ -913,8 +913,11 @@ export function analyzeModuleApertures(source: ScannedSource): {
  * `fails_closed` one is a decision that should stay true, and the rest are the backlog with its cost
  * written down.
  *
- * Two of the three `fails_open` members are **latent**, and each says so: their own callers do not
- * exist. That is this directory's other question (`pg-unreachable-stores.ts`) arriving inside this
+ * Neither remaining `fails_open` member harms a shipped deployment, and each says why: one's caller
+ * does not exist, the other's reader is live over a trait no pack declares. (A third, the design
+ * review's `classificationLayer`, was the one live member and is gone: it reads the kernel's
+ * `fieldClassificationChanges`, which resolves each side against its own traits.) A missing caller
+ * is this directory's other question (`pg-unreachable-stores.ts`) arriving inside this
  * one, and it does not change the direction — a refusal gate that misses its subject fails open the
  * moment it is wired, and recording it as `incomplete` because nothing calls it today would be a
  * claim about the wiring rather than about the read.
@@ -946,21 +949,6 @@ export const ENTITY_FIELD_APERTURE: readonly ApertureDeclaration[] = Object.free
       "what stops it is that `auditable.created_at` is `required: true` with a `now()` default, so " +
       "pulling trait fields into the plans would make a create demand a field the server fills. That " +
       "is a subsystem decision about required-but-defaulted fields, not a reader fix.",
-  },
-  {
-    pkg: "apps/operate-server",
-    file: "apps/operate-server/src/manifest-diff.ts",
-    symbol: "classificationLayer",
-    direction: "fails_open",
-    consequence:
-      "A classification change on a trait-contributed field is absent from the diff the approving " +
-      "reviewer reads, so weakening one from `phi` to `internal` is approved unseen — the review " +
-      "surface for the Architect's own output.",
-    note:
-      "Iterates `next.entities ?? []` where `next: Manifest` and reads `entity.fields`. Live: " +
-      "`design-review-routes.ts` shows `ManifestDiffView` to the reviewer, and the ranked register " +
-      "already records that the view covers 5 of 16 manifest sections. `ManifestEntity` is the " +
-      "indexed-access alias, so the nominal `Entity` token appears nowhere in the file.",
   },
   {
     pkg: "apps/architect-cli",

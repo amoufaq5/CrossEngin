@@ -1,0 +1,1125 @@
+{
+  "apps/architect-cli/src/chat.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 5
+    },
+    "no-useless-assignment": {
+      "count": 1
+    }
+  },
+  "apps/architect-cli/src/commands.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 1
+    }
+  },
+  "apps/architect-cli/src/file-confinement.ts": {
+    "no-useless-assignment": {
+      "count": 1
+    }
+  },
+  "apps/architect-cli/src/license.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 7
+    }
+  },
+  "apps/architect-cli/src/manifest-io.ts": {
+    "no-useless-assignment": {
+      "count": 1
+    },
+    "preserve-caught-error": {
+      "count": 1
+    }
+  },
+  "apps/architect-cli/src/tools.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 5
+    }
+  },
+  "apps/architect-cli/src/unified-diff.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/access-reviews-lifecycle.ts": {
+    "@typescript-eslint/no-redundant-type-constituents": {
+      "count": 1
+    },
+    "preserve-caught-error": {
+      "count": 2
+    }
+  },
+  "apps/operate-server/src/ai-design-routes.ts": {
+    "@typescript-eslint/no-unsafe-return": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/ai-design.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 4
+    }
+  },
+  "apps/operate-server/src/audit-chain-env.ts": {
+    "preserve-caught-error": {
+      "count": 3
+    }
+  },
+  "apps/operate-server/src/audit-chain-key-registration.ts": {
+    "@typescript-eslint/consistent-type-imports": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/audit-chain.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 1
+    },
+    "preserve-caught-error": {
+      "count": 2
+    }
+  },
+  "apps/operate-server/src/audit-log-store.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 3
+    },
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/audit-read-routes.ts": {
+    "@typescript-eslint/no-unsafe-return": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/audit-sampling-policy-source.ts": {
+    "@typescript-eslint/no-redundant-type-constituents": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/certification.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    },
+    "@typescript-eslint/no-redundant-type-constituents": {
+      "count": 1
+    },
+    "preserve-caught-error": {
+      "count": 2
+    }
+  },
+  "apps/operate-server/src/chain-verify.ts": {
+    "@typescript-eslint/consistent-type-imports": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/checkpoint-scheduler.ts": {
+    "@typescript-eslint/no-redundant-type-constituents": {
+      "count": 1
+    },
+    "no-useless-assignment": {
+      "count": 1
+    },
+    "preserve-caught-error": {
+      "count": 2
+    }
+  },
+  "apps/operate-server/src/deletion-scheduler.ts": {
+    "@typescript-eslint/no-redundant-type-constituents": {
+      "count": 1
+    },
+    "@typescript-eslint/unbound-method": {
+      "count": 2
+    }
+  },
+  "apps/operate-server/src/delivery-scheduler.ts": {
+    "@typescript-eslint/no-redundant-type-constituents": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/delivery-senders.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/delivery-store.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/design-jobs.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 6
+    }
+  },
+  "apps/operate-server/src/design-review-routes.ts": {
+    "@typescript-eslint/no-unsafe-return": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/design-review-store.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 8
+    }
+  },
+  "apps/operate-server/src/digest-store.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/dr-readiness.ts": {
+    "preserve-caught-error": {
+      "count": 2
+    }
+  },
+  "apps/operate-server/src/edge.ts": {
+    "@typescript-eslint/consistent-type-imports": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/envelope-tenant-readiness.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/fax-observation-store.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 2
+    }
+  },
+  "apps/operate-server/src/gateway-idempotency.ts": {
+    "@typescript-eslint/no-redundant-type-constituents": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/health.ts": {
+    "prefer-const": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/integrity-proof.ts": {
+    "@typescript-eslint/no-redundant-type-constituents": {
+      "count": 1
+    },
+    "preserve-caught-error": {
+      "count": 2
+    }
+  },
+  "apps/operate-server/src/integrity-verdict-routes.ts": {
+    "@typescript-eslint/no-unsafe-return": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/integrity-verdict-store.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 6
+    }
+  },
+  "apps/operate-server/src/jwks.ts": {
+    "@typescript-eslint/no-redundant-type-constituents": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/manifest-activation-poller.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    },
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/manifest-source.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 1
+    },
+    "preserve-caught-error": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/metering.ts": {
+    "@typescript-eslint/no-redundant-type-constituents": {
+      "count": 1
+    },
+    "preserve-caught-error": {
+      "count": 2
+    }
+  },
+  "apps/operate-server/src/mtls-client.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/node.ts": {
+    "@typescript-eslint/consistent-type-imports": {
+      "count": 1
+    },
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    },
+    "@typescript-eslint/no-unsafe-return": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/notification-routes.ts": {
+    "@typescript-eslint/no-unsafe-return": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/notification-store.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/notification-template-routes.ts": {
+    "@typescript-eslint/no-unsafe-return": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/platform-admin.ts": {
+    "@typescript-eslint/no-unsafe-return": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/platform-users.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 5
+    },
+    "@typescript-eslint/no-unused-vars": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/preference-store.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    },
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/principals.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/prune-scheduler.ts": {
+    "@typescript-eslint/no-redundant-type-constituents": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/read-state-routes.ts": {
+    "@typescript-eslint/no-unsafe-return": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/recipient-resolver.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 3
+    }
+  },
+  "apps/operate-server/src/request-signing.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/scheduler.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 2
+    },
+    "@typescript-eslint/no-redundant-type-constituents": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/server.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    }
+  },
+  "apps/operate-server/src/slo-config.ts": {
+    "preserve-caught-error": {
+      "count": 2
+    }
+  },
+  "apps/operate-server/src/slo-defaults.ts": {
+    "preserve-caught-error": {
+      "count": 2
+    }
+  },
+  "apps/operate-server/src/slo.ts": {
+    "@typescript-eslint/no-redundant-type-constituents": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/stripe-usage-sync.ts": {
+    "@typescript-eslint/no-redundant-type-constituents": {
+      "count": 1
+    },
+    "preserve-caught-error": {
+      "count": 2
+    }
+  },
+  "apps/operate-server/src/suppression-store.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 4
+    }
+  },
+  "apps/operate-server/src/template-store.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/tenant-deletion-routes.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 2
+    }
+  },
+  "apps/operate-server/src/tenant-manifest-lineage.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/tenant-manifests.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 5
+    }
+  },
+  "apps/operate-server/src/user-fk-readiness.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "apps/operate-server/src/workflow-workers.ts": {
+    "@typescript-eslint/unbound-method": {
+      "count": 1
+    }
+  },
+  "apps/operate-web/app/admin/settings/page.tsx": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "apps/operate-web/app/e/[slug]/[id]/page.tsx": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 13
+    },
+    "@typescript-eslint/no-unused-vars": {
+      "count": 1
+    }
+  },
+  "apps/operate-web/app/e/[slug]/page.tsx": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 10
+    }
+  },
+  "apps/operate-web/app/reports/period-close/page.tsx": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 1
+    }
+  },
+  "apps/operate-web/components/ReferencePicker.tsx": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "apps/operate-web/lib/format.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 3
+    }
+  },
+  "apps/operate-web/lib/inbox.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 2
+    }
+  },
+  "apps/operate-web/lib/period-close.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 6
+    }
+  },
+  "apps/operate-web/lib/reference-cache.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "apps/operate-web/lib/schema.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    },
+    "@typescript-eslint/no-unused-vars": {
+      "count": 1
+    }
+  },
+  "packages/ai-architect-runtime-pg/src/inflation.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 2
+    }
+  },
+  "packages/ai-providers-anthropic/src/provider.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    },
+    "@typescript-eslint/require-await": {
+      "count": 2
+    },
+    "@typescript-eslint/restrict-template-expressions": {
+      "count": 1
+    }
+  },
+  "packages/ai-providers-anthropic/src/streaming.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 6
+    }
+  },
+  "packages/ai-providers-local/src/chat-api.ts": {
+    "no-useless-assignment": {
+      "count": 1
+    }
+  },
+  "packages/ai-providers-local/src/provider.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/ai-providers-local/src/streaming.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 9
+    },
+    "@typescript-eslint/no-unsafe-assignment": {
+      "count": 1
+    }
+  },
+  "packages/ai-providers-openai/src/chat-api.ts": {
+    "no-useless-assignment": {
+      "count": 1
+    }
+  },
+  "packages/ai-providers-openai/src/provider.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/ai-providers-openai/src/streaming.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 8
+    },
+    "@typescript-eslint/no-unsafe-assignment": {
+      "count": 1
+    }
+  },
+  "packages/ai-providers/src/helpers.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    }
+  },
+  "packages/ai-providers/src/mock.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 1
+    }
+  },
+  "packages/ai-router/src/cost-tracker.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 2
+    }
+  },
+  "packages/ai-router/src/router.ts": {
+    "@typescript-eslint/only-throw-error": {
+      "count": 1
+    },
+    "@typescript-eslint/unbound-method": {
+      "count": 2
+    }
+  },
+  "packages/api-gateway-runtime/src/adapters.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/api-gateway-runtime/src/auth.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    },
+    "@typescript-eslint/require-await": {
+      "count": 1
+    }
+  },
+  "packages/api-gateway-runtime/src/runtime.ts": {
+    "@typescript-eslint/consistent-type-imports": {
+      "count": 2
+    },
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    },
+    "@typescript-eslint/require-await": {
+      "count": 12
+    }
+  },
+  "packages/api-gateway-runtime/src/stores.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 4
+    }
+  },
+  "packages/billing-stripe/src/client.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/certification-runtime-pg/src/report-store.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "packages/compliance/src/resolve.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "packages/crypto-pg/src/records.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 2
+    }
+  },
+  "packages/crypto/src/key-store.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 9
+    }
+  },
+  "packages/dr-runtime-pg/src/drill-store.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "packages/dr-runtime-pg/src/failover-store.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "packages/dr-runtime-pg/src/persisting-engine.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    }
+  },
+  "packages/dr-runtime-pg/src/readiness-store.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "packages/dr-runtime-pg/src/replayer.ts": {
+    "@typescript-eslint/consistent-type-imports": {
+      "count": 2
+    }
+  },
+  "packages/dr-runtime-pg/src/upsert-guard.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 2
+    }
+  },
+  "packages/dr-runtime/src/engine.ts": {
+    "@typescript-eslint/no-redundant-type-constituents": {
+      "count": 1
+    }
+  },
+  "packages/feature-flags-pg/src/flag-store.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "packages/feature-flags-pg/src/records.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "packages/feature-flags-pg/src/targeting-rule-store.ts": {
+    "@typescript-eslint/consistent-type-imports": {
+      "count": 1
+    },
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "packages/forensics-pg/src/chain-signature-verify.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 1
+    }
+  },
+  "packages/forensics-pg/src/checkpoint-store.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 5
+    }
+  },
+  "packages/i18n/src/bundle.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/i18n/src/plurals.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/i18n/src/resolution.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    }
+  },
+  "packages/i18n/src/tenant-config.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/incident-response-runtime-pg/src/comms-store.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "packages/incident-response-runtime-pg/src/postmortem-store.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "packages/incident-response-runtime-pg/src/records.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "packages/incident-response-runtime-pg/src/replayer.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "packages/incident-response-runtime-pg/src/runbook-store.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 2
+    }
+  },
+  "packages/incident-response-runtime/src/declarer.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 4
+    }
+  },
+  "packages/jobs/src/enqueue.ts": {
+    "@typescript-eslint/consistent-type-imports": {
+      "count": 1
+    }
+  },
+  "packages/kernel-pg/src/canonical.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 3
+    }
+  },
+  "packages/kernel-pg/src/connection.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 2
+    }
+  },
+  "packages/kernel-pg/src/diff.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/kernel-pg/src/node-pg.ts": {
+    "@typescript-eslint/no-unsafe-assignment": {
+      "count": 1
+    },
+    "@typescript-eslint/require-await": {
+      "count": 3
+    }
+  },
+  "packages/kernel-pg/src/read-rows.ts": {
+    "no-useless-assignment": {
+      "count": 1
+    }
+  },
+  "packages/kernel-pg/src/scoped-write.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "packages/kernel/src/ddl/diff.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/marketplace-runtime/src/install.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/notification-providers/src/bounce-webhook.ts": {
+    "no-useless-escape": {
+      "count": 1
+    }
+  },
+  "packages/notification-providers/src/email-ses.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/notification-providers/src/fcm-token.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/notification-providers/src/metadata-token.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/notification-providers/src/page-dispatch.ts": {
+    "@typescript-eslint/unbound-method": {
+      "count": 1
+    }
+  },
+  "packages/notification-providers/src/page-email.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/notification-providers/src/page-pagerduty.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/notification-providers/src/page-slack.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/notification-providers/src/page-sms.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 5
+    }
+  },
+  "packages/notification-providers/src/push-fcm.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/notification-providers/src/sms-twilio.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 3
+    }
+  },
+  "packages/notification-providers/src/voice-twilio.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 3
+    }
+  },
+  "packages/observability-runtime-pg/src/enforcement-action-store.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "packages/observability-runtime-pg/src/replayer.ts": {
+    "@typescript-eslint/consistent-type-imports": {
+      "count": 1
+    }
+  },
+  "packages/observability-runtime/src/burn-rate.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    }
+  },
+  "packages/observability-runtime/src/latency.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    }
+  },
+  "packages/operate-runtime-pg/src/list-sql.ts": {
+    "@typescript-eslint/no-unsafe-assignment": {
+      "count": 2
+    },
+    "@typescript-eslint/unbound-method": {
+      "count": 1
+    }
+  },
+  "packages/operate-runtime-pg/src/tenant-schema-erase.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "packages/operate-runtime/src/admin-handlers.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/operate-runtime/src/aging-handler.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 3
+    },
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/operate-runtime/src/aging.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 3
+    },
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    }
+  },
+  "packages/operate-runtime/src/association.ts": {
+    "@typescript-eslint/no-unsafe-assignment": {
+      "count": 2
+    }
+  },
+  "packages/operate-runtime/src/compile.ts": {
+    "@typescript-eslint/consistent-type-imports": {
+      "count": 1
+    },
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 3
+    }
+  },
+  "packages/operate-runtime/src/entitlement.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 1
+    }
+  },
+  "packages/operate-runtime/src/entity-audit.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    }
+  },
+  "packages/operate-runtime/src/entity-events.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/operate-runtime/src/handlers.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 4
+    }
+  },
+  "packages/operate-runtime/src/inventory.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 4
+    }
+  },
+  "packages/operate-runtime/src/job-invoke-handler.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/operate-runtime/src/license.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 1
+    }
+  },
+  "packages/operate-runtime/src/list-query.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    },
+    "@typescript-eslint/no-unsafe-assignment": {
+      "count": 1
+    },
+    "@typescript-eslint/no-unsafe-return": {
+      "count": 2
+    }
+  },
+  "packages/operate-runtime/src/openapi-schema.ts": {
+    "no-irregular-whitespace": {
+      "count": 1
+    }
+  },
+  "packages/operate-runtime/src/store.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 8
+    },
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    },
+    "@typescript-eslint/no-unsafe-argument": {
+      "count": 5
+    },
+    "@typescript-eslint/no-unsafe-assignment": {
+      "count": 1
+    },
+    "@typescript-eslint/no-unsafe-call": {
+      "count": 1
+    },
+    "@typescript-eslint/no-unsafe-member-access": {
+      "count": 1
+    },
+    "@typescript-eslint/require-await": {
+      "count": 8
+    }
+  },
+  "packages/operate-runtime/src/tax-determination.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    }
+  },
+  "packages/operate-runtime/src/wht-reconciliation-handler.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/operate-runtime/src/wht-reconciliation.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "packages/operate-runtime/src/write-effects.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 12
+    },
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 3
+    }
+  },
+  "packages/operate-runtime/src/write-guards.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 2
+    },
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    },
+    "@typescript-eslint/require-await": {
+      "count": 1
+    }
+  },
+  "packages/pwa/src/manifest.ts": {
+    "no-useless-escape": {
+      "count": 1
+    }
+  },
+  "packages/pwa/src/sync.ts": {
+    "prefer-const": {
+      "count": 1
+    }
+  },
+  "packages/sdk/src/pagination.ts": {
+    "no-useless-assignment": {
+      "count": 4
+    }
+  },
+  "packages/tenant-lifecycle-pg/src/deletion-pipeline.ts": {
+    "@typescript-eslint/consistent-type-imports": {
+      "count": 2
+    }
+  },
+  "packages/tenant-lifecycle-pg/src/deletion-request-store.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    },
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 4
+    }
+  },
+  "packages/tenant-lifecycle-pg/src/deletion-runner.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 2
+    }
+  },
+  "packages/tenant-lifecycle-pg/src/lifecycle-event-store.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 2
+    },
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 4
+    }
+  },
+  "packages/tenant-lifecycle-pg/src/shared-table-erasure.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 2
+    }
+  },
+  "packages/tenant-lifecycle-pg/src/tombstone-store.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 2
+    },
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/testing/src/strategy/ci-workflow.ts": {
+    "no-useless-assignment": {
+      "count": 1
+    }
+  },
+  "packages/testing/src/strategy/entity-field-aperture.ts": {
+    "no-useless-assignment": {
+      "count": 2
+    }
+  },
+  "packages/workflow-runtime-pg/src/activity-claim.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "packages/workflow-runtime-pg/src/definition-store.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "packages/workflow-runtime-pg/src/instance-store.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/workflow-runtime-pg/src/job-cancellation.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "packages/workflow-runtime-pg/src/job-claim.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "packages/workflow-runtime-pg/src/job-engine.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "packages/workflow-runtime-pg/src/projecting-event-log.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    }
+  },
+  "packages/workflow-runtime-pg/src/signal-store.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 1
+    }
+  },
+  "packages/workflow-runtime-pg/src/timer-claim.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "packages/workflow-runtime/src/engine.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 10
+    },
+    "@typescript-eslint/require-await": {
+      "count": 2
+    }
+  },
+  "packages/workflow-runtime/src/event-log.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 4
+    }
+  },
+  "packages/workflow-runtime/src/projection.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/workflow-runtime/src/saga.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    }
+  },
+  "packages/workflow-signal-bridge/src/secret-resolver.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 1
+    }
+  },
+  "packages/workflow-worker/src/abort.ts": {
+    "no-useless-assignment": {
+      "count": 1
+    }
+  },
+  "packages/workflow-worker/src/renew.ts": {
+    "no-useless-assignment": {
+      "count": 1
+    }
+  }
+}

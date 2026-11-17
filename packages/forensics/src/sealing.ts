@@ -9,7 +9,10 @@ import {
 } from "@crossengin/crypto";
 
 import {
+  ChainCheckpointSchema,
   GENESIS_HASH,
+  type ChainCheckpoint,
+  type ChainFoldVerdict,
   type ChainedLogEntry,
   type LogKind,
 } from "./tamper-evident-logs.js";
@@ -154,6 +157,159 @@ export function verifyChainEntrySignature(
     entry.priorEntryHash,
   );
   return verifyEd25519(publicKeyBase64, entry.signature, canonicalBytes);
+}
+
+/**
+ * The entry hash this entry's stored content commits to, recomputed exactly as `buildChainEntry`
+ * computed it.
+ *
+ * It exists because the two folds compare a stored `priorEntryHash` against a stored `entryHash` and
+ * recompute neither, while the signature covers the canonical bytes and **not** `entryHash` — so the
+ * one column every later entry links through was bound to its content by nothing. Rewriting the
+ * tail entry's `entry_hash` passed both folds and every signature (no later entry to disagree), and
+ * the next append then chained from the forged value. A content-addressed recompute closes that,
+ * and it also binds every hashed column without a resolvable key, which the signature cannot.
+ *
+ * What it does **not** add is resistance to a writer who recomputes: every input is a stored
+ * column, so an attacker who rewrites an entry and every hash after it produces a chain this check
+ * passes. That is what the signature (under a key this deployment trusts) and the anchors are for.
+ */
+export function recomputeEntryHash(entry: ChainedLogEntry): string {
+  const canonicalBytes = canonicalEntryBytes(
+    entry.sequenceNumber,
+    entry.kind,
+    entry.recordedAt,
+    entry.actorReference,
+    entry.payloadSha256,
+    entry.payloadSizeBytes,
+    entry.priorEntryHash,
+  );
+  return hashChainStep(entry.priorEntryHash, sha256(canonicalBytes), FORENSICS_HASH_ALGORITHM);
+}
+
+/**
+ * Every entry's stored `entryHash` against the hash its content commits to; the first that differs
+ * breaks the verdict at its own sequence. Vacuously valid over no entries, like the link fold — an
+ * empty chain is the truncation check's subject, not this one's.
+ */
+export function verifyChainEntryHashes(entries: readonly ChainedLogEntry[]): ChainFoldVerdict {
+  for (const entry of entries) {
+    if (recomputeEntryHash(entry) !== entry.entryHash) {
+      return {
+        valid: false,
+        brokenAt: entry.sequenceNumber,
+        reason: "entry hash does not match its content",
+      };
+    }
+  }
+  return { valid: true, brokenAt: null };
+}
+
+const CHECKPOINT_DOMAIN_TAG = "crossengin.chain.checkpoint.v1\n";
+
+/**
+ * The bytes a checkpoint signature commits to: the scope, the sequence and root hash it anchors, the
+ * provenance a bounded proof trusts the prefix on, and when it was taken.
+ *
+ * **Scope is inside the bytes** so a signed checkpoint cannot be copied into another scope's table,
+ * where it would witness a sequence that chain never reached. `checkpointedBy`, `algorithm` and
+ * `externalAnchorReference` are deliberately outside: none decides what a verifier does with the
+ * anchor, and `externalAnchorReference` has no producer — signing it would commit to a field nothing
+ * fills. An absent provenance is signed as `null` rather than omitted, because `JSON.stringify` drops
+ * `undefined` keys and a missing key would make two different claims sign to one byte string.
+ */
+export function canonicalCheckpointBytes(
+  scope: string | null,
+  checkpoint: Pick<
+    ChainCheckpoint,
+    "sequenceNumber" | "rootHash" | "provenance" | "checkpointedAt"
+  >,
+): Uint8Array {
+  // Lowercased because a scope is a UUID and is compared as one everywhere else: `tenant_id = $1::uuid`
+  // answers the same rows for either case, and `verify-chain --tenant` and a static `tenants` list
+  // take whatever case was typed, so bytes over the raw string signed a lowercase scope and verified
+  // an uppercase one as `bad_signature` — a forged-checkpoint finding about an honest row.
+  const json = JSON.stringify({
+    scope: scope === null ? null : scope.toLowerCase(),
+    sequenceNumber: checkpoint.sequenceNumber,
+    rootHash: checkpoint.rootHash,
+    provenance: checkpoint.provenance ?? null,
+    checkpointedAt: checkpoint.checkpointedAt,
+  });
+  return new TextEncoder().encode(CHECKPOINT_DOMAIN_TAG + json);
+}
+
+/**
+ * What a checkpoint's signature establishes against a set of trusted keys, keyed by fingerprint.
+ *
+ * Four standings rather than a boolean because they mean different things to a verifier: `unsigned`
+ * is a row an older binary wrote (a gap, not a finding), while `untrusted_key` and `bad_signature`
+ * are rows the deployment's own writer cannot have produced — it signs every checkpoint with its own
+ * key — so each is evidence that somebody else wrote or edited the row.
+ */
+export const CHECKPOINT_SIGNATURE_STANDINGS = [
+  "signed",
+  "unsigned",
+  "untrusted_key",
+  "bad_signature",
+] as const;
+export type CheckpointSignatureStanding = (typeof CHECKPOINT_SIGNATURE_STANDINGS)[number];
+
+export function checkpointSignatureStanding(
+  scope: string | null,
+  checkpoint: ChainCheckpoint,
+  trustedKeys: ReadonlyMap<string, string>,
+): CheckpointSignatureStanding {
+  if (checkpoint.signature === undefined || checkpoint.signingKeyFingerprint === undefined) {
+    return "unsigned";
+  }
+  const publicKey = trustedKeys.get(checkpoint.signingKeyFingerprint);
+  if (publicKey === undefined) return "untrusted_key";
+  return verifyEd25519(publicKey, checkpoint.signature, canonicalCheckpointBytes(scope, checkpoint))
+    ? "signed"
+    : "bad_signature";
+}
+
+/**
+ * The checkpoint with its signature attached. Signed **after** every other field is fixed, so the
+ * bytes are exactly the ones a verifier will rebuild from the stored row.
+ */
+export async function signCheckpoint(
+  scope: string | null,
+  checkpoint: ChainCheckpoint,
+  signer: {
+    readonly fingerprint: string;
+    sign(canonicalBytes: Uint8Array): Promise<string>;
+  },
+): Promise<ChainCheckpoint> {
+  const signature = await signer.sign(canonicalCheckpointBytes(scope, checkpoint));
+  return ChainCheckpointSchema.parse({
+    ...checkpoint,
+    signature,
+    signingKeyFingerprint: signer.fingerprint,
+  });
+}
+
+/**
+ * The keys a chain verifier trusts, keyed by fingerprint, built from public keys alone so the
+ * fingerprint is **derived** and a map stating one key under another's fingerprint cannot be formed.
+ * A malformed key throws, naming its position and not its value: an operator declared it, and a
+ * trusted-key set silently one key short would refuse every entry that key signed.
+ */
+export function trustedChainKeys(publicKeysBase64: readonly string[]): ReadonlyMap<string, string> {
+  const keys = new Map<string, string>();
+  publicKeysBase64.forEach((publicKey, i) => {
+    let fingerprint: string;
+    try {
+      fingerprint = ed25519PublicKeyFingerprint(publicKey);
+    } catch {
+      throw new Error(
+        `trusted chain key #${(i + 1).toString()} is not a base64 Ed25519 public key (32 bytes)`,
+      );
+    }
+    keys.set(fingerprint, publicKey);
+  });
+  return keys;
 }
 
 export interface EvidenceSeal {

@@ -26,6 +26,7 @@ export const TenantManifestRecordSchema = z
     status: z.enum(MANIFEST_PROPOSAL_STATUSES),
     source: z.enum(MANIFEST_PROPOSAL_SOURCES),
     providerLabel: z.string().nullable(),
+    designedBy: z.string().min(1).nullable(),
     createdAt: z.string().datetime({ offset: true }),
     updatedAt: z.string().datetime({ offset: true }),
     activatedAt: z.string().datetime({ offset: true }).nullable(),
@@ -45,6 +46,12 @@ export const CreateManifestProposalInputSchema = z
     manifestHash: z.string().min(1),
     source: z.enum(MANIFEST_PROPOSAL_SOURCES),
     providerLabel: z.string().nullable().optional(),
+    /**
+     * The principal that requested the design. Required and nullable: `null` is the claim *nobody
+     * the platform can name asked for this*, which a review then cannot tell from a second person,
+     * and an omitted key would let a new writer forget the one fact four-eyes turns on.
+     */
+    designedBy: z.string().min(1).nullable(),
   })
   .strict();
 
@@ -139,7 +146,7 @@ export interface PostgresTenantManifestStoreOptions {
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 const SELECT_COLUMNS =
   "id, tenant_id, name, description, manifest, manifest_hash, status, source, provider_label, " +
-  "created_at, updated_at, activated_at, review_status, review_notes, reviewed_at";
+  "designed_by, created_at, updated_at, activated_at, review_status, review_notes, reviewed_at";
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -219,6 +226,7 @@ export class PostgresTenantManifestStore implements TenantManifestSource {
       status: String(row["status"]),
       source: String(row["source"]),
       providerLabel: row["provider_label"] == null ? null : String(row["provider_label"]),
+      designedBy: row["designed_by"] == null ? null : String(row["designed_by"]),
       createdAt: isoOf(row["created_at"]),
       updatedAt: isoOf(row["updated_at"]),
       activatedAt: row["activated_at"] == null ? null : isoOf(row["activated_at"]),
@@ -232,8 +240,8 @@ export class PostgresTenantManifestStore implements TenantManifestSource {
     return withTenantContext(this.conn, tenantId, async (tx) => {
       const sql =
         `INSERT INTO ${this.table}` +
-        ` (tenant_id, name, description, manifest, manifest_hash, status, source, provider_label)` +
-        ` VALUES ($1, $2, $3, $4::jsonb, $5, 'draft', $6, $7) RETURNING ${SELECT_COLUMNS}`;
+        ` (tenant_id, name, description, manifest, manifest_hash, status, source, provider_label, designed_by)` +
+        ` VALUES ($1, $2, $3, $4::jsonb, $5, 'draft', $6, $7, $8) RETURNING ${SELECT_COLUMNS}`;
       const result = await tx.query(sql, [
         tenantId,
         input.name,
@@ -242,6 +250,7 @@ export class PostgresTenantManifestStore implements TenantManifestSource {
         input.manifestHash,
         input.source,
         input.providerLabel ?? null,
+        input.designedBy,
       ]);
       const row = result.rows[0];
       if (row === undefined) throw new Error("INSERT did not return a row");

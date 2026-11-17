@@ -8,7 +8,7 @@ import {
 } from "@crossengin/kernel-pg";
 
 import { helpText, parseArgs, type ParsedCommand } from "./cli.js";
-import { applyJsonPayload, runApply, standingDifferences } from "./apply.js";
+import { applyJsonPayload, readApplyFlags, runApply, standingDifferences } from "./apply.js";
 import { printJson } from "./format.js";
 import type { RunContext } from "./commands.js";
 
@@ -168,6 +168,10 @@ function record(
     succeeded: outcome !== "failed",
     errorMessage,
     skipped: outcome === "skipped",
+    subject: null,
+    transactional: true,
+    attempts: outcome === "skipped" ? 0 : 1,
+    stoppedBy: null,
   };
 }
 
@@ -329,5 +333,51 @@ describe("apply help", () => {
     expect(text).toContain("--plan");
     expect(text).toContain("--dry-run");
     expect(text).toContain("reconciliation plan");
+  });
+});
+
+describe("apply flags are read strictly (H-23)", () => {
+  it.each([
+    [["apply", "--paln"], "apply: unknown flag --paln"],
+    // The shared parser reads `--plan yes` as plan = "yes", which getBooleanFlag answered false: an apply.
+    [["apply", "--plan", "yes"], "apply: --plan takes no value, or =true / =false; got 'yes'"],
+    [["apply", "--plan=yes"], "apply: --plan takes no value, or =true / =false; got 'yes'"],
+    [["apply", "--lock-timeout-ms"], "apply: --lock-timeout-ms needs a value"],
+    [["apply", "--lock-timeout-ms=5s"], "apply: --lock-timeout-ms must be a non-negative whole number; got '5s'"],
+    [["apply", "now"], "apply: unexpected argument 'now'"],
+  ])("refuses %j before touching the environment", async (argv, message) => {
+    // A database is named, so a refusal here cannot be the missing-environment refusal.
+    const { ctx, err } = buffers({ PGHOST: "127.0.0.1", PGDATABASE: "dev_db", PGUSER: "u" });
+    const code = await runApply(parsed(...argv), ctx);
+    expect(code).toBe(2);
+    expect(err()).toContain(message);
+  });
+
+  it("reads --plan=true, --plan=1 and a bare --plan as a plan, and --plan=false as not", () => {
+    for (const argv of [["apply", "--plan=true"], ["apply", "--plan=1"], ["apply", "--plan"]]) {
+      const r = readApplyFlags(parsed(...argv));
+      expect(r.ok && r.flags.planOnly).toBe(true);
+    }
+    const off = readApplyFlags(parsed("apply", "--plan=false"));
+    expect(off.ok && off.flags.planOnly).toBe(false);
+  });
+
+  it("parses the three bounds in both spellings", () => {
+    const r = readApplyFlags(
+      parsed("apply", "--lock-timeout-ms=0", "--statement-timeout-ms", "60000", "--lock-retries=3"),
+    );
+    expect(r.ok && r.flags.bounds).toEqual({ lockTimeoutMs: 0, statementTimeoutMs: 60000, lockRetries: 3 });
+  });
+
+  it("accepts what the compose migrate step passes", () => {
+    const r = readApplyFlags(parsed("apply", "--confirm"));
+    expect(r.ok && r.flags).toEqual({
+      dryRun: false,
+      planOnly: false,
+      confirm: true,
+      allowLoosening: false,
+      bounds: {},
+    });
+    expect(readApplyFlags(parsed("apply", "--plan", "--format", "json")).ok).toBe(true);
   });
 });

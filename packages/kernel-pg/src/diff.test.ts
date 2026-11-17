@@ -50,7 +50,7 @@ describe("diffSchema", () => {
           { name: "name", dataType: "text", isNullable: false, defaultExpr: null },
         ],
         {
-          indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false }],
+          indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false, valid: true }],
           policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"], permissive: true }],
           rlsEnabled: true,
         },
@@ -98,7 +98,7 @@ describe("diffSchema", () => {
           { name: "legacy", dataType: "text", isNullable: true, defaultExpr: null },
         ],
         {
-          indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false }],
+          indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false, valid: true }],
           policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"], permissive: true }],
           rlsEnabled: true,
         },
@@ -117,7 +117,7 @@ describe("diffSchema", () => {
           { name: "name", dataType: "varchar(255)", isNullable: true, defaultExpr: "'anon'::text" },
         ],
         {
-          indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false }],
+          indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false, valid: true }],
           policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"], permissive: true }],
           rlsEnabled: true,
         },
@@ -141,8 +141,8 @@ describe("diffSchema", () => {
         ],
         {
           indexes: [
-            { name: "tenants_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true },
-            { name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false },
+            { name: "tenants_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true, valid: true },
+            { name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false, valid: true },
           ],
           policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"], permissive: true }],
           rlsEnabled: true,
@@ -164,7 +164,7 @@ describe("diffSchema", () => {
         ],
         {
           indexes: [
-            { name: "tenants_legacy_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false },
+            { name: "tenants_legacy_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false, valid: true },
           ],
           policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"], permissive: true }],
           rlsEnabled: true,
@@ -185,7 +185,7 @@ describe("diffSchema", () => {
           { name: "name", dataType: "text", isNullable: false, defaultExpr: null },
         ],
         {
-          indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false }],
+          indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false, valid: true }],
           policies: [{ name: "old_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"], permissive: true }],
           rlsEnabled: true,
         },
@@ -205,7 +205,7 @@ describe("diffSchema", () => {
           { name: "name", dataType: "text", isNullable: false, defaultExpr: null },
         ],
         {
-          indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false }],
+          indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false, valid: true }],
           policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"], permissive: true }],
           rlsEnabled: false,
         },
@@ -225,7 +225,7 @@ describe("diffSchema", () => {
           { name: "name", dataType: "TEXT", isNullable: false, defaultExpr: null },
         ],
         {
-          indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false }],
+          indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false, valid: true }],
           policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"], permissive: true }],
           rlsEnabled: true,
         },
@@ -409,10 +409,10 @@ describe("diffSchema — no false drift on a correct schema", () => {
       { name: "code", dataType: "text", isNullable: false, defaultExpr: null },
     ],
     indexes: [
-      { name: "widgets_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true },
-      { name: "idx_widgets_status", columns: ["status"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false },
-      { name: "widgets_code_key", columns: ["code"], unique: true, primary: false, method: "btree", predicate: null, constraintBacked: true },
-      { name: "widgets_id_code_key", columns: ["id", "code"], unique: true, primary: false, method: "btree", predicate: null, constraintBacked: true },
+      { name: "widgets_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true, valid: true },
+      { name: "idx_widgets_status", columns: ["status"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false, valid: true },
+      { name: "widgets_code_key", columns: ["code"], unique: true, primary: false, method: "btree", predicate: null, constraintBacked: true, valid: true },
+      { name: "widgets_id_code_key", columns: ["id", "code"], unique: true, primary: false, method: "btree", predicate: null, constraintBacked: true, valid: true },
     ],
     policies: [],
     foreignKeys: [],
@@ -481,7 +481,7 @@ describe("diffSchema — no false drift on a correct schema", () => {
       ...liveTable,
       indexes: [
         ...liveTable.indexes,
-        { name: "idx_widgets_adhoc", columns: ["hash"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false },
+        { name: "idx_widgets_adhoc", columns: ["hash"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false, valid: true },
       ],
     };
     const diff = diffSchema([target], { schema: "meta", tables: [drifted] });
@@ -497,6 +497,7 @@ describe("diffSchema — no false drift on a correct schema", () => {
       method: "btree",
       predicate: "(entity = 'Item'::text)",
       constraintBacked: false,
+      valid: true,
     };
     const live: LiveTable = { ...liveTable, indexes: [...liveTable.indexes, runtimeIndex] };
     const withPrefix = diffSchema([{ ...target, runtimeIndexPrefix: "widgets_rt_" }], {
@@ -573,7 +574,7 @@ describe("diffSchema — in-place index and policy changes", () => {
       ],
       {
         indexes: [
-          { name: "widgets_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true },
+          { name: "widgets_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true, valid: true },
           {
             name: "idx_widgets_open",
             columns: ["status"],
@@ -582,8 +583,9 @@ describe("diffSchema — in-place index and policy changes", () => {
             method: "btree",
             predicate: "(status = 'open'::text)",
             constraintBacked: false,
+            valid: true,
           },
-          { name: "idx_widgets_tags", columns: ["tags"], unique: false, primary: false, method: "gin", predicate: null, constraintBacked: false },
+          { name: "idx_widgets_tags", columns: ["tags"], unique: false, primary: false, method: "gin", predicate: null, constraintBacked: false, valid: true },
           {
             name: "idx_widgets_pair",
             columns: ["tenant_id", "status"],
@@ -592,6 +594,7 @@ describe("diffSchema — in-place index and policy changes", () => {
             method: "btree",
             predicate: null,
             constraintBacked: false,
+            valid: true,
           },
           {
             name: "widgets_tenant_status_key",
@@ -601,6 +604,7 @@ describe("diffSchema — in-place index and policy changes", () => {
             method: "btree",
             predicate: null,
             constraintBacked: true,
+            valid: true,
           },
         ],
         policies: [{ name: "widgets_isolation", using: "(tenant_id IS NOT NULL)", check: null, command: "ALL", roles: ["PUBLIC"], permissive: true }],
@@ -896,7 +900,7 @@ describe("diffSchema — a policy's permissiveness", () => {
       ],
       {
         indexes: [
-          { name: "widgets_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true },
+          { name: "widgets_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true, valid: true },
         ],
         policies: [
           {
@@ -1047,8 +1051,8 @@ describe("diffSchema — table-level constraints", () => {
       ],
       {
         indexes: [
-          { name: "comms_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true },
-          { name: "comms_pair_key", columns: ["tenant_id", "id"], unique: true, primary: false, method: "btree", predicate: null, constraintBacked: true },
+          { name: "comms_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true, valid: true },
+          { name: "comms_pair_key", columns: ["tenant_id", "id"], unique: true, primary: false, method: "btree", predicate: null, constraintBacked: true, valid: true },
         ],
         foreignKeys: [
           {
@@ -1351,9 +1355,9 @@ describe("diffSchema — renamed columns", () => {
       ],
       {
         indexes: [
-          { name: "flags_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true },
-          { name: "idx_flags_default", columns: [columnName], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false },
-          { name: "flags_default_key", columns: [columnName], unique: true, primary: false, method: "btree", predicate: null, constraintBacked: true },
+          { name: "flags_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true, valid: true },
+          { name: "idx_flags_default", columns: [columnName], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false, valid: true },
+          { name: "flags_default_key", columns: [columnName], unique: true, primary: false, method: "btree", predicate: null, constraintBacked: true, valid: true },
         ],
         ...over,
       },
@@ -1456,7 +1460,7 @@ describe("diffSchema — a table-level foreign key matched by its columns", () =
       ],
       {
         indexes: [
-          { name: "comms_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true },
+          { name: "comms_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true, valid: true },
         ],
         foreignKeys: [
           {
@@ -1532,7 +1536,7 @@ describe("diffSchema — a table-level foreign key matched by its columns", () =
         ],
         {
           indexes: [
-            { name: "comms_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true },
+            { name: "comms_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true, valid: true },
           ],
           foreignKeys: [
             {
@@ -1594,7 +1598,7 @@ describe("diffSchema — column-level CHECK expressions", () => {
         ],
         {
           indexes: [
-            { name: "widgets_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true },
+            { name: "widgets_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true, valid: true },
           ],
           checkConstraints: checks,
         },
@@ -1730,7 +1734,7 @@ describe("diffSchema — column-level CHECK expressions", () => {
           ],
           {
             indexes: [
-              { name: "widgets_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true },
+              { name: "widgets_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true, valid: true },
             ],
             checkConstraints: [CORRECT[1] as LiveTable["checkConstraints"][number]],
           },

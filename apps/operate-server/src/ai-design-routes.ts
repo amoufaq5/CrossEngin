@@ -7,11 +7,16 @@ import {
   diffFragment,
   schemaFragment,
   type ActiveManifestSourceLike,
+  type DiffLineageLike,
   type ManifestDiffer,
   type ManifestProjector,
   type ReviewStatusLike,
 } from "./design-review-routes.js";
-import { DESIGN_JOB_MAX_ATTEMPTS, type DesignJobStoreLike } from "./design-runner.js";
+import {
+  DESIGN_JOB_MAX_ATTEMPTS,
+  type DesignJobStoreLike,
+  type DesignRunnerInput,
+} from "./design-runner.js";
 import {
   MANIFEST_PROPOSAL_STATUSES,
   type ManifestProposalSource,
@@ -38,6 +43,7 @@ export interface AiManifestRecordLike {
   readonly status: ManifestProposalStatus;
   readonly source: ManifestProposalSource;
   readonly providerLabel: string | null;
+  readonly designedBy: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly activatedAt: string | null;
@@ -50,6 +56,8 @@ export interface AiManifestCreateInput {
   readonly manifestHash: string;
   readonly source: ManifestProposalSource;
   readonly providerLabel?: string | null;
+  /** The requesting principal, which the review route refuses as the approver (H-28). */
+  readonly designedBy: string | null;
 }
 
 export interface AiManifestListQuery {
@@ -105,13 +113,11 @@ export interface AiDesignContext {
   /** Optional: with `activeManifests`, detail responses also carry what activation would change. */
   readonly diffManifests?: ManifestDiffer;
   readonly activeManifests?: ActiveManifestSourceLike;
+  /** Optional: with the two above, the diff compares what the tenant is served, lineage composed. */
+  readonly diffLineage?: DiffLineageLike;
   /** Async design mode. Both must be wired or the job routes self-503. */
   readonly jobs?: DesignJobStoreLike;
-  readonly startJob?: (
-    tenantId: string,
-    jobId: string,
-    input: { description: string; name: string },
-  ) => void;
+  readonly startJob?: (tenantId: string, jobId: string, input: DesignRunnerInput) => void;
   /** When set, activation requires platform approval: resolves the proposal's review status. */
   readonly reviewGate?: { reviewStatusFor(tenantId: string, id: string): Promise<ReviewStatusLike | null> };
 }
@@ -144,6 +150,18 @@ function guard(ctx: AiDesignContext, principal: ResolvedPrincipal | null): Handl
 
 function tenantOf(principal: ResolvedPrincipal | null): string | null {
   return principal?.tenantId ?? null;
+}
+
+/**
+ * Who asked for a design, as the review route will compare it against the approver. The principal
+ * id and not `principalUserId`: a bare api-key's shared placeholder names nobody, and recording
+ * `null` for it would make its design approvable by the same key, while recording the placeholder
+ * makes it unapprovable by any key resolving to that placeholder — the conservative reading of an
+ * identity that cannot tell two people apart.
+ */
+function designerOf(principal: ResolvedPrincipal | null): string | null {
+  const id = principal?.principalId;
+  return id === undefined || id.length === 0 ? null : id;
 }
 
 function firstQueryValue(value: string | readonly string[] | undefined): string | undefined {
@@ -203,6 +221,7 @@ function buildDesignHandler(ctx: AiDesignContext): Handler {
       manifestHash: result.manifestHash,
       source: "ai",
       providerLabel: result.providerLabel,
+      designedBy: designerOf(principal),
     });
     return json(201, { proposal, summary: ctx.summarize(proposal.manifest) });
   };
@@ -241,7 +260,11 @@ function buildDesignJobCreateHandler(ctx: AiDesignContext): Handler {
       description: parsed.data.description,
       maxAttempts: DESIGN_JOB_MAX_ATTEMPTS,
     });
-    startJob(tenant, job.id, { description: parsed.data.description, name });
+    startJob(tenant, job.id, {
+      description: parsed.data.description,
+      name,
+      designedBy: designerOf(principal),
+    });
     return json(202, { job });
   };
 }
@@ -265,7 +288,13 @@ function buildDesignJobGetHandler(ctx: AiDesignContext): Handler {
     const diff =
       proposal === null
         ? {}
-        : await diffFragment(ctx.diffManifests, ctx.activeManifests, tenant, proposal.manifest);
+        : await diffFragment(
+            ctx.diffManifests,
+            ctx.activeManifests,
+            tenant,
+            proposal.manifest,
+            ctx.diffLineage,
+          );
     return json(200, {
       job,
       proposal,
@@ -311,6 +340,7 @@ function buildGetHandler(ctx: AiDesignContext): Handler {
       ctx.activeManifests,
       tenant,
       proposal.manifest,
+      ctx.diffLineage,
     );
     return json(200, {
       proposal,

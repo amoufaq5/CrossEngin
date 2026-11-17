@@ -1,22 +1,28 @@
+import { REQUIRED_JWT_CLAIMS } from "@crossengin/api-gateway-runtime";
+import { generateEd25519Keypair } from "@crossengin/crypto";
 import { manifestHash, tryValidateManifest, type Manifest } from "@crossengin/kernel/manifest";
 import { InMemoryEntityStore } from "@crossengin/operate-runtime";
-import { ColumnEncryptionUnavailable } from "@crossengin/operate-runtime-pg";
+import { ColumnEncryptionUnavailable, TenantSchemaStranded } from "@crossengin/operate-runtime-pg";
 import { ERP_CORE_PACK_SLUG, buildErpCorePack } from "@crossengin/pack-erp-core";
 import { describe, expect, it } from "vitest";
 
 import type { RawHttpRequest, RawHttpResponse } from "./http.js";
-import { parseApiKeySpec } from "./principals.js";
+import { buildJwksProvider, parseApiKeySpec, type JwtVerifyConfig } from "./principals.js";
 import { buildOperateHttpServer, type OperateHttpServer } from "./server.js";
 import {
   GATEWAY_BUILD_REFUSALS,
   GATEWAY_BUILD_REFUSAL_KINDS,
   TenantGatewayCache,
+  bearerTenantVerifier,
   buildPerTenantDispatch,
   resolveRequestTenant,
+  type BearerTenantVerdict,
+  type BearerTenantVerifier,
   type GatewayBuildRefusalKind,
   type TenantGatewayCacheOptions,
 } from "./tenant-gateway-cache.js";
 import { buildTenantManifestLineage } from "./tenant-manifest-lineage.js";
+import { DEFAULT_SESSION_TOKEN_SECONDS, mintSessionToken } from "./token-mint.js";
 
 const TENANT_1 = "00000000-0000-4000-8000-000000000001";
 const TENANT_2 = "00000000-0000-4000-8000-000000000002";
@@ -167,55 +173,295 @@ function makeCache(
   return { cache, builds, refused };
 }
 
+const SIGNER = generateEd25519Keypair();
+const OTHER_SIGNER = generateEd25519Keypair();
+const GATEWAY_NOW = new Date("2026-08-21T12:00:00.000Z");
+const JWT: JwtVerifyConfig = {
+  jwksProvider: buildJwksProvider([{ kid: "login-v1", publicKeyBase64: SIGNER.publicKeyBase64 }]),
+  issuer: "https://operate.example.test",
+  audience: "crossengin-operate",
+  requiredClaims: new Set(REQUIRED_JWT_CLAIMS),
+};
+const VERIFY = bearerTenantVerifier(JWT, () => GATEWAY_NOW.getTime());
+
+/** A session token exactly as `--credential-login` mints one, for `tenantId`. */
+function sessionFor(
+  tenantId: string,
+  over: Partial<Parameters<typeof mintSessionToken>[0]> = {},
+): string {
+  return mintSessionToken({
+    issuer: JWT.issuer,
+    audience: JWT.audience,
+    userId: "22222222-2222-4222-8222-222222222222",
+    tenantId,
+    roles: { primaryRole: "operator", secondaryRoles: [] },
+    now: GATEWAY_NOW,
+    lifetimeSeconds: DEFAULT_SESSION_TOKEN_SECONDS,
+    kid: "login-v1",
+    signingSeedBase64: SIGNER.privateKeyBase64,
+    publicKeyBase64: SIGNER.publicKeyBase64,
+    ...over,
+  }).token;
+}
+
+/** A verifier answering a fixed verdict, for the routing rules that do not depend on a key. */
+function verdict(v: BearerTenantVerdict): BearerTenantVerifier {
+  return async () => v;
+}
+
 describe("resolveRequestTenant", () => {
-  it("the api key's bound tenant is authoritative over a spoofable x-tenant-id header", () => {
+  it("the api key's bound tenant is authoritative over a spoofable x-tenant-id header", async () => {
     const raw = req("/v1/widgets", { "x-tenant-id": TENANT_2, "x-api-key": "key-a" });
-    expect(resolveRequestTenant(raw, API_KEYS)).toBe(TENANT_1);
+    expect(await resolveRequestTenant(raw, API_KEYS, VERIFY)).toBe(TENANT_1);
   });
 
-  it("honors the x-tenant-id header only for an unknown Bearer credential (JWT mode) with a canonical UUID", () => {
-    const jwtish = { authorization: "Bearer eyJ.some.jwt", "x-tenant-id": TENANT_2 };
-    expect(resolveRequestTenant(req("/x", jwtish), API_KEYS)).toBe(TENANT_2);
-    expect(resolveRequestTenant(req("/x", { "x-tenant-id": TENANT_2 }), API_KEYS)).toBeNull();
+  it("routes a verified session token by its tenant_id claim with NO x-tenant-id header", async () => {
+    // The defect: operate-web's proxy sends no tenant header (the claim is authoritative), so every
+    // browser session resolved no tenant and was served the deployment's manifest.
+    const raw = req("/x", { authorization: `Bearer ${sessionFor(TENANT_2)}` });
+    expect(await resolveRequestTenant(raw, API_KEYS, VERIFY)).toBe(TENANT_2);
+  });
+
+  it("routes by the claim over a conflicting x-tenant-id, leaving the gateway to refuse the mismatch", async () => {
+    const raw = req("/x", { authorization: `Bearer ${sessionFor(TENANT_2)}`, "x-tenant-id": TENANT_1 });
+    expect(await resolveRequestTenant(raw, API_KEYS, VERIFY)).toBe(TENANT_2);
+  });
+
+  it("routes NOWHERE for a Bearer nothing verified, whatever x-tenant-id says", async () => {
+    // This used to resolve TENANT_2: the hint was honoured for any Bearer the key set did not know,
+    // so an unauthenticated caller could aim the manifest source at any tenant and read a refused
+    // tenant's 503 where everyone else got a 401.
+    const forged = sessionFor(TENANT_2, {
+      signingSeedBase64: OTHER_SIGNER.privateKeyBase64,
+      publicKeyBase64: OTHER_SIGNER.publicKeyBase64,
+    });
     expect(
-      resolveRequestTenant(req("/x", { authorization: "Bearer eyJ.some.jwt", "x-tenant-id": "not-a-uuid" }), API_KEYS),
+      await resolveRequestTenant(req("/x", { authorization: `Bearer ${forged}`, "x-tenant-id": TENANT_2 }), API_KEYS, VERIFY),
     ).toBeNull();
     expect(
-      resolveRequestTenant(req("/x", { authorization: "Bearer eyJ.some.jwt", "x-tenant-id": "deadbeef" }), API_KEYS),
+      await resolveRequestTenant(
+        req("/x", { authorization: "Bearer eyJ.some.jwt", "x-tenant-id": TENANT_2 }),
+        API_KEYS,
+        VERIFY,
+      ),
     ).toBeNull();
   });
 
-  it("resolves the tenant from a matching x-api-key token", () => {
+  it("routes no Bearer at all when no JWT verifier is configured", async () => {
+    const raw = req("/x", { authorization: `Bearer ${sessionFor(TENANT_2)}`, "x-tenant-id": TENANT_2 });
+    expect(await resolveRequestTenant(raw, API_KEYS, null)).toBeNull();
+  });
+
+  it("takes x-tenant-id for a VERIFIED token that names no tenant, canonical UUIDs only", async () => {
+    const claimless = verdict({ kind: "verified", tenantId: null });
+    const bearer = { authorization: "Bearer eyJ.jwt" };
+    expect(await resolveRequestTenant(req("/x", { ...bearer, "x-tenant-id": TENANT_2 }), API_KEYS, claimless)).toBe(
+      TENANT_2,
+    );
+    expect(await resolveRequestTenant(req("/x", bearer), API_KEYS, claimless)).toBeNull();
+    expect(
+      await resolveRequestTenant(req("/x", { ...bearer, "x-tenant-id": "not-a-uuid" }), API_KEYS, claimless),
+    ).toBeNull();
+    expect(
+      await resolveRequestTenant(req("/x", { ...bearer, "x-tenant-id": "deadbeef" }), API_KEYS, claimless),
+    ).toBeNull();
+    expect(await resolveRequestTenant(req("/x", { "x-tenant-id": TENANT_2 }), API_KEYS, claimless)).toBeNull();
+  });
+
+  it("refuses a claim that is not a canonical UUID and lowercases one that is", async () => {
+    expect(
+      await resolveRequestTenant(
+        req("/x", { authorization: "Bearer eyJ.jwt" }),
+        API_KEYS,
+        verdict({ kind: "verified", tenantId: "acme" }),
+      ),
+    ).toBeNull();
+    expect(
+      await resolveRequestTenant(
+        req("/x", { authorization: "Bearer eyJ.jwt" }),
+        API_KEYS,
+        verdict({ kind: "verified", tenantId: TENANT_2.toUpperCase() }),
+      ),
+    ).toBe(TENANT_2);
+  });
+
+  it("resolves the tenant from a matching x-api-key token", async () => {
     const raw = req("/v1/widgets", { "x-api-key": "key-b" });
-    expect(resolveRequestTenant(raw, API_KEYS)).toBe(TENANT_2);
+    expect(await resolveRequestTenant(raw, API_KEYS, VERIFY)).toBe(TENANT_2);
   });
 
-  it("resolves the tenant from a matching Bearer token", () => {
+  it("resolves the tenant from a matching Bearer api-key token without consulting the verifier", async () => {
+    let asked = 0;
+    const counting: BearerTenantVerifier = async () => {
+      asked += 1;
+      return { kind: "unverified" };
+    };
     const raw = req("/v1/widgets", { authorization: "Bearer key-c" });
-    expect(resolveRequestTenant(raw, API_KEYS)).toBe(TENANT_3);
+    expect(await resolveRequestTenant(raw, API_KEYS, counting)).toBe(TENANT_3);
+    expect(asked).toBe(0);
   });
 
-  it("looks up header names case-insensitively", () => {
+  it("looks up header names case-insensitively", async () => {
+    const claimless = verdict({ kind: "verified", tenantId: null });
     expect(
-      resolveRequestTenant(req("/x", { Authorization: "Bearer eyJ.jwt", "X-Tenant-Id": TENANT_1 }), API_KEYS),
+      await resolveRequestTenant(req("/x", { Authorization: "Bearer eyJ.jwt", "X-Tenant-Id": TENANT_1 }), API_KEYS, claimless),
     ).toBe(TENANT_1);
-    expect(resolveRequestTenant(req("/x", { "X-API-KEY": "key-a" }), API_KEYS)).toBe(TENANT_1);
-    expect(resolveRequestTenant(req("/x", { Authorization: "bearer key-b" }), API_KEYS)).toBe(TENANT_2);
+    expect(await resolveRequestTenant(req("/x", { "X-API-KEY": "key-a" }), API_KEYS, VERIFY)).toBe(TENANT_1);
+    expect(await resolveRequestTenant(req("/x", { Authorization: "bearer key-b" }), API_KEYS, VERIFY)).toBe(TENANT_2);
   });
 
-  it("returns null for an unknown token and for no credentials at all", () => {
-    expect(resolveRequestTenant(req("/x", { "x-api-key": "key-nobody" }), API_KEYS)).toBeNull();
-    expect(resolveRequestTenant(req("/x", {}), API_KEYS)).toBeNull();
+  it("returns null for an unknown token and for no credentials at all", async () => {
+    expect(await resolveRequestTenant(req("/x", { "x-api-key": "key-nobody" }), API_KEYS, VERIFY)).toBeNull();
+    expect(await resolveRequestTenant(req("/x", {}), API_KEYS, VERIFY)).toBeNull();
   });
 
-  it("ignores a non-Bearer authorization scheme and an empty tenant header", () => {
-    expect(resolveRequestTenant(req("/x", { authorization: "Basic a2V5LWE=" }), API_KEYS)).toBeNull();
-    expect(resolveRequestTenant(req("/x", { "x-tenant-id": "", "x-api-key": "key-a" }), API_KEYS)).toBe(TENANT_1);
+  it("ignores a non-Bearer authorization scheme and an empty tenant header", async () => {
+    const claimless = verdict({ kind: "verified", tenantId: null });
+    expect(await resolveRequestTenant(req("/x", { authorization: "Basic a2V5LWE=" }), API_KEYS, claimless)).toBeNull();
+    expect(
+      await resolveRequestTenant(req("/x", { "x-tenant-id": "", "x-api-key": "key-a" }), API_KEYS, VERIFY),
+    ).toBe(TENANT_1);
   });
 
-  it("takes the first value of an array-valued header", () => {
+  it("takes the first value of an array-valued header", async () => {
     const raw = req("/x", { authorization: "Bearer eyJ.jwt", "x-tenant-id": [TENANT_2, TENANT_1] });
-    expect(resolveRequestTenant(raw, API_KEYS)).toBe(TENANT_2);
+    expect(await resolveRequestTenant(raw, API_KEYS, verdict({ kind: "verified", tenantId: null }))).toBe(TENANT_2);
+  });
+});
+
+describe("bearerTenantVerifier — the gateway's own verification, asked before routing", () => {
+  it("verifies a session token and reads its tenant_id claim", async () => {
+    expect(await VERIFY(sessionFor(TENANT_1))).toEqual({ kind: "verified", tenantId: TENANT_1 });
+  });
+
+  it("answers unverified for a token signed by a key this deployment does not hold", async () => {
+    const forged = sessionFor(TENANT_1, {
+      signingSeedBase64: OTHER_SIGNER.privateKeyBase64,
+      publicKeyBase64: OTHER_SIGNER.publicKeyBase64,
+    });
+    expect(await VERIFY(forged)).toEqual({ kind: "unverified" });
+  });
+
+  it("answers unverified for an expired token, a foreign audience and a foreign issuer", async () => {
+    const later = bearerTenantVerifier(JWT, () => GATEWAY_NOW.getTime() + 2 * 3_600_000);
+    expect(await later(sessionFor(TENANT_1))).toEqual({ kind: "unverified" });
+    expect(await VERIFY(sessionFor(TENANT_1, { audience: "someone-else" }))).toEqual({ kind: "unverified" });
+    expect(await VERIFY(sessionFor(TENANT_1, { issuer: "https://elsewhere.test" }))).toEqual({ kind: "unverified" });
+  });
+
+  it("answers unverified for a string that is not a JWT", async () => {
+    expect(await VERIFY("key-a")).toEqual({ kind: "unverified" });
+    expect(await VERIFY("eyJ.some.jwt")).toEqual({ kind: "unverified" });
+  });
+
+  it("answers unverified rather than throwing when the key set cannot be read", async () => {
+    const broken = bearerTenantVerifier(
+      {
+        ...JWT,
+        jwksProvider: {
+          getPublicKeyForKid: async () => {
+            throw new Error("jwks unreachable");
+          },
+        },
+      },
+      () => GATEWAY_NOW.getTime(),
+    );
+    expect(await broken(sessionFor(TENANT_1))).toEqual({ kind: "unverified" });
+  });
+});
+
+describe("buildPerTenantDispatch — a browser session reaches its tenant's own gateway", () => {
+  function compileWithJwt(manifest: Manifest): OperateHttpServer {
+    const { httpServer } = buildOperateHttpServer({
+      edgeTrust: "untrusted",
+      manifest,
+      store: new InMemoryEntityStore(),
+      apiKeys: API_KEYS,
+      jwt: JWT,
+      now: () => GATEWAY_NOW,
+    });
+    return httpServer;
+  }
+
+  function edge(verifyBearer: BearerTenantVerifier | null): {
+    dispatch: (raw: RawHttpRequest, body: Uint8Array | null) => Promise<RawHttpResponse>;
+    defaultCalls: number[];
+  } {
+    const source = fakeSource({ [TENANT_1]: tinyManifest("t-one", "Widget") as Record<string, unknown> });
+    const cache = new TenantGatewayCache({
+      source,
+      lineage: LINEAGE,
+      build: (manifest) => compileWithJwt(manifest),
+      now: () => 0,
+    });
+    const defaultServer = compileWithJwt(tinyManifest("default", "Fallback"));
+    const defaultCalls: number[] = [];
+    const dispatch = buildPerTenantDispatch({
+      defaultDispatch: async (raw, body) => {
+        defaultCalls.push(1);
+        return defaultServer.dispatch(raw, body);
+      },
+      cache,
+      apiKeys: API_KEYS,
+      verifyBearer,
+    });
+    return { dispatch, defaultCalls };
+  }
+
+  it("serves the tenant's own entity to a session carrying only its token", async () => {
+    const { dispatch, defaultCalls } = edge(VERIFY);
+    const res = await dispatch(req("/v1/widgets", { authorization: `Bearer ${sessionFor(TENANT_1)}` }), null);
+    expect(res.status).toBe(200);
+    expect(defaultCalls).toHaveLength(0);
+  });
+
+  it("is the deployment's manifest without the verifier — the defect, held as the control", async () => {
+    const { dispatch, defaultCalls } = edge(null);
+    const res = await dispatch(req("/v1/widgets", { authorization: `Bearer ${sessionFor(TENANT_1)}` }), null);
+    expect(res.status).toBe(404);
+    expect(defaultCalls).toHaveLength(1);
+  });
+
+  it("routes by the credential the gateway authenticates when an api key and a session are both sent", async () => {
+    // The gateway's `parseAuthHeader` takes the Bearer over `x-api-key`. Routing took the api key,
+    // so TENANT_1's key beside a TENANT_2 session was compiled under TENANT_1's manifest and
+    // authenticated as TENANT_2: a 200 on TENANT_1's entity for a TENANT_2 principal.
+    const source = fakeSource({
+      [TENANT_1]: tinyManifest("t-one", "Widget") as Record<string, unknown>,
+      [TENANT_2]: tinyManifest("t-two", "Gadget") as Record<string, unknown>,
+    });
+    const cache = new TenantGatewayCache({ source, lineage: LINEAGE, build: (m) => compileWithJwt(m), now: () => 0 });
+    const fallback = compileWithJwt(tinyManifest("default", "Fallback"));
+    const dispatch = buildPerTenantDispatch({
+      defaultDispatch: (r, b) => fallback.dispatch(r, b),
+      cache,
+      apiKeys: API_KEYS,
+      verifyBearer: VERIFY,
+    });
+    const both = { "x-api-key": "key-a", authorization: `Bearer ${sessionFor(TENANT_2)}` };
+    expect((await dispatch(req("/v1/widgets", both), null)).status).toBe(404);
+    expect((await dispatch(req("/v1/gadgets", both), null)).status).toBe(200);
+  });
+
+  it("does not read a tab-separated Bearer, which the gateway does not read either", async () => {
+    // `Bearer<TAB>token` is no Bearer to the gateway, so it authenticates the api key beside it; a
+    // routing that matched `\s+` would compile the session's tenant over the key's principal.
+    const raw = req("/x", { "x-api-key": "key-a", authorization: `Bearer\t${sessionFor(TENANT_2)}` });
+    expect(await resolveRequestTenant(raw, API_KEYS, VERIFY)).toBe(TENANT_1);
+    expect(
+      await resolveRequestTenant(req("/x", { authorization: `Bearer\t${sessionFor(TENANT_2)}` }), API_KEYS, VERIFY),
+    ).toBeNull();
+  });
+
+  it("sends a forged token to the deployment's gateway, which refuses it 401", async () => {
+    const { dispatch, defaultCalls } = edge(VERIFY);
+    const forged = sessionFor(TENANT_1, {
+      signingSeedBase64: OTHER_SIGNER.privateKeyBase64,
+      publicKeyBase64: OTHER_SIGNER.publicKeyBase64,
+    });
+    const res = await dispatch(req("/v1/widgets", { authorization: `Bearer ${forged}`, "x-tenant-id": TENANT_1 }), null);
+    expect(res.status).toBe(401);
+    expect(defaultCalls).toHaveLength(1);
   });
 });
 
@@ -432,6 +678,7 @@ describe("TenantGatewayCache — a tenant's meta.extends is followed, not merely
         defaultDispatch: async () => ({ status: 599, headers: {}, body: null }),
         cache,
         apiKeys: API_KEYS,
+        verifyBearer: null,
       });
       const res = await dispatch(req("/v1/vendors", { "x-api-key": "key-a" }), null);
       // 599 would mean the tenant fell through to the deployment's gateway rather than its own.
@@ -732,6 +979,7 @@ describe("TenantGatewayCache — a lineage that cannot be resolved is refused, n
       },
       cache,
       apiKeys: API_KEYS,
+      verifyBearer: null,
     });
     const res = await dispatch(req("/v1/widgets", { "x-api-key": "key-a" }), null);
     expect(res.status).toBe(503);
@@ -767,6 +1015,7 @@ describe("buildPerTenantDispatch — two tenants, two manifests, one edge", () =
       },
       cache,
       apiKeys: API_KEYS,
+      verifyBearer: null,
     });
     return { dispatch, defaultCalls };
   }
@@ -882,6 +1131,7 @@ describe("per-tenant gateways — observability parity", () => {
       defaultDispatch: async () => ({ status: 500, headers: {}, body: null }),
       cache,
       apiKeys: API_KEYS,
+      verifyBearer: null,
     });
     const res = await dispatch(req("/v1/widgets", { "x-api-key": "key-a" }), null);
     expect(res.status).toBe(200);
@@ -898,7 +1148,7 @@ describe("GATEWAY_BUILD_REFUSALS — the permanence vocabulary", () => {
     }
   });
 
-  it("names exactly the deliberate refusals as permanent: two build, three lineage", () => {
+  it("names exactly the deliberate refusals as permanent: three build, three lineage", () => {
     const permanent = GATEWAY_BUILD_REFUSAL_KINDS.filter((k) => GATEWAY_BUILD_REFUSALS[k].permanent);
     expect([...permanent].sort()).toEqual([
       "abac_obligation_unevaluable",
@@ -906,7 +1156,25 @@ describe("GATEWAY_BUILD_REFUSALS — the permanence vocabulary", () => {
       "lineage_cycle",
       "lineage_override_undeclared",
       "lineage_parent_unknown",
+      "tenant_schema_stranded",
     ]);
+  });
+
+  it("classifies the registry's stranded refusal by name, across the package boundary", async () => {
+    // Thrown by node.ts' build when a re-activation is refused over the tenant's own tables and this
+    // process holds no applied pair to keep serving; unclassified it would be `unknown`, rebuilt on
+    // every request, and the cause would read as unidentified in the log.
+    const { cache, refused } = makeCache(
+      fakeSource({ [TENANT_1]: tinyManifest("t-one", "Widget") as Record<string, unknown> }),
+      {
+        build: () => {
+          throw new TenantSchemaStranded(TENANT_1, "t_abc");
+        },
+      },
+    );
+    const resolved = await cache.serverFor(TENANT_1);
+    expect(resolved).toMatchObject({ kind: "refused", reason: "tenant_schema_stranded" });
+    expect(refused.map((r) => r.reason)).toEqual(["tenant_schema_stranded"]);
   });
 
   it("carries a kind for each of the three kernel lineage throws", () => {
@@ -1096,6 +1364,7 @@ describe("buildPerTenantDispatch — a refused tenant gets 503 and never the def
         },
         cache,
         apiKeys: API_KEYS,
+        verifyBearer: null,
       }),
       defaultCalls: () => defaultCalls,
     };
@@ -1170,6 +1439,7 @@ describe("buildPerTenantDispatch — a refused tenant gets 503 and never the def
       defaultDispatch: async () => ({ status: 500, headers: {}, body: null }),
       cache,
       apiKeys: API_KEYS,
+      verifyBearer: null,
     });
     const res = await dispatch(req("/v1/widgets", { "x-api-key": "key-a" }), null);
     expect(res.status).toBe(503);
@@ -1199,6 +1469,7 @@ describe("buildPerTenantDispatch — a refused tenant gets 503 and never the def
       },
       cache,
       apiKeys: API_KEYS,
+      verifyBearer: null,
     });
     const res = await dispatch(req("/v1/fallbacks", { "x-api-key": "key-c" }), null);
     expect(res.status).toBe(200);
@@ -1241,6 +1512,7 @@ describe("buildPerTenantDispatch — a refused tenant gets 503 and never the def
       },
       cache,
       apiKeys: API_KEYS,
+      verifyBearer: null,
     });
     const res = await dispatch(req("/v1/fallbacks", { "x-api-key": "key-a" }), null);
     expect(res.status).toBe(503);

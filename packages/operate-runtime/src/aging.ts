@@ -68,13 +68,32 @@ export interface AgingInput {
   readonly dueDateField?: string;
   readonly currencyField?: string;
   readonly buckets?: readonly AgingBucket[];
+  /** Tax withheld at source: the payer owes the total less it, so it is never open. */
+  readonly withholdingField?: string;
+  /** How a credit note names itself and the document it credits; absent, none is recognised. */
+  readonly creditNote?: CreditNoteShape;
+}
+
+export interface CreditNoteShape {
+  readonly typeField: string;
+  readonly typeValue: string;
+  readonly refField: string;
 }
 
 /**
- * Pure aging computation: for each document, open = total − applied; days overdue =
- * asOf − due date (0 when not yet due); bucketed by `buckets`. Fully-settled
- * documents (open ≤ 0) are dropped. Totals are summed per bucket. Deterministic,
- * store-agnostic — the report handler supplies the documents + applied amounts.
+ * Pure aging computation: for each document, open = total − withheld − applied; days overdue =
+ * asOf − due date (0 when not yet due); bucketed by `buckets`. Fully-settled documents (open ≤ 0)
+ * are dropped. Totals are summed per bucket. Deterministic, store-agnostic — the report handler
+ * supplies the documents + applied amounts.
+ *
+ * **A credit note is negative, and it ages with the document it credits.** Its `total` is stored
+ * positive (the type denotes the reduction), so it used to be aged as one more receivable: measured,
+ * an invoice of 80 sent and voided showed `-CN` open 80 against a GL whose receivable was 0. Negating
+ * it alone is not enough either, because the voided original is not in an open state — the report
+ * would read −80 against 0. So a credit note and the document it credits are reported as a group,
+ * both rows, dated by the original's due date: the group is dropped when it nets to nothing (a full
+ * credit) and kept when it does not (a partial credit leaves the remainder owed). A credit note whose
+ * original is not supplied stands on its own as a credit balance.
  */
 export function computeAging(input: AgingInput): AgingReport {
   const numberField = input.numberField ?? "id";
@@ -89,14 +108,44 @@ export function computeAging(input: AgingInput): AgingReport {
   let totalOpen = 0;
   const currencies = new Set<string>();
 
+  const cn = input.creditNote;
+  const isCreditNote = (doc: EntityRecord): boolean => cn !== undefined && doc[cn.typeField] === cn.typeValue;
+  const byId = new Map<string, EntityRecord>();
+  for (const doc of input.documents) byId.set(String(doc["id"] ?? ""), doc);
+  const originalOf = (doc: EntityRecord): EntityRecord | null => {
+    if (cn === undefined || !isCreditNote(doc)) return null;
+    const ref = doc[cn.refField];
+    return typeof ref === "string" ? (byId.get(ref) ?? null) : null;
+  };
+  const openOf = (doc: EntityRecord): number => {
+    const id = String(doc["id"] ?? "");
+    const withheld = input.withholdingField === undefined ? 0 : Math.max(0, num(doc[input.withholdingField]));
+    const owed = num(doc[totalField]) - withheld - (input.appliedByDocument.get(id) ?? 0);
+    return Math.round((isCreditNote(doc) ? -owed : owed) * 100) / 100;
+  };
+  // Each credited document's open balance, net of every credit note against it.
+  const groupOpen = new Map<string, number>();
+  for (const doc of input.documents) {
+    const original = originalOf(doc);
+    if (original === null) continue;
+    const key = String(original["id"]);
+    groupOpen.set(key, Math.round(((groupOpen.get(key) ?? openOf(original)) + openOf(doc)) * 100) / 100);
+  }
+
   for (const doc of input.documents) {
     const id = String(doc["id"] ?? "");
     if (id === "") continue;
     const total = num(doc[totalField]);
     const applied = input.appliedByDocument.get(id) ?? 0;
-    const open = Math.round((total - applied) * 100) / 100;
-    if (open <= 0) continue;
-    const dueRaw = doc[dueDateField];
+    const open = openOf(doc);
+    const original = originalOf(doc);
+    const group = groupOpen.get(original !== null ? String(original["id"]) : id);
+    if (group !== undefined) {
+      if (group === 0) continue;
+    } else if (isCreditNote(doc) ? open === 0 : open <= 0) {
+      continue;
+    }
+    const dueRaw = (original ?? doc)[dueDateField];
     const dueDate = typeof dueRaw === "string" && dueRaw.length > 0 ? dueRaw.slice(0, 10) : null;
     const daysOverdue = dueDate !== null ? Math.max(0, daysBetween(input.asOf, dueDate)) : 0;
     const bucket = bucketFor(daysOverdue, buckets);

@@ -1,6 +1,21 @@
-import { addDecimal, compareDecimal, DECIMAL_ZERO, type ExactDecimal, parseDecimal, renderDecimal } from "./decimal.js";
+import {
+  addDecimal,
+  compareDecimal,
+  DECIMAL_ZERO,
+  type ExactDecimal,
+  multiplyDecimal,
+  parseDecimal,
+  renderDecimal,
+  withinOneUnitAtScale,
+} from "./decimal.js";
 import { drainList } from "./list-drain.js";
-import type { EntityStore, ListFilter } from "./store.js";
+import {
+  isAdjustmentPeriodCovering,
+  periodLockedDetail,
+  resolvePostingPeriod,
+  type PostingPeriodConfig,
+} from "./posting-period.js";
+import type { EntityRecord, EntityStore, ListFilter } from "./store.js";
 
 /** A write the guard is asked to vet, just before it is persisted. */
 export interface WriteGuardInput {
@@ -52,9 +67,14 @@ export interface JournalPostingGuardConfig {
   /** The functional-currency (base) amounts, which must balance as well as the transaction ones. */
   readonly functionalDebitField?: string;
   readonly functionalCreditField?: string;
+  /** The rate a line's functional amounts are its transaction amounts multiplied by. */
+  readonly fxRateField?: string;
   /** The line's transaction currency; transaction amounts balance per currency. */
   readonly currencyField?: string;
   readonly periodRefField?: string;
+  readonly entryDateField?: string;
+  /** When set, the entry's date is resolved to a period and a locked one refuses the posting. */
+  readonly postingPeriods?: PostingPeriodConfig;
   readonly periodEntity?: string;
   readonly periodStateField?: string;
   readonly lockedPeriodStates?: readonly string[];
@@ -78,8 +98,10 @@ const DEFAULTS = {
   creditField: "credit",
   functionalDebitField: "functional_debit",
   functionalCreditField: "functional_credit",
+  fxRateField: "fx_rate",
   currencyField: "currency",
   periodRefField: "fiscal_period_id",
+  entryDateField: "entry_date",
   periodEntity: "FiscalPeriod",
   periodStateField: "status",
   lockedPeriodStates: ["closed", "locked"] as readonly string[],
@@ -291,6 +313,25 @@ export function settlementIsCovered(total: number, applied: number): boolean {
 }
 
 /**
+ * What a payer owes on a document: its total less any tax withheld at source.
+ *
+ * Withholding is deducted by the payer and remitted to the authority, so a WHT invoice of 100 with
+ * 5 withheld is settled in full by a payment of 95 — the recognition entry debits the control
+ * account with 95, not 100. Coverage compared payments against the bare total, so measured on the
+ * shipped pack a 95 payment cleared the receivable in the GL to zero while the invoice stayed
+ * `sent`, `mark_paid` was refused `uncovered_settlement: 5.00 of 100.00`, and the aging report
+ * carried 5 open for ever: three surfaces disagreeing about one document, with no act by which the
+ * customer could ever finish paying it. `withholdingField` absent, or the field absent on the
+ * record, owes the total.
+ */
+export function amountOwed(document: EntityRecord, totalField: string, withholdingField: string | undefined): number {
+  const total = num(document[totalField]);
+  if (withholdingField === undefined) return total;
+  const withheld = num(document[withholdingField]);
+  return withheld > 0 ? Math.round((total - withheld) * 100) / 100 : total;
+}
+
+/**
  * Enforces double-entry integrity when a journal entry is posted: the entry's fiscal period must be
  * open (not closed/locked), it must have at least two lines, and its debits must equal its credits
  * **exactly** — per transaction currency, and again over the functional-currency (base) amounts.
@@ -324,11 +365,36 @@ export function journalPostingGuard(config: JournalPostingGuardConfig = {}): Wri
       input.after[c.stateField] === c.postedState && input.before?.[c.stateField] !== c.postedState;
     if (!becomingPosted) return null;
 
-    // Period lock: a posting into a closed/locked period is rejected.
+    // Period lock, by the posting date: an entry dated into a closed period is refused whether or
+    // not it names that period. Naming one used to be the only way to be checked, so an entry that
+    // left `fiscal_period_id` empty — which every manual entry and every effect posting did — went
+    // into a closed book unchecked.
+    //
+    // The one exception is an entry that names an **adjustment** period covering its own date: that
+    // period shares its dates with the last ordinary one, and posting year-end adjustments into it
+    // after the ordinary period is closed is what an adjustment period is for — so there the named
+    // period's own status decides, read just below.
     const periodId = input.after[c.periodRefField];
-    if (typeof periodId === "string" && periodId.length > 0) {
-      const period = await input.store.get(input.tenantId, c.periodEntity, periodId);
-      const status = period?.[c.periodStateField];
+    const named =
+      typeof periodId === "string" && periodId.length > 0
+        ? await input.store.get(input.tenantId, c.periodEntity, periodId)
+        : null;
+    if (config.postingPeriods !== undefined) {
+      const date = input.after[c.entryDateField];
+      if (
+        typeof date === "string" &&
+        date.length >= 10 &&
+        !(named !== null && isAdjustmentPeriodCovering(named, date, config.postingPeriods))
+      ) {
+        const period = await resolvePostingPeriod(input.store, input.tenantId, date, config.postingPeriods);
+        if (period.kind === "locked") {
+          return { status: 422, error: "period_locked", detail: periodLockedDetail(period.status, date) };
+        }
+      }
+    }
+    // And by the named period, which may differ from the one the date falls in.
+    if (named !== null) {
+      const status = named[c.periodStateField];
       if (typeof status === "string" && c.lockedPeriodStates.includes(status)) {
         return {
           status: 422,
@@ -362,6 +428,7 @@ export function journalPostingGuard(config: JournalPostingGuardConfig = {}): Wri
             line[c.creditField],
             line[c.functionalDebitField],
             line[c.functionalCreditField],
+            line[c.fxRateField],
           );
         }
       },
@@ -401,11 +468,11 @@ export function journalPostingGuard(config: JournalPostingGuardConfig = {}): Wri
         status: 422,
         error: "unverifiable_journal_entry",
         detail:
-          `${totals.unreadable.toString()} line amount(s) are not decimals, so the balance of ` +
+          `${totals.unreadable.toString()} line amount(s) or rate(s) are not decimals, so the balance of ` +
           `this entry's debits and credits could not be established`,
       };
     }
-    return totals.imbalance();
+    return totals.imbalance() ?? totals.misconverted();
   };
 }
 
@@ -432,9 +499,12 @@ class JournalTotals {
   unreadable = 0;
   private readonly byCurrency = new Map<string, DebitCredit>();
   private readonly functional: DebitCredit = { debit: DECIMAL_ZERO, credit: DECIMAL_ZERO };
+  private misconversion: { amount: ExactDecimal; rate: ExactDecimal; functional: ExactDecimal; count: number } | null =
+    null;
 
-  add(currency: unknown, debit: unknown, credit: unknown, fDebit: unknown, fCredit: unknown): void {
+  add(currency: unknown, debit: unknown, credit: unknown, fDebit: unknown, fCredit: unknown, fxRate: unknown): void {
     this.lines += 1;
+    this.checkConversion(debit, credit, fDebit, fCredit, fxRate);
     const key = typeof currency === "string" ? currency : "";
     const bucket = this.byCurrency.get(key) ?? { debit: DECIMAL_ZERO, credit: DECIMAL_ZERO };
     bucket.debit = this.plus(bucket.debit, debit);
@@ -442,6 +512,62 @@ class JournalTotals {
     this.byCurrency.set(key, bucket);
     this.functional.debit = this.plus(this.functional.debit, fDebit);
     this.functional.credit = this.plus(this.functional.credit, fCredit);
+  }
+
+  /**
+   * A line's functional amounts are its transaction amounts at its own rate, to the column's two
+   * places: either rounding of the exact product, so a preparer can move the last cent of one line
+   * to make the rounded legs balance (`withinOneUnitAtScale`). Nothing checked this, so a line
+   * stating `debit 100 @ 3.6725` with `functional_debit 7` posted as long as the functional legs
+   * balanced among themselves.
+   *
+   * A line stating **no** functional amount — both legs absent or zero beside a non-zero transaction
+   * amount — is exempt, and that is the deliberate half of the rule rather than a gap in it. The
+   * columns default to 0, so this is every line whose writer never set them, and the live producer
+   * of such lines is the depreciation job (`erp-job-handlers.ts`, which creates lines with `debit` and
+   * `credit` alone and then fires `post`): refusing them would refuse every depreciation posting a
+   * deployment makes today, which ADR-0338's rule forbids. A stated figure must be the right one; an
+   * unstated one is reported as unstated by nothing here, and the base ledger carries zero for it.
+   */
+  private checkConversion(debit: unknown, credit: unknown, fDebit: unknown, fCredit: unknown, fxRate: unknown): void {
+    const stated = (v: unknown): boolean => {
+      if (v === undefined || v === null) return false;
+      const parsed = parseDecimal(v);
+      return parsed === null || parsed.units !== 0n;
+    };
+    if (!stated(fDebit) && !stated(fCredit)) return;
+    const rate = fxRate === undefined || fxRate === null ? { negative: false, units: 1n, scale: 0 } : parseDecimal(fxRate);
+    if (rate === null) {
+      // A stated functional amount beside a rate that is not a decimal cannot be shown right or
+      // wrong, so the entry is refused as unverifiable rather than passed.
+      this.unreadable += 1;
+      return;
+    }
+    for (const [amount, functional] of [
+      [debit, fDebit],
+      [credit, fCredit],
+    ] as const) {
+      const a = amount === undefined || amount === null ? DECIMAL_ZERO : parseDecimal(amount);
+      const f = functional === undefined || functional === null ? DECIMAL_ZERO : parseDecimal(functional);
+      if (a === null || f === null) continue; // `plus` counts these as unreadable and the entry is refused
+      if (withinOneUnitAtScale(f, multiplyDecimal(a, rate), 2)) continue;
+      if (this.misconversion === null) this.misconversion = { amount: a, rate, functional: f, count: 0 };
+      this.misconversion.count += 1;
+    }
+  }
+
+  misconverted(): WriteGuardBlock | null {
+    const m = this.misconversion;
+    if (m === null) return null;
+    const product = multiplyDecimal(m.amount, m.rate);
+    const others = m.count > 1 ? ` (and ${(m.count - 1).toString()} more line amount(s) like it)` : "";
+    return {
+      status: 422,
+      error: "functional_amount_mismatch",
+      detail:
+        `a line's functional amount ${cents(m.functional)} is not its amount ${cents(m.amount)} at its ` +
+        `fx_rate ${renderDecimal(m.rate)} (${renderDecimal(product)}, to two places)${others}`,
+    };
   }
 
   private plus(total: ExactDecimal, value: unknown): ExactDecimal {
@@ -626,7 +752,12 @@ export function lockedDocumentGuard(config: LockedDocumentConfig): WriteGuard {
       // could be moved out of a posted entry by re-pointing its reference — the entry it left then
       // read 500 debit / 0 credit with nothing refusing it.
       for (const ref of childParentRefs(input, config.childParentField)) {
-        const parent = await input.store.get(input.tenantId, config.entity, ref);
+        // Read under a share lock held to the end of the line's transaction, which conflicts with
+        // the exclusive lock a transition takes on the parent: so the parent cannot move from the
+        // state read here until this line has committed, and a transition that already holds it is
+        // waited for and its new state read. A plain read let a line decided on a draft entry commit
+        // after `post` had summed the lines without it.
+        const parent = await input.store.getLocked(input.tenantId, config.entity, ref, "share");
         const parentState = parent?.[stateField];
         if (typeof parentState === "string" && lockedStates.has(parentState)) {
           const leaving = ref === input.before?.[config.childParentField] && ref !== input.after[config.childParentField];
@@ -806,6 +937,8 @@ export interface SettlementCoverageConfig {
   readonly paymentAmountField?: string;
   /** Largest payment set the coverage figure is summed over before the guard refuses. */
   readonly maxPayments?: number;
+  /** Document field carrying tax withheld at source, which the payer never pays to the issuer. */
+  readonly withholdingField?: string;
   /** Human noun for the detail, e.g. "an invoice". */
   readonly noun?: string;
   /** What the caller can do about it, appended to the detail. Never a server flag — see below. */
@@ -851,6 +984,7 @@ export const SETTLEMENT_COVERAGE_DOCUMENTS: readonly SettlementCoverageConfig[] 
   {
     entity: "Invoice",
     refField: "invoice_id",
+    withholdingField: "withholding_total",
     noun: "an invoice",
     remedy:
       "record the remaining payment and complete it, which settles the invoice automatically; or" +
@@ -970,8 +1104,13 @@ export function settlementCoverageGuard(config: SettlementCoverageConfig): Write
     // rather than a presence test.
     const settledAfter = input.after[c.stateField] === c.settledState;
     const settledBefore = input.before?.[c.stateField] === c.settledState;
+    // Compared as what is owed, so a write lowering the withholding raises it exactly as raising
+    // the total does.
     const owesMore =
-      settledBefore && num(input.after[c.totalField]) > num(input.before?.[c.totalField]);
+      settledBefore &&
+      input.before !== null &&
+      amountOwed(input.after, c.totalField, c.withholdingField) >
+        amountOwed(input.before, c.totalField, c.withholdingField);
     if (!settledAfter || (settledBefore && !owesMore)) return null;
 
     // A total that cannot be read is refused rather than allowed, which is the **fourth** cause of
@@ -992,7 +1131,7 @@ export function settlementCoverageGuard(config: SettlementCoverageConfig): Write
           ` read`,
       };
     }
-    const total = num(rawTotal);
+    const total = amountOwed(input.after, c.totalField, c.withholdingField);
     // Nothing owed, nothing to refuse — and the read below is skipped, so a nil document costs no
     // round trip. `settlementIsCovered` answers the same way; the early return is the cost saving
     // and not a second spelling of the rule, which is why the predicate is still consulted after it.

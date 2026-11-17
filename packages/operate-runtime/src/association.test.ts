@@ -27,7 +27,7 @@ import {
   type AssociationHandlerContext,
   type AssociationWriteRouteSpec,
 } from "./association.js";
-import type { ConditionalUpdate, EntityRecord, EntityStore, ListPage, ListQuery } from "./store.js";
+import type { ConditionalRemove, ConditionalUpdate, EntityRecord, EntityStore, ListPage, ListQuery } from "./store.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 
@@ -101,6 +101,12 @@ class FakeStore implements EntityStore {
   }
   async remove(): Promise<boolean> {
     return true;
+  }
+  async removeIf(): Promise<ConditionalRemove> {
+    return { kind: "removed" };
+  }
+  async getLocked(t: string, entity: string, id: string): Promise<EntityRecord | null> {
+    return this.get(t, entity, id);
   }
   async listLinks(
     _t: string,
@@ -275,6 +281,8 @@ describe("buildAssociationListHandler", () => {
       update: async () => null,
       updateIf: async () => ({ kind: "not_found" }),
       remove: async () => true,
+      removeIf: async () => ({ kind: "not_found" }),
+      getLocked: async () => null,
     };
     const out = await invoke(bare, "viewer");
     expect(out.status).toBe(501);
@@ -361,6 +369,8 @@ describe("buildAssociationWriteHandler", () => {
       update: async () => null,
       updateIf: async () => ({ kind: "not_found" }),
       remove: async () => true,
+      removeIf: async () => ({ kind: "not_found" }),
+      getLocked: async () => null,
     };
     expect((await invokeWrite(bare, linkSpec, "editor", { id: "t", relatedId: "p" })).status).toBe(501);
   });
@@ -447,6 +457,8 @@ describe("buildAssociationCountHandler", () => {
       update: async () => null,
       updateIf: async () => ({ kind: "not_found" }),
       remove: async () => true,
+      removeIf: async () => ({ kind: "not_found" }),
+      getLocked: async () => null,
     };
     const out = await invokeCount(bare, "viewer");
     expect(out.status).toBe(501);

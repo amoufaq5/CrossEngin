@@ -7,6 +7,7 @@ import {
   encodeKeyset,
   keysetOf,
   matchesFilter,
+  preconditionHolds,
   projectRecord,
   type EntityRecord,
   type ListPage,
@@ -496,5 +497,22 @@ describe("an ordered filter excludes a missing value, as SQL does", () => {
       filters: [{ field: "n", op: "lt", value: "9" }],
     });
     expect(page.records.map((r) => r["id"])).toEqual(["a"]);
+  });
+});
+
+describe("preconditionHolds", () => {
+  it("compares a decimal as a figure, so a row stored before the wire type is still updatable", () => {
+    expect(preconditionHolds({ q: 5 }, { q: "5.000" })).toBe(true);
+    expect(preconditionHolds({ q: "5" }, { q: "5.000" })).toBe(true);
+    expect(preconditionHolds({ q: "5.000" }, { q: "5.000" })).toBe(true);
+    expect(preconditionHolds({ q: 5.5 }, { q: "5.500" })).toBe(true);
+  });
+
+  it("still refuses a different figure, a non-numeral and an absent value", () => {
+    expect(preconditionHolds({ q: 5 }, { q: "5.001" })).toBe(false);
+    expect(preconditionHolds({ q: "5" }, { q: "6" })).toBe(false);
+    expect(preconditionHolds({ state: "draft" }, { state: "posted" })).toBe(false);
+    expect(preconditionHolds({ q: Number.NaN }, { q: "NaN" })).toBe(false);
+    expect(preconditionHolds({}, { q: "0" })).toBe(false);
   });
 });

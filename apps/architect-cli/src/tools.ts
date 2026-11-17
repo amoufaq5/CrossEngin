@@ -1,6 +1,3 @@
-import { access, readFile, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
-
 import type { LlmTool } from "@crossengin/ai-providers";
 import {
   computeManifestDiff,
@@ -10,6 +7,17 @@ import {
   type Manifest,
 } from "@crossengin/kernel/manifest";
 
+import { approvalDetailLines } from "./approval-detail.js";
+import {
+  confinePath,
+  FileToolRefusal,
+  readConfinedText,
+  resolveFileRoot,
+  secretContentKind,
+  writeConfinedText,
+  type ConfinedPath,
+} from "./file-confinement.js";
+import { unifiedDiff } from "./unified-diff.js";
 import { buildManifestSummary } from "./manifest-io.js";
 import { classifyManifestEditRefusal, manifestEditRefusalResult } from "./refusal.js";
 
@@ -25,6 +33,10 @@ export interface ChatToolDefinition {
 export interface ChatToolOptions {
   readonly allowFileRead?: boolean;
   readonly allowFileWrite?: boolean;
+  /**
+   * The one directory both file tools are confined to, symlinks resolved (H-29). Defaults to the
+   * working directory; `resolveFileRoot` refuses the filesystem root.
+   */
   readonly fileRootDir?: string;
   readonly maxFileBytes?: number;
   readonly approver?: WriteApprover;
@@ -39,14 +51,30 @@ export interface WriteApprovalRequest {
     readonly entitiesRemoved: number;
     readonly entitiesModified: number;
   };
+  /**
+   * What the counts summarise, one fact per line. Required, so an approver that renders only the
+   * counts is a decision somebody made rather than a field nobody populated.
+   */
+  readonly details: readonly string[];
+  /**
+   * The file's text on disk against exactly the bytes that will be written, as a unified diff.
+   * Required for the reason `details` is: it is what a person approving a write is approving.
+   */
+  readonly unifiedDiff: readonly string[];
 }
 
 export interface WriteApprover {
   approve(request: WriteApprovalRequest): Promise<boolean>;
+  /**
+   * Whether a person sees the request before answering. Absent reads as false, so the tool
+   * description never promises a review an approver did not declare it performs.
+   */
+  readonly showsDiffToPerson?: boolean;
 }
 
 export function autoApprover(approve = true): WriteApprover {
   return {
+    showsDiffToPerson: false,
     async approve() {
       return approve;
     },
@@ -55,6 +83,26 @@ export function autoApprover(approve = true): WriteApprover {
 
 const DEFAULT_MAX_FILE_BYTES = 1_048_576;
 const ALLOWED_FILE_EXTENSIONS = [".json", ".yaml", ".yml", ".txt", ".md"] as const;
+const WRITABLE_FILE_EXTENSIONS = [".json"] as const;
+
+const CONFINEMENT_RULES =
+  "Hidden files and directories (.env, .git, .ssh, …), credential-named files and symlinks leading outside the root are refused";
+
+/** Resolves the root once per catalog, on first use, so a refusal surfaces as the tool's error. */
+function memoRoot(dir: string): () => Promise<string> {
+  let pending: Promise<string> | null = null;
+  return () => {
+    pending ??= resolveFileRoot(dir);
+    return pending;
+  };
+}
+
+function refusalError(tool: string, err: unknown): unknown {
+  if (err instanceof FileToolRefusal) {
+    return new ToolExecutionError(`${tool}: refused (${err.reason}): ${err.message}`);
+  }
+  return err;
+}
 
 export function buildToolCatalog(opts: ChatToolOptions = {}): readonly ChatToolDefinition[] {
   const tools: ChatToolDefinition[] = [
@@ -144,18 +192,19 @@ export function buildToolCatalog(opts: ChatToolOptions = {}): readonly ChatToolD
       },
     },
   ];
+  const rootDir = opts.fileRootDir ?? process.cwd();
+  const root = memoRoot(rootDir);
   if (opts.allowFileRead === true) {
-    const root = opts.fileRootDir ?? process.cwd();
     const maxBytes = opts.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
     tools.push({
       name: "read_file",
-      description: `Read a text file from the local filesystem (relative to the working directory). Allowed extensions: ${ALLOWED_FILE_EXTENSIONS.join(", ")}. Max ${maxBytes.toString()} bytes.`,
+      description: `Read a text file under the session's file root; its contents are returned to this conversation. Paths outside the root are refused. ${CONFINEMENT_RULES}, as is a file containing a credential-shaped value. Allowed extensions: ${ALLOWED_FILE_EXTENSIONS.join(", ")}. Max ${maxBytes.toString()} bytes.`,
       inputSchema: {
         type: "object",
         properties: {
           path: {
             type: "string",
-            description: "Relative or absolute path to the file.",
+            description: "Path relative to the file root.",
           },
         },
         required: ["path"],
@@ -164,19 +213,20 @@ export function buildToolCatalog(opts: ChatToolOptions = {}): readonly ChatToolD
     });
   }
   if (opts.allowFileWrite === true && opts.approver !== undefined) {
-    const root = opts.fileRootDir ?? process.cwd();
     const approver = opts.approver;
+    const review =
+      approver.showsDiffToPerson === true
+        ? "A person is shown a unified diff of the file's current text against exactly what will be written, and nothing is written unless they approve."
+        : "This session approves writes without showing them to a person: the file is written as soon as the manifest validates.";
     tools.push({
       name: "propose_manifest_edit",
-      description:
-        "Propose writing a CrossEngin manifest to disk. The user is shown the diff against any existing file at the path and must approve before the write happens. On approval the file is written and the new hash is returned. On denial nothing is written. The manifest must validate against the kernel schema.",
+      description: `Propose writing a CrossEngin manifest to a .json file under the session's file root. ${review} An existing file at the path must itself be a manifest; any other file is refused rather than overwritten. Paths outside the root are refused. ${CONFINEMENT_RULES}. On approval the new hash is returned; on denial nothing is written. The manifest must validate against the kernel schema.`,
       inputSchema: {
         type: "object",
         properties: {
           path: {
             type: "string",
-            description:
-              "Destination path. Must end in .json. Resolved relative to the working directory.",
+            description: "Destination path relative to the file root. Must end in .json.",
           },
           new_manifest_json: {
             type: "string",
@@ -209,36 +259,32 @@ function parseManifestArg(input: ToolInput, key: string): Manifest {
 
 async function readFileTool(
   input: ToolInput,
-  rootDir: string,
+  root: () => Promise<string>,
   maxBytes: number,
 ): Promise<{ path: string; contents: string }> {
   const path = input["path"];
   if (typeof path !== "string" || path.length === 0) {
     throw new ToolExecutionError(`tool input missing string field "path"`);
   }
-  const absolute = resolve(rootDir, path);
-  if (!isExtensionAllowed(absolute)) {
-    throw new ToolExecutionError(
-      `read_file: extension not allowed; permitted: ${ALLOWED_FILE_EXTENSIONS.join(", ")}`,
-    );
-  }
-  let contents: string;
   try {
-    contents = await readFile(absolute, "utf8");
+    const confined = await confinePath(await root(), path, ALLOWED_FILE_EXTENSIONS, "read");
+    const contents = await readConfinedText(confined, maxBytes);
+    const kind = secretContentKind(contents);
+    if (kind !== null) {
+      throw new FileToolRefusal(
+        "secret_content",
+        `${confined.relative} contains a value shaped like a credential (${kind}); its contents are not sent`,
+      );
+    }
+    return { path: confined.relative, contents };
   } catch (err) {
-    throw new ToolExecutionError(
-      `read_file: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    throw refusalError("read_file", err);
   }
-  if (Buffer.byteLength(contents, "utf8") > maxBytes) {
-    throw new ToolExecutionError(`read_file: file exceeds ${maxBytes.toString()} bytes`);
-  }
-  return { path: absolute, contents };
 }
 
 async function proposeManifestEditTool(
   input: ToolInput,
-  rootDir: string,
+  root: () => Promise<string>,
   approver: WriteApprover,
 ): Promise<unknown> {
   const pathRaw = input["path"];
@@ -281,8 +327,25 @@ async function proposeManifestEditTool(
       errors: validation.errors,
     };
   }
-  const absolute = resolve(rootDir, pathRaw);
-  const existing = await loadExistingManifest(absolute);
+  let target: ConfinedPath;
+  let existingText: string | null;
+  try {
+    target = await confinePath(await root(), pathRaw, WRITABLE_FILE_EXTENSIONS, "write");
+    existingText = target.exists ? await readConfinedText(target, MAX_EXISTING_MANIFEST_BYTES) : null;
+  } catch (err) {
+    throw refusalError("propose_manifest_edit", err);
+  }
+  const relativePath = target.relative;
+  const existing = existingText === null ? null : parseExistingManifest(existingText);
+  if (existingText !== null && existing === null) {
+    // Treating it as absent is what let this tool present an overwrite of package.json as a CREATE.
+    return {
+      applied: false,
+      reason: "existing_file_not_a_manifest",
+      path: relativePath,
+      message: `${relativePath} exists and is not a CrossEngin manifest; it is not overwritten. Choose another path, or move the file aside first.`,
+    };
+  }
   const refusal = classifyManifestEditRefusal(existing, proposed);
   if (refusal !== null) {
     return manifestEditRefusalResult(refusal);
@@ -294,44 +357,62 @@ async function proposeManifestEditTool(
     return {
       applied: false,
       reason: "no_changes",
-      path: absolute,
+      path: relativePath,
       hash: newHash,
     };
   }
+  const kernelDiff = existing !== null ? computeManifestDiff(existing, proposed) : null;
   const diff =
-    existing !== null
-      ? computeManifestDiff(existing, proposed)
-      : { addedEntities: proposed.entities ?? [], removedEntities: [], modifiedEntities: [] };
+    kernelDiff ?? { addedEntities: proposed.entities ?? [], removedEntities: [], modifiedEntities: [] };
   const diffSummary = {
     entitiesAdded: diff.addedEntities.length,
     entitiesRemoved: diff.removedEntities.length,
     entitiesModified: diff.modifiedEntities.length,
   };
+  const newText = JSON.stringify(proposed, null, 2) + "\n";
   const approved = await approver.approve({
-    path: absolute,
+    path: target.real,
     isNew,
     newHash,
     diffSummary,
+    details: approvalDetailLines(existing, proposed, kernelDiff),
+    unifiedDiff: unifiedDiff(existingText ?? "", newText, {
+      oldLabel: isNew ? "/dev/null" : `a/${relativePath}`,
+      newLabel: `b/${relativePath}`,
+    }),
   });
   if (!approved) {
     return {
       applied: false,
       reason: "user_denied",
-      path: absolute,
+      path: relativePath,
       diff_summary: diffSummary,
     };
   }
   try {
-    await ensureParentExists(absolute);
-    await writeFile(absolute, JSON.stringify(proposed, null, 2) + "\n", "utf8");
+    // The diff approved was against the text read above; a file changed while the prompt was open
+    // would be overwritten with an edit nobody reviewed against it.
+    const recheck = await confinePath(await root(), pathRaw, WRITABLE_FILE_EXTENSIONS, "write");
+    const nowText = recheck.exists ? await readConfinedText(recheck, MAX_EXISTING_MANIFEST_BYTES) : null;
+    if (recheck.real !== target.real || nowText !== existingText) {
+      return {
+        applied: false,
+        reason: "file_changed_since_approval",
+        path: relativePath,
+        message: `${relativePath} changed after the diff was shown; nothing was written. Propose the edit again.`,
+      };
+    }
+    await writeConfinedText(recheck, newText);
   } catch (err) {
+    const refused = refusalError("propose_manifest_edit", err);
+    if (refused instanceof ToolExecutionError) throw refused;
     throw new ToolExecutionError(
-      `propose_manifest_edit: failed to write ${absolute}: ${err instanceof Error ? err.message : String(err)}`,
+      `propose_manifest_edit: failed to write ${relativePath}: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
   return {
     applied: true,
-    path: absolute,
+    path: relativePath,
     hash: newHash,
     is_new: isNew,
     diff_summary: diffSummary,
@@ -339,50 +420,18 @@ async function proposeManifestEditTool(
   };
 }
 
-async function loadExistingManifest(absolutePath: string): Promise<Manifest | null> {
-  try {
-    await access(absolutePath);
-  } catch {
-    return null;
-  }
-  let text: string;
-  try {
-    text = await readFile(absolutePath, "utf8");
-  } catch (err) {
-    throw new ToolExecutionError(
-      `propose_manifest_edit: failed to read existing ${absolutePath}: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
+/** A manifest file is read whole to diff it, so it gets its own cap, not the read tool's. */
+const MAX_EXISTING_MANIFEST_BYTES = 16_777_216;
+
+function parseExistingManifest(text: string): Manifest | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
-  } catch (err) {
-    throw new ToolExecutionError(
-      `propose_manifest_edit: existing file at ${absolutePath} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
-    );
+  } catch {
+    return null;
   }
   const schemaResult = ManifestSchema.safeParse(parsed);
-  if (!schemaResult.success) return null;
-  return schemaResult.data;
-}
-
-async function ensureParentExists(absolutePath: string): Promise<void> {
-  const parent = dirname(absolutePath);
-  try {
-    await access(parent);
-  } catch {
-    throw new ToolExecutionError(
-      `propose_manifest_edit: parent directory does not exist: ${parent}`,
-    );
-  }
-}
-
-function isExtensionAllowed(path: string): boolean {
-  const lower = path.toLowerCase();
-  for (const ext of ALLOWED_FILE_EXTENSIONS) {
-    if (lower.endsWith(ext)) return true;
-  }
-  return false;
+  return schemaResult.success ? schemaResult.data : null;
 }
 
 export class ToolExecutionError extends Error {

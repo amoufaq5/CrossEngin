@@ -19,6 +19,7 @@ import {
   toDateWire,
   toDecimalWire,
   toTimeWire,
+  type ConditionalRemove,
   type ConditionalUpdate,
   type DecimalSpec,
   type EntityRecord,
@@ -28,6 +29,7 @@ import {
   type ListQuery,
   type ListSort,
   type ListValueType,
+  type RowLock,
   type TransactionalEntityStore,
   type UpdatePrecondition,
 } from "@crossengin/operate-runtime";
@@ -43,6 +45,7 @@ import {
   sqlColumn,
   type ListSqlAdapter,
 } from "./list-sql.js";
+import { ROW_LOCK_CLAUSE } from "./entity-ops.js";
 import { isDatetimeComparable } from "./temporal-sql.js";
 import {
   columnIndex,
@@ -522,14 +525,20 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
     return this.scoped(tenantId, (tx) => this.listPageOn(tx, tenantId, entity, query));
   }
 
-  private async getOn(tx: PgConnection, tenantId: string, entity: string, id: string): Promise<EntityRecord | null> {
+  private async getOn(
+    tx: PgConnection,
+    tenantId: string,
+    entity: string,
+    id: string,
+    lock: RowLock | null = null,
+  ): Promise<EntityRecord | null> {
     const plan = this.planFor(entity);
     const qualified = qualifyTable(plan.schema, plan.table);
     const res = await tx.query<Record<string, unknown>>(
       `SELECT ${this.selectList(plan)}
          FROM ${qualified}
         WHERE ${quoteIdent("tenant_id")} = $1 AND ${quoteIdent("id")} = $2
-        LIMIT 1`,
+        LIMIT 1${lock === null ? "" : ` ${ROW_LOCK_CLAUSE[lock]}`}`,
       [tenantId, id],
     );
     const row = res.rows[0];
@@ -538,6 +547,11 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
 
   async get(tenantId: string, entity: string, id: string): Promise<EntityRecord | null> {
     return this.scoped(tenantId, (tx) => this.getOn(tx, tenantId, entity, id));
+  }
+
+  /** Outside `withTransaction` the lock ends with this call's own transaction. */
+  async getLocked(tenantId: string, entity: string, id: string, lock: RowLock): Promise<EntityRecord | null> {
+    return this.scoped(tenantId, (tx) => this.getOn(tx, tenantId, entity, id, lock));
   }
 
   private async createOn(
@@ -730,14 +744,20 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
   }
 
   private async removeOn(tx: PgConnection, tenantId: string, entity: string, id: string): Promise<boolean> {
+    return this.removeWhere(tx, entity, [`${quoteIdent("tenant_id")} = $1`, `${quoteIdent("id")} = $2`], [tenantId, id]);
+  }
+
+  private async removeWhere(
+    tx: PgConnection,
+    entity: string,
+    where: readonly string[],
+    params: readonly unknown[],
+  ): Promise<boolean> {
     const plan = this.planFor(entity);
     const qualified = qualifyTable(plan.schema, plan.table);
     let res: PgQueryResult;
     try {
-      res = await tx.query(
-        `DELETE FROM ${qualified} WHERE ${quoteIdent("tenant_id")} = $1 AND ${quoteIdent("id")} = $2`,
-        [tenantId, id],
-      );
+      res = await tx.query(`DELETE FROM ${qualified} WHERE ${where.join(" AND ")}`, [...params]);
     } catch (err) {
       // On a delete the violated key is the *referencing* table's `ON DELETE RESTRICT`.
       if ((err as { readonly code?: unknown }).code === PG_FOREIGN_KEY_VIOLATION) {
@@ -751,6 +771,41 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
 
   async remove(tenantId: string, entity: string, id: string): Promise<boolean> {
     return this.scoped(tenantId, (tx) => this.removeOn(tx, tenantId, entity, id));
+  }
+
+  /**
+   * `removeOn` with the precondition in the `DELETE`'s own `WHERE` — `updateIfOn`'s shape, and for
+   * its reason: under READ COMMITTED a row a concurrent transaction updated is waited on and the
+   * predicate re-checked against its newest committed version, so a delete decided on a state the
+   * winner moved matches nothing.
+   */
+  private async removeIfOn(
+    tx: PgConnection,
+    tenantId: string,
+    entity: string,
+    id: string,
+    expected: UpdatePrecondition,
+  ): Promise<ConditionalRemove> {
+    const plan = this.planFor(entity);
+    const params: unknown[] = [tenantId, id];
+    const where = [`${quoteIdent("tenant_id")} = $1`, `${quoteIdent("id")} = $2`, ...this.preconditionClauses(entity, expected, params)];
+    const removed = await this.removeWhere(tx, entity, where, params);
+    if (removed) return { kind: "removed" };
+    const exists = await tx.query(
+      `SELECT 1 FROM ${qualifyTable(plan.schema, plan.table)}
+        WHERE ${quoteIdent("tenant_id")} = $1 AND ${quoteIdent("id")} = $2`,
+      [tenantId, id],
+    );
+    return exists.rows.length > 0 ? { kind: "precondition_failed" } : { kind: "not_found" };
+  }
+
+  async removeIf(
+    tenantId: string,
+    entity: string,
+    id: string,
+    expected: UpdatePrecondition,
+  ): Promise<ConditionalRemove> {
+    return this.scoped(tenantId, (tx) => this.removeIfOn(tx, tenantId, entity, id, expected));
   }
 
   /**
@@ -791,6 +846,14 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
         remove: (t, entity, id) => {
           assertTenant(t);
           return this.removeOn(tx, t, entity, id);
+        },
+        removeIf: (t, entity, id, expected) => {
+          assertTenant(t);
+          return this.removeIfOn(tx, t, entity, id, expected);
+        },
+        getLocked: (t, entity, id, lock) => {
+          assertTenant(t);
+          return this.getOn(tx, t, entity, id, lock);
         },
       };
       return fn(bound);

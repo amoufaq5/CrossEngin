@@ -12,6 +12,8 @@ import {
   type CheckpointScanOptions,
   type CheckpointScanOutcome,
 } from "@crossengin/forensics-pg";
+import { generateEd25519Keypair, signEd25519 } from "@crossengin/crypto";
+import { signCheckpoint, trustedChainKeys } from "@crossengin/forensics";
 import { unreadableDetail, type PgConnection, type RowRead, type UnreadableRow } from "@crossengin/kernel-pg";
 
 import {
@@ -178,8 +180,9 @@ async function auditScripted(
   scope: string | null,
   chain: readonly ChainedLogEntry[] | null,
   script: ScanScript,
+  trustedKeys: ReadonlyMap<string, string> | null = null,
 ): Promise<AnchorAuditReport> {
-  return auditAnchors(scope, new ScriptedCheckpointStore(script), chain);
+  return auditAnchors(scope, new ScriptedCheckpointStore(script), chain, trustedKeys);
 }
 
 async function audit(
@@ -208,6 +211,8 @@ function reportOf(over: Partial<AnchorAuditReport> = {}): AnchorAuditReport {
     disagreeing: [],
     disagreeingCount: 0,
     witnessSequence: null,
+    readableWitnessSequence: null,
+    signatures: null,
     ...over,
   };
   if (over.disagreeingCount !== undefined) return base;
@@ -711,14 +716,14 @@ describe("formatAnchorAudit", () => {
 describe("auditAnchors reads the store through the scan and nothing else", () => {
   it("scans once, passing the scope and the caller's bounds straight through", async () => {
     const store = new ScriptedCheckpointStore({ pages: [page([checkpoint(1)])] });
-    const report = await auditAnchors(TENANT_A, store, chainTo(2), { ceiling: 7, pageSize: 3 });
+    const report = await auditAnchors(TENANT_A, store, chainTo(2), null, { ceiling: 7, pageSize: 3 });
     expect(store.calls).toEqual([{ scope: TENANT_A, opts: { ceiling: 7, pageSize: 3 } }]);
     expect(report.scope).toBe(TENANT_A);
   });
 
   it("carries the platform scope as the null it was asked with", async () => {
     const store = new ScriptedCheckpointStore({ pages: [page([checkpoint(0)])] });
-    const report = await auditAnchors(null, store, chainTo(0), {});
+    const report = await auditAnchors(null, store, chainTo(0), null, {});
     expect(store.calls[0]?.scope).toBeNull();
     expect(report.scope).toBeNull();
   });
@@ -747,10 +752,12 @@ describe("auditAnchors reads the store through the scan and nothing else", () =>
       "complete",
       "disagreeing",
       "disagreeingCount",
+      "readableWitnessSequence",
       "refused",
       "refusedCount",
       "scanned",
       "scope",
+      "signatures",
       "witnessSequence",
     ]);
   });
@@ -764,7 +771,7 @@ describe("auditAnchors reads the store through the scan and nothing else", () =>
       }
     }
     await expect(
-      auditAnchors(TENANT_A, new ThrowingStore(servesNothing(), {}), chainTo(2)),
+      auditAnchors(TENANT_A, new ThrowingStore(servesNothing(), {}), chainTo(2), null),
     ).rejects.toThrow("the anchor table is unreachable");
   });
 });
@@ -844,4 +851,110 @@ describe("verificationExaminedNothing", () => {
     // finding, so this predicate must not claim the milder state for it.
     expect(verificationExaminedNothing(0, chainTruncation(7, null))).toBe(false);
   });
+});
+
+describe("auditAnchors' signature axis (H-18)", () => {
+  const own = generateEd25519Keypair();
+  const forger = generateEd25519Keypair();
+  const trusted = trustedChainKeys([own.publicKeyBase64]);
+  const signerFor = (kp: { privateKeyBase64: string; publicKeyBase64: string }) => ({
+    fingerprint: [...trustedChainKeys([kp.publicKeyBase64]).keys()][0] as string,
+    sign: async (bytes: Uint8Array) => signEd25519(kp.privateKeyBase64, kp.publicKeyBase64, bytes),
+  });
+  const signed = (n: number, kp = own, scope: string | null = TENANT_A) =>
+    signCheckpoint(scope, checkpoint(n), signerFor(kp));
+
+  it("does not ask when no trusted set is supplied, and says so", async () => {
+    const report = await audit(TENANT_A, chainTo(3), [page([checkpoint(1), await signed(2, forger)])]);
+    expect(report.signatures).toBeNull();
+    expect(anchorAuditDisproves(report)).toBe(false);
+    expect(formatAnchorAudit(report)[0]).toContain("signatures not asked (unpinned)");
+  });
+
+  it("counts the chain key's own signatures and the legacy unsigned rows, and finds nothing", async () => {
+    const report = await auditScripted(
+      TENANT_A,
+      chainTo(5),
+      { pages: [page([checkpoint(1), await signed(3), await signed(5)])] },
+      trusted,
+    );
+    expect(report.signatures).toEqual({ signed: 2, unsigned: 1, missigned: [], missignedCount: 0 });
+    expect(anchorAuditDisproves(report)).toBe(false);
+    expect(anchorAuditHasFindings(report)).toBe(false);
+    // On the cover line, so a clean audit is still one line.
+    const lines = formatAnchorAudit(report);
+    expect(lines[0]).toContain("2 signed by the chain key, 1 unsigned");
+    expect(lines.join("\n")).not.toContain("NOT SIGNED");
+  });
+
+  it("disproves on a checkpoint signed by any other key, and never takes it as a witness", async () => {
+    const report = await auditScripted(
+      TENANT_A,
+      chainTo(5),
+      { pages: [page([await signed(2), await signed(4, forger)])] },
+      trusted,
+    );
+    expect(report.signatures?.missigned).toEqual([{ kind: "untrusted_key", sequenceNumber: 4 }]);
+    expect(report.witnessSequence).toBe(2);
+    expect(anchorAuditDisproves(report)).toBe(true);
+    expect(formatAnchorAudit(report).join("\n")).toContain("NOT SIGNED BY THE CHAIN KEY: 1");
+  });
+
+  it("disproves on the chain key's signature over a row edited afterwards", async () => {
+    // The raising attack ADR-0375 left open: `sequence_number := 99` on an anchor. The signature
+    // covers the sequence, so the edited row no longer verifies and cannot witness a false cut.
+    const moved = ChainCheckpointSchema.parse({ ...(await signed(3)), sequenceNumber: 99 });
+    const report = await auditScripted(TENANT_A, chainTo(5), { pages: [page([moved])] }, trusted);
+    expect(report.signatures?.missigned).toEqual([{ kind: "bad_signature", sequenceNumber: 99 }]);
+    expect(report.witnessSequence).toBeNull();
+    expect(chainTruncation(report.witnessSequence, 5).truncated).toBe(false);
+  });
+
+  it("binds the scope: a tenant's signed row copied to another scope does not verify", async () => {
+    const report = await auditScripted(
+      TENANT_A,
+      chainTo(5),
+      { pages: [page([await signed(3, own, null)])] },
+      trusted,
+    );
+    expect(report.signatures?.missigned).toEqual([{ kind: "bad_signature", sequenceNumber: 3 }]);
+  });
+
+  it("stops standing behind an unsigned row's sequence once any signed row exists", async () => {
+    // An unsigned row is the one shape a writer without the key can still produce, so once the
+    // scope has a signed anchor an unsigned one raised past the tail must not witness a false cut.
+    const raised = checkpoint(99, FOREIGN_HASH);
+    const report = await auditScripted(
+      TENANT_A,
+      chainTo(5),
+      { pages: [page([await signed(4), raised])] },
+      trusted,
+    );
+    expect(report.witnessSequence).toBe(4);
+    expect(chainTruncation(report.witnessSequence, 5).truncated).toBe(false);
+    expect(anchorAuditDisproves(report)).toBe(false);
+    // The memory's figure keeps it: a raised unsigned row can only make a regression harder to find.
+    expect(report.readableWitnessSequence).toBe(99);
+  });
+
+  it("keeps unsigned rows as witnesses while none is signed, which is every scope before the upgrade", async () => {
+    const report = await auditScripted(
+      TENANT_A,
+      chainTo(5),
+      { pages: [page([checkpoint(2), checkpoint(4)])] },
+      trusted,
+    );
+    expect(report.witnessSequence).toBe(4);
+    expect(report.signatures).toEqual({ signed: 0, unsigned: 2, missigned: [], missignedCount: 0 });
+  });
+
+  it("caps the missigned list and keeps the whole figure", async () => {
+    const rows = await Promise.all(
+      Array.from({ length: MAX_REPORTED_ANCHOR_DISAGREEMENTS + 3 }, (_, i) => signed(i, forger)),
+    );
+    const report = await auditScripted(TENANT_A, null, { pages: [page(rows)] }, trusted);
+    expect(report.signatures?.missigned).toHaveLength(MAX_REPORTED_ANCHOR_DISAGREEMENTS);
+    expect(report.signatures?.missignedCount).toBe(MAX_REPORTED_ANCHOR_DISAGREEMENTS + 3);
+  });
+
 });

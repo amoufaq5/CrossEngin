@@ -34,7 +34,13 @@ import {
 } from "./list-query.js";
 import { applyLiteralDefaults, type LiteralDefaultPlan } from "./defaults.js";
 import { isReadCeilingExceeded } from "./list-drain.js";
-import { applySequenceDefaults, type SequenceAllocator, type SequenceFieldPlan } from "./sequences.js";
+import { isPostingRefused } from "./posting-period.js";
+import {
+  applySequenceDefaults,
+  isSequenceFieldBlank,
+  type SequenceAllocator,
+  type SequenceFieldPlan,
+} from "./sequences.js";
 import { applySettingsDefaults, type SettingsDefaultPlan } from "./settings-defaults.js";
 import { sequenceSpecResolver, type SettingsStore, type TenantSettings } from "./settings.js";
 import type { TransactionSettingsScope } from "./settings-snapshot.js";
@@ -63,9 +69,22 @@ import {
   type WriteSurface,
   type WriteSurfaceRefusal,
 } from "./write-surface.js";
-import { isApproveClassTransition, makerCheckerRefusal } from "./maker-checker.js";
+import {
+  approvalContentRefusal,
+  type ApprovalContent,
+  isApproveClassTransition,
+  makerCheckerRefusal,
+} from "./maker-checker.js";
 import type { CursorRefusal, CursorSealer } from "./cursor-seal.js";
+import {
+  auditUnavailable,
+  entityAuditPayloads,
+  isEntityAuditUnrecorded,
+  type EntityAuditAction,
+  type EntityWriteAuditor,
+} from "./entity-audit.js";
 import type { RouteAction, RouteSpec } from "./operations.js";
+import { systemWriteOriginOf, type SystemWriteOrigin } from "./system-writer.js";
 
 const FALLBACK_LIST_CONFIG: ListConfig = {
   defaultLimit: DEFAULT_PAGE_SIZE,
@@ -157,13 +176,28 @@ export interface HandlerContext {
    */
   readonly segregationOfDuties?: boolean;
   /**
-   * Per-entity lifecycle state field. An update that loaded its record is written conditional on
+   * What else an approver must not have written under `segregationOfDuties`: the record's last edit
+   * where only edits reach the from-state, and the records it owns. Built from the manifest when the
+   * switch is on; absent, only the creator is refused.
+   */
+  readonly approvalContent?: ApprovalContent;
+  /**
+   * Per-entity state field a write is decided from — the lifecycle's, or for a lock-guarded entity
+   * with no lifecycle the `state` its guard reads. An update or delete that loaded its record is written conditional on
    * that field still holding what was read, because the guards (a document lock above all) decided
    * from that read: without it a PATCH that read `draft` landed on an invoice a concurrent `send`
    * had already posted. Absent, an update is unconditional on state, as in the hand-built test
    * contexts; `compileOperateServer` always supplies it.
    */
   readonly lifecycleStateFields?: ReadonlyMap<string, string>;
+  /**
+   * Where each successful entity write is recorded — inside the write's own transaction on a
+   * transactional store, so the write and its record commit or roll back together. Absent, nothing
+   * is recorded, which is the state of every hand-built context and of `--store memory`; present,
+   * a record that cannot be made refuses the write (503 `audit_unavailable`) rather than letting it
+   * report success unaccounted for.
+   */
+  readonly entityAudit?: EntityWriteAuditor;
   readonly clock?: { now(): Date };
 }
 
@@ -290,6 +324,17 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
     // `principalUserId` and not `principalId` directly: a bare api-key resolves to one placeholder
     // shared by every such key, and writing that into `created_by` would claim one actor for many.
     const actorId = principalUserId(principal);
+    // What every record of a write by this request carries, assembled once so the five write paths
+    // cannot attribute one request two ways.
+    const origin = systemWriteOriginOf(principal);
+    const writeIdentity = {
+      operationId: spec.operationId,
+      requestId: request.id,
+      entity: spec.entity,
+      tenantId,
+      actorUserId: actorId,
+      origin,
+    };
     // Built once and used three ways — asked with no record, re-asked with one, and handed to
     // `rbacCheckForRecords` for a whole page — because every one of those must differ in **nothing
     // but the record**: separate construction sites could drift in the principal, the operation or
@@ -510,26 +555,40 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         // (a 422 between JE-…30 and JE-…32, measured live).
         const createErrors = validateEntity(ctx, spec.entity, body, "create");
         if (createErrors !== null) return createErrors;
-        // Allocated here and not inside `writeTxn`, though inside would also spare the numbers a
-        // guard refusal or an id conflict spends. The Postgres allocator commits on a connection of
-        // its own, so allocating while the entity transaction holds one takes two pool slots per
-        // create: as many concurrent creates as the pool has connections each hold one and wait for
-        // a second that never frees, and every request on the process waits with them. So the
-        // numbering is gap-reduced and not gapless — a guard refusal, an id conflict, the store's
-        // own refusal, a throwing effect or a failed commit each still spend the number.
-        body = await applyEntitySequences(ctx, spec.entity, tenantId, body, settings);
+        // Allocated here and not inside `writeTxn`: the Postgres allocator commits on a connection
+        // of its own, so allocating while the entity transaction holds one takes two pool slots per
+        // create — as many concurrent creates as the pool has connections each hold one and wait for
+        // a second that never frees. So before a number is spent, the two refusals the transaction
+        // would decide deterministically are asked first, on the store outside any transaction: an
+        // id conflict and a guard refusal (measured: each spent one, INV-…02 and INV-…04 between
+        // three successful creates). Both are asked again inside the transaction, which decides.
+        // What still spends a number is a write the pre-flight passed and the transaction refused —
+        // a concurrent change between the two, the store's own refusal (a dangling reference, a
+        // unique violation), a throwing effect or a failed commit — and a draft deleted later.
         const callerId = createKeys.includes("id") ? (parsedBody?.["id"] as string) : null;
+        if (sequenceAllocationPending(ctx, spec.entity, body)) {
+          if (callerId !== null && (await ctx.store.get(tenantId, spec.entity, callerId)) !== null) {
+            return idConflict(spec.entity);
+          }
+          const early = await guard(ctx, {
+            operation: "create",
+            entity: spec.entity,
+            tenantId,
+            id: null,
+            before: null,
+            after: body,
+            store: ctx.store,
+          });
+          if (early !== null) return early;
+        }
+        body = await applyEntitySequences(ctx, spec.entity, tenantId, body, settings);
         return writeTxn(ctx, tenantId, async (store) => {
           // A caller-supplied id that already exists in this tenant is a 409 rather than whatever
           // the store does with it: the in-memory store overwrote the record and the Postgres stores
           // raised an unattributed key violation answered as a 500. Asked inside the transaction;
           // a concurrent insert of the same id can still reach the store's own refusal.
           if (callerId !== null && (await store.get(tenantId, spec.entity, callerId)) !== null) {
-            return json(409, {
-              error: "id_conflict",
-              detail: `a ${spec.entity} with this id already exists; a create cannot replace it`,
-              field: "id",
-            });
+            return idConflict(spec.entity);
           }
           const block = await guard(ctx, {
             operation: "create",
@@ -542,11 +601,21 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
           });
           if (block !== null) return block;
           const created = await store.create(tenantId, spec.entity, body);
+          const createdId = typeof created["id"] === "string" ? (created["id"] as string) : null;
           await runEffects(ctx, {
             operation: "create",
             entity: spec.entity,
             tenantId,
-            id: typeof created["id"] === "string" ? (created["id"] as string) : null,
+            id: createdId,
+            before: null,
+            after: created,
+            store,
+          });
+          await recordEntityWrite(ctx, {
+            ...writeIdentity,
+            action: "create",
+            recordId: createdId,
+            detail: null,
             before: null,
             after: created,
             store,
@@ -596,12 +665,15 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
           // An outstanding obligation — entity-level or field-level — forces the load, on top of
           // the three reasons that already did. Without it the record is never fetched for a plain
           // patch and the obligation could only refuse.
+          // A recorder forces it too: a record of an update with no `before` is a record that cannot
+          // say what changed, which is most of what an audit of an update is for.
           const needsBefore =
             hasGuards(ctx) ||
             hasEffects(ctx) ||
             expectedUpdatedAt !== null ||
             obligationOutstanding ||
-            maskDeferred;
+            maskDeferred ||
+            ctx.entityAudit !== undefined;
           const before = needsBefore ? await store.get(tenantId, spec.entity, id) : null;
           if (needsBefore && before === null) return json(404, { error: "not_found" });
           // Authorization precedes business logic: both obligations are discharged here, after the
@@ -677,6 +749,15 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
             after: record,
             store,
           });
+          await recordEntityWrite(ctx, {
+            ...writeIdentity,
+            action: "update",
+            recordId: id,
+            detail: null,
+            before,
+            after: record,
+            store,
+          });
           return json(200, record);
         }, Object.keys(raw));
       }
@@ -689,7 +770,17 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         // anything this caller typed.
         return writeTxn(ctx, tenantId, async (store) => {
           // An outstanding obligation forces the load: the record is what the policy is about.
-          const needsBefore = hasGuards(ctx) || hasEffects(ctx) || obligationOutstanding;
+          // A recorder forces the load: a record of a delete that does not hold what was deleted
+          // records only that something with this id is gone.
+          // A lifecycle forces it too: the delete is then decided on the state it read, and the
+          // removal below is conditional on that state.
+          const stateField = ctx.lifecycleStateFields?.get(spec.entity);
+          const needsBefore =
+            hasGuards(ctx) ||
+            hasEffects(ctx) ||
+            obligationOutstanding ||
+            ctx.entityAudit !== undefined ||
+            stateField !== undefined;
           const before = needsBefore ? await store.get(tenantId, spec.entity, id) : null;
           if (needsBefore && before === null) return json(404, { error: "not_found" });
           // Before the guard and before `remove`: a destroyed record is not recoverable by a later
@@ -709,8 +800,22 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
             store,
           });
           if (block !== null) return block;
-          const removed = await store.remove(tenantId, spec.entity, id);
-          if (!removed) return json(404, { error: "not_found" });
+          // Conditional on the state the guards just decided from, as the update path is. Measured
+          // before: a delete that read `cart` and a concurrent `place` both succeeded — 204 and 200,
+          // the placement's posting fired, and the order it posted for was gone.
+          if (stateField !== undefined && before !== null) {
+            const removal = await store.removeIf(tenantId, spec.entity, id, { [stateField]: before[stateField] });
+            if (removal.kind === "not_found") return json(404, { error: "not_found" });
+            if (removal.kind === "precondition_failed") {
+              return json(409, {
+                error: "state_changed",
+                detail: `another request moved this ${spec.entity} to a different state while this delete was in flight; nothing was deleted — re-read it`,
+              });
+            }
+          } else {
+            const removed = await store.remove(tenantId, spec.entity, id);
+            if (!removed) return json(404, { error: "not_found" });
+          }
           await runEffects(ctx, {
             operation: "delete",
             entity: spec.entity,
@@ -718,6 +823,15 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
             id,
             before,
             after: before ?? {},
+            store,
+          });
+          await recordEntityWrite(ctx, {
+            ...writeIdentity,
+            action: "delete",
+            recordId: id,
+            detail: null,
+            before,
+            after: null,
             store,
           });
           return { kind: "empty", status: 204 };
@@ -739,9 +853,26 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
           id,
           obligationOutstanding ? resolveObligation : null,
           actorId,
+          request.id,
+          origin,
         );
     }
   };
+}
+
+function idConflict(entity: string): HandlerOutput {
+  return json(409, {
+    error: "id_conflict",
+    detail: `a ${entity} with this id already exists; a create cannot replace it`,
+    field: "id",
+  });
+}
+
+/** Whether a create of `entity` with this body would spend a sequence number. */
+function sequenceAllocationPending(ctx: HandlerContext, entity: string, body: Record<string, unknown>): boolean {
+  const plans = ctx.sequencePlans?.get(entity);
+  if (ctx.allocator === undefined || plans === undefined) return false;
+  return plans.some((p) => isSequenceFieldBlank(body[p.field]));
 }
 
 async function applyEntitySequences(
@@ -775,11 +906,21 @@ async function applyTransition(
   id: string,
   resolveObligation: ObligationReAsk | null,
   actorId: string | null,
+  requestId: string,
+  origin: SystemWriteOrigin | null,
 ): Promise<HandlerOutput> {
   const t = spec.transition;
   if (t === undefined) return json(500, { error: "missing_transition_spec" });
   return writeTxn(ctx, tenantId, async (store) => {
-    const record = await store.get(tenantId, spec.entity, id);
+    // Locked before anything is decided from it, and that is the half of serialising a line write
+    // with its parent's transition that the line's own lock cannot supply: the transition's guards
+    // read the lines (the journal balance, a recognition's tax split), and a line written by a
+    // transaction this one did not wait for is a line those reads never saw — measured as a draft
+    // entry posted Dr 1009 / Cr 10 because a line committed between the balance read and the write.
+    // Holding the record exclusively while the lines are read makes a line writer, which takes the
+    // parent `share` (`lockedDocumentGuard`), either finish first — so the read sees its line — or
+    // wait and then read the parent's new state.
+    const record = await store.getLocked(tenantId, spec.entity, id, "exclusive");
     if (record === null) return json(404, { error: "not_found" });
     // Right after the load and the 404, and **before** the from-state 409: authorization precedes
     // business logic. The record is already loaded unconditionally on this action, so there is
@@ -819,6 +960,23 @@ async function applyTransition(
         ctx.writeSurfaces?.get(spec.entity)?.stampsActor === true,
       );
       if (refused !== null) return json(422, { error: refused.error, detail: refused.detail });
+      // Asked after the record lock: a line writer holds the parent `share`, so the line set this
+      // reads cannot gain a row before the transition commits.
+      if (ctx.approvalContent !== undefined && actorId !== null) {
+        const content = await approvalContentRefusal({
+          content: ctx.approvalContent,
+          store,
+          tenantId,
+          entity: spec.entity,
+          transition: t.name,
+          id,
+          record,
+          fromState: current,
+          actorId,
+          stampsActor: (entity) => ctx.writeSurfaces?.get(entity)?.stampsActor === true,
+        });
+        if (content !== null) return json(422, { error: content.error, detail: content.detail });
+      }
     }
     const patch = {
       [t.stateField]: t.toState,
@@ -858,6 +1016,20 @@ async function applyTransition(
       after,
       store,
       transitionTo: t.toState,
+    });
+    await recordEntityWrite(ctx, {
+      operationId: spec.operationId,
+      requestId,
+      action: "transition",
+      entity: spec.entity,
+      tenantId,
+      recordId: id,
+      actorUserId: actorId,
+      origin,
+      detail: t.name,
+      before: record,
+      after,
+      store,
     });
     return json(200, after);
   }, NO_CALLER_SUPPLIED_FIELD);
@@ -1195,6 +1367,10 @@ async function writeTxn(
     // The settings read happens here, before the transaction takes its connection.
     return ctx.settingsScope !== undefined ? await ctx.settingsScope.run(tenantId, run) : await run();
   } catch (err) {
+    // First, because it is the one failure that is about the *record of* the write rather than the
+    // write: inside a transaction the rollback has already undone the write, so the honest answer is
+    // that nothing happened and a retry is the remedy — a 503, which is what a client retries.
+    if (isEntityAuditUnrecorded(err)) return auditUnavailable(isTransactional(ctx.store));
     // The one write failure whose body may name something — and only when the caller named the
     // field. See `uniqueConflict`.
     if (err instanceof UniqueViolation && callerKeys.includes(err.field)) {
@@ -1260,6 +1436,12 @@ async function writeTxn(
     //
     // 500 rather than a 4xx: the bound is the deployment's, the caller neither chose it nor can
     // change it, and a retry gets the same answer — which is what a 500 says and a 409 would deny.
+    // A posting an effect refused — into a locked period, or against an ambiguous source entry. The
+    // detail is built from literals and server-chosen values only, so it carries what a guard block
+    // would: the effect is the one place this check can run, since effects pass no guard.
+    if (isPostingRefused(err)) {
+      return json(err.status, { error: err.error, detail: err.detail });
+    }
     if (isReadCeilingExceeded(err)) {
       return json(500, {
         error: "read_ceiling_exceeded",
@@ -1329,6 +1511,61 @@ function modifiedSinceLoaded(currentUpdatedAt: string | null): HandlerOutput {
     error: "conflict",
     detail: "the record was modified since you loaded it",
     ...(currentUpdatedAt !== null ? { currentUpdatedAt } : {}),
+  });
+}
+
+/**
+ * Hands one successful write to the deployment's recorder, with every sensitive value withheld.
+ *
+ * Called last in each write unit — after the store write and its effects, before the success output
+ * — so a recorder that refuses rolls back the effects too. Three effects write back onto the record
+ * that triggered them (the withholding total, the booking rate, and on a payment the document it
+ * settles — the last a different record), so the handler's own copy can predate what is stored: with
+ * effects configured the record is read again on the write's own store, and `after` is what the
+ * transaction will commit rather than what the handler last held. The classified-field index is the
+ * one the write mask and the response redaction read, so a field the gateway would withhold from a
+ * reader is the field the trail never holds.
+ */
+async function recordEntityWrite(
+  ctx: HandlerContext,
+  input: {
+    readonly operationId: string;
+    readonly requestId: string;
+    readonly action: EntityAuditAction;
+    readonly entity: string;
+    readonly tenantId: string;
+    readonly recordId: string | null;
+    readonly actorUserId: string | null;
+    readonly origin: SystemWriteOrigin | null;
+    readonly detail: string | null;
+    readonly before: EntityRecord | null;
+    readonly after: EntityRecord | null;
+    /** The store the write ran on — the transaction's, inside one. */
+    readonly store: EntityStore;
+  },
+): Promise<void> {
+  if (ctx.entityAudit === undefined) return;
+  const after =
+    input.after !== null && input.recordId !== null && hasEffects(ctx)
+      ? ((await input.store.get(input.tenantId, input.entity, input.recordId)) ?? input.after)
+      : input.after;
+  const payloads = entityAuditPayloads(
+    input.before,
+    after,
+    ctx.classifiedFields?.get(input.entity) ?? [],
+  );
+  await ctx.entityAudit.record({
+    requestId: input.requestId,
+    operationId: input.operationId,
+    action: input.action,
+    entity: input.entity,
+    tenantId: input.tenantId,
+    recordId: input.recordId,
+    actorUserId: input.actorUserId,
+    ...(input.origin !== null ? { origin: input.origin } : {}),
+    detail: input.detail,
+    ...payloads,
+    inTransaction: isTransactional(ctx.store),
   });
 }
 

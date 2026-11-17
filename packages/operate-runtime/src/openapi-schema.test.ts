@@ -212,7 +212,8 @@ describe("entitySchemas over the real erp-core pack", () => {
 
   it("describes the RESOLVED field set, which is a third wider than the entity's own", () => {
     // ADR-0361's class, and the whole correctness question for this module. Measured: 51 of 51
-    // entities differ, 426 own fields against 630 resolved — 204 outside the narrow aperture,
+    // entities differ, 427 own fields against 631 resolved (426 and 630 until
+    // `BillLine.purchase_order_line_id`) — 204 outside the narrow aperture,
     // exactly 51 x 4 because every entity is `auditable`. The sibling artifact `ui-schema.ts` reads
     // the narrow set, which is why `created_at`/`updated_at` appear in no view; measured through the
     // real create handler they ARE in the response body.
@@ -226,8 +227,8 @@ describe("entitySchemas over the real erp-core pack", () => {
         entitySchemas(e, traits, null, surfaceOf(e)).response.properties ?? {},
       ).length;
     }
-    expect(own).toBe(426);
-    expect(resolved).toBe(630);
+    expect(own).toBe(427);
+    expect(resolved).toBe(631);
     // One `id` added per entity, and nothing dropped.
     expect(props).toBe(resolved + entities.length);
   });

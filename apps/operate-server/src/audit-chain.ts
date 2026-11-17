@@ -254,6 +254,13 @@ export interface AuditChainObserverOptions {
    * back to the config path unchanged.
    */
   readonly policyCache?: LiveAuditPolicySource;
+  /**
+   * Whether this request's entry is already in the chain in a richer form — an entity write recorded
+   * and anchored in its own transaction (`EntityAuditRecorder.supersedes`). Asked for every
+   * request, including one the sampling policy excludes, because answering consumes the recorder's
+   * mark. Absent, nothing is skipped.
+   */
+  readonly supersedes?: (execution: PipelineExecution) => boolean;
 }
 
 const PLATFORM_SCOPE = "\u0000platform";
@@ -282,7 +289,11 @@ export class AuditChainObserver {
       this.opts.policyCache !== undefined && execution.tenantId !== null
         ? this.opts.policyCache.get(execution.tenantId)
         : undefined;
+    // Asked whatever the policy says, so a mark left by an entity write is consumed rather than
+    // held until eviction; the order of the two tests decides nothing else.
+    const superseded = this.opts.supersedes?.(execution) ?? false;
     if (!shouldRecordAuditWithLive(execution, this.config, live)) return;
+    if (superseded) return;
     const input = auditAppendInputFrom(execution, this.config);
     const scope = input.tenantId ?? PLATFORM_SCOPE;
     this.inFlight += 1;

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -183,11 +183,11 @@ describe("executeToolCall — read_file", () => {
   });
 
   it("rejects disallowed extensions", async () => {
-    const tools = buildToolCatalog({ allowFileRead: true });
+    const tools = buildToolCatalog({ allowFileRead: true, fileRootDir: await tempDir() });
     const result = await executeToolCall(tools, {
       id: "r1",
       name: "read_file",
-      input: { path: "/tmp/whatever.exe" },
+      input: { path: "whatever.exe" },
     });
     expect(result.isError).toBe(true);
     const parsed = JSON.parse(result.output) as { error: string };
@@ -268,6 +268,8 @@ describe("autoApprover", () => {
         isNew: true,
         newHash: "h",
         diffSummary: { entitiesAdded: 0, entitiesRemoved: 0, entitiesModified: 0 },
+        details: [],
+        unifiedDiff: [],
       }),
     ).toBe(true);
   });
@@ -280,6 +282,8 @@ describe("autoApprover", () => {
         isNew: true,
         newHash: "h",
         diffSummary: { entitiesAdded: 0, entitiesRemoved: 0, entitiesModified: 0 },
+        details: [],
+        unifiedDiff: [],
       }),
     ).toBe(false);
   });
@@ -323,6 +327,22 @@ describe("executeToolCall — propose_manifest_edit", () => {
     expect(approver.requests[0]?.isNew).toBe(true);
     const written = await readFile(join(dir, "m.json"), "utf8");
     expect((JSON.parse(written) as Manifest).meta.name).toBe("Brand New");
+  });
+
+  it("hands the approver detail lines naming what changed, not only the counts", async () => {
+    const dir = await tempDir();
+    const path = join(dir, "m.json");
+    const before = emptyManifest({ name: "Before", slug: "x" });
+    await writeFile(path, JSON.stringify(before, null, 2), "utf8");
+    const approver = new RecordingApprover(false);
+    const tools = buildToolCatalog({ allowFileWrite: true, approver, fileRootDir: dir });
+    const after = { ...emptyManifest({ name: "Before", slug: "x" }), roles: { clerk: { name: "clerk" } } };
+    await executeToolCall(tools, {
+      id: "pe1",
+      name: "propose_manifest_edit",
+      input: { path: "m.json", new_manifest_json: JSON.stringify(after) },
+    });
+    expect(approver.requests[0]?.details).toEqual(["  section roles: +clerk"]);
   });
 
   it("UPDATEs an existing file and reports diff entity counts", async () => {
@@ -500,5 +520,166 @@ describe("executeToolCall — propose_manifest_edit", () => {
     expect(approver.requests).toHaveLength(0);
     const onDisk = JSON.parse(await readFile(path, "utf8")) as Manifest;
     expect(onDisk.entities?.[0]?.traits).toContain("auditable");
+  });
+});
+
+describe("H-29 — the file tools are confined to one root", () => {
+  async function rootWithOutside(): Promise<{ root: string; outside: string }> {
+    const base = await tempDir();
+    const root = join(base, "root");
+    const outside = join(base, "outside");
+    await mkdir(join(root, "sub"), { recursive: true });
+    await mkdir(outside);
+    await writeFile(join(outside, "o.json"), '{"outside":"secret-ish"}');
+    await writeFile(join(outside, "victim.json"), '{"keep":true}');
+    return { root, outside };
+  }
+
+  async function errorOf(tools: ReturnType<typeof buildToolCatalog>, name: string, input: object): Promise<string> {
+    const result = await executeToolCall(tools, { id: "x", name, input });
+    expect(result.isError).toBe(true);
+    return (JSON.parse(result.output) as { error: string }).error;
+  }
+
+  it("read_file refuses .., an absolute path, a file symlink and a directory symlink out of the root", async () => {
+    const { root, outside } = await rootWithOutside();
+    await symlink(join(outside, "o.json"), join(root, "link.json"));
+    await symlink(outside, join(root, "dirlink"));
+    const tools = buildToolCatalog({ allowFileRead: true, fileRootDir: root });
+    expect(await errorOf(tools, "read_file", { path: "../outside/o.json" })).toContain("refused (outside_root)");
+    expect(await errorOf(tools, "read_file", { path: join(outside, "o.json") })).toContain("refused (outside_root)");
+    expect(await errorOf(tools, "read_file", { path: "sub/../../outside/o.json" })).toContain("refused (outside_root)");
+    expect(await errorOf(tools, "read_file", { path: "link.json" })).toContain("refused (symlink_escape)");
+    expect(await errorOf(tools, "read_file", { path: "dirlink/o.json" })).toContain("refused (symlink_escape)");
+  });
+
+  it("read_file returns a root-relative path, never the machine's absolute one", async () => {
+    const { root } = await rootWithOutside();
+    await writeFile(join(root, "sub", "m.json"), "{}");
+    const tools = buildToolCatalog({ allowFileRead: true, fileRootDir: root });
+    const result = await executeToolCall(tools, { id: "x", name: "read_file", input: { path: "sub/m.json" } });
+    expect(JSON.parse(result.output)).toEqual({ path: join("sub", "m.json"), contents: "{}" });
+  });
+
+  it("read_file refuses .env-style, credential-named and credential-bearing files inside the root", async () => {
+    const { root } = await rootWithOutside();
+    await writeFile(join(root, ".env.json"), "{}");
+    await writeFile(join(root, "service-account.json"), "{}");
+    await writeFile(join(root, "config.json"), `{"key":"-----BEGIN PRIVATE KEY-----\\n${"Q".repeat(80)}"}`);
+    const tools = buildToolCatalog({ allowFileRead: true, fileRootDir: root });
+    expect(await errorOf(tools, "read_file", { path: ".env.json" })).toContain("refused (hidden_path)");
+    expect(await errorOf(tools, "read_file", { path: "service-account.json" })).toContain("refused (secret_named)");
+    const err = await errorOf(tools, "read_file", { path: "config.json" });
+    expect(err).toContain("refused (secret_content)");
+    expect(err).not.toContain("QQQQ");
+  });
+
+  it("propose_manifest_edit refuses .., an absolute path and a directory symlink, and writes nothing outside", async () => {
+    const { root, outside } = await rootWithOutside();
+    await symlink(outside, join(root, "dirlink"));
+    await symlink(join(outside, "victim.json"), join(root, "victim.json"));
+    const approver = new RecordingApprover(true);
+    const tools = buildToolCatalog({ allowFileWrite: true, approver, fileRootDir: root });
+    const m = JSON.stringify(emptyManifest({ name: "X", slug: "x" }));
+    expect(await errorOf(tools, "propose_manifest_edit", { path: "../outside/w.json", new_manifest_json: m })).toContain("outside_root");
+    expect(await errorOf(tools, "propose_manifest_edit", { path: join(outside, "w.json"), new_manifest_json: m })).toContain("outside_root");
+    expect(await errorOf(tools, "propose_manifest_edit", { path: "dirlink/w.json", new_manifest_json: m })).toContain("symlink_escape");
+    expect(await errorOf(tools, "propose_manifest_edit", { path: "victim.json", new_manifest_json: m })).toContain("symlink_escape");
+    expect(approver.requests).toHaveLength(0);
+    expect((await readdir(outside)).sort()).toEqual(["o.json", "victim.json"]);
+    expect(await readFile(join(outside, "victim.json"), "utf8")).toBe('{"keep":true}');
+  });
+
+  it("propose_manifest_edit refuses to overwrite a JSON file that is not a manifest, rather than calling it a CREATE", async () => {
+    const { root } = await rootWithOutside();
+    await writeFile(join(root, "package.json"), '{"name":"app"}');
+    const approver = new RecordingApprover(true);
+    const tools = buildToolCatalog({ allowFileWrite: true, approver, fileRootDir: root });
+    const result = await executeToolCall(tools, {
+      id: "x",
+      name: "propose_manifest_edit",
+      input: { path: "package.json", new_manifest_json: JSON.stringify(emptyManifest({ name: "X", slug: "x" })) },
+    });
+    expect(JSON.parse(result.output)).toMatchObject({ applied: false, reason: "existing_file_not_a_manifest" });
+    expect(approver.requests).toHaveLength(0);
+    expect(await readFile(join(root, "package.json"), "utf8")).toBe('{"name":"app"}');
+  });
+
+  it("hands the approver a unified diff of the file on disk against exactly the bytes written", async () => {
+    const { root } = await rootWithOutside();
+    const before = emptyManifest({ name: "Before", slug: "x" });
+    const onDisk = JSON.stringify(before, null, 2) + "\n";
+    await writeFile(join(root, "m.json"), onDisk);
+    const approver = new RecordingApprover(true);
+    const tools = buildToolCatalog({ allowFileWrite: true, approver, fileRootDir: root });
+    const after = emptyManifest({ name: "After", slug: "x" });
+    await executeToolCall(tools, {
+      id: "x",
+      name: "propose_manifest_edit",
+      input: { path: "m.json", new_manifest_json: JSON.stringify(after) },
+    });
+    const diff = approver.requests[0]?.unifiedDiff ?? [];
+    expect(diff.slice(0, 2)).toEqual(["--- a/m.json", "+++ b/m.json"]);
+    expect(diff).toContain('-    "name": "Before",');
+    expect(diff).toContain('+    "name": "After",');
+    const written = await readFile(join(root, "m.json"), "utf8");
+    expect(written).toBe(JSON.stringify(after, null, 2) + "\n");
+  });
+
+  it("a new file's diff is against /dev/null", async () => {
+    const { root } = await rootWithOutside();
+    const approver = new RecordingApprover(false);
+    const tools = buildToolCatalog({ allowFileWrite: true, approver, fileRootDir: root });
+    await executeToolCall(tools, {
+      id: "x",
+      name: "propose_manifest_edit",
+      input: { path: "sub/new.json", new_manifest_json: JSON.stringify(emptyManifest({ name: "N", slug: "n" })) },
+    });
+    const diff = approver.requests[0]?.unifiedDiff ?? [];
+    expect(diff[0]).toBe("--- /dev/null");
+    expect(diff[1]).toBe(`+++ b/${join("sub", "new.json")}`);
+    expect(diff.slice(3).every((l) => l.startsWith("+"))).toBe(true);
+  });
+
+  it("does not write when the file changed while the approval prompt was open", async () => {
+    const { root } = await rootWithOutside();
+    await writeFile(join(root, "m.json"), JSON.stringify(emptyManifest({ name: "A", slug: "x" }), null, 2));
+    const edited = JSON.stringify(emptyManifest({ name: "Edited in the editor", slug: "x" }), null, 2);
+    const approver: WriteApprover = {
+      async approve() {
+        await writeFile(join(root, "m.json"), edited);
+        return true;
+      },
+    };
+    const tools = buildToolCatalog({ allowFileWrite: true, approver, fileRootDir: root });
+    const result = await executeToolCall(tools, {
+      id: "x",
+      name: "propose_manifest_edit",
+      input: { path: "m.json", new_manifest_json: JSON.stringify(emptyManifest({ name: "B", slug: "x" })) },
+    });
+    expect(JSON.parse(result.output)).toMatchObject({ applied: false, reason: "file_changed_since_approval" });
+    expect(await readFile(join(root, "m.json"), "utf8")).toBe(edited);
+  });
+
+  it("describes the review it actually gets: a diff for a person, or none under auto-approval", async () => {
+    const root = await tempDir();
+    const descriptionFor = (approver: WriteApprover): string =>
+      buildToolCatalog({ allowFileWrite: true, approver, fileRootDir: root }).find(
+        (t) => t.name === "propose_manifest_edit",
+      )!.description;
+    expect(descriptionFor({ showsDiffToPerson: true, approve: async () => true })).toContain("A person is shown a unified diff");
+    expect(descriptionFor(autoApprover())).toContain("without showing them to a person");
+    expect(descriptionFor(autoApprover())).not.toContain("is shown");
+    expect(descriptionFor(new RecordingApprover(true))).toContain("without showing them to a person");
+    const read = buildToolCatalog({ allowFileRead: true, fileRootDir: root }).find((t) => t.name === "read_file")!;
+    // The model needs only relative paths; the absolute root names the OS account to the vendor.
+    expect(read.description).not.toContain(root);
+    expect(descriptionFor(autoApprover())).not.toContain(root);
+    expect(read.description).toContain("returned to this conversation");
+  });
+
+  it("refuses everything when the root is the filesystem root", async () => {
+    const tools = buildToolCatalog({ allowFileRead: true, fileRootDir: "/" });
+    expect(await errorOf(tools, "read_file", { path: "etc/hosts.md" })).toContain("refused (outside_root)");
   });
 });

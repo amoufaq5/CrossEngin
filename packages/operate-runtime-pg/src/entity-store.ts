@@ -4,16 +4,28 @@ import {
   type AssociationCounter,
   type AssociationReader,
   type AssociationWriter,
+  type ConditionalRemove,
   type ConditionalUpdate,
   type EntityRecord,
   type EntityStore,
   type ListPage,
   type ListQuery,
+  type RowLock,
   type TransactionalEntityStore,
   type UpdatePrecondition,
 } from "@crossengin/operate-runtime";
 
-import { createOp, getOp, listOp, listPageOp, removeOp, updateIfOp, updateOp } from "./entity-ops.js";
+import {
+  createOp,
+  getLockedOp,
+  getOp,
+  listOp,
+  listPageOp,
+  removeIfOp,
+  removeOp,
+  updateIfOp,
+  updateOp,
+} from "./entity-ops.js";
 import {
   ensureDocumentUniqueIndexes,
   planDocumentIntegrity,
@@ -114,6 +126,16 @@ class TxEntityStore implements EntityStore {
     this.assertTenant(tenantId);
     return removeOp(this.tx, this.table, tenantId, entity, id, this.integrity);
   }
+
+  removeIf(tenantId: string, entity: string, id: string, expected: UpdatePrecondition): Promise<ConditionalRemove> {
+    this.assertTenant(tenantId);
+    return removeIfOp(this.tx, this.table, tenantId, entity, id, expected, this.integrity);
+  }
+
+  getLocked(tenantId: string, entity: string, id: string, lock: RowLock): Promise<EntityRecord | null> {
+    this.assertTenant(tenantId);
+    return getLockedOp(this.tx, this.table, tenantId, entity, id, lock);
+  }
 }
 
 /**
@@ -205,6 +227,17 @@ export class PostgresEntityStore
     return withTenantContext(this.conn, tenantId, (tx) =>
       removeOp(tx, this.table, tenantId, entity, id, this.integrity),
     );
+  }
+
+  removeIf(tenantId: string, entity: string, id: string, expected: UpdatePrecondition): Promise<ConditionalRemove> {
+    return withTenantContext(this.conn, tenantId, (tx) =>
+      removeIfOp(tx, this.table, tenantId, entity, id, expected, this.integrity),
+    );
+  }
+
+  /** Outside `withTransaction` the lock ends with this call's own transaction. */
+  getLocked(tenantId: string, entity: string, id: string, lock: RowLock): Promise<EntityRecord | null> {
+    return withTenantContext(this.conn, tenantId, (tx) => getLockedOp(tx, this.table, tenantId, entity, id, lock));
   }
 
   /** Runs `fn` in one tenant-scoped transaction; every op on the supplied store shares it. */

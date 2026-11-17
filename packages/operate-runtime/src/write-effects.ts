@@ -1,7 +1,10 @@
 import { parseDecimal } from "./decimal.js";
 import { drainList, ReadCeilingExceeded } from "./list-drain.js";
+import { postingPeriodFor, PostingRefused, type PostingPeriodConfig } from "./posting-period.js";
+import { determineDocumentTax, type DocumentTaxDetermination, type TaxDeterminationConfig } from "./tax-determination.js";
 import type { EntityRecord } from "./store.js";
 import {
+  amountOwed,
   readAppliedPayments,
   readAppliedToDocument,
   settlementIsCovered,
@@ -48,6 +51,8 @@ export interface JournalReversalConfig {
    * correct one.
    */
   readonly maxLines?: number;
+  /** The fiscal calendar a posting's period is resolved from; absent, no period is resolved. */
+  readonly periods?: PostingPeriodConfig;
   readonly clock?: { now(): Date };
 }
 
@@ -84,7 +89,7 @@ const DEFAULTS = {
  * `auditable` trait is not given a column it does not have.
  */
 const ACTOR_FIELDS = ["created_by", "updated_by"] as const;
-function attributedToTrigger(source: EntityRecord): EntityRecord {
+export function attributedToTrigger(source: EntityRecord): EntityRecord {
   if (!Object.prototype.hasOwnProperty.call(source, "updated_by")) return {};
   const actor = source["updated_by"] ?? null;
   return { created_by: actor, updated_by: actor };
@@ -118,6 +123,186 @@ function swapAmount(a: unknown, b: unknown): boolean {
 }
 
 /**
+ * Creates a posted journal entry an effect writes, with its fiscal period resolved from its own
+ * `entry_date` and the lock enforced — the one door every effect's posting goes through.
+ *
+ * Effects write through the store and so pass no guard, which is how every system posting used to
+ * land in a closed period: the handler's lock read only an entry that named its period, and no
+ * effect named one. `periodOverride` is the single exception, for the revaluation a period's own
+ * close posts into that period: the close is the act the lock exists for, so it cannot refuse it.
+ * `null` there means the caller already resolved the period through `postingPeriodFor` — the lock
+ * enforced — and found none, which is how an effect resolves before its first write.
+ */
+export async function createPostedEntry(
+  input: WriteEffectInput,
+  entryEntity: string,
+  header: EntityRecord,
+  periods: PostingPeriodConfig | undefined,
+  periodOverride?: string | null,
+): Promise<EntityRecord> {
+  const record: EntityRecord = { ...header };
+  if (periodOverride !== undefined) {
+    if (periodOverride !== null) record["fiscal_period_id"] = periodOverride;
+  } else {
+    const date = typeof header["entry_date"] === "string" ? (header["entry_date"] as string) : "";
+    const periodId = date === "" ? null : await postingPeriodFor(input.store, input.tenantId, date, periods);
+    if (periodId !== null) record["fiscal_period_id"] = periodId;
+  }
+  return input.store.create(input.tenantId, entryEntity, record);
+}
+
+/** The one posted entry carrying `number`, or null; two is an integrity fault and refuses. */
+async function findEntryByNumber(
+  input: WriteEffectInput,
+  entryEntity: string,
+  number: string,
+): Promise<EntityRecord | null> {
+  const found: EntityRecord[] = [];
+  const outcome = await drainList(
+    input.store,
+    input.tenantId,
+    entryEntity,
+    { sort: [], filters: [{ field: "entry_number", op: "eq", value: number }] },
+    { ceiling: 10 },
+    (rows) => {
+      for (const r of rows) if (r["entry_number"] === number) found.push(r);
+    },
+  );
+  if (!outcome.complete || found.length > 1) {
+    throw new PostingRefused(
+      409,
+      "posting_ambiguous",
+      "more than one journal entry carries the number of the posting this write reverses, so which one to reverse is not established",
+    );
+  }
+  return found[0] ?? null;
+}
+
+interface EntryLineShape {
+  readonly lineEntity: string;
+  readonly lineEntryRefField: string;
+  readonly maxLines: number;
+}
+
+/** Every line of one entry, read in full or refused — a reversal of a prefix balances and is wrong. */
+async function readEntryLines(
+  input: WriteEffectInput,
+  entryId: string,
+  c: EntryLineShape,
+): Promise<EntityRecord[]> {
+  const lines: EntityRecord[] = [];
+  const outcome = await drainList(
+    input.store,
+    input.tenantId,
+    c.lineEntity,
+    { sort: [], filters: [{ field: c.lineEntryRefField, op: "eq", value: entryId }] },
+    { ceiling: c.maxLines },
+    (rows) => {
+      for (const line of rows) if (String(line[c.lineEntryRefField] ?? "") === entryId) lines.push(line);
+    },
+  );
+  if (!outcome.complete) throw new ReadCeilingExceeded(c.lineEntity, c.maxLines, "a journal entry's reversal");
+  return lines;
+}
+
+const LINE_COPY_SKIP = new Set<string>([
+  "id",
+  "created_at",
+  "updated_at",
+  ...["created_by", "updated_by"],
+  "journal_entry_id",
+  "debit",
+  "credit",
+  "functional_debit",
+  "functional_credit",
+  "description",
+]);
+
+/** A line's amounts in integer cents, both pairs. */
+function lineCents(line: EntityRecord): { d: bigint; c: bigint; fd: bigint; fc: bigint } {
+  const cents = (v: unknown): bigint => BigInt(Math.round(num(v) * 100));
+  return { d: cents(line["debit"]), c: cents(line["credit"]), fd: cents(line["functional_debit"]), fc: cents(line["functional_credit"]) };
+}
+
+/** `cents × num / den`, rounded half away from zero, exact for any magnitude a ledger holds. */
+function scaleCents(cents: bigint, numerator: bigint, denominator: bigint): bigint {
+  if (denominator === 0n) return 0n;
+  return (cents * numerator * 2n + denominator) / (2n * denominator);
+}
+
+/**
+ * The mirror of a posted entry's lines — debit and credit swapped on both amount pairs, every other
+ * dimension (account, currency, rate, cost centre) kept — optionally scaled to a part of the whole.
+ *
+ * Scaled, each amount is `round(amount × part / whole)` in exact integer cents, and the two sides
+ * are then set to `part` exactly: the rounding residual of each side goes to the largest line on it. A
+ * scaled reversal therefore balances under ADR-0422's exact rule and sums to the part asked for,
+ * which a per-line rounding alone does not guarantee. The functional pair follows the transaction
+ * pair line for line when the source carried them equal (every posting this module writes), and is
+ * otherwise scaled and balanced on the credit anchor.
+ */
+function mirrorLines(
+  source: readonly EntityRecord[],
+  part: { readonly cents: bigint; readonly whole: bigint } | null,
+  describe: (description: string) => string,
+  stamp: EntityRecord,
+): EntityRecord[] {
+  const shaped = source.map((line) => {
+    const amounts = lineCents(line);
+    // Reversed: what was credited is now debited.
+    let d = amounts.c;
+    let c = amounts.d;
+    let fd = amounts.fc;
+    let fc = amounts.fd;
+    if (part !== null) {
+      d = scaleCents(d, part.cents, part.whole);
+      c = scaleCents(c, part.cents, part.whole);
+      fd = scaleCents(fd, part.cents, part.whole);
+      fc = scaleCents(fc, part.cents, part.whole);
+    }
+    return { line, d, c, fd, fc, equalPairs: amounts.d === amounts.fd && amounts.c === amounts.fc };
+  });
+  const pick = (side: "d" | "c"): number => {
+    let best = -1;
+    shaped.forEach((s, i) => {
+      if (s[side] > 0n && (best === -1 || s[side] > shaped[best]![side])) best = i;
+    });
+    return best;
+  };
+  const debitAnchor = pick("d");
+  const creditAnchor = pick("c");
+  if (part !== null) {
+    const sum = (side: "d" | "c"): bigint => shaped.reduce((a, s) => a + s[side], 0n);
+    if (debitAnchor !== -1) shaped[debitAnchor]!.d += part.cents - sum("d");
+    if (creditAnchor !== -1) shaped[creditAnchor]!.c += part.cents - sum("c");
+  }
+  const allEqual = shaped.every((s) => s.equalPairs);
+  if (allEqual) {
+    for (const s of shaped) {
+      s.fd = s.d;
+      s.fc = s.c;
+    }
+  } else if (part !== null && creditAnchor !== -1) {
+    const fd = shaped.reduce((a, s) => a + s.fd, 0n);
+    const fc = shaped.reduce((a, s) => a + s.fc, 0n);
+    shaped[creditAnchor]!.fc += fd - fc;
+  }
+  const money = (cents: bigint): number => Number(cents) / 100;
+  const kept = part === null ? shaped : shaped.filter((s) => s.d !== 0n || s.c !== 0n || s.fd !== 0n || s.fc !== 0n);
+  return kept.map((s) => {
+    const out: EntityRecord = {};
+    for (const [k, v] of Object.entries(s.line)) if (!LINE_COPY_SKIP.has(k)) out[k] = v;
+    out["debit"] = money(s.d);
+    out["credit"] = money(s.c);
+    out["functional_debit"] = money(s.fd);
+    out["functional_credit"] = money(s.fc);
+    const desc = typeof s.line["description"] === "string" ? (s.line["description"] as string) : "";
+    out["description"] = describe(desc);
+    return { ...out, ...stamp };
+  });
+}
+
+/**
  * On the posted→reversed edge of a journal entry, auto-creates the mirror
  * reversing entry: a new posted entry (same book/period, dated today, numbered
  * `<original>-REV`) whose lines negate the original by swapping debit↔credit (and
@@ -125,6 +310,143 @@ function swapAmount(a: unknown, b: unknown): boolean {
  * records are written directly through the store, so they bypass the handler's
  * guards/effects (no recursion) and are balanced by construction.
  */
+interface ReverseEntryOptions extends EntryLineShape {
+  readonly entryEntity: string;
+  readonly stateField: string;
+  readonly postedState: string;
+  readonly reversedState: string;
+  /** The entry to reverse, already found and known posted. */
+  readonly source: EntityRecord;
+  readonly number: string;
+  readonly sourceLabel: string;
+  readonly memo: string;
+  /** Reverse only this part of the source, in cents of its debit total; null reverses it whole. */
+  readonly partCents: bigint | null;
+  readonly periods: PostingPeriodConfig | undefined;
+  readonly nowIso: string;
+  readonly actor: EntityRecord;
+}
+
+/**
+ * Posts the reversal of one of this module's own posted entries, dated today in today's period, and
+ * marks the source `reversed` when it was reversed whole.
+ *
+ * Marking it is what keeps a later manual `reverse` of the same entry from reversing it a second
+ * time: the journal lifecycle moves only `posted → reversed`, so a reversed source can no longer be
+ * reached by the transition. A part-reversal leaves it `posted`, because the rest of it still
+ * stands. Read in full before anything is written, so a ceiling refusal writes nothing.
+ */
+async function reverseEntry(input: WriteEffectInput, o: ReverseEntryOptions): Promise<void> {
+  const sourceId = String(o.source["id"]);
+  const lines = await readEntryLines(input, sourceId, o);
+  const debitCents = lines.reduce((a, l) => a + lineCents(l).d, 0n);
+  const part = o.partCents === null || o.partCents >= debitCents ? null : { cents: o.partCents, whole: debitCents };
+  const mirrored = mirrorLines(lines, part, (d) => `Reversal: ${d}`.trim(), {
+    created_at: o.nowIso,
+    updated_at: o.nowIso,
+    ...o.actor,
+  });
+  const header: EntityRecord = {
+    entry_number: o.number,
+    entry_date: o.nowIso.slice(0, 10),
+    source: o.sourceLabel,
+    [o.stateField]: o.postedState,
+    memo: o.memo,
+    posted_at: o.nowIso,
+    created_at: o.nowIso,
+    updated_at: o.nowIso,
+    ...o.actor,
+  };
+  if (typeof o.source["book_id"] === "string") header["book_id"] = o.source["book_id"];
+  const created = await createPostedEntry(input, o.entryEntity, header, o.periods);
+  const newId = String(created["id"]);
+  for (const line of mirrored) {
+    await input.store.create(input.tenantId, o.lineEntity, { ...line, [o.lineEntryRefField]: newId });
+  }
+  if (part === null) {
+    await input.store.update(input.tenantId, o.entryEntity, sourceId, {
+      [o.stateField]: o.reversedState,
+      updated_at: o.nowIso,
+    });
+  }
+}
+
+export interface PostingReversalConfig {
+  /** The document whose own posting is reversed (e.g. "Bill", "Payment"). */
+  readonly entity: string;
+  readonly stateField?: string;
+  /** The states the document must leave — the ones in which its posting stands. */
+  readonly fromStates: readonly string[];
+  readonly toState: string;
+  readonly numberField: string;
+  /** Suffix of the entry the document's posting effect wrote, e.g. "-GL" or "-SETTLE". */
+  readonly sourceSuffix: string;
+  /** Suffix of the reversing entry, e.g. "-VOID" or "-REFUND". */
+  readonly reversalSuffix: string;
+  /** `JournalEntry.source` of the reversing entry. */
+  readonly sourceLabel: string;
+  readonly entryEntity?: string;
+  readonly lineEntity?: string;
+  readonly periods?: PostingPeriodConfig;
+  readonly maxLines?: number;
+  readonly clock?: { now(): Date };
+}
+
+/**
+ * When a document leaves the state its posting stands in — a Bill voided after approval, a Payment
+ * refunded after completion — posts the reversal of the entry its own posting effect wrote.
+ *
+ * Measured before this existed, on the shipped pack: a Bill of 200 approved and then voided left
+ * `AP −200 / expense 200` in the GL with the Bill reading `void`, and a Payment of 50 completed and
+ * then refunded left the receivable cleared with the Payment reading `refunded`. Both documents had
+ * been locked from the state that posted them so that a plain write could not change what the GL
+ * held — and the transition out of that state changed it anyway, because nothing undid the posting.
+ *
+ * The entry is found by the number its posting effect gave it, which is the one key both effects
+ * agree on and is declared `unique`. No entry, or one already `reversed`, posts nothing: a Bill
+ * voided before it was approved never posted, and reversing a posting twice is what the lifecycle
+ * exists to prevent. A prior-state trigger and not `entersState`, for `journalReversalEffect`'s
+ * reason: a document created already `void` was never in the state that posted.
+ */
+export function postingReversalEffect(config: PostingReversalConfig): WriteEffect {
+  const c = {
+    stateField: "state",
+    entryEntity: DEFAULTS.entryEntity,
+    lineEntity: DEFAULTS.lineEntity,
+    maxLines: DEFAULTS.maxLines,
+    ...config,
+  };
+  return async (input) => {
+    if (input.entity !== c.entity) return;
+    if (input.operation !== "update" && input.operation !== "transition") return;
+    const before = input.before?.[c.stateField];
+    if (typeof before !== "string" || !c.fromStates.includes(before)) return;
+    if (input.after[c.stateField] !== c.toState) return;
+    const docId = input.id;
+    if (docId === null) return;
+    const docNumber = typeof input.after[c.numberField] === "string" ? (input.after[c.numberField] as string) : docId;
+    const source = await findEntryByNumber(input, c.entryEntity, `${docNumber}${c.sourceSuffix}`);
+    if (source === null || source[DEFAULTS.stateField] !== DEFAULTS.postedState) return;
+    await reverseEntry(input, {
+      entryEntity: c.entryEntity,
+      lineEntity: c.lineEntity,
+      lineEntryRefField: DEFAULTS.lineEntryRefField,
+      maxLines: c.maxLines,
+      stateField: DEFAULTS.stateField,
+      postedState: DEFAULTS.postedState,
+      reversedState: DEFAULTS.reversedState,
+      source,
+      number: `${docNumber}${c.reversalSuffix}`,
+      sourceLabel: c.sourceLabel,
+      memo: `Reversal of ${docNumber}${c.sourceSuffix} (${c.toState})`,
+      partCents: null,
+      periods: c.periods,
+      nowIso: (c.clock?.now() ?? new Date()).toISOString(),
+      actor: attributedToTrigger(input.after),
+    });
+  };
+}
+
 export function journalReversalEffect(config: JournalReversalConfig = {}): WriteEffect {
   const c = { ...DEFAULTS, ...config };
   return async (input) => {
@@ -158,9 +480,10 @@ export function journalReversalEffect(config: JournalReversalConfig = {}): Write
       updated_at: nowIso,
       ...attributedToTrigger(original),
     };
-    for (const carry of ["book_id", "fiscal_period_id"]) {
-      if (typeof original[carry] === "string") reversalEntry[carry] = original[carry];
-    }
+    // The book carries; the period does not. A reversal is dated today, so it belongs to today's
+    // period — copying the original's put an entry dated June into a period that ended in March, and
+    // into a closed one with nothing checking, since nothing checked an effect's posting at all.
+    if (typeof original["book_id"] === "string") reversalEntry["book_id"] = original["book_id"];
 
     const skip = new Set<string>([
       "id",
@@ -222,7 +545,7 @@ export function journalReversalEffect(config: JournalReversalConfig = {}): Write
       throw new ReadCeilingExceeded(c.lineEntity, c.maxLines, "a journal reversal");
     }
 
-    const created = await input.store.create(input.tenantId, c.entryEntity, reversalEntry);
+    const created = await createPostedEntry(input, c.entryEntity, reversalEntry, config.periods);
     const newId = String(created["id"]);
     for (const reversed of reversals) {
       reversed[c.lineEntryRefField] = newId;
@@ -255,6 +578,8 @@ export interface InvoiceCreditNoteConfig {
   readonly totalField?: string;
   readonly subtotalField?: string;
   readonly taxTotalField?: string;
+  /** Tax withheld at source, scaled onto a partial credit note in proportion. */
+  readonly withholdingField?: string;
   readonly linePositionField?: string;
   readonly lineQuantityField?: string;
   readonly lineUnitPriceField?: string;
@@ -368,10 +693,25 @@ export function invoiceVoidCreditNoteEffect(config: InvoiceCreditNoteConfig = {}
     const requested = optionalNum(original[c.creditAmountField]);
     const isPartial = requested !== null && requested > 0 && requested < total;
     const amount = isPartial ? requested : total;
+    // A partial credit carries the original's tax in proportion, rather than none: a credit of 55
+    // against a 100 + 10 VAT invoice credits 50 of revenue and 5 of tax. Writing the whole amount as
+    // net with zero tax told the customer their VAT was unchanged, while the GL — which reverses
+    // the recognition entry in the same proportion — reduced it. Scaled in exact integer cents,
+    // `creditNoteGlPostingEffect`'s own arithmetic, so the document and its posting agree.
+    let partialSubtotal = amount;
     if (isPartial) {
+      const totalCents = BigInt(Math.round(total * 100));
+      const partCents = BigInt(Math.round(amount * 100));
+      const scaled = (v: unknown): number =>
+        Number(scaleCents(BigInt(Math.round(num(v) * 100)), partCents, totalCents)) / 100;
+      const originalSubtotal = optionalNum(original[c.subtotalField]);
+      partialSubtotal = originalSubtotal === null ? amount : scaled(originalSubtotal);
       creditNote[c.totalField] = amount;
-      creditNote[c.subtotalField] = amount;
-      creditNote[c.taxTotalField] = 0;
+      creditNote[c.subtotalField] = partialSubtotal;
+      creditNote[c.taxTotalField] = Math.round((amount - partialSubtotal) * 100) / 100;
+      if (config.withholdingField !== undefined && optionalNum(original[config.withholdingField]) !== null) {
+        creditNote[config.withholdingField] = scaled(original[config.withholdingField]);
+      }
       creditNote[c.notesField] = `Partial credit note for ${origNumber}`;
     } else {
       creditNote[c.notesField] = `Credit note for ${origNumber}`;
@@ -404,9 +744,9 @@ export function invoiceVoidCreditNoteEffect(config: InvoiceCreditNoteConfig = {}
         [c.linePositionField]: 1,
         [c.descriptionField]: "Partial credit",
         [c.lineQuantityField]: 1,
-        [c.lineUnitPriceField]: amount,
+        [c.lineUnitPriceField]: partialSubtotal,
         [c.lineTaxRateField]: 0,
-        [c.lineTotalField]: amount,
+        [c.lineTotalField]: partialSubtotal,
         created_at: nowIso,
         updated_at: nowIso,
         ...attributedToTrigger(original),
@@ -485,6 +825,14 @@ export interface CreditNoteGlConfig {
   /** Fallback placeholder account references when no code is configured/found. */
   readonly arAccountRef?: string;
   readonly revenueAccountRef?: string;
+  /**
+   * Suffix of the invoice's recognition entry (e.g. "-AR"). When set, the credit note posts the
+   * mirror of that entry — every line, tax and withholding included — instead of the two-line
+   * revenue/AR pair; when the invoice has no posted recognition entry, it posts nothing.
+   */
+  readonly recognitionEntrySuffix?: string;
+  readonly periods?: PostingPeriodConfig;
+  readonly maxLines?: number;
   readonly clock?: { now(): Date };
 }
 
@@ -549,21 +897,56 @@ export function creditNoteGlPostingEffect(config: CreditNoteGlConfig = {}): Writ
     const origNumber = typeof original[c.numberField] === "string" ? (original[c.numberField] as string) : originalId;
     const currency = typeof original[c.currencyField] === "string" ? (original[c.currencyField] as string) : "USD";
 
+    // The credit reverses what recognition posted, line for line: revenue, each tax code's line,
+    // withholding and the control account, in the proportion credited. The two-line pair below
+    // reversed only revenue and AR, for the gross amount — so measured on the shipped pack a VAT 10%
+    // invoice of 100 + 10, sent and voided, left revenue over-reversed by 10 and tax payable never
+    // reversed at all: `{AR 0, revenue +10, tax_payable −10}`, an entry that balanced. Mirroring the
+    // posted entry reuses recognition's own split rather than re-deriving it, so the two cannot
+    // disagree about a rate, a code's account or a rounding.
+    if (config.recognitionEntrySuffix !== undefined) {
+      const recognition = await findEntryByNumber(input, c.entryEntity, `${origNumber}${config.recognitionEntrySuffix}`);
+      if (recognition === null || recognition[DEFAULTS.stateField] !== DEFAULTS.postedState) return;
+      await reverseEntry(input, {
+        entryEntity: c.entryEntity,
+        lineEntity: c.lineEntity,
+        lineEntryRefField: DEFAULTS.lineEntryRefField,
+        maxLines: config.maxLines ?? DEFAULTS.maxLines,
+        stateField: DEFAULTS.stateField,
+        postedState: DEFAULTS.postedState,
+        reversedState: DEFAULTS.reversedState,
+        source: recognition,
+        number: `${origNumber}-CN-GL`,
+        sourceLabel: "invoice",
+        memo: `Credit note GL posting for ${origNumber}`,
+        partCents: amount < total ? BigInt(Math.round(amount * 100)) : null,
+        periods: config.periods,
+        nowIso,
+        actor: attributedToTrigger(original),
+      });
+      return;
+    }
+
     // Resolve configured account codes to real LedgerAccount ids; fall back to placeholders.
     const codes = config.resolveAccountCodes ? await config.resolveAccountCodes(input.tenantId) : {};
     const arAccount = (await resolveAccountId(input, c, codes.ar)) ?? c.arAccountRef;
     const revenueAccount = (await resolveAccountId(input, c, codes.revenue)) ?? c.revenueAccountRef;
 
-    const entry = await input.store.create(input.tenantId, c.entryEntity, {
-      entry_number: `${origNumber}-CN-GL`,
-      entry_date: today,
-      source: "system",
-      state: "posted",
-      memo: `Credit note GL posting for ${origNumber}`,
-      posted_at: nowIso,
-      created_at: nowIso,
-      updated_at: nowIso,
-    });
+    const entry = await createPostedEntry(
+      input,
+      c.entryEntity,
+      {
+        entry_number: `${origNumber}-CN-GL`,
+        entry_date: today,
+        source: "system",
+        state: "posted",
+        memo: `Credit note GL posting for ${origNumber}`,
+        posted_at: nowIso,
+        created_at: nowIso,
+        updated_at: nowIso,
+      },
+      config.periods,
+    );
     const entryId = String(entry["id"]);
     const baseLine = { journal_entry_id: entryId, currency, fx_rate: 1, created_at: nowIso, updated_at: nowIso };
     // Reverse the sale: debit revenue, credit AR — balanced by construction.
@@ -599,7 +982,7 @@ export function creditNoteGlPostingEffect(config: CreditNoteGlConfig = {}): Writ
  * `sort: []` returns an arbitrary one of them. Null makes the caller fall back to its configured
  * placeholder ref, which is a wrong-but-named account rather than a wrong-and-unnamed one.
  */
-async function resolveAccountId(
+export async function resolveAccountId(
   input: WriteEffectInput,
   c: { ledgerAccountEntity: string; accountCodeField: string },
   code: string | undefined,
@@ -631,6 +1014,7 @@ function glLine(
 
 export interface RecognitionGlConfig {
   readonly entity: string;
+  readonly periods?: PostingPeriodConfig;
   readonly entryEntity?: string;
   readonly lineEntity?: string;
   readonly stateField?: string;
@@ -691,6 +1075,12 @@ export interface RecognitionTaxLinesConfig {
   readonly codeKindField?: string;
   readonly withholdingKind?: string;
   /**
+   * When set, each line's code and rate are determined from the tenant's declared jurisdiction and
+   * its `TaxRule`s on the document's date (`tax-determination.ts`), and a document whose total does
+   * not reconcile with the determined tax is refused instead of falling back to one untaxed line.
+   */
+  readonly determination?: TaxDeterminationConfig;
+  /**
    * The largest line set the tax breakdown reads **in full**. Reaching it is reported rather than
    * silently truncated, and the reconciliation gate below is not a substitute for that: it covers
    * `netTotal + taxTotal` and **not** `withholdingTotal`, so a dropped tail that nets to ~0 passes
@@ -727,6 +1117,11 @@ export interface TaxBreakdown {
   readonly taxTotal: number;
   /** Sum of withholding tax — a contra to the control account, NOT part of the total. */
   readonly withholdingTotal: number;
+  /**
+   * Sum of self-assessed (reverse-charge) tax — outside the total and outside the control account,
+   * posted as a balancing pair. Zero unless a jurisdiction's rule marks a purchase reverse charge.
+   */
+  readonly selfAssessedTotal: number;
   /** One entry per distinct tax label with non-zero tax, in first-seen order. */
   readonly groups: readonly {
     readonly label: string;
@@ -734,6 +1129,7 @@ export interface TaxBreakdown {
     readonly accountCode: string | null;
     readonly jurisdiction: string | null;
     readonly withholding: boolean;
+    readonly selfAssessed: boolean;
   }[];
 }
 
@@ -788,6 +1184,7 @@ export function computeLineTaxBreakdown(
       readonly accountCode?: string | null;
       readonly jurisdiction?: string | null;
       readonly withholding?: boolean;
+      readonly selfAssessed?: boolean;
     }
   >,
 ): TaxBreakdown {
@@ -797,6 +1194,7 @@ export function computeLineTaxBreakdown(
   const accountByLabel = new Map<string, string | null>();
   const jurisdictionByLabel = new Map<string, string | null>();
   const withholdingByLabel = new Map<string, boolean>();
+  const selfAssessedByLabel = new Map<string, boolean>();
   for (const line of lines) {
     const netCents = Math.round(line.net * 100);
     netTotalCents += netCents;
@@ -805,6 +1203,7 @@ export function computeLineTaxBreakdown(
     let accountCode: string | null = null;
     let jurisdiction: string | null = null;
     let withholding = false;
+    let selfAssessed = false;
     if (line.taxCodeId !== null && rateByCode.has(line.taxCodeId)) {
       const resolved = rateByCode.get(line.taxCodeId)!;
       rate = resolved.rate;
@@ -812,27 +1211,35 @@ export function computeLineTaxBreakdown(
       accountCode = resolved.accountCode ?? null;
       jurisdiction = resolved.jurisdiction ?? null;
       withholding = resolved.withholding ?? false;
+      selfAssessed = resolved.selfAssessed ?? false;
     } else if (line.flatRatePct !== null) {
       rate = line.flatRatePct;
     }
     if (rate <= 0) continue;
     const taxCents = lineTaxCents(netCents, rate);
     if (taxCents <= 0) continue;
-    const key = label !== null && label.length > 0 ? label : `${rate}%`;
+    // A self-assessed code keys its own group, so it never shares a label's total with the same code
+    // charged normally on another document line.
+    const base = label !== null && label.length > 0 ? label : `${rate}%`;
+    const key = selfAssessed ? `${base} (reverse charge)` : base;
     if (!taxCentsByLabel.has(key)) {
       order.push(key);
       accountByLabel.set(key, accountCode);
       jurisdictionByLabel.set(key, jurisdiction);
       withholdingByLabel.set(key, withholding);
+      selfAssessedByLabel.set(key, selfAssessed);
     }
     taxCentsByLabel.set(key, (taxCentsByLabel.get(key) ?? 0) + taxCents);
   }
   let taxTotalCents = 0;
   let withholdingTotalCents = 0;
+  let selfAssessedTotalCents = 0;
   const groups = order.map((label) => {
     const taxCents = taxCentsByLabel.get(label) ?? 0;
     const withholding = withholdingByLabel.get(label) ?? false;
-    if (withholding) withholdingTotalCents += taxCents;
+    const selfAssessed = selfAssessedByLabel.get(label) ?? false;
+    if (selfAssessed) selfAssessedTotalCents += taxCents;
+    else if (withholding) withholdingTotalCents += taxCents;
     else taxTotalCents += taxCents;
     return {
       label,
@@ -840,12 +1247,14 @@ export function computeLineTaxBreakdown(
       accountCode: accountByLabel.get(label) ?? null,
       jurisdiction: jurisdictionByLabel.get(label) ?? null,
       withholding,
+      selfAssessed,
     };
   });
   return {
     netTotal: netTotalCents / 100,
     taxTotal: taxTotalCents / 100,
     withholdingTotal: withholdingTotalCents / 100,
+    selfAssessedTotal: selfAssessedTotalCents / 100,
     groups,
   };
 }
@@ -903,6 +1312,7 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
     // so they reduce the control line rather than adding an opposite-side tax line.
     let taxGroups: TaxBreakdown["groups"] | null = null;
     let withholdingTotal = 0;
+    let determination: DocumentTaxDetermination = { kind: "off" };
     if (config.taxLines !== undefined) {
       const tc = { ...TAX_LINES_FALLBACKS, ...config.taxLines };
       // One pass collects the breakdown's own input and the distinct TaxCode ids it needs
@@ -934,11 +1344,32 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
       if (!outcome.complete) {
         throw new ReadCeilingExceeded(tc.entity, tc.maxRows, "a document's tax breakdown");
       }
+      if (tc.determination !== undefined && breakdownLines.length > 0) {
+        determination = await determineDocumentTax({
+          store: input.store,
+          tenantId: input.tenantId,
+          document: doc,
+          lines: breakdownLines,
+          config: tc.determination,
+          today: (c.clock?.now() ?? new Date()).toISOString().slice(0, 10),
+        });
+        if (determination.kind === "determined") {
+          breakdownLines.splice(0, breakdownLines.length, ...determination.lines);
+          for (const line of determination.lines) if (line.taxCodeId !== null) codeIds.add(line.taxCodeId);
+        }
+      }
       if (breakdownLines.length > 0) {
         // Resolve each distinct TaxCode once.
         const rateByCode = new Map<
           string,
-          { rate: number; label: string; accountCode: string | null; jurisdiction: string | null; withholding: boolean }
+          {
+            rate: number;
+            label: string;
+            accountCode: string | null;
+            jurisdiction: string | null;
+            withholding: boolean;
+            selfAssessed: boolean;
+          }
         >();
         for (const id of codeIds) {
           const code = await input.store.get(input.tenantId, tc.codeEntity, id);
@@ -946,12 +1377,16 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
             const label = typeof code[tc.codeLabelField] === "string" ? (code[tc.codeLabelField] as string) : id;
             const acct = code[tc.codeAccountField];
             const juris = code[tc.codeJurisdictionField];
+            // A determined rate is the jurisdiction's rule in force on the document's date, which is
+            // the dated statement; the code's own rate is used only when nothing was determined.
+            const determined = determination.kind === "determined" ? determination.rates.get(id) : undefined;
             rateByCode.set(id, {
-              rate: num(code[tc.codeRateField]),
+              rate: determined !== undefined ? determined.rate : num(code[tc.codeRateField]),
               label,
               accountCode: typeof acct === "string" && acct.length > 0 ? acct : null,
               jurisdiction: typeof juris === "string" && juris.length > 0 ? juris : null,
               withholding: code[tc.codeKindField] === tc.withholdingKind,
+              selfAssessed: determined?.selfAssessed ?? false,
             });
           }
         }
@@ -963,6 +1398,27 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
           tax = breakdown.taxTotal;
           withholdingTotal = breakdown.withholdingTotal;
           taxGroups = breakdown.groups;
+          // Before anything is written: a self-assessed pair credited to the same account it debits
+          // would post nothing a reader could see, so a config that names no liability account for it
+          // refuses here rather than after the entry exists.
+          if (breakdown.selfAssessedTotal > 0 && tc.determination?.selfAssessedAccountRef === undefined) {
+            throw new PostingRefused(
+              409,
+              "tax_reverse_charge_unposted",
+              `a ${c.entity} line carries reverse-charge tax and this posting has no account to self-assess it to`,
+            );
+          }
+        } else if (determination.kind === "determined") {
+          // Without a jurisdiction the document total is authoritative and a split that does not
+          // reconcile degrades to one untaxed net line. With one, the platform has determined the
+          // tax, and posting that line would put a figure in the GL it knows is not the document's.
+          throw new PostingRefused(
+            422,
+            "tax_total_disagrees",
+            `the document total ${total.toFixed(2)} is not its lines' net ${breakdown.netTotal.toFixed(2)} plus the ` +
+              `tax ${breakdown.taxTotal.toFixed(2)} determined for jurisdiction '${determination.jurisdictionCode}' ` +
+              `on ${determination.date}; correct the total or the lines' tax codes`,
+          );
         }
       }
     }
@@ -977,7 +1433,7 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
     const netAccount = (await resolveAccountId(input, c, codes.net)) ?? c.netAccountRef;
     const taxAccount = (await resolveAccountId(input, c, codes.tax)) ?? c.taxAccountRef;
 
-    const entry = await input.store.create(input.tenantId, c.entryEntity, {
+    const entry = await createPostedEntry(input, c.entryEntity, {
       entry_number: `${docNumber}${c.entrySuffix}`,
       entry_date: today,
       source: c.sourceValue,
@@ -986,7 +1442,7 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
       posted_at: nowIso,
       created_at: nowIso,
       updated_at: nowIso,
-    });
+    }, config.periods);
     const base = { journal_entry_id: String(entry["id"]), currency, fx_rate: 1, created_at: nowIso, updated_at: nowIso };
     // Withholding is deducted from the control account (the customer pays / vendor is paid
     // less), so the control line is the total net of withholding; the withheld amount goes
@@ -1011,11 +1467,36 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
         acctCache.set(code, resolved);
         return resolved;
       };
+      const determinationConfig = config.taxLines?.determination;
+      let selfAssessedAccount: string | null = null;
       for (const group of taxGroups) {
         if (group.tax <= EPSILON) continue;
         const accountCode =
           group.accountCode ?? (group.jurisdiction !== null ? jurisdictionAccounts[group.jurisdiction] : undefined);
         const account = accountCode !== undefined && accountCode.length > 0 ? await resolveCode(accountCode) : taxAccount;
+        if (group.selfAssessed) {
+          // Reverse charge: the buyer accounts for the tax the seller did not charge, as input tax on
+          // the expense side and an equal output-tax liability on the control side. The pair nets to
+          // zero, so the entry still balances on the document total.
+          if (selfAssessedAccount === null) {
+            const code = determinationConfig?.resolveSelfAssessedAccountCode
+              ? await determinationConfig.resolveSelfAssessedAccountCode(input.tenantId)
+              : undefined;
+            selfAssessedAccount =
+              (await resolveAccountId(input, c, code)) ?? determinationConfig?.selfAssessedAccountRef ?? taxAccount;
+          }
+          await input.store.create(
+            input.tenantId,
+            c.lineEntity,
+            glLine(base, account, `${c.taxDescription} (${group.label})`, opposite, group.tax),
+          );
+          await input.store.create(
+            input.tenantId,
+            c.lineEntity,
+            glLine(base, selfAssessedAccount, `Self-assessed tax payable (${group.label})`, c.controlSide, group.tax),
+          );
+          continue;
+        }
         const side: GlSide = group.withholding ? c.controlSide : opposite;
         const desc = group.withholding ? `Withholding (${group.label})` : `${c.taxDescription} (${group.label})`;
         await input.store.create(input.tenantId, c.lineEntity, glLine(base, account, desc, side, group.tax));
@@ -1037,6 +1518,7 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
 
 export interface PaymentSettlementGlConfig {
   readonly paymentEntity?: string;
+  readonly periods?: PostingPeriodConfig;
   readonly entryEntity?: string;
   readonly lineEntity?: string;
   readonly stateField?: string;
@@ -1129,7 +1611,7 @@ const SETTLEMENT_FALLBACKS = {
  * about a store that returned no id, not about the operation — `WriteGuardInput.id`'s "null on
  * create" is true of the *guard* input and not of the effect's.
  */
-function entersState(input: WriteEffectInput, stateField: string, state: string): boolean {
+export function entersState(input: WriteEffectInput, stateField: string, state: string): boolean {
   if (input.operation === "delete") return false;
   if (input.before?.[stateField] === state) return false;
   return input.after[stateField] === state;
@@ -1171,7 +1653,7 @@ export function paymentSettlementGlPostingEffect(config: PaymentSettlementGlConf
     const apAccount = (await resolveAccountId(input, c, codes.ap)) ?? c.apAccountRef;
     const fxAccount = (await resolveAccountId(input, c, codes.fx)) ?? c.fxAccountRef;
 
-    const entry = await input.store.create(input.tenantId, c.entryEntity, {
+    const entry = await createPostedEntry(input, c.entryEntity, {
       entry_number: `${payNumber}${c.entrySuffix}`,
       entry_date: today,
       source: "payment",
@@ -1180,7 +1662,7 @@ export function paymentSettlementGlPostingEffect(config: PaymentSettlementGlConf
       posted_at: nowIso,
       created_at: nowIso,
       updated_at: nowIso,
-    });
+    }, config.periods);
     const base = { journal_entry_id: String(entry["id"]), currency, fx_rate: 1, created_at: nowIso, updated_at: nowIso };
     const lines: Record<string, unknown>[] = [];
     const fxDiff = cashAmount - amount; // cash moved minus balance cleared
@@ -1224,6 +1706,14 @@ export interface PaymentApplicationConfig {
    * the applied total and settles a document that is still owed.
    */
   readonly maxPayments?: number;
+  /** Tax withheld at source; the payer owes the total less it (see `amountOwed`). */
+  readonly withholdingField?: string;
+  /**
+   * The payment state that undoes a payment (e.g. "refunded"). Entering it re-opens a document this
+   * effect settled when what remains applied no longer covers it, into `reopenState`.
+   */
+  readonly refundedState?: string;
+  readonly reopenState?: string;
   readonly clock?: { now(): Date };
 }
 
@@ -1255,6 +1745,12 @@ export function paymentApplicationEffect(config: PaymentApplicationConfig): Writ
   const c = { ...APPLICATION_FALLBACKS, ...config };
   return async (input) => {
     if (input.entity !== c.paymentEntity) return;
+    if (c.refundedState !== undefined && c.reopenState !== undefined) {
+      if (input.before?.[c.stateField] === c.completedState && input.after[c.stateField] === c.refundedState) {
+        await reopenUncovered(input, c, c.reopenState);
+        return;
+      }
+    }
     if (!entersState(input, c.stateField, c.completedState)) return;
 
     const docId = input.after[c.refField];
@@ -1266,7 +1762,7 @@ export function paymentApplicationEffect(config: PaymentApplicationConfig): Writ
     if (c.settleableStates !== undefined && (typeof docState !== "string" || !c.settleableStates.includes(docState))) {
       return;
     }
-    const total = num(doc[c.documentTotalField]);
+    const total = amountOwed(doc, c.documentTotalField, c.withholdingField);
     if (total <= 0) return;
 
     // Every completed payment, not the first page of them, and with no stop once the running total
@@ -1298,6 +1794,58 @@ export function paymentApplicationEffect(config: PaymentApplicationConfig): Writ
   };
 }
 
+/**
+ * A refund takes back a payment, so a document it settled may be owed again: re-opened into
+ * `reopenState` (with `paid_at` cleared) when the payments still completed against it no longer
+ * cover it. Measured before: a Payment of 50 settling an invoice of 50, then refunded, left the
+ * invoice `paid` while the refund reversal put the 50 back on the receivable — the GL owed, the
+ * document said settled, and the aging report dropped it. That is ADR-0391's divergence entered from
+ * the other side. A document another payment still covers stays settled; one never settled is left
+ * alone. A direct store write, as the settlement is, so the issued-document lock does not refuse it.
+ */
+async function reopenUncovered(
+  input: WriteEffectInput,
+  c: {
+    paymentEntity: string;
+    documentEntity: string;
+    refField: string;
+    stateField: string;
+    completedState: string;
+    amountField: string;
+    documentTotalField: string;
+    documentStateField: string;
+    paidState: string;
+    paidAtField: string;
+    maxPayments: number;
+    withholdingField?: string;
+    clock?: { now(): Date };
+  },
+  reopenState: string,
+): Promise<void> {
+  const docId = input.after[c.refField];
+  if (typeof docId !== "string" || docId.length === 0) return;
+  const doc = await input.store.get(input.tenantId, c.documentEntity, docId);
+  if (doc === null || doc[c.documentStateField] !== c.paidState) return;
+  const owed = amountOwed(doc, c.documentTotalField, c.withholdingField);
+  const read = await readAppliedToDocument(input.store, input.tenantId, c.refField, docId, {
+    paymentEntity: c.paymentEntity,
+    stateField: c.stateField,
+    completedState: c.completedState,
+    amountField: c.amountField,
+    ceiling: c.maxPayments,
+  });
+  if (!read.complete) {
+    throw new ReadCeilingExceeded(c.paymentEntity, c.maxPayments, "the amount applied to a document");
+  }
+  if (settlementIsCovered(owed, read.applied)) return;
+  const nowIso = (c.clock?.now() ?? new Date()).toISOString();
+  await input.store.update(input.tenantId, c.documentEntity, docId, {
+    [c.documentStateField]: reopenState,
+    [c.paidAtField]: null,
+    updated_at: nowIso,
+  });
+}
+
 /** One open foreign-currency document side (receivable or payable) for revaluation. */
 interface FxRevalDocSpec {
   readonly entity: string;
@@ -1305,6 +1853,12 @@ interface FxRevalDocSpec {
   readonly paymentRefField: string;
   /** "ar" → control is AR (asset); "ap" → control is AP (liability). */
   readonly side: "ar" | "ap";
+  /**
+   * Tax withheld at source on this document, never owed by the payer and so never open. Name it
+   * only where the field is a server stamp: a caller-written figure here would shrink an open
+   * balance by whatever the caller typed.
+   */
+  readonly withholdingField?: string;
 }
 
 export interface UnrealizedFxRevaluationConfig {
@@ -1351,6 +1905,8 @@ export interface UnrealizedFxRevaluationConfig {
    * construction**, so nothing downstream can see that the figure is wrong.
    */
   readonly maxRows?: number;
+  /** The fiscal calendar the auto-reversal's period is resolved from. */
+  readonly periods?: PostingPeriodConfig;
   readonly clock?: { now(): Date };
 }
 
@@ -1503,7 +2059,7 @@ export function unrealizedFxRevaluationEffect(config: UnrealizedFxRevaluationCon
             if (docId === "") continue;
             const currency = typeof record[c.currencyField] === "string" ? (record[c.currencyField] as string).toUpperCase() : functional;
             if (currency === functional) continue; // only foreign-currency documents are revalued
-            const total = num(record[c.totalField]);
+            const total = amountOwed(record, c.totalField, doc.withholdingField);
             const open = Math.round((total - (applied.get(docId) ?? 0)) * 100) / 100;
             if (open <= 0) continue; // fully paid → nothing to revalue
             // The rate the document was booked at; absent → 1 (matching the legacy approximation).
@@ -1559,24 +2115,166 @@ export function unrealizedFxRevaluationEffect(config: UnrealizedFxRevaluationCon
       lines.push(glLine(base, fxAccount, fxDesc, fxSide, amount));
     }
 
-    if (lines.length === 0) return; // nothing to revalue → no entry
+    // **Idempotent across a reopen and a re-close.** The period's own revaluation entries already
+    // posted are read back and only the difference is posted, so closing a period twice revalues it
+    // once. Measured before: close → open → close posted two `2026-06-FXREVAL` entries of 10 each,
+    // doubling the unrealized loss — and on `--store pg`, where `entry_number` is enforced unique,
+    // the second close was a 500 instead. A later revaluation is numbered `-FXREVAL2`, `-FXREVAL3`.
+    const prior = await readPriorRevaluations(input, c, periodId, periodLabel);
+    const net = new Map<string, { line: Record<string, unknown>; cents: bigint }>();
+    const keyOf = (l: Record<string, unknown>): string => `${String(l["ledger_account_id"])}|${String(l["currency"])}`;
+    for (const l of lines) {
+      const k = keyOf(l);
+      const cents = BigInt(Math.round((num(l["debit"]) - num(l["credit"])) * 100));
+      net.set(k, { line: l, cents: (net.get(k)?.cents ?? 0n) + cents });
+    }
+    for (const [k, p] of prior.byKey) {
+      const entry = net.get(k) ?? {
+        line: { ledger_account_id: p.account, currency: p.currency, fx_rate: p.fxRate, description: p.description },
+        cents: 0n,
+      };
+      net.set(k, { line: entry.line, cents: entry.cents - p.cents });
+    }
+    const posting: Record<string, unknown>[] = [];
+    for (const { line, cents } of net.values()) {
+      if (cents === 0n) continue;
+      const amount = Number(cents < 0n ? -cents : cents) / 100;
+      const side: GlSide = cents > 0n ? "debit" : "credit";
+      posting.push(glLine({ ...line, created_at: nowIso, updated_at: nowIso }, String(line["ledger_account_id"]), String(line["description"] ?? ""), side, amount));
+    }
+    if (posting.length === 0) return; // nothing to revalue, or already revalued as it stands
 
-    const entry = await input.store.create(input.tenantId, c.entryEntity, {
-      entry_number: `${periodLabel}-FXREVAL`,
-      entry_date: endDate,
-      source: "fx_revaluation",
-      state: "posted",
-      memo: `Unrealized FX revaluation for period ${periodLabel}`,
-      posted_at: nowIso,
-      fiscal_period_id: periodId,
-      created_at: nowIso,
-      updated_at: nowIso,
-    });
+    const number = `${periodLabel}-FXREVAL${prior.count === 0 ? "" : String(prior.count + 1)}`;
+    // The reversal's period is resolved — and a locked one refused — before anything is written, so
+    // "nothing was written" stays a property of this effect rather than a promise about the caller's
+    // store (ADR-0367): resolved after, a refusal left the revaluation itself behind on any store
+    // that does not roll the close back.
+    const reversalDate = addDays(endDate, 1);
+    const reversalPeriodId = await postingPeriodFor(input.store, input.tenantId, reversalDate, config.periods);
+    // Into the period being closed, which is `closed` by now: the close is the act the lock exists
+    // for, so it is the one posting that cannot be refused for it.
+    const entry = await createPostedEntry(
+      input,
+      c.entryEntity,
+      {
+        entry_number: number,
+        entry_date: endDate,
+        source: "fx_revaluation",
+        state: "posted",
+        memo: `Unrealized FX revaluation for period ${periodLabel}`,
+        posted_at: nowIso,
+        created_at: nowIso,
+        updated_at: nowIso,
+      },
+      undefined,
+      periodId,
+    );
     const entryId = String(entry["id"]);
-    for (const line of lines) {
+    for (const line of posting) {
       await input.store.create(input.tenantId, c.lineEntity, { ...line, journal_entry_id: entryId });
     }
+
+    // **And it reverses itself on the first day of the next period** — the standard treatment for
+    // an unrealized revaluation, and the reason it is not optional here: the next close revalues
+    // every open document from its *booking* rate again, so an unreversed entry is counted twice,
+    // once in each period. Dated the day after the period's end and checked against the lock like
+    // any posting (resolved above): a next period already closed refuses this close by name rather
+    // than posting a reversal into it.
+    const reversal = await createPostedEntry(
+      input,
+      c.entryEntity,
+      {
+        entry_number: `${number}R`,
+        entry_date: reversalDate,
+        source: "fx_revaluation",
+        state: "posted",
+        memo: `Reversal of the unrealized FX revaluation for period ${periodLabel}`,
+        posted_at: nowIso,
+        created_at: nowIso,
+        updated_at: nowIso,
+      },
+      undefined,
+      reversalPeriodId,
+    );
+    const reversalId = String(reversal["id"]);
+    const mirrored = mirrorLines(posting, null, (d) => `Reversal: ${d}`.trim(), { created_at: nowIso, updated_at: nowIso });
+    for (const line of mirrored) {
+      await input.store.create(input.tenantId, c.lineEntity, { ...line, journal_entry_id: reversalId });
+    }
   };
+}
+
+interface PriorRevaluation {
+  readonly account: string;
+  readonly currency: string;
+  readonly fxRate: unknown;
+  readonly description: string;
+  readonly cents: bigint;
+}
+
+function addDays(date: string, days: number): string {
+  const d = new Date(`${date.slice(0, 10)}T00:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * The revaluation entries a period already carries — `<label>-FXREVAL` and its numbered successors,
+ * never their `R` reversals, which sit in the next period — summed per (account, currency).
+ */
+async function readPriorRevaluations(
+  input: WriteEffectInput,
+  c: { entryEntity: string; lineEntity: string; maxRows: number },
+  periodId: string,
+  label: string,
+): Promise<{ count: number; byKey: Map<string, PriorRevaluation> }> {
+  const pattern = new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-FXREVAL(\\d*)$`);
+  const entries: EntityRecord[] = [];
+  const outcome = await drainList(
+    input.store,
+    input.tenantId,
+    c.entryEntity,
+    // `source` pushed down too: every posting is stamped with its period now, so a period-only
+    // filter drains the whole month's journal to find its one or two revaluations — and refuses the
+    // close once a busy tenant's month passes the ceiling.
+    {
+      sort: [],
+      filters: [
+        { field: "fiscal_period_id", op: "eq", value: periodId },
+        { field: "source", op: "eq", value: "fx_revaluation" },
+      ],
+    },
+    { ceiling: c.maxRows },
+    (rows) => {
+      for (const e of rows) {
+        if (e["fiscal_period_id"] === periodId && e["source"] === "fx_revaluation" && pattern.test(String(e["entry_number"] ?? ""))) {
+          entries.push(e);
+        }
+      }
+    },
+  );
+  if (!outcome.complete) throw new ReadCeilingExceeded(c.entryEntity, c.maxRows, "an unrealized FX revaluation");
+  const byKey = new Map<string, PriorRevaluation>();
+  for (const e of entries) {
+    const lines = await readEntryLines(
+      input,
+      String(e["id"]),
+      { lineEntity: c.lineEntity, lineEntryRefField: DEFAULTS.lineEntryRefField, maxLines: DEFAULTS.maxLines },
+    );
+    for (const l of lines) {
+      const k = `${String(l["ledger_account_id"])}|${String(l["currency"])}`;
+      const amounts = lineCents(l);
+      const was = byKey.get(k);
+      byKey.set(k, {
+        account: String(l["ledger_account_id"]),
+        currency: String(l["currency"]),
+        fxRate: l["fx_rate"] ?? 1,
+        description: typeof l["description"] === "string" ? (l["description"] as string) : "Unrealized FX revaluation",
+        cents: (was?.cents ?? 0n) + amounts.d - amounts.c,
+      });
+    }
+  }
+  return { count: entries.length, byKey };
 }
 
 export interface BookingRateStampConfig {
@@ -1740,6 +2438,7 @@ export interface WhtCertificateClearingConfig {
   readonly resolveAccountCodes?: (tenantId: string) => Promise<{ whtReceivable?: string; taxRecoverable?: string }>;
   readonly whtReceivableAccountRef?: string;
   readonly taxRecoverableAccountRef?: string;
+  readonly periods?: PostingPeriodConfig;
   readonly clock?: { now(): Date };
 }
 
@@ -1789,7 +2488,7 @@ export function whtCertificateClearingEffect(config: WhtCertificateClearingConfi
     const recoverableAccount = (await resolveAccountId(input, c, codes.taxRecoverable)) ?? c.taxRecoverableAccountRef;
     const whtAccount = (await resolveAccountId(input, c, codes.whtReceivable)) ?? c.whtReceivableAccountRef;
 
-    const entry = await input.store.create(input.tenantId, c.entryEntity, {
+    const entry = await createPostedEntry(input, c.entryEntity, {
       entry_number: `${certNumber}-WHT`,
       entry_date: today,
       source: "system",
@@ -1798,7 +2497,7 @@ export function whtCertificateClearingEffect(config: WhtCertificateClearingConfi
       posted_at: nowIso,
       created_at: nowIso,
       updated_at: nowIso,
-    });
+    }, config.periods);
     const base = { journal_entry_id: String(entry["id"]), currency, fx_rate: 1, created_at: nowIso, updated_at: nowIso };
     // Reclass the withheld tax: debit income-tax-recoverable, credit WHT-receivable.
     await input.store.create(input.tenantId, c.lineEntity, glLine(base, recoverableAccount, "WHT — income tax recoverable", "debit", amount));

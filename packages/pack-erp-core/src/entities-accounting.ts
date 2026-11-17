@@ -151,6 +151,10 @@ export const TAX_JURISDICTION_ENTITY: Entity = {
   indexes: [{ fields: ["country", "is_active"] }],
 };
 
+// Read by invoice and bill recognition when the tenant names a default jurisdiction: a rule in force
+// on the document's date sets its code's rate, and the one `standard` rule supplies an uncoded line's
+// code. `priority` declares precedence and not its direction, so it is not read — two rules in force
+// that disagree are refused rather than ranked.
 export const TAX_RULE_ENTITY: Entity = {
   name: "TaxRule",
   traits: [...AUDITABLE],

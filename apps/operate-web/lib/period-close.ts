@@ -1,4 +1,4 @@
-import { listRecords, updateRecord } from "@/lib/api";
+import { listRecords, runTransition } from "@/lib/api";
 
 // Entity slugs (naive pluralizer: <kebab> + "s").
 const PERIOD_SLUG = "fiscal-periods";
@@ -167,8 +167,9 @@ export async function fetchPeriods(): Promise<readonly FiscalPeriodRow[]> {
     .sort((a, b) => (b.startDate ?? "").localeCompare(a.startDate ?? ""));
 }
 
+// A period's status moves only by transition since it has a lifecycle; a PATCH of it is refused.
 export async function closePeriod(id: string): Promise<void> {
-  await updateRecord(PERIOD_SLUG, id, { status: "closed" });
+  await runTransition(PERIOD_SLUG, id, "close");
 }
 
 /**

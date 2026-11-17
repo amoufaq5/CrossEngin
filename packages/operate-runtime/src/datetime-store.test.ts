@@ -259,6 +259,8 @@ describe("withDatetimeWireType", () => {
       update: async () => null,
       updateIf: async () => ({ kind: "not_found" }),
       remove: async () => false,
+      removeIf: async () => ({ kind: "not_found" }),
+      getLocked: async () => null,
     };
     const store = withDatetimeWireType(plain, INDEX);
     expect((store as Partial<{ withTransaction: unknown }>).withTransaction).toBeUndefined();

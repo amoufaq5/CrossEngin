@@ -10,8 +10,11 @@ import {
   signEd25519,
 } from "@crossengin/crypto";
 import {
+  ChainCheckpointSchema,
   GENESIS_HASH,
   buildChainEntry,
+  signCheckpoint,
+  trustedChainKeys,
   verifyChainIntegrity,
   type ChainCheckpoint,
   type ChainedLogEntry,
@@ -30,6 +33,7 @@ import { anchorAuditDisproves, type AnchorAuditReport } from "./anchor-audit.js"
 import type { AuditAnchorReport, AuditAnchorResult } from "./audit-anchor.js";
 import {
   CHAIN_FULL_REASONS,
+  PinnedChainKeys,
   verifyChainFromCheckpoint,
   verifyChainFull,
   type ChainVerificationReport,
@@ -41,6 +45,7 @@ import {
   INTEGRITY_PASS_SKIP_REASONS,
   IntegrityProofScheduler,
   IntegrityProofConfigSchema,
+  periodicFullFoldSchedule,
   DEFAULT_INTEGRITY_PROOF_CONFIG,
   compromiseCauses,
   formatIntegrityProof,
@@ -934,6 +939,17 @@ describe("COMPROMISE_CAUSES", () => {
         disagreeing: [{ kind: "root_hash_mismatch", sequenceNumber: 4, matchedAt: null }],
       }),
     },
+    checkpoint_signature_invalid: {
+      anchorAudit: anchorAudit({
+        scanned: 1,
+        signatures: {
+          signed: 0,
+          unsigned: 0,
+          missigned: [{ kind: "bad_signature", sequenceNumber: 4 }],
+          missignedCount: 1,
+        },
+      }),
+    },
     audit_row_tampered: { anchors: anchors({ ok: false, tampered: [tamperedResult] }) },
     audit_row_refused: { anchors: anchors({ ok: false, unreadable: [refusedRow] }) },
     // The memory axis. Both fixtures leave every *other* axis clean, which is the whole point of
@@ -980,6 +996,7 @@ describe("COMPROMISE_CAUSES", () => {
       "chain_row_refused",
       "checkpoint_row_refused",
       "checkpoint_disagrees_with_chain",
+      "checkpoint_signature_invalid",
       "audit_row_tampered",
       "audit_row_refused",
       "witness_regressed",
@@ -1082,6 +1099,12 @@ describe("COMPROMISE_CAUSES", () => {
             refused: [refusedRow],
             refusedCount: 1,
             disagreeing: [{ kind: "root_hash_mismatch", sequenceNumber: 4, matchedAt: null }],
+            signatures: {
+              signed: 0,
+              unsigned: 0,
+              missigned: [{ kind: "untrusted_key", sequenceNumber: 5 }],
+              missignedCount: 1,
+            },
           }),
           anchors: anchors({ ok: false, tampered: [tamperedResult], unreadable: [refusedRow] }),
           ...EXHIBITS.witness_regressed,
@@ -2023,6 +2046,28 @@ describe("a chain row the contract refuses", () => {
     expect(proof.verdict).toBe("compromised");
   });
 
+  it("folds the whole chain on a periodic pass even where a bounded one was available (H-18)", async () => {
+    const entries = await signedChain(3);
+    const proof = await proveScopeIntegrity(TENANT_A, {
+      logStore: {
+        loadChain: async () => ({ entries, unreadable: [] }),
+        loadFrom: async () => {
+          throw new Error("a periodic pass must not take the bounded path");
+        },
+        tail: async () => ({ sequenceNumber: 2, entryHash: entries[2]!.entryHash }),
+      },
+      checkpoints: fakeCheckpoints({ records: [] }),
+      registry,
+      audit: { listAnchoredForScope: async () => ({ rows: [], unreadable: [] }) },
+      auditRowLimit: 10,
+      fromCheckpoint: true,
+      periodicFullFold: true,
+      now: () => new Date(AT),
+    } as unknown as Parameters<typeof proveScopeIntegrity>[1]);
+    expect(proof.chain.fullBecause).toBe("periodic");
+    expect(proof.chain.ok).toBe(true);
+  });
+
   it("propagates a failure of the anchor scan rather than calling it a finding", async () => {
     // Nothing is caught here. `scanCheckpoints` answering a refused row is the finding; a scan that
     // *throws* is a read that did not happen, and a verdict claiming otherwise would assert a
@@ -2454,6 +2499,55 @@ describe("proveScopeIntegrity reads the larger side of each comparison second", 
 
   const noAudit = { listAnchoredForScope: async () => ({ rows: [], unreadable: [] }) };
 
+  it("compares a prior verdict against the unfiltered witness, so an older replica's unsigned anchor is not an anchor lost (H-18)", async () => {
+    // A rolling upgrade: this replica signs its anchors, an older one beside it still writes them
+    // unsigned and records verdicts attesting the maximum over every row. Once a signed row exists
+    // the truncation check stops standing on unsigned rows — and comparing the older replica's
+    // attestation against that narrower figure read its own honest anchor at 8 as destroyed, a
+    // `witness_regressed` page on a sound chain.
+    const entries = await chainOf(9);
+    const anchorOf = (n: number): ChainCheckpoint =>
+      ChainCheckpointSchema.parse({
+        sequenceNumber: n,
+        rootHash: entries[n]!.entryHash,
+        checkpointedAt: AT,
+        checkpointedBy: "system:checkpoint",
+        provenance: "verified_full",
+      });
+    const signed = await signCheckpoint(TENANT_A, anchorOf(5), {
+      fingerprint: FP,
+      sign: async (bytes) => signEd25519(keypair.privateKeyBase64, keypair.publicKeyBase64, bytes),
+    });
+    const olderReplicas = anchorOf(8);
+    const verdictEntry = await append(entries, "the older replica's verdict");
+    const proof = await proveScopeIntegrity(TENANT_A, {
+      logStore: logStore(entries),
+      checkpoints: fakeCheckpoints({ records: [signed, olderReplicas] }),
+      registry: new PinnedChainKeys(trustedChainKeys([keypair.publicKeyBase64])),
+      audit: noAudit,
+      auditRowLimit: 500,
+      fromCheckpoint: false,
+      now: () => new Date(AT),
+      witnessMemory: async () => ({
+        kind: "attested" as const,
+        attested: {
+          witnessSequence: 8,
+          tailSequence: 8,
+          verifiedAt: AT,
+          payloadSha256: verdictEntry.payloadSha256,
+          chainEntryHash: verdictEntry.entryHash,
+          chainSequenceNumber: verdictEntry.sequenceNumber,
+        },
+      }),
+    } as unknown as Parameters<typeof proveScopeIntegrity>[1]);
+
+    // The truncation check still stands only on the signed row; the memory reads the wider figure.
+    expect(proof.anchorAudit.witnessSequence).toBe(5);
+    expect(proof.anchorAudit.readableWitnessSequence).toBe(8);
+    expect(proof.witnessMemory.outcome).toBe("consistent");
+    expect(proof.verdict).toBe("verified");
+  });
+
   it("reads a prior verdict before the chain, so a concurrent pass's verdict cannot contradict it", async () => {
     // The race ADR-0406's addendum measured across two replicas at 19 of 240. The other replica's
     // verdict lands between this pass's two reads: `record()` appends the chain entry and only then
@@ -2577,5 +2671,43 @@ describe("proveScopeIntegrity reads the larger side of each comparison second", 
     expect(proof.truncation.truncated).toBe(false);
     expect(compromiseCauses(proof as unknown as CompromiseEvidence)).not.toContain("chain_truncated");
     expect(proof.verdict).toBe("verified");
+  });
+});
+
+describe("periodicFullFoldSchedule (H-18)", () => {
+  it("folds fully on the first pass and every Nth after it, per scope", () => {
+    const due = periodicFullFoldSchedule(3);
+    expect([1, 2, 3, 4, 5, 6, 7].map(() => due(TENANT_A))).toEqual([
+      true, false, false, true, false, false, true,
+    ]);
+    // A scope joining late starts at its own first pass, not at the others' phase.
+    expect(due(null)).toBe(true);
+    expect(due(null)).toBe(false);
+  });
+
+  it("never folds fully at 0", () => {
+    const due = periodicFullFoldSchedule(0);
+    expect([1, 2, 3].map(() => due(TENANT_A))).toEqual([false, false, false]);
+  });
+
+  it("is the schedule the lifecycle actually asks, once per pass", async () => {
+    // A text fence because the lifecycle builds its own stores over a connection: the schedule's
+    // own tests pass whether or not anything consults it, and a lifecycle passing `false` (or
+    // dropping the field, which defaults to `false`) reverts every pass to bounded with no failure.
+    const source = await readFile(new URL("./integrity-proof.ts", import.meta.url), "utf8");
+    const start = source.indexOf("export function buildIntegrityProofLifecycle(");
+    expect(start).toBeGreaterThan(0);
+    const body = source
+      .slice(start)
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("//"))
+      .join("\n");
+    expect(body).toContain("periodicFullFoldSchedule(config.fullFoldEveryPasses)");
+    expect(body).toMatch(/\bperiodicFullFold: periodicFullFold\(scope\),/);
+  });
+
+  it("defaults to a day of hourly passes", () => {
+    expect(IntegrityProofConfigSchema.parse({}).fullFoldEveryPasses).toBe(24);
+    expect(() => IntegrityProofConfigSchema.parse({ fullFoldEveryPasses: -1 })).toThrow();
   });
 });

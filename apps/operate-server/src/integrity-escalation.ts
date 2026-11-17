@@ -244,6 +244,7 @@ export const COMPROMISE_CAUSE_PAYLOAD_KEY: Record<CompromiseCause, string> = {
   chain_row_refused: "unreadable.chainRows",
   checkpoint_row_refused: "unreadable.checkpointRows",
   checkpoint_disagrees_with_chain: "anchorDisagreements",
+  checkpoint_signature_invalid: "anchorSignatures",
   audit_row_tampered: "tampered",
   audit_row_refused: "unreadable.auditRows",
   // Both memory causes resolve to one key, which is the first time two causes share one and is
@@ -650,6 +651,18 @@ export class IntegrityEscalator {
             // `causes=[chain_truncated]` with `truncated: true`, so this row asserted that audit
             // history had been destroyed while every entry was present.
             anchorDisagreements: recordedDisagreements(report.anchorAudit),
+            // `null` when the pass held no pinned key and so did not ask — kept distinct from a
+            // clean count for ADR-0331's reason. Sequences and kinds only; a signature is opaque
+            // and an operator acts on the row, not on its bytes.
+            anchorSignatures:
+              report.anchorAudit.signatures === null
+                ? null
+                : {
+                    signed: report.anchorAudit.signatures.signed,
+                    unsigned: report.anchorAudit.signatures.unsigned,
+                    missignedCount: report.anchorAudit.signatures.missignedCount,
+                    missigned: report.anchorAudit.signatures.missigned,
+                  },
             // The fourth axis, and the only one that is not a reading of a table *now*. It carries
             // the outcome plus the two figures a prior verdict attested — which are the figures
             // this pass disagreed with, so the row says what changed rather than only that

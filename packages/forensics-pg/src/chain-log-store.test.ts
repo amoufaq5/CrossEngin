@@ -12,6 +12,8 @@ import {
   PostgresChainLogReader,
   PostgresChainLogStore,
   advisoryKeyFor,
+  foldSuffixWithContent,
+  foldWithContent,
   unreadableEntryVerdict,
 } from "./chain-log-store.js";
 import { PostgresChainCheckpointStore } from "./checkpoint-store.js";
@@ -754,5 +756,75 @@ describe("the platform write elevation", () => {
       return store.appendWithin(tx, input);
     });
     expect(entry.sequenceNumber).toBe(0);
+  });
+});
+
+/** Serves every full-chain read with the entry at `sequenceNumber` carrying a rewritten `entry_hash`. */
+function entryHashRewritingConn(inner: PgConnection, sequenceNumber: number): PgConnection {
+  const wrap = (c: PgConnection): PgConnection => ({
+    query: (async (sql: string, params?: readonly unknown[]) => {
+      const res = await c.query(sql, params);
+      if (!sql.includes("actor_reference")) return res;
+      const rows = res.rows.map((r) => {
+        const row = { ...r } as Record<string, unknown>;
+        return Number(row["sequence_number"]) === sequenceNumber
+          ? { ...row, entry_hash: "a".repeat(64) }
+          : row;
+      });
+      return { rows, rowCount: rows.length };
+    }) as PgConnection["query"],
+    transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) =>
+      inner.transaction((tx) => fn(wrap(tx)))) as PgConnection["transaction"],
+    withAdvisoryLock: c.withAdvisoryLock,
+    close: c.close,
+  });
+  return wrap(inner);
+}
+
+describe("the content-hash recompute", () => {
+  it("verify() catches a rewritten tail entry_hash that the link fold passes", async () => {
+    const keyStore = new InMemoryKeyStore();
+    const record = await keyStore.createKey({ tenantId: null, algorithm: "ed25519", purpose: "evidence_sealing" });
+    const signer = keyStoreChainSigner(keyStore, record, null);
+    const inner = fakeChainPg();
+    const writer = new PostgresChainLogStore(inner, signer);
+    for (let n = 0; n < 3; n += 1) await append(writer, TENANT_A, n);
+
+    const reader = new PostgresChainLogReader(entryHashRewritingConn(inner, 2));
+    const read = await reader.loadChain(TENANT_A);
+    // The defect, stated: the link fold has no later entry to disagree with the tail.
+    expect(verifyChainIntegrity(read.entries).valid).toBe(true);
+    expect(await reader.verify(TENANT_A)).toEqual({
+      valid: false,
+      brokenAt: 2,
+      reason: "entry hash does not match its content",
+    });
+  });
+
+  it("verifyFromCheckpoint recomputes the suffix it reads, too", async () => {
+    const keyStore = new InMemoryKeyStore();
+    const record = await keyStore.createKey({ tenantId: null, algorithm: "ed25519", purpose: "evidence_sealing" });
+    const signer = keyStoreChainSigner(keyStore, record, null);
+    const inner = fakeChainPg();
+    const writer = new PostgresChainLogStore(inner, signer);
+    await append(writer, TENANT_A, 0);
+    const cp = await writer.createCheckpoint(TENANT_A, { checkpointedBy: "a", checkpointedAt: AT, provenance: "verified_full" });
+    await append(writer, TENANT_A, 1);
+    await append(writer, TENANT_A, 2);
+    const reader = new PostgresChainLogReader(entryHashRewritingConn(inner, 2));
+    expect((await reader.verifyFromCheckpoint(TENANT_A, cp)).brokenAt).toBe(2);
+  });
+
+  it("foldWithContent and foldSuffixWithContent answer valid over a chain the store wrote", async () => {
+    const { store } = await newStore();
+    for (let n = 0; n < 3; n += 1) await append(store, TENANT_A, n);
+    const read = await store.loadChain(TENANT_A);
+    expect(foldWithContent(read.entries)).toEqual({ valid: true, brokenAt: null });
+    expect(
+      foldSuffixWithContent(read.entries.slice(1), {
+        fromSequence: 1,
+        priorRootHash: read.entries[0]!.entryHash,
+      }),
+    ).toEqual({ valid: true, brokenAt: null });
   });
 });

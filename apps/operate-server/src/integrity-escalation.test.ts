@@ -700,6 +700,18 @@ describe("IntegrityEscalator — every compromise cause has a key that explains 
         disagreeing: [{ kind: "sequence_relocated", sequenceNumber: 99, matchedAt: 4 }],
       }),
     },
+    checkpoint_signature_invalid: {
+      anchors: cleanAnchors(),
+      anchorAudit: anchorAudit({
+        scanned: 1,
+        signatures: {
+          signed: 0,
+          unsigned: 0,
+          missigned: [{ kind: "untrusted_key", sequenceNumber: 3 }],
+          missignedCount: 1,
+        },
+      }),
+    },
     audit_row_tampered: { anchors: cleanAnchors({ ok: false, tampered: [tamperedResult] }) },
     audit_row_refused: {
       anchors: cleanAnchors({

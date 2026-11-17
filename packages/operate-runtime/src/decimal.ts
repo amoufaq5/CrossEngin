@@ -203,6 +203,30 @@ export function addDecimal(a: ExactDecimal, b: ExactDecimal): ExactDecimal {
 /** Zero, at scale 0 — the identity for {@link addDecimal}. */
 export const DECIMAL_ZERO: ExactDecimal = { negative: false, units: 0n, scale: 0 };
 
+/** The exact product of two decimals, at the sum of their scales. */
+export function multiplyDecimal(a: ExactDecimal, b: ExactDecimal): ExactDecimal {
+  const units = a.units * b.units;
+  return { negative: units === 0n ? false : a.negative !== b.negative, units, scale: a.scale + b.scale };
+}
+
+/**
+ * Whether `value` is `exact` rounded down or up to `scale` — the two figures a `NUMERIC(_, scale)`
+ * column can hold for it. Both are admitted rather than only the half-away-from-zero one, because
+ * a preparer balancing a multi-line entry adjusts one line by the last unit so the entry's rounded
+ * legs sum to each other; refusing that line would refuse a balanced entry whose every figure is the
+ * product to the column's precision.
+ */
+export function withinOneUnitAtScale(value: ExactDecimal, exact: ExactDecimal, scale: number): boolean {
+  if (exact.scale <= scale) return compareDecimal(value, exact) === 0;
+  const divisor = 10n ** BigInt(exact.scale - scale);
+  const truncated = exact.units / divisor;
+  const inexact = exact.units % divisor !== 0n;
+  const candidates = inexact ? [truncated, truncated + 1n] : [truncated];
+  return candidates.some(
+    (units) => compareDecimal(value, { negative: units === 0n ? false : exact.negative, units, scale }) === 0,
+  );
+}
+
 /**
  * Exact comparison of two decimal numerals, or null when either side is not one. Used by the
  * in-memory store's sort: with decimals on the wire as strings, a `localeCompare` would order

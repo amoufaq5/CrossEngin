@@ -265,6 +265,21 @@ describe("verifyLogin", () => {
     expect(outcome).toMatchObject({ ok: false, refusal: "password_mismatch" });
   });
 
+  it("carries the counted attempt on a wrong password, and on no other refusal", async () => {
+    const mismatch = await run({ record: await activeRecord() }, "wrong");
+    expect(mismatch.ok).toBe(false);
+    if (!mismatch.ok) {
+      expect(mismatch.countedAttempt?.tenantId).toBe(TENANT);
+      expect(mismatch.countedAttempt?.failedAttempts).toBeGreaterThan(0);
+    }
+    const noMembership = await run({ record: await activeRecord(), roles: null });
+    expect(noMembership).toMatchObject({ ok: false, refusal: "no_active_membership" });
+    if (!noMembership.ok) expect(noMembership.countedAttempt).toBeUndefined();
+    const unknownUser = await run({ record: null });
+    expect(unknownUser).toMatchObject({ ok: false, refusal: "user_unknown" });
+    if (!unknownUser.ok) expect(unknownUser.countedAttempt).toBeUndefined();
+  });
+
   it("a null credential hash is NOT a pass", async () => {
     // Every existing row on every deployment is in this state, so an `if` that ended on the wrong
     // branch would log in every user with any password.
@@ -514,6 +529,7 @@ describe("buildAuthTokenInterceptor", () => {
       mint: () => minted,
       onSuccess: async () => undefined,
       admission: new LoginAdmission({ concurrency: 4, queue: 4, perAccount: 4, retryAfterSeconds: 1 }),
+      audit: null,
       ...over,
     });
   }
@@ -738,6 +754,102 @@ describe("buildAuthTokenInterceptor", () => {
     // The dispatch stage would otherwise echo up to 480 characters of this upstream.
     expect(text).not.toContain("db-host-1");
     expect(text).not.toContain("app_user");
+    expect(onError).toHaveBeenCalled();
+  });
+
+  it("records a success in the session's tenant BEFORE returning the token", async () => {
+    const order: string[] = [];
+    const succeeded = vi.fn(async () => {
+      order.push("audit");
+    });
+    const res = await interceptor({
+      audit: { succeeded, failed: vi.fn() },
+      onSuccess: async () => {
+        order.push("onSuccess");
+      },
+    })(req, body({ tenant: "acme", email: "a@b.test", password: "correct horse" }));
+    expect(res?.status).toBe(200);
+    expect(succeeded).toHaveBeenCalledWith({ userId: USER, tenantId: TENANT, roles: ["erp_admin"] });
+    expect(order).toEqual(["audit", "onSuccess"]);
+    expect(JSON.stringify(succeeded.mock.calls)).not.toContain("correct horse");
+  });
+
+  it("refuses the login with 503 and returns no token when the success cannot be recorded", async () => {
+    const onSuccess = vi.fn(async () => undefined);
+    const onError = vi.fn();
+    const res = await interceptor({
+      audit: {
+        succeeded: async () => {
+          throw new Error("audit_log unreachable");
+        },
+        failed: vi.fn(),
+      },
+      onSuccess,
+      onError,
+    })(req, body({ tenant: "acme", email: "a@b.test", password: "x" }));
+    expect(res?.status).toBe(503);
+    expect(JSON.stringify(parse(res as { body: Uint8Array | null }))).not.toContain(minted.token);
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalled();
+  });
+
+  it("records a counted wrong password AFTER answering, and never makes the answer differ", async () => {
+    const attempt = { tenantId: TENANT, failedAttempts: 3, lockedUntil: null };
+    const failed = vi.fn(async () => undefined);
+    const login = interceptor({
+      verify: async () => ({
+        ok: false,
+        refusal: "password_mismatch",
+        userId: USER,
+        detail: "password did not match (3 consecutive)",
+        countedAttempt: attempt,
+      }),
+      audit: { succeeded: vi.fn(), failed },
+    });
+    const res = await login(req, body({ tenant: "acme", email: "a@b.test", password: "nope" }));
+    // Not yet: the record is scheduled behind the response so it cannot slow it.
+    expect(failed).not.toHaveBeenCalled();
+    expect(res?.status).toBe(401);
+    await new Promise((r) => setImmediate(r));
+    expect(failed).toHaveBeenCalledWith({ userId: USER, attempt });
+    const unknown = await interceptor({
+      verify: async () => ({ ok: false, refusal: "user_unknown", userId: null, detail: "no user" }),
+    })(req, body({ tenant: "acme", email: "a@b.test", password: "nope" }));
+    expect(new TextDecoder().decode(res?.body ?? new Uint8Array())).toBe(
+      new TextDecoder().decode(unknown?.body ?? new Uint8Array()),
+    );
+  });
+
+  it("records no refusal that compared no password, and reports a failed record without changing the 401", async () => {
+    const failed = vi.fn(async () => undefined);
+    for (const refusal of ["user_unknown", "account_locked", "tenant_unknown"] as const) {
+      await interceptor({
+        verify: async () => ({ ok: false, refusal, userId: refusal === "account_locked" ? USER : null, detail: "d" }),
+        audit: { succeeded: vi.fn(), failed },
+      })(req, body({ tenant: "acme", email: "a@b.test", password: "nope" }));
+    }
+    await new Promise((r) => setImmediate(r));
+    expect(failed).not.toHaveBeenCalled();
+    const onError = vi.fn();
+    const res = await interceptor({
+      verify: async () => ({
+        ok: false,
+        refusal: "password_mismatch",
+        userId: USER,
+        detail: "d",
+        countedAttempt: { tenantId: TENANT, failedAttempts: 1, lockedUntil: null },
+      }),
+      audit: {
+        succeeded: vi.fn(),
+        failed: async () => {
+          throw new Error("platform write refused");
+        },
+      },
+      onError,
+    })(req, body({ tenant: "acme", email: "a@b.test", password: "nope" }));
+    expect(res?.status).toBe(401);
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
     expect(onError).toHaveBeenCalled();
   });
 

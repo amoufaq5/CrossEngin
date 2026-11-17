@@ -4,12 +4,14 @@ import {
   generateEd25519Keypair,
 } from "@crossengin/crypto";
 import { PostgresKeyRegistry } from "@crossengin/crypto-pg";
+import { trustedChainKeys } from "@crossengin/forensics";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 
 import {
   auditChainKeyRegistryRecord,
   deriveAuditChainKeyId,
   registerAuditChainKey,
+  untrustedRegisteredChainKeys,
 } from "./audit-chain-key-registration.js";
 
 const KEY_ID_REGEX = /^key_(hmac-sha256|ed25519)_[0-9A-HJKMNP-TV-Z]{26}$/;
@@ -213,5 +215,22 @@ describe("registerAuditChainKey", () => {
     expect(record.keyId).toBe(override);
     const byId = await registry.getByKeyId(override);
     expect(byId?.publicKeyBase64).toBe(publicKeyBase64);
+  });
+});
+
+describe("untrustedRegisteredChainKeys (H-18)", () => {
+  it("names the registered chain keys the pin does not hold, and only those", async () => {
+    const registry = new PostgresKeyRegistry(fakeCryptoKeysConn());
+    const current = generateEd25519Keypair();
+    const rotatedAway = generateEd25519Keypair();
+    await registerAuditChainKey(registry, current);
+    await registerAuditChainKey(registry, rotatedAway);
+    const pin = trustedChainKeys([current.publicKeyBase64]);
+    expect(await untrustedRegisteredChainKeys(registry, pin)).toEqual([
+      ed25519PublicKeyFingerprint(rotatedAway.publicKeyBase64),
+    ]);
+    // Declaring the rotated-away half is the remedy, and it clears the finding.
+    const both = trustedChainKeys([current.publicKeyBase64, rotatedAway.publicKeyBase64]);
+    expect(await untrustedRegisteredChainKeys(registry, both)).toEqual([]);
   });
 });

@@ -73,3 +73,27 @@ export async function registerAuditChainKey(
   await registry.register(record);
   return record;
 }
+
+/**
+ * Platform-registered chain keys the pinned trust set does not hold (H-18).
+ *
+ * The scheduled passes no longer trust the registry, so a key this deployment registered before a
+ * rotation — honest history — now reads `untrusted_key` on every entry it signed, which is a page.
+ * Said at boot with the fingerprints, because the remedy (add the public half to
+ * `AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS`) is one an operator can only take before the first pass.
+ * Reports and never refuses: a registered key is not evidence of a rotation, since any session
+ * able to claim the platform key-write grant could have registered it.
+ */
+export async function untrustedRegisteredChainKeys(
+  registry: PostgresKeyRegistry,
+  trusted: ReadonlyMap<string, string>,
+): Promise<readonly string[]> {
+  const read = await registry.listKeys({
+    tenantId: null,
+    algorithm: "ed25519",
+    purpose: "evidence_sealing",
+  });
+  return read.records
+    .map((r) => r.fingerprint)
+    .filter((f): f is string => f !== null && !trusted.has(f));
+}

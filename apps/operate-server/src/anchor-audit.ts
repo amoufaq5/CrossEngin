@@ -1,4 +1,8 @@
-import type { ChainCheckpoint, ChainedLogEntry } from "@crossengin/forensics";
+import {
+  checkpointSignatureStanding,
+  type ChainCheckpoint,
+  type ChainedLogEntry,
+} from "@crossengin/forensics";
 import type { PostgresChainCheckpointStore } from "@crossengin/forensics-pg";
 import type { RowRead, UnreadableRow } from "@crossengin/kernel-pg";
 
@@ -26,6 +30,20 @@ import type { RowRead, UnreadableRow } from "@crossengin/kernel-pg";
  */
 export const ANCHOR_DISAGREEMENT_KINDS = ["sequence_relocated", "root_hash_mismatch"] as const;
 export type AnchorDisagreementKind = (typeof ANCHOR_DISAGREEMENT_KINDS)[number];
+
+/**
+ * A readable checkpoint whose signature this deployment's chain key did not make (H-18).
+ *
+ * The writer signs every checkpoint it records, so `untrusted_key` (a key that is not the chain's)
+ * and `bad_signature` (the chain key's fingerprint over bytes that are not this row's) are rows the
+ * writer cannot have produced — evidence, and `compromised`. An **unsigned** row is not here: every
+ * checkpoint written before signing landed is one, and during a rolling upgrade an older replica
+ * still writes them, so it is counted on the report and pages nobody.
+ */
+export interface AnchorSignatureFinding {
+  readonly kind: "untrusted_key" | "bad_signature";
+  readonly sequenceNumber: number;
+}
 
 export interface AnchorDisagreement {
   readonly kind: AnchorDisagreementKind;
@@ -104,6 +122,33 @@ export interface AnchorAuditReport {
    * that wants the stronger one has the discriminator on the same report.
    */
   readonly witnessSequence: number | null;
+  /**
+   * The witness over every readable, uncontradicted row **signed or not** — `witnessSequence` as it
+   * was before signed rows narrowed it (H-18) — and the figure ADR-0399's memory compares.
+   *
+   * Two figures because the two consumers fail in opposite directions. The truncation check must
+   * not stand on an unsigned row, since raising one past the tail is the cheap forgery; the memory's
+   * `witness_regressed` must not stand on a *narrower* reading than the one it is compared against,
+   * and a verdict an older replica wrote during a rolling upgrade attested the unfiltered maximum —
+   * so comparing it against the signed-only figure read that replica's own unsigned anchor as an
+   * anchor lost, and paged. A raised unsigned row can only *raise* this figure, which makes the
+   * regression harder to trip and not easier, so it costs the memory nothing it detected before.
+   */
+  readonly readableWitnessSequence: number | null;
+  /**
+   * The signature axis, `null` exactly when no trusted key set was supplied — the question was not
+   * asked, which is the unpinned `verify-chain`'s state and is said on its line.
+   */
+  readonly signatures: AnchorSignatureAudit | null;
+}
+
+export interface AnchorSignatureAudit {
+  readonly signed: number;
+  /** Rows carrying no signature — legacy or an older replica's; reported, never a finding. */
+  readonly unsigned: number;
+  /** Capped at `MAX_REPORTED_ANCHOR_DISAGREEMENTS`; `missignedCount` is the whole figure. */
+  readonly missigned: readonly AnchorSignatureFinding[];
+  readonly missignedCount: number;
 }
 
 /**
@@ -208,6 +253,9 @@ export async function auditAnchors(
   scope: string | null,
   checkpoints: PostgresChainCheckpointStore,
   chain: readonly ChainedLogEntry[] | null,
+  // Required rather than optional, because an optional trust set defaulting to *not asked* would be
+  // the unpinned verifier restated as a default: the caller says which keys, or says `null`.
+  trustedKeys: ReadonlyMap<string, string> | null,
   opts: { readonly ceiling?: number; readonly pageSize?: number } = {},
 ): Promise<AnchorAuditReport> {
   const index = chain === null ? null : indexChain(chain);
@@ -220,12 +268,40 @@ export async function auditAnchors(
   const disagreements: AnchorDisagreement[] = [];
   let disagreementCount = 0;
   let witnessSequence: number | null = null;
+  // Two witnesses, and the published one is chosen once the scan has seen the whole table: once any
+  // row carries this deployment's signature, an **unsigned** row's sequence is no longer a fact this
+  // audit will stand behind — it is the one shape a writer without the key can still produce, so
+  // raising an unsigned row past the tail would otherwise manufacture the false `chain_truncated`
+  // ADR-0375 left open. Before the first signed row every anchor is legacy, and dropping them would
+  // read as every witness gone, which ADR-0399's memory grades `witness_regressed` on the upgrade.
+  let signedWitness: number | null = null;
+  let signed = 0;
+  let unsigned = 0;
+  const missigned: AnchorSignatureFinding[] = [];
+  let missignedCount = 0;
 
   const onPage = (page: RowRead<ChainCheckpoint>): void => {
     for (const row of page.unreadable) {
       if (refused.length < MAX_REPORTED_ANCHOR_REFUSALS) refused.push(row);
     }
     for (const checkpoint of page.records) {
+      let isSigned = false;
+      if (trustedKeys !== null) {
+        const standing = checkpointSignatureStanding(scope, checkpoint, trustedKeys);
+        if (standing === "unsigned") {
+          unsigned += 1;
+        } else if (standing === "signed") {
+          signed += 1;
+          isSigned = true;
+        } else {
+          // Never a witness: its sequence is whatever the writer of a forged row put there.
+          missignedCount += 1;
+          if (missigned.length < MAX_REPORTED_ANCHOR_DISAGREEMENTS) {
+            missigned.push({ kind: standing, sequenceNumber: checkpoint.sequenceNumber });
+          }
+          continue;
+        }
+      }
       if (index !== null) {
         const disagreement = disagreementFor(checkpoint, index);
         if (disagreement !== null) {
@@ -242,6 +318,9 @@ export async function auditAnchors(
       if (witnessSequence === null || checkpoint.sequenceNumber > witnessSequence) {
         witnessSequence = checkpoint.sequenceNumber;
       }
+      if (isSigned && (signedWitness === null || checkpoint.sequenceNumber > signedWitness)) {
+        signedWitness = checkpoint.sequenceNumber;
+      }
     }
   };
 
@@ -254,7 +333,10 @@ export async function auditAnchors(
     refusedCount: outcome.refusedCount,
     disagreeing: index === null ? null : disagreements,
     disagreeingCount: index === null ? null : disagreementCount,
-    witnessSequence,
+    witnessSequence: signed > 0 ? signedWitness : witnessSequence,
+    readableWitnessSequence: witnessSequence,
+    signatures:
+      trustedKeys === null ? null : { signed, unsigned, missigned, missignedCount },
   };
 }
 
@@ -273,7 +355,9 @@ export function anchorAuditDisproves(report: AnchorAuditReport): boolean {
   // and that is exactly why it has to be written the right way round now rather than when a cap of
   // zero, or a per-axis cap, makes the two disagree.
   return (
-    report.refusedCount > 0 || (report.disagreeingCount !== null && report.disagreeingCount > 0)
+    report.refusedCount > 0 ||
+    (report.disagreeingCount !== null && report.disagreeingCount > 0) ||
+    (report.signatures !== null && report.signatures.missignedCount > 0)
   );
 }
 
@@ -311,7 +395,8 @@ export function formatAnchorAudit(report: AnchorAuditReport): readonly string[] 
   // anchored **in** the chain, and two lines reading `anchors:` about two different tables is a
   // report an operator has to disambiguate before they can act on it.
   lines.push(
-    `checkpoints: ${report.scanned.toString()} row(s) scanned, ${coverage}, witness ${witness}`,
+    `checkpoints: ${report.scanned.toString()} row(s) scanned, ${coverage}, witness ${witness}` +
+      signatureClause(report.signatures),
   );
   if (report.refusedCount > 0) {
     lines.push(`  REFUSED: ${report.refusedCount.toString()} checkpoint row(s) the contract refuses`);
@@ -322,6 +407,7 @@ export function formatAnchorAudit(report: AnchorAuditReport): readonly string[] 
       lines.push(`    … and ${(report.refusedCount - report.refused.length).toString()} more`);
     }
   }
+  lines.push(...formatMissigned(report.signatures));
   if (report.disagreeing === null) {
     lines.push("  correspondence: not asked (no fully-readable chain in hand)");
     return lines;
@@ -335,6 +421,33 @@ export function formatAnchorAudit(report: AnchorAuditReport): readonly string[] 
   }
   if (disagreeingCount > report.disagreeing.length) {
     lines.push(`    … and ${(disagreeingCount - report.disagreeing.length).toString()} more`);
+  }
+  return lines;
+}
+
+/**
+ * The signature axis rides on the cover line when it has nothing to report, so a clean audit stays
+ * one line; only a mis-signed row earns lines of its own. The unpinned case is said rather than left
+ * silent, because silence there reads as *asked and clean*.
+ */
+function signatureClause(sig: AnchorSignatureAudit | null): string {
+  if (sig === null) return ", signatures not asked (unpinned)";
+  return (
+    `, ${sig.signed.toString()} signed by the chain key` +
+    (sig.unsigned > 0
+      ? `, ${sig.unsigned.toString()} unsigned (written before checkpoints were signed — not a finding)`
+      : "")
+  );
+}
+
+function formatMissigned(sig: AnchorSignatureAudit | null): readonly string[] {
+  if (sig === null || sig.missignedCount === 0) return [];
+  const lines = [`  NOT SIGNED BY THE CHAIN KEY: ${sig.missignedCount.toString()} checkpoint(s)`];
+  for (const f of sig.missigned) {
+    lines.push(`    checkpoint at ${f.sequenceNumber.toString()}: ${f.kind}`);
+  }
+  if (sig.missignedCount > sig.missigned.length) {
+    lines.push(`    … and ${(sig.missignedCount - sig.missigned.length).toString()} more`);
   }
   return lines;
 }

@@ -168,6 +168,36 @@ describe("PostgresEntityStore — CRUD round-trips", () => {
     ).rejects.toThrow(/cross-tenant/);
   });
 
+  it("removeIf deletes only while the precondition holds on the row it locked", async () => {
+    const { conn, calls } = fakePg();
+    const store = new PostgresEntityStore(conn);
+    await store.create(TENANT, "Product", { ...PRODUCT, state: "draft" });
+    const deletesBefore = calls.filter((sql) => sql.startsWith("DELETE")).length;
+    expect(await store.removeIf(TENANT, "Product", "prod-1", { state: "sent" })).toEqual({ kind: "precondition_failed" });
+    expect(calls.filter((sql) => sql.startsWith("DELETE")).length).toBe(deletesBefore);
+    expect(calls.some((sql) => sql.includes("SELECT document") && sql.includes("FOR UPDATE"))).toBe(true);
+    expect(await store.removeIf(TENANT, "Product", "prod-1", { state: "draft" })).toEqual({ kind: "removed" });
+    expect(await store.get(TENANT, "Product", "prod-1")).toBeNull();
+    expect(await store.removeIf(TENANT, "Product", "prod-1", {})).toEqual({ kind: "not_found" });
+  });
+
+  it("getLocked reads with FOR SHARE or FOR NO KEY UPDATE, and get with neither", async () => {
+    const { conn, calls } = fakePg();
+    const store = new PostgresEntityStore(conn);
+    await store.create(TENANT, "Product", PRODUCT);
+    calls.length = 0;
+    await store.get(TENANT, "Product", "prod-1");
+    expect(calls.some((sql) => /FOR (SHARE|NO KEY UPDATE|UPDATE)/.test(sql))).toBe(false);
+    const shared = await store.withTransaction(TENANT, (tx) => tx.getLocked(TENANT, "Product", "prod-1", "share"));
+    expect(shared).toMatchObject({ id: "prod-1" });
+    expect(calls.some((sql) => sql.includes("SELECT document") && sql.trimEnd().endsWith("FOR SHARE"))).toBe(true);
+    await store.withTransaction(TENANT, (tx) => tx.getLocked(TENANT, "Product", "prod-1", "exclusive"));
+    expect(calls.some((sql) => sql.includes("SELECT document") && sql.trimEnd().endsWith("FOR NO KEY UPDATE"))).toBe(true);
+    await expect(
+      store.withTransaction(TENANT, (tx) => tx.getLocked(OTHER_TENANT, "Product", "prod-1", "share")),
+    ).rejects.toThrow(/cross-tenant/);
+  });
+
   it("remove deletes and reports whether a row was removed", async () => {
     const { conn } = fakePg();
     const store = new PostgresEntityStore(conn);

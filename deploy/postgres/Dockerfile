@@ -15,7 +15,11 @@
 # control the server: a C function against a per-row SQL one, on a path every INSERT takes. So an
 # image built to install it and failing to is a build defect rather than a degraded runtime, and
 # postgres/init/00-extension.sql is right to let that abort initialisation.
-FROM postgres:16-bookworm
+#
+# Pinned to an exact minor, like every other image in deploy/: a rebuild next month is the image this
+# repository tested, and a minor upgrade is a line in a diff rather than a side effect of a rebuild.
+ARG POSTGRES_IMAGE=postgres:16.16-bookworm
+FROM ${POSTGRES_IMAGE}
 
 # From the PGDG apt repository, NOT the project's GitHub release, and the difference is
 # architectural. That release ships ONE prebuilt .so and it is x86_64 only (fboulnois/pg_uuidv7#24:
@@ -32,9 +36,15 @@ FROM postgres:16-bookworm
 # construction and there is no architecture named anywhere here.
 #
 # $PG_MAJOR and not a pinned extension version: the .so must match the server's major ABI, which
-# the package name carries, and that is the only axis on which this can be incompatible. The
-# version floats as `node:20-bookworm-slim` and `caddy:2` do elsewhere in deploy/.
+# the package name carries, and that is the only axis on which this can be incompatible.
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends "postgresql-${PG_MAJOR}-pg-uuidv7"; \
     rm -rf /var/lib/apt/lists/*
+
+# The `backup` service runs this image as `postgres` (so pg_dump matches the server's major exactly).
+# /backups is created here owned by that user because a named volume is initialised from the image's
+# directory on first mount, ownership included; without it the volume is root's and the service
+# cannot write. A bind-mounted BACKUP_DIR has to be owned by uid 999 instead (deploy/README.md).
+COPY backup/run-backups.sh /usr/local/bin/crossengin-backup
+RUN mkdir -p /backups && chown postgres:postgres /backups

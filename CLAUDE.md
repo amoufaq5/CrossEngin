@@ -15676,10 +15676,13 @@ findings are closed or narrowed as follows; the high, medium and low tiers follo
   index — **closed by ADR-0423** below; FiscalPeriod reopen-and-reclose re-posts the FX
   revaluation by decision; Expense posts nothing and is not locked.
 
-**The high tier: nine findings in seven slices are closed (ADR-0421 – ADR-0427)**, each verified
-live on PG 16 in compose order with the API connecting as the confined role. The rest of the tier —
-**H-13, C-05, H-14, H-15, H-16, H-18, H-23, H-26, H-27, H-28, H-29, H-33** — was not attempted and
-is still open as the audit states it.
+**The high tier: every finding but H-33 has an increment (ADR-0421 – ADR-0439).** Nine findings in
+seven slices landed first (ADR-0421 – ADR-0427); the remaining eleven landed in twelve slices
+(ADR-0428 – ADR-0439), each implemented, adversarially reviewed (every reviewer found and fixed real
+defects in its implementer's work) and verified live on PG 16 in compose order with the API
+connecting as the confined role. **H-33** (one author, no independent human review) is a process
+finding no code closes. Several slices close the audit's finding *partially by design* and say so in
+their ADR's open questions; the live findings that cut across slices are listed after the entries.
 
 - **H-08 + H-32, the write surface** (ADR-0421). A body key the entity does not declare is 422
   `field_not_declared` and a server-owned one (id, implicit columns, actor stamps, effect stamps,
@@ -15718,6 +15721,80 @@ is still open as the audit states it.
 - **H-06, sign-in** (ADR-0427). The attempt is reserved in one conditional `UPDATE` before
   verification (50 parallel wrong passwords: 2 × 401 + 48 × 429, failed attempts = 2), and
   `LoginAdmission` caps concurrent derivations below the libuv pool, answering 503/429 at once.
+- **C-05, the audit trail** (ADR-0428). Every successful entity create/update/delete/transition and
+  association link/unlink writes one anchored `meta.audit_log` row **in the write's own
+  transaction** (`ambient-transaction.ts` lets the recorder find it; a second connection would be
+  ADR-0422's deadlock), and a write whose row cannot be made is **503 `audit_unavailable`, rolled
+  back** — measured live with `INSERT` revoked. Sensitive-class values are stored as
+  `{"$redacted":"<class>"}`, because the table is retained after Article 17 and plaintext there would
+  undo ADR-0338. Logins are recorded (a success fails closed; a counted failure and the locking
+  attempt are written after the 401, not awaited, so timing does not enumerate emails). L8 is closed
+  for writes only. Open: **405 of `erp-core`'s 426 own fields are unclassified, so their values
+  outlive an erasure in `before`/`after`** (a product decision), effect writes to *other* records
+  are unrecorded, link/unlink are not atomic, and one tenant's writes serialize on the chain lock.
+- **H-13, accounting reversals** (ADR-0429). Credit notes post their tax, voids and refunds reverse
+  what was posted, an effect posting into a closed period is refused `period_locked` (with a fix for
+  the year-end adjustment period the first draft regressed), and FX revaluation auto-reverses on the
+  first day of the next period so a reopen-reclose no longer doubles it. Open, measured: an API-created
+  credit note posts nothing (GL AR 110 vs aging 55), voiding a partly paid bill leaves AP in debit,
+  FX revaluation lines break *functional = amount × fx_rate*, and foreign-currency recognition still
+  writes `fx_rate` 1.
+- **H-16, job handlers** (ADR-0430). `system-writer.ts` is the guarded seam: a job writes through the
+  same guards and effects as an HTTP request, as a `system` actor, audited with the job origin. Five
+  real `erp-core` handlers (overdue, reorder, depreciation, sales-order→invoice, one event job); the
+  other nine are declined by name, and producers enqueue only served jobs (148 pending rows per tenant
+  per day → 3). **Live, two cross-slice defects**: on the confined `crossengin_app` role **the job
+  worker claims nothing** — ADR-0389's cross-tenant claim residual, now hit on the default role, and
+  the boot line's remedy (grant `BYPASSRLS`) would undo ADR-0424; and sales-order→invoice fails 422
+  on any tenant without `finance.defaultPaymentTermsDays`, which nothing reports. Latent: the compose
+  passes no producer flag. A period-locked depreciation run leaves its draft entry behind.
+- **H-14, inventory** (ADR-0431). Stock moves only through an immutable `StockMovement`; a receipt
+  posts inventory/GRNI/price variance, a shipment posts COGS and refuses insufficient stock, and a
+  bill is three-way matched (an unlinked line that a receipt credited is refused — the reviewer's
+  fix for goods counted twice). Payroll and bank reconciliation are out of scope; pre-existing stock
+  has no opening inventory balance (open).
+- **H-15, tax and numbering** (ADR-0432). `TaxRule`/`TaxJurisdiction` decide the rate in force, a
+  header total that disagrees with the determination is 422, and a guard or id-conflict refusal no
+  longer spends a sequence number. A **store** refusal (dangling reference) still burns one, live.
+  E-invoicing stays out of scope and is said so.
+- **H-10/H-12/H-32 residuals** (ADR-0433). `removeIf` and a parent row lock: delete racing send never
+  both succeed (20/20), and a line racing post never leaves a posted unbalanced entry. `FiscalPeriod`
+  has a lifecycle (PATCH reopen is 422), segregation of duties refuses the last editor and any line
+  author, and `WhtCertificate`'s PATCH-driven state is raced-safe (it double-posted). **Open, live:
+  deleting the other person's line and then approving bypasses segregation of duties.**
+- **H-27, per-tenant routing** (ADR-0434). A bearer session is routed by its **verified** token's
+  tenant, so a browser session reaches its tenant's activated manifest (before: the boot manifest),
+  an unverified bearer is 401 and builds no gateway, a bearer wins over an api-key as the gateway
+  parses them, and a refused re-activation keeps serving the last applied manifest. Open: retention
+  is per process (a restart answers 503 `tenant_schema_stranded`), and the restart's
+  `[tenant-schema]` line still claims the JSONB fallback beside that 503.
+- **H-28, design review** (ADR-0435). The reviewer sees field-level change detail and a diff on a
+  first activation (against the deployment manifest), both sides compared at one composition level,
+  and `designer_cannot_approve` refuses self-approval unless `--allow-design-self-approval`.
+- **H-29, CLI file tools** (ADR-0436). `read_file`/`propose_manifest_edit` are confined to
+  `--file-root` (symlink escapes, hidden and secret-bearing files refused, `O_NOFOLLOW`, size cap),
+  and a write is approved over its unified diff. The reviewer replaced a quadratic secret scan
+  (38.9 s on 450 KB).
+- **H-18, chain verification** (ADR-0437). Verification recomputes each entry's hash from its
+  content, pins the deployment's chain key so a tenant-registered key reads `untrusted_key`,
+  checkpoints are signed (a two-column raise reads `bad_signature` instead of a false TRUNCATED), and
+  the proof re-folds in full periodically. Open: a below-anchor edit waits for the periodic full fold,
+  and `deploy/` documents neither `AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS` nor `--integrity-proof-full-every`.
+- **H-23, migrations** (ADR-0438). `lock_timeout` with bounded retries, `CREATE INDEX CONCURRENTLY`
+  on populated tables, a read-only `--plan` that takes no lock (a reader waited 6.03 s → 0.038 s),
+  strict CLI flags (`--paln` is exit 2), and `drift`/`apply` exit 1 over expressions they never
+  compared (they exited 0 while a `USING (true)` policy edit went unreported).
+- **H-26 + H-22 + M-24, supply chain and image** (ADR-0439). Next 15.5 / React 19, a real lint (with
+  498 recorded suppressions), `pnpm audit` in CI, a multi-stage non-root Node 22 image (1.41 GB →
+  644 MB, uid 1000, no dev tooling), a backup service that test-restores every dump and fails its
+  healthcheck on a failed run, and a compose smoke job. Open: zod 4 / vitest 4 migration, no off-host
+  backup copy, no metrics or tracing.
+
+**Live findings across the slices, still open**: the job worker claims nothing as `crossengin_app`
+(above); **`--store pg-columns` cannot boot as `crossengin_app`** (`CREATE SCHEMA IF NOT EXISTS public`
+needs a database privilege the role does not hold, and the fatal names neither cause nor remedy), so
+every pg-columns live arm ran as the owner; and `--file-root /` is accepted silently with no file tool
+enabled (harmless).
 
 ### Demoted, with the measurement that demoted them
 
@@ -15742,7 +15819,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 421 records; 342 Accepted, 79 Proposed (the
+title or status change cannot drift. 433 records; 354 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

@@ -57,6 +57,17 @@ describe("TenantSettingsSchema", () => {
     expect(TenantSettingsSchema.safeParse({ features: { f1: "yes" } }).success).toBe(false);
   });
 
+  it("accepts the two depreciation account codes and bounds them like every other code", () => {
+    const parsed = TenantSettingsSchema.parse({
+      finance: { depreciationExpenseAccountCode: "6100", accumulatedDepreciationAccountCode: "1590" },
+    });
+    expect(parsed.finance?.depreciationExpenseAccountCode).toBe("6100");
+    expect(parsed.finance?.accumulatedDepreciationAccountCode).toBe("1590");
+    expect(
+      TenantSettingsSchema.safeParse({ finance: { depreciationExpenseAccountCode: "x".repeat(33) } }).success,
+    ).toBe(false);
+  });
+
   it("accepts an optional auditSampling policy and stays valid without one", () => {
     const withSampling = TenantSettingsSchema.parse({
       auditSampling: { outcomes: ["deny", "error"], operations: ["product.list"], sampleRate: 0.25 },

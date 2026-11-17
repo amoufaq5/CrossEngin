@@ -1,10 +1,10 @@
 # ADR index
 
-421 records. Generated from the ADR files themselves — regenerate rather than
+433 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 342  **Proposed:** 79
+- **Accepted:** 354  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -433,3 +433,15 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0425](0425-the-serving-pool-is-bounded-and-survives-a-dropped-connection.md) | The serving pool is bounded, and survives a dropped connection | — | Accepted | 2026-11-17 |
 | [0426](0426-an-expression-default-is-looked-up-never-written.md) | An expression default is looked up in a closed table, never written into SQL | — | Accepted | 2026-11-17 |
 | [0427](0427-a-sign-in-is-admitted-before-it-is-verified.md) | A sign-in is admitted before it is verified, and counted before it is judged | — | Accepted | 2026-11-17 |
+| [0428](0428-an-entity-write-is-recorded-in-the-transaction-that-makes-it.md) | An entity write is recorded in the transaction that makes it | — | Accepted | 2026-11-17 |
+| [0429](0429-a-posting-is-reversed-by-what-it-posted-in-the-period-it-lands-in.md) | A posting is reversed by what it posted, in the period it lands in | — | Accepted | 2026-11-17 |
+| [0430](0430-a-job-writes-through-the-request-path-as-a-system-actor.md) | A job writes through the request path, as a system actor | — | Accepted | 2026-11-17 |
+| [0431](0431-stock-moves-only-through-a-movement-and-a-bill-is-matched-to-what-was-received.md) | Stock moves only through a movement, at standard cost, and a bill is matched to what was received | — | Accepted | 2026-11-17 |
+| [0432](0432-tax-is-determined-by-the-rule-in-force-and-a-refused-create-spends-no-number.md) | Tax is determined by the rule in force, and a refused create spends no number | — | Accepted | 2026-11-17 |
+| [0433](0433-a-transition-holds-the-row-it-decided-from-and-an-approver-wrote-nothing-it-approves.md) | A transition holds the row it decided from, and an approver wrote nothing it approves | — | Accepted | 2026-11-17 |
+| [0434](0434-a-request-is-routed-by-the-tenant-its-credential-proves.md) | A request is routed by the tenant its credential proves, and a refused re-activation keeps the last applied manifest | — | Accepted | 2026-11-17 |
+| [0435](0435-a-reviewer-sees-what-a-design-changes-and-did-not-design-it.md) | A reviewer sees what a design changes, and is not the person who designed it | — | Accepted | 2026-11-17 |
+| [0436](0436-a-chat-file-tool-reaches-only-its-root-and-a-write-is-approved-over-its-bytes.md) | A chat file tool reaches only its root, and a write is approved over the bytes it writes | — | Accepted | 2026-11-17 |
+| [0437](0437-a-chain-is-checked-against-its-content-and-a-key-it-pins.md) | A chain is checked against its content, its signer is pinned, and its anchors are signed | — | Accepted | 2026-11-17 |
+| [0438](0438-a-migration-waits-a-bounded-time-and-a-plan-takes-no-lock.md) | A migration waits a bounded time for a lock, a plan takes none, and a flag it does not know is refused | — | Accepted | 2026-11-17 |
+| [0439](0439-the-web-is-patched-the-image-is-unprivileged-and-every-backup-is-test-restored.md) | The web is patched, the image is unprivileged, and every backup is test-restored | — | Accepted | 2026-11-17 |

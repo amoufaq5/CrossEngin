@@ -60,6 +60,7 @@ function fakeManifestDb(): { conn: PgConnection; captured: Captured[] } {
         status: "draft",
         source: p[5],
         provider_label: p[6] ?? null,
+        designed_by: p[7] ?? null,
         created_at: at,
         updated_at: at,
         activated_at: null,
@@ -177,6 +178,7 @@ function proposalInput(overrides: Record<string, unknown> = {}): CreateManifestP
     manifestHash: "a".repeat(16),
     source: "ai",
     providerLabel: "anthropic/claude-sonnet-4-6",
+    designedBy: "00000000-0000-4000-8000-0000000000d1",
     ...overrides,
   });
 }
@@ -192,6 +194,7 @@ function validRecord(): Record<string, unknown> {
     status: "draft",
     source: "manual",
     providerLabel: null,
+    designedBy: null,
     createdAt: "2026-06-01T00:00:00.000Z",
     updatedAt: "2026-06-01T00:00:00.000Z",
     activatedAt: null,
@@ -222,9 +225,20 @@ describe("tenant-manifests — schemas", () => {
       manifest: {},
       manifestHash: "h",
       source: "manual",
+      designedBy: null,
     });
     expect(parsed.description).toBe("");
     expect(parsed.providerLabel).toBeUndefined();
+  });
+
+  it("requires designedBy to be stated, null being the claim that nobody was recorded", () => {
+    // Required rather than optional (H-28): an optional field defaulting to "no designer" would let
+    // a writer that forgot it produce a proposal the four-eyes check can never refuse.
+    const base = { name: "n", manifest: {}, manifestHash: "h", source: "ai" };
+    expect(CreateManifestProposalInputSchema.safeParse(base).success).toBe(false);
+    expect(CreateManifestProposalInputSchema.safeParse({ ...base, designedBy: "" }).success).toBe(false);
+    expect(CreateManifestProposalInputSchema.safeParse({ ...base, designedBy: null }).success).toBe(true);
+    expect(CreateManifestProposalInputSchema.safeParse({ ...base, designedBy: "u1" }).success).toBe(true);
   });
 
   it("rejects empty name, oversize name, oversize description, and unknown source", () => {
@@ -371,6 +385,18 @@ describe("tenant-manifests — store create", () => {
     expect(record.providerLabel).toBeNull();
     const insert = captured.find((c) => c.sql.startsWith("INSERT INTO"));
     expect(insert?.params[6]).toBeNull();
+  });
+
+  it("binds the designer as $8 and reads it back on the record", async () => {
+    const { conn, captured } = fakeManifestDb();
+    const store = new PostgresTenantManifestStore(conn);
+    const record = await store.create(TENANT_A, proposalInput());
+    expect(record.designedBy).toBe("00000000-0000-4000-8000-0000000000d1");
+    const insert = captured.find((c) => c.sql.startsWith("INSERT INTO"));
+    expect(insert?.sql).toContain("designed_by");
+    expect(insert?.params[7]).toBe("00000000-0000-4000-8000-0000000000d1");
+    const unrecorded = await store.create(TENANT_A, proposalInput({ designedBy: null }));
+    expect(unrecorded.designedBy).toBeNull();
   });
 });
 

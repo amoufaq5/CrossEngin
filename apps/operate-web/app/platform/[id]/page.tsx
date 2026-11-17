@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState, type ReactElement } from "react";
+import { use, useCallback, useEffect, useState, type ReactElement } from "react";
 
 import { Badge } from "@/components/Badge";
 import { RoleWarnings } from "@/components/RoleWarnings";
@@ -204,8 +204,8 @@ function describeMembershipActionFailure(e: unknown, action: MembershipAction): 
   }
 }
 
-export default function TenantDetailPage({ params }: { params: { id: string } }): ReactElement {
-  const { id } = params;
+export default function TenantDetailPage({ params }: { params: Promise<{ id: string }> }): ReactElement {
+  const { id } = use(params);
   const [tenant, setTenant] = useState<Tenant | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState<string | null>(null);

@@ -139,7 +139,8 @@ describe("buildUiSchema", () => {
     expect(entity("Bill").fields.find((f) => f.name === "state")?.readOnly).toBe(true);
     expect(entity("Opportunity").fields.find((f) => f.name === "stage")?.readOnly).toBe(true);
     // An entity with no lifecycle keeps its status editable: a plain update is its only route.
-    expect(entity("FiscalPeriod").fields.find((f) => f.name === "status")?.readOnly).toBeUndefined();
+    expect(entity("FiscalYear").fields.find((f) => f.name === "status")?.readOnly).toBeUndefined();
+    expect(entity("FiscalPeriod").fields.find((f) => f.name === "status")?.readOnly).toBe(true);
   });
 
   it("leaves a lifecycle state field with no default editable, so a create can name the initial state", () => {

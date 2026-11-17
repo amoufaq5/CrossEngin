@@ -9,6 +9,8 @@ import {
   GENESIS_HASH,
   buildChainEntry,
   checkpointAnchorsBoundedProof,
+  earliestChainBreak,
+  verifyChainEntryHashes,
   verifyChainIntegrity,
   type ChainCheckpoint,
   type ChainedLogEntry,
@@ -104,6 +106,27 @@ export function unreadableEntryVerdict(
 }
 
 /**
+ * The link fold from genesis **and** the content-hash check, reporting whichever breaks first.
+ *
+ * The link fold alone compares a stored `priorEntryHash` against a stored `entryHash` and
+ * recomputes neither, so an `entry_hash` rewritten at the tail — where no later entry links to it —
+ * passed it and every signature, and the next append chained from the forged value. Measured before
+ * this: link fold `valid`, signatures `valid`. One spelling for every verifier that folds a whole
+ * chain, so the hourly proof, `verify-chain` and the checkpoint scheduler cannot disagree about it.
+ */
+export function foldWithContent(entries: readonly ChainedLogEntry[]): ChainSuffixVerdict {
+  return earliestChainBreak(verifyChainIntegrity(entries), verifyChainEntryHashes(entries));
+}
+
+/** The bounded form: the suffix fold from an anchor, and the content of the suffix it read. */
+export function foldSuffixWithContent(
+  entries: readonly ChainedLogEntry[],
+  opts: { readonly fromSequence: number; readonly priorRootHash: string },
+): ChainSuffixVerdict {
+  return earliestChainBreak(verifyChainSuffix(entries, opts), verifyChainEntryHashes(entries));
+}
+
+/**
  * One spelling of the read, so `loadChain` and `loadFrom` cannot come to disagree about what a
  * refused row is. `detail` carries no value from the row by construction (`unreadableDetail`), which
  * is what makes it safe to interpolate into a verdict a log line and a stored record both carry.
@@ -178,7 +201,7 @@ export class PostgresChainLogReader {
 
   async verify(tenantId: string | null): Promise<ChainSuffixVerdict> {
     const read = await this.loadChain(tenantId);
-    return unreadableEntryVerdict(read.unreadable) ?? verifyChainIntegrity(read.entries);
+    return unreadableEntryVerdict(read.unreadable) ?? foldWithContent(read.entries);
   }
 
   async tail(tenantId: string | null): Promise<ChainTail | null> {
@@ -242,7 +265,7 @@ export class PostgresChainLogReader {
     const read = await this.loadFrom(tenantId, fromSequence);
     return (
       unreadableEntryVerdict(read.unreadable) ??
-      verifyChainSuffix(read.entries, { fromSequence, priorRootHash: checkpoint.rootHash })
+      foldSuffixWithContent(read.entries, { fromSequence, priorRootHash: checkpoint.rootHash })
     );
   }
 

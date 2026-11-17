@@ -4,9 +4,14 @@ import type { PgConnection, PgQueryResult } from "./connection.js";
 import {
   ADVISORY_LOCK_KEY,
   APPLY_STATEMENT_OUTCOMES,
+  DEFAULT_LOCK_RETRIES,
+  DEFAULT_LOCK_TIMEOUT_MS,
+  DEFAULT_STATEMENT_TIMEOUT_MS,
   MigrationApplier,
   applyFailures,
+  applyStatementStop,
   formatApplyReport,
+  statementRunsOutsideTransaction,
   type ApplyReport,
 } from "./applier.js";
 
@@ -469,6 +474,10 @@ function executedRecord(index: number, excerpt: string): ApplyReport["statements
     succeeded: true,
     errorMessage: null,
     skipped: false,
+    subject: null,
+    transactional: true,
+    attempts: 1,
+    stoppedBy: null,
   };
 }
 
@@ -486,6 +495,10 @@ function failedRecord(
     succeeded: false,
     errorMessage,
     skipped: false,
+    subject: null,
+    transactional: true,
+    attempts: 1,
+    stoppedBy: null,
   };
 }
 
@@ -644,5 +657,241 @@ describe("applyFailures", () => {
         firstFailureAt: null,
       }),
     ).toEqual([]);
+  });
+});
+
+function pgError(code: string, message: string): Error {
+  return Object.assign(new Error(message), { code });
+}
+
+/**
+ * The basic fake, recording which statements ran inside a transaction and failing a statement with a
+ * scripted error for its first N attempts.
+ */
+function recordingConnection(
+  state: FakeDbState,
+  script: ReadonlyMap<string, readonly Error[]> = new Map(),
+): { conn: PgConnection; log: { sql: string; inTx: boolean }[] } {
+  const base = fakeConnection(state);
+  const log: { sql: string; inTx: boolean }[] = [];
+  const attempts = new Map<string, number>();
+  let inTx = false;
+  const query = (async (sql: string, params?: readonly unknown[]) => {
+    log.push({ sql, inTx });
+    const errors = script.get(sql);
+    if (errors !== undefined) {
+      const n = attempts.get(sql) ?? 0;
+      attempts.set(sql, n + 1);
+      const err = errors[n];
+      if (err !== undefined) throw err;
+    }
+    return base.query(sql, params);
+  }) as PgConnection["query"];
+  const conn: PgConnection = {
+    ...base,
+    query,
+    transaction: (async <T,>(fn: (tx: PgConnection) => Promise<T>): Promise<T> => {
+      inTx = true;
+      try {
+        return await base.transaction(async () => fn(conn));
+      } finally {
+        inTx = false;
+      }
+    }) as PgConnection["transaction"],
+  };
+  return { conn, log };
+}
+
+describe("statementRunsOutsideTransaction (H-23)", () => {
+  it.each([
+    'CREATE INDEX CONCURRENTLY "i" ON "s"."t" ("a");',
+    'CREATE UNIQUE INDEX CONCURRENTLY "i" ON "s"."t" ("a");',
+    'DROP INDEX CONCURRENTLY IF EXISTS "s"."i";',
+    "REINDEX INDEX CONCURRENTLY s.i;",
+    "reindex (verbose) table concurrently s.t",
+  ])("recognises %s", (sql) => {
+    expect(statementRunsOutsideTransaction(sql)).toBe(true);
+  });
+
+  it.each([
+    'CREATE INDEX "i" ON "s"."t" ("a");',
+    'DROP INDEX "s"."i";',
+    // Two statements are one implicit transaction, which Postgres refuses for CONCURRENTLY anyway.
+    'DROP INDEX CONCURRENTLY "s"."i"; CREATE INDEX CONCURRENTLY "i" ON t (a);',
+    "SELECT 'CREATE INDEX CONCURRENTLY'",
+  ])("leaves %s transactional", (sql) => {
+    expect(statementRunsOutsideTransaction(sql)).toBe(false);
+  });
+});
+
+describe("applyStatementStop (H-23)", () => {
+  it("reads 55P03 as a lock timeout", () => {
+    expect(applyStatementStop(pgError("55P03", "canceling statement due to lock timeout"))).toBe(
+      "lock_timeout",
+    );
+  });
+
+  it("reads 57014 as a statement timeout only when the message says so", () => {
+    expect(applyStatementStop(pgError("57014", "canceling statement due to statement timeout"))).toBe(
+      "statement_timeout",
+    );
+    // An operator's pg_cancel_backend is not a bound this applier set.
+    expect(applyStatementStop(pgError("57014", "canceling statement due to user request"))).toBeNull();
+  });
+
+  it("answers null for every other failure", () => {
+    expect(applyStatementStop(pgError("42P07", "relation already exists"))).toBeNull();
+    expect(applyStatementStop(new Error("no code"))).toBeNull();
+    expect(applyStatementStop("not an error")).toBeNull();
+  });
+});
+
+describe("MigrationApplier bounds (H-23)", () => {
+  const TABLE_SQL = "ALTER TABLE meta.t ADD COLUMN c INT;";
+  const CONCURRENT_SQL = 'CREATE INDEX CONCURRENTLY "i" ON "meta"."t" ("c");';
+
+  it("sets both bounds transaction-locally before a transactional statement", async () => {
+    const state = freshState();
+    const { conn, log } = recordingConnection(state);
+    await new MigrationApplier({
+      connection: conn,
+      schema: "meta",
+      statements: [TABLE_SQL],
+      lockTimeoutMs: 1_500,
+      statementTimeoutMs: 60_000,
+    }).apply();
+    const inTx = log.filter((l) => l.inTx).map((l) => l.sql);
+    expect(inTx.slice(0, 3)).toEqual([
+      "SET LOCAL lock_timeout = '1500ms'",
+      "SET LOCAL statement_timeout = '60000ms'",
+      TABLE_SQL,
+    ]);
+    // A session-level SET would outlive the statement on a pooled connection.
+    expect(log.some((l) => /^SET (lock|statement)_timeout/.test(l.sql))).toBe(false);
+  });
+
+  it("defaults to the documented bounds", async () => {
+    const { conn, log } = recordingConnection(freshState());
+    await new MigrationApplier({ connection: conn, schema: "meta", statements: [TABLE_SQL] }).apply();
+    expect(log.map((l) => l.sql)).toContain(`SET LOCAL lock_timeout = '${String(DEFAULT_LOCK_TIMEOUT_MS)}ms'`);
+    expect(log.map((l) => l.sql)).toContain(
+      `SET LOCAL statement_timeout = '${String(DEFAULT_STATEMENT_TIMEOUT_MS)}ms'`,
+    );
+  });
+
+  it("runs a CONCURRENTLY statement bare, outside any transaction and without bounds", async () => {
+    const state = freshState();
+    const { conn, log } = recordingConnection(state);
+    const report = await new MigrationApplier({
+      connection: conn,
+      schema: "meta",
+      statements: [{ sql: CONCURRENT_SQL, subject: "meta.t" }],
+    }).apply();
+    const entry = log.find((l) => l.sql === CONCURRENT_SQL);
+    expect(entry?.inTx).toBe(false);
+    expect(log.some((l) => l.sql.startsWith("SET LOCAL"))).toBe(false);
+    expect(report.statements[0]).toMatchObject({ transactional: false, subject: "meta.t", outcome: "executed" });
+  });
+
+  it("retries a lock timeout after a doubling pause and records the attempts", async () => {
+    const pauses: number[] = [];
+    const lockErr = pgError("55P03", "canceling statement due to lock timeout");
+    const { conn } = recordingConnection(freshState(), new Map([[TABLE_SQL, [lockErr, lockErr]]]));
+    const report = await new MigrationApplier({
+      connection: conn,
+      schema: "meta",
+      statements: [{ sql: TABLE_SQL, subject: "meta.t" }],
+      sleep: async (ms) => {
+        pauses.push(ms);
+      },
+    }).apply();
+    expect(pauses).toEqual([1_000, 2_000]);
+    expect(report.executed).toBe(1);
+    expect(report.statements[0]).toMatchObject({ outcome: "executed", attempts: 3, stoppedBy: null });
+  });
+
+  it("gives up after the retries and names the busy table and the remedy", async () => {
+    const lockErr = pgError("55P03", "canceling statement due to lock timeout");
+    const { conn } = recordingConnection(
+      freshState(),
+      new Map([[TABLE_SQL, Array.from({ length: DEFAULT_LOCK_RETRIES + 1 }, () => lockErr)]]),
+    );
+    const report = await new MigrationApplier({
+      connection: conn,
+      schema: "meta",
+      statements: [{ sql: TABLE_SQL, subject: "meta.t" }],
+      sleep: async () => undefined,
+    }).apply();
+    const record = report.statements[0];
+    expect(record).toMatchObject({ outcome: "failed", attempts: 3, stoppedBy: "lock_timeout" });
+    expect(record?.errorMessage).toContain("lock timeout on meta.t");
+    expect(record?.errorMessage).toContain("--lock-timeout-ms");
+    expect(record?.errorMessage).toContain("changed nothing");
+    expect(formatApplyReport(report)).toContain("gave up waiting for a lock");
+  });
+
+  it("does not retry a statement timeout, which would run as long again", async () => {
+    const pauses: number[] = [];
+    const timeout = pgError("57014", "canceling statement due to statement timeout");
+    const { conn } = recordingConnection(freshState(), new Map([[TABLE_SQL, [timeout]]]));
+    const report = await new MigrationApplier({
+      connection: conn,
+      schema: "meta",
+      statements: [TABLE_SQL],
+      sleep: async (ms) => {
+        pauses.push(ms);
+      },
+    }).apply();
+    expect(pauses).toEqual([]);
+    expect(report.statements[0]).toMatchObject({ attempts: 1, stoppedBy: "statement_timeout" });
+    expect(report.statements[0]?.errorMessage).toContain("statement timeout on its table");
+  });
+
+  it("does not retry an ordinary failure, nor a lock timeout on a concurrent build", async () => {
+    const pauses: number[] = [];
+    const { conn } = recordingConnection(
+      freshState(),
+      new Map([
+        [TABLE_SQL, [pgError("42P07", "already exists")]],
+        [CONCURRENT_SQL, [pgError("55P03", "lock timeout")]],
+      ]),
+    );
+    const report = await new MigrationApplier({
+      connection: conn,
+      schema: "meta",
+      statements: [TABLE_SQL, CONCURRENT_SQL],
+      sleep: async (ms) => {
+        pauses.push(ms);
+      },
+    }).apply();
+    expect(pauses).toEqual([]);
+    expect(report.statements.map((r) => r.attempts)).toEqual([1, 1]);
+    expect(formatApplyReport(report)).toContain("leaves an invalid index");
+  });
+
+  it("refuses a negative or fractional bound at construction", () => {
+    const conn = fakeConnection(freshState());
+    expect(() => new MigrationApplier({ connection: conn, schema: "meta", statements: [], lockTimeoutMs: -1 })).toThrow(
+      /lockTimeoutMs/,
+    );
+    expect(
+      () => new MigrationApplier({ connection: conn, schema: "meta", statements: [], statementTimeoutMs: 1.5 }),
+    ).toThrow(/statementTimeoutMs/);
+    expect(() => new MigrationApplier({ connection: conn, schema: "meta", statements: [], lockRetries: -2 })).toThrow(
+      /lockRetries/,
+    );
+  });
+
+  it("accepts 0 for both bounds, which waits and runs indefinitely", async () => {
+    const { conn, log } = recordingConnection(freshState());
+    await new MigrationApplier({
+      connection: conn,
+      schema: "meta",
+      statements: [TABLE_SQL],
+      lockTimeoutMs: 0,
+      statementTimeoutMs: 0,
+    }).apply();
+    expect(log.map((l) => l.sql)).toContain("SET LOCAL lock_timeout = '0ms'");
+    expect(log.map((l) => l.sql)).toContain("SET LOCAL statement_timeout = '0ms'");
   });
 });

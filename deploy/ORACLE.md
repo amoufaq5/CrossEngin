@@ -51,7 +51,8 @@ pointed at the architecture.
 
 It now installs `postgresql-$PG_MAJOR-pg-uuidv7` from the PGDG apt repository, which publishes
 arm64. **If you forked this repository before that change, pull it before you build.** The other
-three images (`node:20-bookworm-slim`, `caddy:2`, `postgres:16-bookworm`) are already multi-arch.
+three images (`node:22.23.5-bookworm-slim`, `caddy:2.11.9`, `postgres:16.16-bookworm`) are already
+multi-arch, and each is pinned to an exact release.
 
 ---
 
@@ -607,9 +608,12 @@ does that. These three commands tell you the file is a complete, decompressible 
 that `pg_dump` finished writing — which is the failure mode a silent cron produces, and
 not the only one there is.
 
-This repository models DR tiers with RPO/RTO targets and ships **no backup scheduler**, so until
-it does, `~/backups/dump.sh` and the crontab line above it are the deployment's real recovery
-point — which is why its `pipefail` and its verify-before-prune are not fussiness.
+The compose stack also runs a `backup` service of its own ([README → Backups](./README.md#backups)):
+a custom-format dump every day that is **restored into a scratch database** and compared with the
+source before it is kept, which is the restore test the three commands above are not. Its dumps
+sit in a Docker volume on this VM's boot volume, so they survive nothing that loses the disk.
+Keep `~/backups/dump.sh` and its crontab line anyway if `~/backups` is where you copy from to
+somewhere off the VM — which is why its `pipefail` and its verify-before-prune are not fussiness.
 
 ---
 
@@ -670,12 +674,12 @@ index, which is why `.dockerignore` has to list `.git` explicitly.
 Two things make it a gap even so, and they are different in kind:
 
 - **The cost.** `COPY . .` sits immediately above
-  `RUN pnpm install --frozen-lockfile && pnpm -r build && pnpm --filter @crossengin/operate-web build`,
+  `RUN pnpm install --frozen-lockfile && pnpm -r build` (which runs operate-web's `next build`),
   and the Dockerfile's own comment says that layer is deliberately coarse. So changing two bytes of
   JSON invalidates it and buys you a full `pnpm install`, a full workspace build and a `next build`
   — the first build is 10–20 minutes on two A1 cores, and a rebuild is most of it, because what the
-  cache still holds above the `COPY` is the `node:20` and corepack layers rather than any of the
-  three steps above. A route that costs that per edit is a route nobody uses twice.
+  cache still holds above the `COPY` is the `node:22` and corepack layers rather than either of the
+  two steps above. A route that costs that per edit is a route nobody uses twice.
 - **What it cannot carry.** What is missing is a route for an *uncommitted, host-side* file, which
   is exactly the shape a credential needs — and baking one is strictly worse than not having the
   route. An Ed25519 private seed inside an image layer is in the local layer cache, in any

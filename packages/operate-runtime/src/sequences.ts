@@ -122,7 +122,8 @@ export interface ApplySequenceDefaultsInput {
   readonly resolveSpec?: (spec: SequenceDefault) => SequenceDefault;
 }
 
-function isBlank(value: unknown): boolean {
+/** Whether a sequence-defaulted field is unset and so would be allocated a number. */
+export function isSequenceFieldBlank(value: unknown): boolean {
   return value === undefined || value === null || value === "";
 }
 
@@ -138,7 +139,7 @@ export async function applySequenceDefaults(
   const resolve = input.resolveSpec ?? ((s) => s);
   const out: EntityRecord = { ...input.record };
   for (const plan of input.plans) {
-    if (!isBlank(out[plan.field])) continue;
+    if (!isSequenceFieldBlank(out[plan.field])) continue;
     const spec = resolve(plan.spec);
     const periodKey = derivePeriodKey(spec.resetPeriod, input.now);
     const value = await input.allocator.allocate({

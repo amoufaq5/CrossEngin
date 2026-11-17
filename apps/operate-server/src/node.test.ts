@@ -595,13 +595,33 @@ describe("serve()'s two buildOperateHttpServer literals", () => {
       webhookRoute:
         "a deployment-wide route singleton, not per-request: the Stripe webhook is matched ahead " +
         "of the gateway on the default server, which handles it for every tenant",
-      billingPortal:
-        "the same — POST /v1/meta/billing-portal stays on the default server. These two are the " +
-        "exceptions node.ts' own comment above the literal names, and they are the only two that " +
-        "hold: `idempotencyStore` and `rateLimitChecker` were in this map until the rule found " +
-        "them, and both are per-request",
     }),
   ];
+
+  /**
+   * Why `billingPortal` sat in the map above for three increments with a false reason: the rule
+   * checks that an exemption is *declared*, and its reason is prose nothing reads — "stays on the
+   * default server" was asserted of a **gateway** route, called with the tenant's own credential,
+   * and so routed to the tenant's gateway where it was not registered. The one exemption reason
+   * the per-tenant site can give that the boot site cannot is *the default server handles it for
+   * every tenant*, and that is checkable: it is true only of a field `buildOperateHttpServer`
+   * hands to `OperateHttpServer` (matched on the raw request, ahead of every gateway) and does not
+   * forward into `buildOperateGateway` (a route only the compiled gateway can match).
+   */
+  function serverLiteral(text: string, opener: string): string {
+    const at = text.indexOf(opener);
+    expect(at, `${opener} not found in server.ts`).toBeGreaterThan(-1);
+    const open = text.indexOf("{", at + opener.length - 1);
+    let depth = 0;
+    for (let i = open; i < text.length; i += 1) {
+      if (text[i] === "{") depth += 1;
+      else if (text[i] === "}") {
+        depth -= 1;
+        if (depth === 0) return text.slice(open, i + 1);
+      }
+    }
+    throw new Error(`${opener} is unbalanced`);
+  }
 
   it("passes every option it accepts, at both sites, or declares why not", () => {
     const sites = literals();
@@ -650,6 +670,30 @@ describe("serve()'s two buildOperateHttpServer literals", () => {
     for (const site of sites) expect(site.body).toMatch(/\bmanifest\b/);
   });
 
+  it("excuses at the per-tenant site only a field the default server serves ahead of the gateway", () => {
+    const stripped = stripComments(serverSrc);
+    const toGateway = serverLiteral(stripped, "buildOperateGateway(options.manifest, {");
+    const toServer = serverLiteral(stripped, "new OperateHttpServer({");
+    const perTenantOnly = Object.keys(notPassed[1] ?? {}).filter((f) => !(f in (notPassed[0] ?? {})));
+    expect(perTenantOnly, "the per-tenant site excuses nothing of its own").not.toEqual([]);
+    for (const f of perTenantOnly) {
+      expect(
+        toGateway,
+        `notPassed[1] excuses ${f} as served by the default server, but buildOperateHttpServer ` +
+          `forwards it into the gateway, where only the gateway that received the request can match it`,
+      ).not.toMatch(new RegExp(`\\boptions\\.${f}\\b`));
+      expect(toServer, `${f} does not reach OperateHttpServer at all`).toMatch(
+        new RegExp(`\\boptions\\.${f}\\b`),
+      );
+    }
+  });
+
+  it("passes the billing portal to the per-tenant gateway, where its route is matched", () => {
+    const perTenant = literals()[1];
+    expect(perTenant?.body).toMatch(/\bbillingPortal\b/);
+    expect(Object.keys(notPassed[1] ?? {})).not.toContain("billingPortal");
+  });
+
   it("passes the replay guard and the rate-limit window to the per-tenant gateway", () => {
     // The two the rule found. Pinned by name as well as by the rule, because the rule would be
     // satisfied by moving them back into `notPassed` with a plausible-sounding reason — and the
@@ -661,6 +705,37 @@ describe("serve()'s two buildOperateHttpServer literals", () => {
     expect(perTenant?.body).toMatch(/\brateLimitChecker\b/);
     expect(Object.keys(notPassed[1] ?? {})).not.toContain("idempotencyStore");
     expect(Object.keys(notPassed[1] ?? {})).not.toContain("rateLimitChecker");
+  });
+});
+
+describe("serve()'s per-tenant routing reads what it verified and serves what it applied", () => {
+  // Each of these is one expression a type cannot ask for: `verifyBearer: null`, `manifest:
+  // tenantManifest` and `forget(tenantId)` in the poller all typecheck, and each restores one half of
+  // H-27 with every unit test in tenant-gateway-cache and the registry still green.
+  const src = stripComments(readFileSync(resolve(import.meta.dirname, "./node.ts"), "utf8"));
+  const dispatchAt = src.indexOf("buildPerTenantDispatch({");
+  const dispatchSpan = src.slice(dispatchAt, src.indexOf("})", dispatchAt));
+
+  it("hands the per-tenant dispatch a verifier over the gateways' own JWT config", () => {
+    expect(dispatchAt).toBeGreaterThan(-1);
+    expect(dispatchSpan).toMatch(/verifyBearer:\s*jwt\s*!==\s*null\s*\?\s*bearerTenantVerifier\(jwt\)\s*:\s*null/);
+  });
+
+  it("compiles a tenant's gateway against the manifest the registry is serving, and refuses a stranded one", () => {
+    const at = src.indexOf("ensureServing(tenantId, tenantManifest)");
+    expect(at).toBeGreaterThan(-1);
+    const after = src.slice(at, at + 1500);
+    expect(after).toMatch(/if \(serving\.kind === "stranded"\) \{\s*throw new TenantSchemaStranded\(/);
+    expect(after).toMatch(/manifest:\s*served,/);
+    expect(after).toMatch(/store:\s*tenantStoreFor\(served\)/);
+  });
+
+  it("re-applies on an activation without dropping the store being served", () => {
+    const at = src.indexOf("new ManifestActivationPoller(");
+    expect(at).toBeGreaterThan(-1);
+    const poller = src.slice(at, src.indexOf("onError:", at));
+    expect(poller).toMatch(/tenantStoreRegistry\?\.forgetApplication\(tenantId\)/);
+    expect(poller).not.toMatch(/\.forget\(tenantId\)/);
   });
 });
 
@@ -683,7 +758,9 @@ describe("runVerifyChain — the anchor audit's chain argument", () => {
   })();
 
   it("passes the entries the fold examined, and not a bare null", () => {
-    expect(body).toContain("auditAnchors(tenantId, checkpoints, verification.correspondenceChain)");
+    expect(body).toMatch(
+      /auditAnchors\(\s*tenantId,\s*checkpoints,\s*verification\.correspondenceChain,\s*trustedKeys,?\s*\)/,
+    );
     // The mutation this exists to catch is the pre-increment line, which typechecks and leaves
     // every `chain-verify` test green: `correspondenceChain` is `readonly ChainedLogEntry[] | null`,
     // so `null` is assignable and the audit answers `disagreeing: null` — *not asked* — on a
@@ -704,6 +781,27 @@ describe("runVerifyChain — the anchor audit's chain argument", () => {
     // an append in the window only ever *clears* the truncation check while a delete in it is a
     // truncation that really happened. Reversed, the window manufactures findings.
     expect(body.indexOf("auditAnchors(")).toBeLessThan(body.indexOf("reader.tail("));
+  });
+});
+
+describe("both chain passes are pinned to the deployment's own key (H-18)", () => {
+  // As text: the lifecycles accept the registry form too, so a site passing the registry instead of
+  // the pin typechecks and every test stays green while the passes verify against any registered
+  // key — which is the defect.
+  const src = stripComments(readFileSync(resolve(import.meta.dirname, "./node.ts"), "utf8"));
+
+  it("builds the pin from the signing key and the declared keys, never from the registry", () => {
+    expect(src).toContain("chainTrustFromEnv(process.env, auditConfig.publicKeyBase64)");
+    expect(src).toContain("chainTrust = new PinnedChainKeys(trust.keys)");
+  });
+
+  it("hands the pin to both lifecycles", () => {
+    const sites = [...src.matchAll(/build(Checkpoint|IntegrityProof)Lifecycle\(conn, \w+, \{[\s\S]*?registry: ([^,\n]+),/g)];
+    expect(sites.map((m) => m[1]).sort()).toEqual(["Checkpoint", "IntegrityProof"]);
+    // Not `chainTrust ?? new PostgresKeyRegistry(conn)`, which is what this read before: that arm
+    // was unreachable (both blocks mount only once a key resolved, which builds the pin) and was the
+    // unpinned registry waiting for the next wiring edit to take it.
+    for (const m of sites) expect(m[2]).toBe("requirePinnedChainKeys(chainTrust)");
   });
 });
 
@@ -827,6 +925,53 @@ describe("the job survey is unconditional, derived, and total over its own vocab
     expect(src.slice(at, at + 400), "the served count").toContain("servedJobIds.length");
     expect(src.slice(at, at + 400), "the unservable count").toContain("unservable.length");
     expect(src.slice(at, at + 400), "the mounted producer set").toContain("mountedProducers");
+  });
+});
+
+describe("the job producers enqueue only what this binary handles", () => {
+  /**
+   * Text, for the same reason as the survey fences above: both producers are built inside `serve()`.
+   * The rule is that a run nothing can claim must not be written, because `meta.job_runs` keeps it
+   * `pending` for ever — P1.6 measured 148 such rows per tenant per day from the scheduler alone on
+   * `erp-core`, 144 of them two polling jobs no binary can serve.
+   */
+  const src = stripComments(readFileSync(resolve(import.meta.dirname, "./node.ts"), "utf8"));
+
+  it("derives the served set from the manifest and --job-actor-role, before either producer is built", () => {
+    const decl = src.indexOf("const erpJobs = erpJobCoverage(manifest, options.jobActorRoles, {");
+    const filtered = src.indexOf("const jobsThisBinaryServes =");
+    const sink = src.indexOf("new PostgresEntityEventSink(");
+    expect(decl, "the coverage").toBeGreaterThan(-1);
+    expect(filtered, "the filtered declaration list").toBeGreaterThan(decl);
+    expect(sink, "the event sink after the filter").toBeGreaterThan(filtered);
+    expect(src.slice(filtered, filtered + 200)).toContain("erpJobs.handled.includes(j.id)");
+    // The coverage is told about --segregation-of-duties, which decides whether a job may draft a
+    // record that a person could never approve.
+    expect(src.slice(decl, filtered)).toContain("segregationOfDuties: options.segregationOfDuties");
+  });
+
+  it("hands both producers the filtered list and neither the whole manifest's", () => {
+    expect(src).toContain("new PostgresEntityEventSink(conn, jobsThisBinaryServes,");
+    const scheduler = src.indexOf("jobScheduler = new JobScheduler({");
+    expect(scheduler, "the scheduler").toBeGreaterThan(-1);
+    const literal = src.slice(scheduler, src.indexOf("});", scheduler));
+    expect(literal, "the scheduler's job list").toContain("jobs: jobsThisBinaryServes");
+    expect(literal).not.toContain("jobs: manifestJobs");
+  });
+
+  it("tells the survey which producers were narrowed, so it does not say runs accumulate for the declined", () => {
+    const call = src.indexOf("const jobHandlers = buildJobHandlerRegistry({");
+    expect(call, "the registry call").toBeGreaterThan(-1);
+    const literal = src.slice(call, src.indexOf("});", call));
+    // The two producers handed `jobsThisBinaryServes` and not the invoke route, which is handed every
+    // declaration: naming it here would make the survey hide a run that does accumulate.
+    expect(literal).toContain('servedOnlyProducers: mountedProducers.filter((p) => p !== "invoke_route")');
+  });
+
+  it("registers the handlers this binary builds, and names every declaration it declines", () => {
+    expect(src).toContain("const JOB_HANDLER_PROVIDERS: readonly JobHandlerProvider[] = buildErpJobProviders({");
+    expect(src).toContain("for (const absence of erpJobs.declined)");
+    expect(src).toContain("for (const note of erpJobs.partial)");
   });
 });
 

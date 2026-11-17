@@ -205,11 +205,11 @@ function forwardedResponseHeaders(upstream: Response): Record<string, string> {
 }
 
 interface Ctx {
-  params: { path: string[] };
+  params: Promise<{ path: string[] }>;
 }
 
-export const GET = (req: NextRequest, { params }: Ctx) => proxy(req, params.path);
-export const POST = (req: NextRequest, { params }: Ctx) => proxy(req, params.path);
-export const PATCH = (req: NextRequest, { params }: Ctx) => proxy(req, params.path);
-export const PUT = (req: NextRequest, { params }: Ctx) => proxy(req, params.path);
-export const DELETE = (req: NextRequest, { params }: Ctx) => proxy(req, params.path);
+export const GET = async (req: NextRequest, { params }: Ctx) => proxy(req, (await params).path);
+export const POST = async (req: NextRequest, { params }: Ctx) => proxy(req, (await params).path);
+export const PATCH = async (req: NextRequest, { params }: Ctx) => proxy(req, (await params).path);
+export const PUT = async (req: NextRequest, { params }: Ctx) => proxy(req, (await params).path);
+export const DELETE = async (req: NextRequest, { params }: Ctx) => proxy(req, (await params).path);

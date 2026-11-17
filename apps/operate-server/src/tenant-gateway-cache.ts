@@ -1,4 +1,5 @@
 import { API_KEY_HEADER } from "@crossengin/api-gateway";
+import { verifyBearerJwt } from "@crossengin/api-gateway-runtime";
 import {
   ManifestSchema,
   resolveManifest,
@@ -7,7 +8,7 @@ import {
 } from "@crossengin/kernel/manifest";
 
 import type { RawHttpRequest, RawHttpResponse } from "./http.js";
-import type { ApiKeySpec } from "./principals.js";
+import type { ApiKeySpec, JwtVerifyConfig } from "./principals.js";
 import type { OperateHttpServer } from "./server.js";
 import { permittedParentSentence, type TenantManifestLineage } from "./tenant-manifest-lineage.js";
 
@@ -27,37 +28,137 @@ function headerValue(headers: RawHttpRequest["headers"], name: string): string |
   return null;
 }
 
-function requestToken(raw: RawHttpRequest): string | null {
-  const apiKey = headerValue(raw.headers, API_KEY_HEADER);
-  if (apiKey !== null) return apiKey;
+/**
+ * The Bearer token the gateway will authenticate, by the gateway's own rule: `parseAuthHeader`
+ * takes `Authorization` first and reads a Bearer only where the trimmed value starts with
+ * `bearer ` and a literal space. Routing has to pick the credential the gateway will pick, or a
+ * request is compiled under one tenant's manifest and authenticated as another — measured, an
+ * `x-api-key` for one tenant beside a valid session for a second was served the first tenant's
+ * gateway with a 200 as the second. A looser match (`\s+`, which admits a tab) would reopen it the
+ * other way round, since the gateway reads `Bearer<TAB>…` as no Bearer and falls to the api key.
+ */
+function bearerToken(raw: RawHttpRequest): string | null {
   const auth = headerValue(raw.headers, "authorization");
   if (auth === null) return null;
-  const match = /^bearer\s+(.+)$/i.exec(auth);
-  const token = match?.[1]?.trim();
-  return token === undefined || token === "" ? null : token;
+  const trimmed = auth.trim();
+  if (!trimmed.toLowerCase().startsWith("bearer ")) return null;
+  const token = trimmed.slice(7).trim();
+  return token === "" ? null : token;
 }
 
 /**
- * Resolves the tenant an incoming raw request belongs to. The authenticated
- * credential is authoritative: a registered API key token (`x-api-key` or
- * `authorization: Bearer <token>`) resolves to its bound tenant. The spoofable
- * `x-tenant-id` header is honored only for requests carrying a Bearer
- * credential the key set does not know (a JWT, whose tenant the gateway's
- * P1.18 cross-check will verify against the claim) and only when it is a
- * canonical UUID — so an unauthenticated flood of random tenant headers never
- * reaches the manifest source or the cache.
+ * What a Bearer credential establishes about the tenant a request belongs to.
+ *
+ * `verified` carries the token's own `tenant_id` claim, or `null` when the token names no tenant —
+ * which is a different fact from `unverified`, and the routing below treats them differently: a
+ * verified token naming no tenant may still pick one with `x-tenant-id` (the gateway's own rule,
+ * ADR-0098), while an unverified one routes nowhere.
  */
-export function resolveRequestTenant(raw: RawHttpRequest, apiKeys: readonly ApiKeySpec[]): string | null {
-  const token = requestToken(raw);
-  if (token !== null) {
-    const spec = apiKeys.find((k) => k.key === token);
-    if (spec !== undefined) return spec.tenantId;
+export type BearerTenantVerdict =
+  | { readonly kind: "verified"; readonly tenantId: string | null }
+  | { readonly kind: "unverified" };
+
+export type BearerTenantVerifier = (token: string) => Promise<BearerTenantVerdict>;
+
+/**
+ * The gateway's `clockSkewSeconds`, which `buildOperateGateway` does not forward and the runtime
+ * fixes at 30. Restated rather than imported because the runtime does not export it; the cost of
+ * the two drifting is bounded in the safe direction only if this one is no stricter, since a token
+ * this check rejects and the gateway would accept is served by the deployment's manifest.
+ */
+const GATEWAY_JWT_CLOCK_SKEW_SECONDS = 30;
+
+/**
+ * Verifies a Bearer JWT with the **same** `JwtVerifyConfig` the tenant's gateway authenticates it
+ * with — the same JWKS provider object, issuer, audience and required claims — so the tenant a
+ * request is routed by is a fact the routing has checked rather than a claim it read.
+ *
+ * Why verify here rather than route by the principal after authentication: authentication is one of
+ * the seventeen stages *inside* a compiled gateway, and which gateway's pipeline a request enters is
+ * the decision being made, so there is no authenticated principal yet and no seam for re-entering
+ * another gateway's pipeline at stage six. Verifying twice costs one more Ed25519 verify per request
+ * against one shared key set; the chosen gateway's verification stays authoritative, and the two can
+ * disagree only when a clock tick or a JWKS change lands between two calls microseconds apart. Not
+ * only in the safe direction: an `exp` passing in between leaves the tenant's gateway refusing a
+ * token the routing accepted, but an `nbf` arriving, or a key the remote provider fetches only on
+ * the gateway's call, has the routing refuse a token the deployment's gateway then accepts — that
+ * one request served the deployment's manifest, which is this function's defect for the width of
+ * the window rather than a new one.
+ *
+ * A throw from the JWKS provider reads as `unverified`, which sends the request to the deployment's
+ * gateway where the same provider is consulted again; it throws there too unless it has recovered,
+ * which is the window above.
+ */
+export function bearerTenantVerifier(
+  jwt: JwtVerifyConfig,
+  now: () => number = Date.now,
+): BearerTenantVerifier {
+  return async (token: string): Promise<BearerTenantVerdict> => {
+    try {
+      const result = await verifyBearerJwt({
+        token,
+        jwks: jwt.jwksProvider,
+        opts: {
+          expectedIssuer: jwt.issuer,
+          expectedAudience: jwt.audience,
+          requiredClaims: jwt.requiredClaims,
+          clockSkewSeconds: GATEWAY_JWT_CLOCK_SKEW_SECONDS,
+          nowSeconds: Math.floor(now() / 1000),
+        },
+      });
+      if (result.outcome !== "authenticated" || result.jwt === undefined) return { kind: "unverified" };
+      // The runtime's own reading of the claim (`typeof … === "string"`), so a token the gateway
+      // treats as naming no tenant is treated so here too.
+      const claim: unknown = result.jwt.payload.tenant_id;
+      return { kind: "verified", tenantId: typeof claim === "string" ? claim : null };
+    } catch {
+      return { kind: "unverified" };
+    }
+  };
+}
+
+/**
+ * Resolves the tenant an incoming raw request belongs to, from facts this process has checked.
+ *
+ * The credential is the one the gateway will authenticate (`bearerToken`): a Bearer when there is
+ * one, else `x-api-key`. A registered API key token resolves to its bound tenant — in the Bearer
+ * position too, though the gateway reads every Bearer as a JWT and refuses that one 401, so the
+ * routing there only decides which gateway says so. Any other Bearer credential is verified as a JWT with the deployment's own key set
+ * (`verifyBearer`), and a verified token resolves to its `tenant_id` claim — or, when it carries
+ * none, to the `x-tenant-id` header, which is the gateway's own rule for such a token.
+ *
+ * It used to answer `null` for every JWT that did not also send `x-tenant-id`, which is every
+ * browser session: `operate-web`'s proxy deliberately sends no tenant header because the token's
+ * claim is authoritative. So under per-tenant manifests — on the shipped compose, where
+ * `--ai-design` implies them — a tenant's own users were served the **deployment's** manifest while
+ * an api-key caller for the same tenant was served the tenant's. And the header it did honour was
+ * honoured for a Bearer nothing had verified, so an unauthenticated caller could aim the manifest
+ * source and the gateway cache at any tenant, and read a refused tenant's 503 where everyone else
+ * got a 401.
+ *
+ * `verifyBearer` is required and `null` means *no JWT verifier is configured*: then no Bearer that
+ * is not an api key can authenticate anywhere, so none is routed. The header is read only as a
+ * canonical UUID, so a flood of random values never reaches the manifest source.
+ */
+export async function resolveRequestTenant(
+  raw: RawHttpRequest,
+  apiKeys: readonly ApiKeySpec[],
+  verifyBearer: BearerTenantVerifier | null,
+): Promise<string | null> {
+  const bearer = bearerToken(raw);
+  if (bearer === null) {
+    // No Bearer, so the gateway authenticates `x-api-key` if anything — and only then.
+    const apiKey = headerValue(raw.headers, API_KEY_HEADER);
+    return apiKey === null ? null : (apiKeys.find((k) => k.key === apiKey.trim())?.tenantId ?? null);
   }
-  const bearer = headerValue(raw.headers, "authorization");
-  if (bearer === null || !/^bearer\s/i.test(bearer)) return null;
-  const hint = headerValue(raw.headers, "x-tenant-id");
-  if (hint === null || !UUID_RE.test(hint)) return null;
-  return hint.toLowerCase();
+  const spec = apiKeys.find((k) => k.key === bearer);
+  if (spec !== undefined) return spec.tenantId;
+  if (verifyBearer === null) return null;
+  const verdict = await verifyBearer(bearer);
+  if (verdict.kind === "unverified") return null;
+  const tenant = verdict.tenantId ?? headerValue(raw.headers, "x-tenant-id");
+  if (tenant === null || !UUID_RE.test(tenant)) return null;
+  return tenant.toLowerCase();
 }
 
 /**
@@ -74,6 +175,7 @@ export const GATEWAY_BUILD_REFUSAL_KINDS = [
   "lineage_cycle",
   "lineage_override_undeclared",
   "lineage_parent_unknown",
+  "tenant_schema_stranded",
   "unknown",
 ] as const;
 
@@ -112,6 +214,10 @@ export const GATEWAY_BUILD_REFUSALS: Record<
   lineage_cycle: { permanent: true },
   lineage_override_undeclared: { permanent: true },
   lineage_parent_unknown: { permanent: true },
+  // Permanent for the two build refusals' reason: it clears only when an operator runs the SQL the
+  // schema refusal reported or re-activates the manifest that built the tables, and the activation
+  // poller invalidates the entry on either.
+  tenant_schema_stranded: { permanent: true },
   unknown: { permanent: false },
 };
 
@@ -122,6 +228,7 @@ const REFUSAL_BY_ERROR_NAME: Readonly<Record<string, GatewayBuildRefusalKind>> =
   ExtendsCycleError: "lineage_cycle",
   UndeclaredEntityOverrideError: "lineage_override_undeclared",
   UnknownParentManifestError: "lineage_parent_unknown",
+  TenantSchemaStranded: "tenant_schema_stranded",
 };
 
 /**
@@ -139,6 +246,7 @@ const REFUSAL_NAMES_PERMITTED_PARENT: Record<GatewayBuildRefusalKind, boolean> =
   lineage_cycle: true,
   lineage_override_undeclared: true,
   lineage_parent_unknown: true,
+  tenant_schema_stranded: false,
   unknown: false,
 };
 
@@ -507,9 +615,15 @@ export function buildPerTenantDispatch(opts: {
   defaultDispatch: (raw: RawHttpRequest, body: Uint8Array | null) => Promise<RawHttpResponse>;
   cache: TenantGatewayCache;
   apiKeys: readonly ApiKeySpec[];
+  /**
+   * Required, `null` when no JWT verifier is configured. Optional would let a call site drop it with
+   * the type still valid and route every session to the deployment's manifest again, which is the
+   * defect this parameter closes.
+   */
+  verifyBearer: BearerTenantVerifier | null;
 }): (raw: RawHttpRequest, body: Uint8Array | null) => Promise<RawHttpResponse> {
   return async (raw: RawHttpRequest, body: Uint8Array | null): Promise<RawHttpResponse> => {
-    const tenantId = resolveRequestTenant(raw, opts.apiKeys);
+    const tenantId = await resolveRequestTenant(raw, opts.apiKeys, opts.verifyBearer);
     if (tenantId === null) return opts.defaultDispatch(raw, body);
     const resolved = await opts.cache.serverFor(tenantId);
     // Switched rather than tested for a sentinel, so a fourth resolution arm fails to compile here

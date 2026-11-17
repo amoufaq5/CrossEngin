@@ -156,6 +156,13 @@ export function withDecimalWireType<S extends EntityStore>(store: S, index: Deci
     remove(tenantId, entity, id) {
       return store.remove(tenantId, entity, id);
     },
+    removeIf(tenantId, entity, id, expected) {
+      return store.removeIf(tenantId, entity, id, map(entity, expected, "inbound"));
+    },
+    async getLocked(tenantId, entity, id, lock) {
+      const record = await store.getLocked(tenantId, entity, id, lock);
+      return record === null ? null : map(entity, record, "stored");
+    },
   };
   const transactional = store as Partial<TransactionalEntityStore>;
   if (typeof transactional.withTransaction === "function") {

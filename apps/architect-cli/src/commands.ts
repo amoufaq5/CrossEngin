@@ -50,6 +50,7 @@ import {
   type ChatToolDefinition,
   type WriteApprover,
 } from "./tools.js";
+import { resolveFileRoot } from "./file-confinement.js";
 import type { ParsedCommand } from "./cli.js";
 import { getBooleanFlag, getStringFlag } from "./cli.js";
 import {
@@ -446,12 +447,38 @@ export async function runChat(
       approver = interactiveApprover({ io: ctx.io, reader: lines });
     }
   }
+  let fileRootDir: string | undefined;
+  if (!toolsDisabled && (allowFileRead || allowFileWrite)) {
+    const fileRootFlag = getStringFlag(command, "file-root");
+    if (command.flags.has("file-root") && (fileRootFlag === null || fileRootFlag.length === 0)) {
+      // A bare --file-root would otherwise fall back to the working directory, which is not what was asked.
+      printError(ctx.io, "chat: --file-root needs a directory");
+      return 2;
+    }
+    try {
+      fileRootDir = await resolveFileRoot(fileRootFlag ?? process.cwd());
+    } catch (err) {
+      printError(ctx.io, `chat: ${err instanceof Error ? err.message : String(err)}`);
+      return 2;
+    }
+    // Said either way: this directory is what the file tools can hand to the model's vendor or overwrite.
+    printError(
+      ctx.io,
+      `[tools] file root: ${fileRootDir} (${[
+        allowFileRead ? "read_file" : null,
+        allowFileWrite ? `propose_manifest_edit, ${autoApprove ? "writes auto-approved with no review" : "each write shown as a diff for y/N"}` : null,
+      ]
+        .filter((x) => x !== null)
+        .join("; ")})`,
+    );
+  }
   let toolCatalog: readonly ChatToolDefinition[] | undefined;
   if (!toolsDisabled) {
     toolCatalog = buildToolCatalog({
       allowFileRead,
       allowFileWrite,
       approver,
+      ...(fileRootDir !== undefined ? { fileRootDir } : {}),
     });
   }
 

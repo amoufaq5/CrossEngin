@@ -4,11 +4,13 @@ import {
   keysetOf,
   ListSurfaceUnserveable,
   preconditionHolds,
+  type ConditionalRemove,
   type ConditionalUpdate,
   type EntityRecord,
   type ListPage,
   type ListQuery,
   type ListValueType,
+  type RowLock,
   type UpdatePrecondition,
 } from "@crossengin/operate-runtime";
 
@@ -155,6 +157,32 @@ export async function getOp(
   return res.rows[0]?.document ?? null;
 }
 
+/**
+ * The row-lock clause for each mode. `exclusive` is `FOR NO KEY UPDATE` rather than `FOR UPDATE`:
+ * it is the lock the transition's own `UPDATE` takes, it conflicts with `FOR SHARE`, and unlike
+ * `FOR UPDATE` it does not block the `FOR KEY SHARE` another transaction's reference check takes —
+ * a payment naming an invoice need not wait for that invoice's transition.
+ */
+export const ROW_LOCK_CLAUSE: Readonly<Record<RowLock, string>> = {
+  share: "FOR SHARE",
+  exclusive: "FOR NO KEY UPDATE",
+};
+
+export async function getLockedOp(
+  tx: PgConnection,
+  table: string,
+  tenantId: string,
+  entity: string,
+  id: string,
+  lock: RowLock,
+): Promise<EntityRecord | null> {
+  const res = await tx.query<DocumentRow>(
+    `SELECT document FROM ${table} WHERE tenant_id = $1 AND entity = $2 AND record_id = $3 ${ROW_LOCK_CLAUSE[lock]}`,
+    [tenantId, entity, id],
+  );
+  return res.rows[0]?.document ?? null;
+}
+
 export async function createOp(
   tx: PgConnection,
   table: string,
@@ -242,6 +270,32 @@ async function writeMerged(
     rethrowDocumentUniqueViolation(integrity, err);
   }
   return merged;
+}
+
+/**
+ * `removeOp` with a precondition, compared against the document held `FOR UPDATE` — `updateIfOp`'s
+ * shape, and for its reason: a `SELECT … FOR UPDATE` that waited on a concurrent writer returns that
+ * writer's committed version, so a delete decided on a state another transaction has since moved
+ * matches nothing.
+ */
+export async function removeIfOp(
+  tx: PgConnection,
+  table: string,
+  tenantId: string,
+  entity: string,
+  id: string,
+  expected: UpdatePrecondition,
+  integrity: DocumentIntegrityPlan | null = null,
+): Promise<ConditionalRemove> {
+  const existing = await tx.query<DocumentRow>(
+    `SELECT document FROM ${table} WHERE tenant_id = $1 AND entity = $2 AND record_id = $3 FOR UPDATE`,
+    [tenantId, entity, id],
+  );
+  const current = existing.rows[0]?.document;
+  if (current === undefined) return { kind: "not_found" };
+  if (!preconditionHolds(current, expected)) return { kind: "precondition_failed" };
+  const removed = await removeOp(tx, table, tenantId, entity, id, integrity);
+  return removed ? { kind: "removed" } : { kind: "not_found" };
 }
 
 export async function removeOp(

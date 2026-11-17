@@ -1,15 +1,21 @@
 import { columnNameForField } from "@crossengin/kernel/ddl";
 import {
   ManifestSchema,
+  abacObligationChanges,
   computeManifestDiff,
   diffManifestSections,
+  fieldClassificationChanges,
+  fieldDefaultChanges,
   manifestSectionChangeMayWithhold,
+  resolveManifest,
+  roleInheritanceChanges,
   type Manifest,
+  type ManifestRegistry,
   type ManifestSectionChange,
   type ManifestSectionName,
 } from "@crossengin/kernel/manifest";
 
-import { CRUD_OPERATIONS, SENSITIVE_CLASSIFICATIONS, formatFieldType } from "./manifest-view.js";
+import { CRUD_OPERATIONS, formatFieldType } from "./manifest-view.js";
 
 export const DIFF_IMPACTS = ["none", "additive", "breaking"] as const;
 export type DiffImpact = (typeof DIFF_IMPACTS)[number];
@@ -23,6 +29,11 @@ export type DiffWarningCode =
   | "permission_revoked"
   | "classification_removed"
   | "classification_raised"
+  | "classification_moved"
+  | "field_default_changed"
+  | "role_inherits_changed"
+  | "abac_obligation_changed"
+  | "lineage_unresolved"
   | "relation_removed"
   | "relation_cascade_added"
   | "relation_kind_changed"
@@ -45,7 +56,43 @@ export interface FieldChange {
     | "type_changed"
     | "required_added"
     | "required_removed"
-    | "classification_changed";
+    | "classification_changed"
+    | "default_changed";
+  readonly from: string | null;
+  readonly to: string | null;
+}
+
+/**
+ * What a diff was computed against, which the old view could not say (H-28).
+ *
+ * `comparable: false` used to cover three different facts with one sentence — *this tenant has no
+ * live system*, *the live system could not be read*, and *one side did not parse* — and the
+ * renderer printed "This is the first system for this tenant" for all three. A tenant with no
+ * active manifest of its own is served the **deployment's** manifest, so that is what a first
+ * activation is compared against when the route can resolve it; `none` is left for a route that
+ * was given no baseline to substitute, and `unreadable` for a read of the live manifest that
+ * failed, where claiming either of the other two would be a statement about a tenant nobody
+ * looked at.
+ */
+export const DIFF_BASELINES = [
+  "active_manifest",
+  "deployment_manifest",
+  "unreadable",
+  "none",
+] as const;
+export type DiffBaseline = (typeof DIFF_BASELINES)[number];
+
+/** A role whose `inherits` moved: it gains or loses every grant of the roles named. */
+export interface RoleChange {
+  readonly role: string;
+  readonly inheritsGained: readonly string[];
+  readonly inheritsLost: readonly string[];
+}
+
+/** An ABAC obligation added to, removed from or re-keyed on one grant position. */
+export interface ObligationChange {
+  readonly entity: string;
+  readonly operation: string;
   readonly from: string | null;
   readonly to: string | null;
 }
@@ -84,6 +131,9 @@ export interface ManifestDiffView {
   readonly rolesAdded: readonly string[];
   readonly rolesRemoved: readonly string[];
   readonly lifecycleChanges: readonly LifecycleChange[];
+  readonly roleChanges: readonly RoleChange[];
+  readonly obligationChanges: readonly ObligationChange[];
+  readonly baseline: DiffBaseline;
   readonly counts: { added: number; removed: number; modified: number; warnings: number };
   /**
    * Every section the two manifests differ on, including the twelve the detail layers above
@@ -112,7 +162,7 @@ const DEFAULT_ON_DELETE = "restrict";
 
 // Callers own the value they are handed: every incomparable answer is a fresh object so a
 // mutation of `counts` can never corrupt the shared EMPTY_DIFF_VIEW constant.
-function emptyView(): ManifestDiffView {
+function emptyView(baseline: DiffBaseline): ManifestDiffView {
   return {
     comparable: false,
     impact: "none",
@@ -126,12 +176,15 @@ function emptyView(): ManifestDiffView {
     rolesAdded: [],
     rolesRemoved: [],
     lifecycleChanges: [],
+    roleChanges: [],
+    obligationChanges: [],
+    baseline,
     sectionChanges: [],
     counts: { added: 0, removed: 0, modified: 0, warnings: 0 },
   };
 }
 
-export const EMPTY_DIFF_VIEW: ManifestDiffView = emptyView();
+export const EMPTY_DIFF_VIEW: ManifestDiffView = emptyView("none");
 
 function parseManifest(doc: Record<string, unknown> | null): Manifest | null {
   if (doc === null || typeof doc !== "object" || Array.isArray(doc)) return null;
@@ -177,7 +230,7 @@ interface EntityLayer {
 }
 
 /**
- * The nine view fields the five detail layers fill — what the census asks a layer about.
+ * The eleven view fields the five detail layers fill — what the census asks a layer about.
  *
  * A `Pick` of the view rather than its own interface, so an extractor below cannot read a field the
  * view does not carry; and `compare` spreads this exact object into its return value, so what
@@ -195,6 +248,8 @@ export type SectionDetailCounts = Pick<
   | "rolesAdded"
   | "rolesRemoved"
   | "lifecycleChanges"
+  | "roleChanges"
+  | "obligationChanges"
 >;
 
 /**
@@ -272,8 +327,8 @@ export const SECTION_DETAIL_LAYER: {
     d.fieldChanges.length,
   traits: null,
   relations: (d) => d.relationChanges.length,
-  roles: (d) => d.rolesAdded.length + d.rolesRemoved.length,
-  permissions: (d) => d.permissionChanges.length,
+  roles: (d) => d.rolesAdded.length + d.rolesRemoved.length + d.roleChanges.length,
+  permissions: (d) => d.permissionChanges.length + d.obligationChanges.length,
   workflows: (d) => d.lifecycleChanges.length,
   integrations: null,
   jobs: null,
@@ -453,35 +508,24 @@ function entityLayer(active: Manifest, next: Manifest): EntityLayer {
   }
 }
 
-function isSensitive(classification: string | null): boolean {
-  return classification !== null && SENSITIVE_CLASSIFICATIONS.includes(classification);
+/**
+ * Classification changes over each side's **resolved** fields, a trait's included.
+ *
+ * This read `entity.fields`, so a classification a trait contributes moved with no field change at
+ * all — a trait field weakened `phi` → `internal` reached the reviewer only as a `traits` section
+ * change with every count zero, which is ADR-0361's narrow side of the split on the one page a
+ * reviewer approves from. The kernel's `fieldClassificationChanges` is the one reading both the
+ * view and the Architect CLI use.
+ */
+function classificationLayer(
+  active: Manifest,
+  next: Manifest,
+): ReturnType<typeof fieldClassificationChanges> {
+  return fieldClassificationChanges(active, next);
 }
 
-function classificationLayer(active: Manifest, next: Manifest): readonly FieldChange[] {
-  const activeEntities = entityIndex(active);
-  const changes: FieldChange[] = [];
-
-  for (const entity of next.entities ?? []) {
-    const previous = activeEntities.get(entity.name);
-    if (previous === undefined) continue;
-    const previousFields = fieldIndex(previous);
-    for (const field of entity.fields) {
-      const priorField = previousFields.get(field.name);
-      if (priorField === undefined) continue;
-      const from = priorField.classification ?? null;
-      const to = field.classification ?? null;
-      if (from === to) continue;
-      changes.push({
-        entity: entity.name,
-        field: field.name,
-        change: "classification_changed",
-        from,
-        to,
-      });
-    }
-  }
-
-  return changes;
+function traitClause(source: "own" | "trait"): string {
+  return source === "trait" ? " (contributed by a trait, so every entity carrying it moves too)" : "";
 }
 
 function grantRoles(grant: RoleGrant | undefined): readonly string[] {
@@ -683,7 +727,22 @@ function compare(active: Manifest, next: Manifest): ManifestDiffView {
   const additive: DiffWarning[] = [];
 
   const entities = entityLayer(active, next);
-  const classificationChanges = classificationLayer(active, next);
+  const classifications = classificationLayer(active, next);
+  const classificationChanges: readonly FieldChange[] = classifications.map((c) => ({
+    entity: c.entity,
+    field: c.field,
+    change: "classification_changed",
+    from: c.from,
+    to: c.to,
+  }));
+  const defaults = fieldDefaultChanges(active, next);
+  const defaultChanges: readonly FieldChange[] = defaults.map((c) => ({
+    entity: c.entity,
+    field: c.field,
+    change: "default_changed",
+    from: c.from,
+    to: c.to,
+  }));
   // The whole-manifest census, which is what makes the five detail layers a *detail* rather
   // than the answer. `mayWithhold` is resolved here so the view carries one judgement.
   const sectionChanges: readonly SectionChangeView[] = diffManifestSections(active, next).map(
@@ -691,7 +750,7 @@ function compare(active: Manifest, next: Manifest): ManifestDiffView {
   );
 
   const modified: string[] = [...entities.modified];
-  for (const change of classificationChanges) {
+  for (const change of [...classificationChanges, ...defaultChanges]) {
     if (!modified.includes(change.entity)) modified.push(change.entity);
   }
 
@@ -729,24 +788,54 @@ function compare(active: Manifest, next: Manifest): ManifestDiffView {
     }
   }
 
-  for (const change of classificationChanges) {
-    const from = change.from;
-    const to = change.to;
-    if (isSensitive(to) && !isSensitive(from)) {
-      additive.push({
+  for (const change of classifications) {
+    const label = `${change.entity}.${change.field}`;
+    const storage = change.encryptionChanged
+      ? " Its storage moves between ciphertext and plaintext, which an existing column is not migrated across automatically."
+      : "";
+    if (change.move === "raised") {
+      (change.encryptionChanged ? breaking : additive).push({
         code: "classification_raised",
-        impact: "additive",
-        message: `Field ${change.entity}.${change.field} is newly classified ${to ?? ""} — it becomes redacted for callers without an explicit grant.`,
+        impact: change.encryptionChanged ? "breaking" : "additive",
+        message: `Field ${label} is newly classified ${change.to ?? ""}${traitClause(change.source)} — it becomes redacted for callers without an explicit grant.${storage}`,
         entities: [change.entity],
       });
-    } else if (isSensitive(from) && !isSensitive(to)) {
+    } else if (change.move === "lowered") {
       breaking.push({
         code: "classification_removed",
         impact: "breaking",
-        message: `Field ${change.entity}.${change.field} loses its ${from ?? ""} classification — data that was governed no longer is.`,
+        message: `Field ${label} loses its ${change.from ?? ""} classification${traitClause(change.source)} — data that was governed no longer is.${storage}`,
+        entities: [change.entity],
+      });
+    } else if (change.move === "between_sensitive") {
+      // Neither "newly classified" nor "loses its classification" is true, which is why this read
+      // as nothing. Sensitive grants are per class (ADR-0329), so who may read and write the field
+      // moves with it even when no grant in the manifest changes.
+      breaking.push({
+        code: "classification_moved",
+        impact: "breaking",
+        message: `Field ${label} moves from ${change.from ?? ""} to ${change.to ?? ""}${traitClause(change.source)} — the roles a deployment privileges for ${change.to ?? ""} decide who may read and write it now, not those privileged for ${change.from ?? ""}.${storage}`,
         entities: [change.entity],
       });
     }
+  }
+
+  for (const change of defaults) {
+    const label = `${change.entity}.${change.field}`;
+    const warning: DiffWarning = change.requiredLosesDefault
+      ? {
+          code: "field_default_changed",
+          impact: "breaking",
+          message: `Field ${label} loses its default (${change.from ?? "none"}) while staying required — a create that omits it is now refused.`,
+          entities: [change.entity],
+        }
+      : {
+          code: "field_default_changed",
+          impact: "additive",
+          message: `Field ${label} default changes from ${change.from ?? "none"} to ${change.to ?? "none"}${traitClause(change.source)} — every create that omits it stores the new value.`,
+          entities: [change.entity],
+        };
+    (warning.impact === "breaking" ? breaking : additive).push(warning);
   }
 
   const permissionChanges = permissionLayer(active, next, entities.removed);
@@ -770,6 +859,28 @@ function compare(active: Manifest, next: Manifest): ManifestDiffView {
         entities: [change.entity],
       });
     }
+  }
+
+  // An obligation on a grant of an entity that is removed goes with the entity, as its roles do.
+  const obligationChanges: readonly ObligationChange[] = abacObligationChanges(active, next).filter(
+    (c) => !entities.removed.includes(c.entity),
+  );
+  for (const change of obligationChanges) {
+    // Every direction is breaking and for opposite reasons: an obligation added withholds — and a
+    // deployment declaring no policy for the key refuses the manifest at boot (ADR-0340) — while
+    // one removed makes the grant unconditional for every holder of its roles.
+    const what =
+      change.from === null
+        ? `gains ABAC obligation ${change.to ?? ""} — holders of its roles are admitted only when that policy says so`
+        : change.to === null
+          ? `loses ABAC obligation ${change.from} — the grant becomes unconditional for every holder of its roles`
+          : `changes ABAC obligation ${change.from} → ${change.to}`;
+    breaking.push({
+      code: "abac_obligation_changed",
+      impact: "breaking",
+      message: `${change.operation} on ${change.entity} ${what}.`,
+      entities: [change.entity],
+    });
   }
 
   const beforeRelations = relationIndex(active);
@@ -862,6 +973,29 @@ function compare(active: Manifest, next: Manifest): ManifestDiffView {
       entities: [],
     });
   }
+  const roleChanges: readonly RoleChange[] = roleInheritanceChanges(active, next).map((c) => ({
+    role: c.role,
+    inheritsGained: c.gained,
+    inheritsLost: c.lost,
+  }));
+  for (const change of roleChanges) {
+    // Gaining a parent is an escalation as wide as that parent's grants, update and delete
+    // included, which is why it is graded with a destructive `permission_granted` rather than an
+    // additive one; losing one withholds.
+    const parts: string[] = [];
+    if (change.inheritsGained.length > 0) {
+      parts.push(`now inherits ${change.inheritsGained.join(", ")} and gains every grant it holds`);
+    }
+    if (change.inheritsLost.length > 0) {
+      parts.push(`no longer inherits ${change.inheritsLost.join(", ")} and loses every grant it held only through it`);
+    }
+    breaking.push({
+      code: "role_inherits_changed",
+      impact: "breaking",
+      message: `Role ${change.role} ${parts.join("; ")}.`,
+      entities: [],
+    });
+  }
 
   const common = new Set<string>();
   for (const name of entityIndex(next).keys()) {
@@ -880,7 +1014,11 @@ function compare(active: Manifest, next: Manifest): ManifestDiffView {
   }
 
   const warnings: readonly DiffWarning[] = [...breaking, ...additive];
-  const fieldChanges: readonly FieldChange[] = [...entities.fieldChanges, ...classificationChanges];
+  const fieldChanges: readonly FieldChange[] = [
+    ...entities.fieldChanges,
+    ...classificationChanges,
+    ...defaultChanges,
+  ];
   const lifecycleChanges: readonly LifecycleChange[] = lifecycleDeltas.map((delta) => ({
     entity: delta.entity,
     detail: delta.detail,
@@ -898,6 +1036,8 @@ function compare(active: Manifest, next: Manifest): ManifestDiffView {
     rolesAdded,
     rolesRemoved,
     lifecycleChanges,
+    roleChanges,
+    obligationChanges,
   };
 
   const changed =
@@ -911,6 +1051,8 @@ function compare(active: Manifest, next: Manifest): ManifestDiffView {
     rolesAdded.length > 0 ||
     rolesRemoved.length > 0 ||
     lifecycleChanges.length > 0 ||
+    roleChanges.length > 0 ||
+    obligationChanges.length > 0 ||
     sectionChanges.length > 0;
 
   return {
@@ -927,6 +1069,7 @@ function compare(active: Manifest, next: Manifest): ManifestDiffView {
           : "none",
     warnings,
     ...details,
+    baseline: "active_manifest",
     sectionChanges,
     counts: {
       added: entities.added.length,
@@ -941,15 +1084,45 @@ export function diffManifests(
   active: Record<string, unknown> | null,
   next: Record<string, unknown>,
 ): ManifestDiffView {
-  if (active === null) return emptyView();
+  if (active === null) return emptyView("none");
   const activeManifest = parseManifest(active);
   const nextManifest = parseManifest(next);
-  if (activeManifest === null || nextManifest === null) return emptyView();
+  if (activeManifest === null || nextManifest === null) return emptyView("active_manifest");
   try {
     return compare(activeManifest, nextManifest);
   } catch {
     // Activation review must never fail closed on a diff: an unexpected shape reads as
     // "nothing to compare" rather than a thrown request.
-    return emptyView();
+    return emptyView("active_manifest");
   }
+}
+
+/** The warning code the route adds when a proposal's lineage cannot be composed. */
+export const LINEAGE_UNRESOLVED_WARNING_CODE: DiffWarningCode = "lineage_unresolved";
+
+/**
+ * What the diff seam needs to compare the manifest a tenant is **served** rather than the one it
+ * stored: the deployment's own manifest, which a tenant with no active system of its own is served
+ * (and which every tenant manifest is permitted to extend, ADR-0368), and the same lineage
+ * composition the gateway cache applies before it serves a stored manifest.
+ *
+ * Comparing two stored manifests unresolved was right only when both extended the same parent;
+ * a first activation had nothing on the left, so the reviewer saw no diff at all for the single
+ * most consequential activation a tenant makes — the one that decides whether their design extends
+ * the pack or replaces it.
+ */
+export interface DiffLineage {
+  readonly deploymentManifest: Record<string, unknown>;
+  /** Composes `meta.extends`; throws when the manifest does not parse or its lineage is refused. */
+  resolve(manifest: Record<string, unknown>): Promise<Record<string, unknown>>;
+}
+
+export function buildDiffLineage(deployment: Manifest, registry: ManifestRegistry): DiffLineage {
+  return {
+    deploymentManifest: deployment,
+    async resolve(manifest: Record<string, unknown>): Promise<Record<string, unknown>> {
+      const parsed = ManifestSchema.parse(manifest);
+      return resolveManifest(parsed, { registry });
+    },
+  };
 }

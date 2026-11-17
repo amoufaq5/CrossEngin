@@ -8,8 +8,12 @@ import {
   applyFailures,
   createNodePgConnection,
   formatApplyReport,
+  applierStatementsFor,
+  applyExitCode,
   formatReconciliationPlan,
+  formatUncomparedApplyOutcome,
   looksLikeProductionDatabase,
+  parseNonNegativeIntegerFlag,
   parsePgEnvConfig,
   planLiveReconciliation,
   type ApplyReport,
@@ -18,17 +22,91 @@ import {
 } from "@crossengin/kernel-pg";
 
 import type { ParsedCommand } from "./cli.js";
-import { getBooleanFlag } from "./cli.js";
 import { printError, printJson, printSuccess, type IoStreams } from "./format.js";
 import type { RunContext } from "./commands.js";
+
+/** Every flag `apply` reads; anything else is refused (H-23). */
+export const APPLY_FLAG_KINDS = {
+  format: "value",
+  "dry-run": "boolean",
+  plan: "boolean",
+  confirm: "boolean",
+  "allow-loosening": "boolean",
+  "lock-timeout-ms": "count",
+  "statement-timeout-ms": "count",
+  "lock-retries": "count",
+} as const;
+
+export interface ApplyFlags {
+  readonly dryRun: boolean;
+  readonly planOnly: boolean;
+  readonly confirm: boolean;
+  readonly allowLoosening: boolean;
+  readonly bounds: {
+    readonly lockTimeoutMs?: number;
+    readonly statementTimeoutMs?: number;
+    readonly lockRetries?: number;
+  };
+}
+
+/**
+ * Read `apply`'s flags strictly. `getBooleanFlag` answers false for any value it does not recognise,
+ * so `--plan yes` (which the shared parser reads as `plan = "yes"`) was an **apply**, and a misspelt
+ * `--paln` was silently ignored — on the one command whose effect is DDL against a live database.
+ */
+export function readApplyFlags(
+  command: ParsedCommand,
+): { readonly ok: true; readonly flags: ApplyFlags } | { readonly ok: false; readonly error: string } {
+  if (command.positional.length > 0) {
+    return { ok: false, error: `unexpected argument '${command.positional[0]!}'` };
+  }
+  const booleans = new Set<string>();
+  const bounds: { lockTimeoutMs?: number; statementTimeoutMs?: number; lockRetries?: number } = {};
+  const boundKey = {
+    "lock-timeout-ms": "lockTimeoutMs",
+    "statement-timeout-ms": "statementTimeoutMs",
+    "lock-retries": "lockRetries",
+  } as const;
+  for (const [name, value] of command.flags) {
+    const kind = Object.prototype.hasOwnProperty.call(APPLY_FLAG_KINDS, name)
+      ? APPLY_FLAG_KINDS[name as keyof typeof APPLY_FLAG_KINDS]
+      : undefined;
+    if (kind === undefined) return { ok: false, error: `unknown flag --${name}` };
+    if (kind === "value") continue;
+    if (kind === "boolean") {
+      if (value === true || value === "true" || value === "1") booleans.add(name);
+      else if (value !== "false" && value !== "0") {
+        return { ok: false, error: `--${name} takes no value, or =true / =false; got '${value}'` };
+      }
+      continue;
+    }
+    if (value === true) return { ok: false, error: `--${name} needs a value` };
+    const parsed = parseNonNegativeIntegerFlag(name, value);
+    if (!parsed.ok) return { ok: false, error: parsed.error };
+    bounds[boundKey[name as keyof typeof boundKey]] = parsed.value;
+  }
+  return {
+    ok: true,
+    flags: {
+      dryRun: booleans.has("dry-run"),
+      planOnly: booleans.has("plan"),
+      confirm: booleans.has("confirm"),
+      allowLoosening: booleans.has("allow-loosening"),
+      bounds,
+    },
+  };
+}
 
 export async function runApply(
   command: ParsedCommand,
   ctx: RunContext,
 ): Promise<number> {
-  const dryRun = getBooleanFlag(command, "dry-run");
-  const planOnly = getBooleanFlag(command, "plan");
-  const confirm = getBooleanFlag(command, "confirm");
+  const read = readApplyFlags(command);
+  if (!read.ok) {
+    printError(ctx.io, `apply: ${read.error}`);
+    return 2;
+  }
+  const { dryRun, planOnly, confirm, bounds } = read.flags;
   // The one reconciliation refusal an operator can override (ADR-0328). It has existed on
   // `ReconciliationOptions` since ADR-0308 with no way to pass it, so the four kill-switch
   // `meta.users` foreign keys ADR-0296 removed from the catalog have been reported as undeclared
@@ -36,7 +114,7 @@ export async function runApply(
   // **foreign keys only**, because dropping one is the single loosening that cannot fail against
   // existing rows — which is what keeps ADR-0290's "every step in the plan is expected to succeed"
   // true.
-  const allowLoosening = getBooleanFlag(command, "allow-loosening");
+  const allowLoosening = read.flags.allowLoosening;
   if (dryRun) {
     return emitDryRun(ctx.io, command);
   }
@@ -62,6 +140,7 @@ export async function runApply(
     // edited table definition migrate instead of re-running `CREATE TABLE` and halting.
     const plan = await planLiveReconciliation(conn, META_SCHEMA_NAME, META_TABLES, {
       ...(allowLoosening ? { allowLoosening: true } : {}),
+      ...(bounds.lockTimeoutMs === undefined ? {} : { probeLockTimeoutMs: bounds.lockTimeoutMs }),
     });
     if (planOnly) {
       if (command.format === "json") {
@@ -90,7 +169,7 @@ export async function runApply(
       // plan is empty, so the applier ran exactly that one idempotent statement and printed
       // `total: 1, executed: 1` — "one change was made" where nothing had changed, which is the
       // confusion ADR-0331 added the re-plan to remove.
-      statements: [...plan.statements],
+      statements: applierStatementsFor(plan),
       // The plan was computed from the live schema, so every statement in it is needed; the hash
       // log records what ran, not what the database holds, and skipping on it here would leave a
       // dropped object missing.
@@ -98,6 +177,7 @@ export async function runApply(
       // Continue past a failed statement. The plan is built to succeed and its steps are largely
       // independent, so one refused ALTER must not hide the thirty additions behind it.
       stopOnFailure: false,
+      ...bounds,
     });
     const report = await applier.apply();
     // Re-plan after a clean apply, because "executed 3, failed 0" is not the same claim as "the
@@ -116,6 +196,7 @@ export async function runApply(
       report.preconditions.ok && report.failed === 0
         ? await planLiveReconciliation(conn, META_SCHEMA_NAME, META_TABLES, {
             ...(allowLoosening ? { allowLoosening: true } : {}),
+            ...(bounds.lockTimeoutMs === undefined ? {} : { probeLockTimeoutMs: bounds.lockTimeoutMs }),
           })
         : null;
     if (command.format === "json") {
@@ -129,9 +210,11 @@ export async function runApply(
       // describes the schema as it now is; `plan` is the best available only when the apply did not
       // finish, and there the failure report sits beside it.
       const standing = standingDifferences(plan, converged);
-      if (standing.unreconciled.length > 0) {
+      if (standing.unreconciled.length > 0 || (standing.uncompared ?? []).length > 0) {
         printSuccess(ctx.io, formatReconciliationPlan(standing));
       }
+      const uncomparedOutcome = formatUncomparedApplyOutcome(standing.uncompared ?? []);
+      if (uncomparedOutcome !== null) printSuccess(ctx.io, uncomparedOutcome);
       if (converged !== null && converged.statements.length > 0) {
         printSuccess(
           ctx.io,
@@ -143,9 +226,10 @@ export async function runApply(
     }
     // Unchanged by ADR-0363 and deliberately: an `unreconciled` item exits 0, including the one
     // reason no re-run can clear, because `deploy/`'s `migrate` step gates the API on this exit
-    // code. `crossengin-pg.ts` carries the argument at the sibling site.
-    if (!report.preconditions.ok || report.failed > 0) return 1;
-    return 0;
+    // code. `crossengin-pg.ts` carries the argument at the sibling site. An expression left
+    // uncompared by the plan that describes the schema now does exit 1 (`applyExitCode`): its change
+    // may have been skipped, and a re-run is the remedy.
+    return applyExitCode(report, standingDifferences(plan, converged).uncompared ?? []);
   } catch (err) {
     printError(ctx.io, `apply: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
@@ -167,9 +251,10 @@ export interface ApplyJsonPayload {
    * done" (ADR-0331). `null` when the apply did not finish cleanly — the remaining difference is
    * then obviously the failure's, and re-planning would only describe it a second way.
    *
-   * `remaining.statements.length === 0` is the convergence claim. Anything else means another
-   * `apply` is needed, which happens when a step could only be planned against the schema as it
-   * was before this pass.
+   * `remaining.statements.length === 0` **and** `remaining.uncompared` empty is the convergence
+   * claim. Statements left mean another `apply` is needed, which happens when a step could only be
+   * planned against the schema as it was before this pass; an uncompared expression means the plan
+   * could not say whether that object matches the catalog at all.
    */
   readonly remaining: ReconciliationPlan | null;
 }

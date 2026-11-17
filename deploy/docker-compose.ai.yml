@@ -9,7 +9,10 @@
 
 services:
   ollama:
-    image: ollama/ollama:latest
+    # An exact release and never `latest`, which CLAUDE.md forbids and which here would let a rebuild
+    # change the model runtime under a deployment that changed nothing. The two services name the same
+    # tag so the pull and the server agree on the on-disk model format.
+    image: ollama/ollama:0.40.16
     volumes:
       - ollama-models:/root/.ollama
     # Never published: only the api service reaches it, over the compose network.
@@ -21,12 +24,17 @@ services:
       timeout: 5s
       retries: 30
       start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     restart: unless-stopped
 
   # One-shot: pulls the model into the shared volume before the API needs it.
   # Idempotent — a model already present is a no-op, so this is safe on every `up`.
   ai-pull:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.40.16
     depends_on:
       ollama:
         condition: service_healthy
@@ -34,6 +42,11 @@ services:
       OLLAMA_HOST: http://ollama:11434
     entrypoint: ["ollama"]
     command: ["pull", "${OPERATE_AI_MODEL:-qwen2.5:14b-instruct}"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     restart: "no"
 
   api:

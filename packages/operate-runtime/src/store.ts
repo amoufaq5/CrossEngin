@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
 import { compareInstantText } from "./datetime.js";
 import { compareDecimalText } from "./decimal.js";
 
@@ -236,7 +238,39 @@ export interface EntityStore {
     expected: UpdatePrecondition,
   ): Promise<ConditionalUpdate>;
   remove(tenantId: string, entity: string, id: string): Promise<boolean>;
+  /**
+   * `remove`, applied only while every field in `expected` still holds the value it was read as —
+   * `updateIf`'s compare-and-set for a delete. A delete decided on a `cart` order used to land after
+   * a concurrent `place` had committed: both answered success, the posting effect had fired, and the
+   * order it posted for was gone. Same atomicity rule as `updateIf`: the check and the delete are one
+   * step in the store.
+   */
+  removeIf(
+    tenantId: string,
+    entity: string,
+    id: string,
+    expected: UpdatePrecondition,
+  ): Promise<ConditionalRemove>;
+  /**
+   * `get`, holding a row lock on the record until the enclosing transaction ends — `share` for a
+   * write that depends on the record staying as read (a line written under a parent's lock), and
+   * `exclusive` for the act that may change it (a transition). The two conflict, so a line write and
+   * its parent's transition run one after the other and never interleave: whichever takes the lock
+   * second reads what the first committed. Two `share` holders do not conflict, so lines of one
+   * parent are still written concurrently. Outside a transaction the lock ends with the call, which
+   * guarantees nothing — the guarantee is a property of the transaction a handler runs in.
+   */
+  getLocked(tenantId: string, entity: string, id: string, lock: RowLock): Promise<EntityRecord | null>;
 }
+
+/** The row lock {@link EntityStore.getLocked} takes. */
+export type RowLock = "share" | "exclusive";
+
+/** What a conditional delete did. `precondition_failed` means the record exists and changed. */
+export type ConditionalRemove =
+  | { readonly kind: "removed" }
+  | { readonly kind: "not_found" }
+  | { readonly kind: "precondition_failed" };
 
 /**
  * Field values a conditional update requires the stored record still to hold, **as the store's own
@@ -267,8 +301,23 @@ function sameStoredValue(a: unknown, b: unknown): boolean {
   const aAbsent = a === undefined || a === null;
   const bAbsent = b === undefined || b === null;
   if (aAbsent || bAbsent) return aAbsent && bAbsent;
-  if (typeof a !== "object" || typeof b !== "object") return a === b;
+  if (typeof a !== "object" || typeof b !== "object") return a === b || sameDecimal(a, b);
   return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
+ * A decimal compared as a figure. `expected` was read through the decimal wire decorator, so it is
+ * the canonical text (`"5.000"`), while a document written before that decorator holds the JSON
+ * number `5` or a client's `"5"` — and comparing those as text made every conditional update of such
+ * a row fail for good, a "retry it" no retry could satisfy. The column store already compares a
+ * NUMERIC column as a figure, so this is the in-process stores agreeing with it.
+ */
+function sameDecimal(a: unknown, b: unknown): boolean {
+  const text = (v: unknown): string | null =>
+    typeof v === "number" ? (Number.isFinite(v) ? String(v) : null) : typeof v === "string" ? v : null;
+  const left = text(a);
+  const right = text(b);
+  return left !== null && right !== null && compareDecimalText(left, right) === 0;
 }
 
 /**
@@ -661,19 +710,106 @@ export class InMemoryEntityStore implements EntityStore {
     return this.bucket(tenantId, entity).delete(id);
   }
 
+  // `updateIf`'s rule: no `await` between the comparison and the delete.
+  async removeIf(
+    tenantId: string,
+    entity: string,
+    id: string,
+    expected: UpdatePrecondition,
+  ): Promise<ConditionalRemove> {
+    const bucket = this.bucket(tenantId, entity);
+    const existing = bucket.get(id);
+    if (existing === undefined) return { kind: "not_found" };
+    if (!preconditionHolds(existing, expected)) return { kind: "precondition_failed" };
+    bucket.delete(id);
+    return { kind: "removed" };
+  }
+
+  private readonly rowLocks = new RowLockTable();
+
+  /**
+   * The lock is taken before the read and through `this.get`, so a subclass overriding `get` (a test
+   * barrier) still reads under it. Inside `withTransaction` it is held until that transaction ends;
+   * outside one there is no transaction to hold it for, so none is taken.
+   */
+  async getLocked(tenantId: string, entity: string, id: string, lock: RowLock): Promise<EntityRecord | null> {
+    const tx = this.transactionScope.getStore();
+    if (tx !== undefined) await this.rowLocks.acquire(tx, `${tenantId}\u0000${entity}\u0000${id}`, lock);
+    return this.get(tenantId, entity, id);
+  }
+
+  private readonly transactionScope = new AsyncLocalStorage<RowLockHolder>();
+
   /**
    * Runs `fn` against this store, restoring a snapshot of all records if it
    * throws — giving the in-memory store the same all-or-nothing semantics the
    * Postgres store gets from a real transaction (useful for testing rollback).
+   * Row locks taken by `getLocked` inside `fn` are released when it settles.
    */
   async withTransaction<T>(_tenantId: string, fn: (tx: EntityStore) => Promise<T>): Promise<T> {
     const snapshot = new Map([...this.records].map(([k, v]) => [k, new Map(v)] as const));
+    const holder: RowLockHolder = {};
     try {
-      return await fn(this);
+      return await this.transactionScope.run(holder, () => fn(this));
     } catch (e) {
       this.records.clear();
       for (const [k, v] of snapshot) this.records.set(k, v);
       throw e;
+    } finally {
+      this.rowLocks.releaseAll(holder);
     }
+  }
+}
+
+/** One transaction's identity in the lock table; compared by reference. */
+type RowLockHolder = Record<string, never>;
+
+/**
+ * Shared/exclusive row locks for the in-memory store, with Postgres's compatibility for the two
+ * modes `getLocked` takes (`FOR SHARE` against `FOR NO KEY UPDATE`): shares coexist, an exclusive
+ * excludes everyone else, and a holder may re-take or strengthen its own lock when it is the only
+ * holder. There is no deadlock detection — Postgres has one and this does not — so a cycle (two
+ * share holders each asking to strengthen) waits for ever; no handler takes a share and then an
+ * exclusive on one row, which is the only way to form one.
+ */
+class RowLockTable {
+  private readonly held = new Map<string, { mode: RowLock; holders: Set<RowLockHolder> }>();
+  private readonly byHolder = new Map<RowLockHolder, Set<string>>();
+  private waiters: (() => void)[] = [];
+
+  async acquire(holder: RowLockHolder, key: string, mode: RowLock): Promise<void> {
+    for (;;) {
+      const state = this.held.get(key);
+      const alone = state !== undefined && state.holders.size === 1 && state.holders.has(holder);
+      if (state === undefined || state.holders.size === 0 || alone || (mode === "share" && state.mode === "share")) {
+        const next = state === undefined || state.holders.size === 0 ? { mode, holders: new Set<RowLockHolder>() } : state;
+        if (mode === "exclusive") next.mode = "exclusive";
+        next.holders.add(holder);
+        this.held.set(key, next);
+        let keys = this.byHolder.get(holder);
+        if (keys === undefined) {
+          keys = new Set();
+          this.byHolder.set(holder, keys);
+        }
+        keys.add(key);
+        return;
+      }
+      await new Promise<void>((resolve) => this.waiters.push(resolve));
+    }
+  }
+
+  releaseAll(holder: RowLockHolder): void {
+    const keys = this.byHolder.get(holder);
+    if (keys === undefined) return;
+    this.byHolder.delete(holder);
+    for (const key of keys) {
+      const state = this.held.get(key);
+      if (state === undefined) continue;
+      state.holders.delete(holder);
+      if (state.holders.size === 0) this.held.delete(key);
+    }
+    const woken = this.waiters;
+    this.waiters = [];
+    for (const wake of woken) wake();
   }
 }

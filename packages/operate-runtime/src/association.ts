@@ -13,13 +13,14 @@ import {
   type RoleName,
 } from "@crossengin/auth";
 import type { PathSegment, ResolvedPrincipal, RouteDefinition } from "@crossengin/api-gateway";
-import { principalAbacAttributes } from "@crossengin/api-gateway";
+import { principalAbacAttributes, principalUserId } from "@crossengin/api-gateway";
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 import type { Manifest } from "@crossengin/kernel/manifest";
 
 import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from "./list-query.js";
 import { entityCamel, resourceSlug, routeId } from "./slugs.js";
 import type { EntityRecord, EntityStore } from "./store.js";
+import { auditUnavailable, isEntityAuditUnrecorded, type EntityWriteAuditor } from "./entity-audit.js";
 
 /**
  * Parses an association list's `?limit` — the cap on how many linked records to
@@ -189,6 +190,14 @@ export interface AssociationHandlerContext {
    * entity list behind it pool one grant's obligations the same way.
    */
   readonly abacBatchEvaluator?: AbacBatchEvaluator;
+  /**
+   * The recorder `HandlerContext` carries, read by link and unlink. Those two commit on the store's
+   * own transaction, which the handler cannot reach into, so their record is made **after** the
+   * write and a refusal reports a write that stands with no record — a 503 that says so, never a
+   * 204. Zero `many_to_many` relations are declared across the seven packs, so no shipped route
+   * takes this path.
+   */
+  readonly entityAudit?: EntityWriteAuditor;
 }
 
 function json(status: number, body: unknown): HandlerOutput {
@@ -555,7 +564,7 @@ export function associationWriteRouteFromSpec(spec: AssociationWriteRouteSpec): 
  * `501 associations_unsupported` when the store can't write associations.
  */
 export function buildAssociationWriteHandler(spec: AssociationWriteRouteSpec, ctx: AssociationHandlerContext): Handler {
-  return async ({ principal, params }) => {
+  return async ({ request, principal, params }) => {
     const tenantId = principal?.tenantId ?? null;
     if (tenantId === null) return json(401, { error: "tenant_required" });
 
@@ -590,6 +599,29 @@ export function buildAssociationWriteHandler(spec: AssociationWriteRouteSpec, ct
       await ctx.store.link(tenantId, spec.left, spec.right, leftId, rightId);
     } else {
       await ctx.store.unlink(tenantId, spec.left, spec.right, leftId, rightId);
+    }
+    if (ctx.entityAudit !== undefined) {
+      try {
+        await ctx.entityAudit.record({
+          requestId: request.id,
+          operationId: spec.operationId,
+          action: spec.action,
+          entity: spec.ownerEntity,
+          tenantId,
+          recordId: ownerId,
+          actorUserId: principalUserId(principal),
+          detail: spec.relatedEntity,
+          // Ids only: a link names two records and carries no field of either, so nothing here is
+          // classified and nothing needs withholding.
+          before: null,
+          after: { relatedEntity: spec.relatedEntity, relatedId },
+          diff: null,
+          inTransaction: false,
+        });
+      } catch (err) {
+        if (isEntityAuditUnrecorded(err)) return auditUnavailable(false);
+        throw err;
+      }
     }
     return { kind: "empty", status: 204 };
   };

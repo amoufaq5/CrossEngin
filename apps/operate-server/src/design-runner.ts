@@ -100,6 +100,8 @@ export interface DesignRunnerOptions {
 export interface DesignRunnerInput {
   readonly description: string;
   readonly name: string;
+  /** The principal that requested the job, carried to the proposal it creates (H-28). */
+  readonly designedBy: string | null;
 }
 
 const MAX_ERROR_CHARS = 500;
@@ -207,6 +209,7 @@ export async function runDesignJob(
       manifestHash: result.manifestHash,
       source: "ai",
       providerLabel: result.providerLabel,
+      designedBy: input.designedBy,
     });
     await settle(async () =>
       jobs.succeed(tenantId, jobId, { proposalId: proposal.id, providerLabel: result.providerLabel }),

@@ -50,7 +50,8 @@ import {
   type SchemaDiff,
   type TableDiff,
 } from "./diff.js";
-import { renderExpressions } from "./expression-render.js";
+import { statementRunsOutsideTransaction, type ApplyReport } from "./applier.js";
+import { renderExpressions, type UncomparedExpression } from "./expression-render.js";
 import {
   introspectSchema,
   parseSessionPolicyVisibility,
@@ -80,6 +81,13 @@ export const RECONCILE_STEP_KINDS = [
   "replace_table_constraint",
   "add_column_check",
   "replace_column_check",
+  /**
+   * An index Postgres holds under a declared name and marks invalid — what a failed
+   * `CREATE INDEX CONCURRENTLY` leaves. Two statements, both concurrent: drop it, build it again.
+   * Safe to run in that order under a continue-past-failure applier because the dropped index was
+   * serving nothing: if the build then fails, the next plan finds the index missing and adds it.
+   */
+  "rebuild_invalid_index",
 ] as const;
 export type ReconcileStepKind = (typeof RECONCILE_STEP_KINDS)[number];
 
@@ -196,6 +204,17 @@ export interface ReconciliationProbe {
    * every step in it is expected to succeed — was true only of sessions that could see the rows.
    */
   readonly confinedTables: ReadonlySet<string>;
+  /**
+   * Existing tables this session saw hold **no** row while not confined — the only tables where a
+   * new index is built with a plain `CREATE INDEX` (H-23).
+   *
+   * A plain build holds a `SHARE` lock for the whole build, which blocks every write to the table;
+   * on an empty table that is free and the statement stays transactional. Everywhere else the index
+   * is built `CONCURRENTLY`, outside a transaction. Membership is the claim *seen empty*, so a table
+   * that was not asked, could not be asked, or whose session is confined is built concurrently —
+   * the direction that costs wall-clock time rather than a write outage.
+   */
+  readonly emptyTables: ReadonlySet<string>;
 }
 
 /** The two things a declared CHECK can be, which decides what `target` names. */
@@ -241,6 +260,12 @@ export interface ReconciliationOptions {
    * and neither becomes safe because a flag was passed.
    */
   readonly allowLoosening?: boolean;
+  /**
+   * How long `planLiveReconciliation`'s expression probe waits for a lock on a table before naming
+   * that table's expressions uncompared. Default `DEFAULT_PROBE_LOCK_TIMEOUT_MS`; read by nothing
+   * else, since `planSchemaReconciliation` takes no connection.
+   */
+  readonly probeLockTimeoutMs?: number;
 }
 
 export interface ReconciliationPlan {
@@ -250,6 +275,40 @@ export interface ReconciliationPlan {
   readonly unreconciled: readonly UnreconciledItem[];
   /** `steps` flattened to the statement list a `MigrationApplier` takes. */
   readonly statements: readonly string[];
+  /**
+   * Declared expressions the live plan could not compare, each with the error that stopped it — a
+   * privilege the session lacks, a lock it could not take, a statement cancelled (H-23). Those are
+   * **not compared** rather than read as drift: before this a refused probe read as "the
+   * expression cannot be applied" and planned a rebuild of a correct index or policy.
+   *
+   * Set only by `planLiveReconciliation`, which is the one place a probe runs; a plan built from a
+   * hand-assembled diff probed nothing and carries none.
+   */
+  readonly uncompared?: readonly UncomparedExpression[];
+}
+
+/**
+ * `CREATE [UNIQUE] INDEX` → `CREATE [UNIQUE] INDEX CONCURRENTLY`, for an index `emitIndex` wrote.
+ *
+ * Throws rather than passing an unrecognised statement through, because a statement that silently
+ * stayed in its plain form would take the write-blocking lock this exists to avoid.
+ */
+export function concurrentIndexSql(sql: string): string {
+  const match = /^CREATE (UNIQUE )?INDEX (?!CONCURRENTLY )/.exec(sql);
+  if (match === null) {
+    throw new Error(`not a CREATE INDEX statement emitIndex writes: ${sql.slice(0, 80)}`);
+  }
+  return `CREATE ${match[1] ?? ""}INDEX CONCURRENTLY ${sql.slice(match[0].length)}`;
+}
+
+/**
+ * The statements an applier takes, each naming the table it touches — so a statement that could not
+ * take its lock is reported against the table that was busy rather than as a bare SQL excerpt.
+ */
+export function applierStatementsFor(
+  plan: ReconciliationPlan,
+): readonly { readonly sql: string; readonly subject: string }[] {
+  return plan.steps.map((s) => ({ sql: s.sql, subject: `${plan.schema}.${s.table}` }));
 }
 
 function quoted(schema: string, table: string): string {
@@ -471,15 +530,21 @@ function planTable(
   const declaredIndexes = new Map((table.indexes ?? []).map((i) => [i.name, i] as const));
   const declaredPolicies = new Map((table.rls?.policies ?? []).map((p) => [p.name, p] as const));
   const constraintColumns = uniqueConstraintColumns(table);
+  // An index added to a table that already exists is built `CONCURRENTLY` unless the probe saw the
+  // table empty (H-23): a plain build holds `SHARE` — every write to the table waits — for as long as
+  // the build takes, and a table created by this plan never reaches here (its indexes ride on
+  // `create_table`, plain and inside the creation).
+  const builtPlain = probe?.emptyTables.has(table.name) === true;
   for (const name of tableDiff.addedIndexes) {
     const idx = declaredIndexes.get(name);
     if (idx !== undefined) {
       if (refuseIfBlocked(table, "index", name, idx.columns, refusedColumns, unreconciled)) continue;
+      const plain = emitIndex(table, idx);
       steps.push({
         kind: "create_index",
         table: table.name,
         target: name,
-        sql: emitIndex(table, idx),
+        sql: builtPlain ? plain : concurrentIndexSql(plain),
         guarded: false,
       });
       continue;
@@ -558,6 +623,26 @@ function planTable(
     const idx = declaredIndexes.get(delta.name);
     if (idx === undefined) continue;
     if (refuseIfBlocked(table, "index", delta.name, idx.columns, refusedColumns, unreconciled)) {
+      continue;
+    }
+    if (delta.reasons.includes("invalid")) {
+      // Always concurrent, and in two statements: `CONCURRENTLY` cannot share a statement or a
+      // transaction. The declared definition is what is built, so an invalid index whose shape also
+      // drifted is repaired in the same pass.
+      steps.push({
+        kind: "rebuild_invalid_index",
+        table: table.name,
+        target: delta.name,
+        sql: `DROP INDEX CONCURRENTLY IF EXISTS ${quoted(table.schema, delta.name)};`,
+        guarded: false,
+      });
+      steps.push({
+        kind: "rebuild_invalid_index",
+        table: table.name,
+        target: delta.name,
+        sql: concurrentIndexSql(emitIndex(table, idx)),
+        guarded: false,
+      });
       continue;
     }
     steps.push({
@@ -1445,9 +1530,52 @@ function uniqueConstraintColumns(
   return out;
 }
 
+/**
+ * `drift`'s exit code. A declared expression the probe could not compare — a busy table, a missing
+ * `TEMP` or `SELECT` privilege — is not agreement, so it exits 1 like drift does: `drift` is the CI
+ * guard rail (ADR-0047), and a 0 over expressions nobody examined is a falsely-true control
+ * (ADR-0372). Measured live as a non-owner with `TEMPORARY` revoked: every one of 1,072 expressions
+ * went uncompared, a tenant-isolation policy edited to `USING (true)` was not reported, and only an
+ * unrelated index-column difference kept the exit at 1. `--exit-zero-on-drift` covers both.
+ */
+export function driftExitCode(
+  hasDrift: boolean,
+  uncompared: readonly UncomparedExpression[],
+  exitZeroOnDrift: boolean,
+): 0 | 1 {
+  if (exitZeroOnDrift) return 0;
+  return hasDrift || uncompared.length > 0 ? 1 : 0;
+}
+
+/**
+ * `apply`'s exit code. An uncompared expression is one whose declared change, if any, was neither
+ * planned nor applied — so a run that skipped a policy rewrite because its table was busy must not
+ * read as a clean upgrade. Unlike an `unreconciled` item (which exits 0 because no re-run clears
+ * it, ADR-0363) the usual cause here is transient and a re-run is the remedy.
+ */
+export function applyExitCode(
+  report: { readonly preconditions: Pick<ApplyReport["preconditions"], "ok">; readonly failed: number },
+  uncompared: readonly UncomparedExpression[],
+): 0 | 1 {
+  if (!report.preconditions.ok || report.failed > 0) return 1;
+  return uncompared.length > 0 ? 1 : 0;
+}
+
+/** The line `apply` prints after its report when it exits 1 for `applyExitCode`'s second reason. */
+export function formatUncomparedApplyOutcome(uncompared: readonly UncomparedExpression[]): string | null {
+  if (uncompared.length === 0) return null;
+  return (
+    `  ${String(uncompared.length)} declared expression(s) were not compared, so any change to them ` +
+    "was neither planned nor applied; each is listed above with why. A lock timeout (55P03) clears " +
+    "on a re-run or with --lock-timeout-ms raised; a privilege (42501) needs apply run as the " +
+    "schema's owner."
+  );
+}
+
 export function formatReconciliationPlan(plan: ReconciliationPlan): string {
   const lines: string[] = [`Reconciliation plan for schema "${plan.schema}":`];
-  if (plan.steps.length === 0 && plan.unreconciled.length === 0) {
+  const uncompared = plan.uncompared ?? [];
+  if (plan.steps.length === 0 && plan.unreconciled.length === 0 && uncompared.length === 0) {
     lines.push("  (nothing to do — the live schema matches the catalog)");
     return lines.join("\n");
   }
@@ -1455,7 +1583,7 @@ export function formatReconciliationPlan(plan: ReconciliationPlan): string {
     lines.push(`  ${plan.steps.length} statement(s) to apply:`);
     // Grouped, because creating one table emits a statement per index and policy too — a fresh
     // database would otherwise print 839 lines that all say `create_table`.
-    const groups = new Map<string, { count: number; guarded: boolean }>();
+    const groups = new Map<string, { count: number; guarded: boolean; concurrent: boolean }>();
     for (const step of plan.steps) {
       const subject = step.target === step.table ? step.table : `${step.table}.${step.target}`;
       const key = `${step.kind} ${subject}`;
@@ -1463,12 +1591,16 @@ export function formatReconciliationPlan(plan: ReconciliationPlan): string {
       groups.set(key, {
         count: (prior?.count ?? 0) + 1,
         guarded: (prior?.guarded ?? false) || step.guarded,
+        concurrent: (prior?.concurrent ?? false) || statementRunsOutsideTransaction(step.sql),
       });
     }
     for (const [key, group] of groups) {
       const guard = group.guarded ? " [guarded]" : "";
+      // Said, because it is the one kind of step that does not block writes while it runs and is
+      // not undone if it fails — it leaves an invalid index the next plan rebuilds.
+      const concurrent = group.concurrent ? " [concurrent]" : "";
       const times = group.count > 1 ? ` (${group.count} statements)` : "";
-      lines.push(`      ${key}${times}${guard}`);
+      lines.push(`      ${key}${times}${guard}${concurrent}`);
     }
   }
   if (plan.unreconciled.length > 0) {
@@ -1477,6 +1609,16 @@ export function formatReconciliationPlan(plan: ReconciliationPlan): string {
       lines.push(`      [${item.reason}] ${item.table}.${item.target}`);
       lines.push(`        ${item.detail}`);
       lines.push(`        manual: ${item.manualSql}`);
+    }
+  }
+  if (uncompared.length > 0) {
+    lines.push(
+      `  ${uncompared.length} declared expression(s) not compared — the probe could not run, so ` +
+        "these were neither called drifted nor planned:",
+    );
+    for (const u of uncompared) {
+      lines.push(`      ${u.table} [${u.sqlstate ?? "no sqlstate"}] ${u.reason}`);
+      lines.push(`        ${u.expression}`);
     }
   }
   return lines.join("\n");
@@ -1512,10 +1654,16 @@ export async function planLiveReconciliation(
   const requests = tables
     .filter((tb) => liveNames.has(tb.name))
     .flatMap((tb) => expressionRequestsFor(tb));
-  const rendered = await renderExpressions(conn, schema, requests);
+  const rendered = await renderExpressions(
+    conn,
+    schema,
+    requests,
+    options.probeLockTimeoutMs === undefined ? {} : { lockTimeoutMs: options.probeLockTimeoutMs },
+  );
   const diff = diffSchema(tables, live, rendered);
   const probe = await probeForReconciliation(conn, schema, diff, tables);
-  return planSchemaReconciliation(diff, tables, probe, options);
+  const plan = planSchemaReconciliation(diff, tables, probe, options);
+  return { ...plan, uncompared: rendered.uncompared ?? [] };
 }
 
 async function probeForReconciliation(
@@ -1560,10 +1708,23 @@ async function probeForReconciliation(
     const row = result.rows[0];
     rowCounts.set(table, row === undefined ? 0 : Number.parseInt(row.count, 10));
   }
+  const emptyTables = new Set<string>();
+  for (const m of diff.modifiedTables) {
+    if (m.addedIndexes.length === 0) continue;
+    // Confinement first, for the count's reason: a confined session sees no row in a table that holds
+    // some, and "empty" is the claim that would plan a write-blocking build.
+    if (confinedTables.has(m.table) || (await sessionIsConfinedOn(conn, schema, m.table))) continue;
+    // `EXISTS` rather than the count above: one row answers it, where `count(*)` reads the table.
+    const result = await conn.query<{ populated: boolean }>(
+      `SELECT EXISTS (SELECT 1 FROM ${quoted(schema, m.table)}) AS populated`,
+    );
+    if (result.rows[0]?.populated === false) emptyTables.add(m.table);
+  }
   const widening = await proveWidenings(conn, schema, diff, tables);
   return {
     rowCounts,
     confinedTables,
+    emptyTables,
     wideningProofs: widening.proofs,
     wideningImplications: widening.implications,
   };

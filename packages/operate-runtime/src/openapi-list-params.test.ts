@@ -28,6 +28,7 @@ import {
 import {
   FILTER_OPS,
   matchesFilter,
+  type ConditionalRemove,
   type ConditionalUpdate,
   type EntityRecord,
   type EntityStore,
@@ -98,11 +99,13 @@ describe("listQueryParameters — every emitted parameter is one the parser serv
     expect(offenders).toEqual([]);
     // A floor first, because an empty emission would satisfy the assertion above vacuously.
     expect(examined).toBeGreaterThan(1500);
-    // Then the measured figure: 51 core entities, 1,774 parameters (235 fixed + 1,539 filter, at
+    // Then the measured figure: 51 core entities, 1,792 parameters (235 fixed + 1,557 filter, at
     // 1 + FILTER_OPS.length per filterable field over the 45 entities that declare one). It is the
-    // same 1,774 the assembled document carries on its list operations, counted independently — so
-    // a pack edit fails here and the figure gets re-derived rather than carried forward stale.
-    expect(examined).toBe(1774);
+    // same 1,792 the assembled document carries on its list operations, counted independently — so
+    // a pack edit fails here and the figure gets re-derived rather than carried forward stale. It
+    // was 1,774 until `BillLine.purchase_order_line_id` (indexed, so filterable) added nine, and
+    // 1,783 until `FiscalPeriod` gained a lifecycle, whose state field is filterable, adding nine more.
+    expect(examined).toBe(1792);
     expect(CONFIGS.length).toBe(51);
   });
 
@@ -125,9 +128,9 @@ describe("listQueryParameters — every emitted parameter is one the parser serv
       }
     }
     expect(offenders).toEqual([]);
-    // Measured: 45 of core's 51 entities declare a filterable field, giving 1,539 filter
+    // Measured: 45 of core's 51 entities declare a filterable field, giving 1,557 filter
     // parameters at nine apiece.
-    expect(examined).toBe(1539);
+    expect(examined).toBe(1557);
   });
 
   it("emits only field names `FILTER_KEY_RE` can parse, so no listed filter is inert", () => {
@@ -374,7 +377,7 @@ describe("a filter parameter's schema is a string and never the field's declared
         expect(p.schema, `${entity}.${p.name}`).toEqual({ type: "string" });
       }
     }
-    expect(examined).toBe(1539);
+    expect(examined).toBe(1557);
   });
 
   it("gives a numeric field's filter a string schema, with the type in the description only", () => {
@@ -459,6 +462,12 @@ class LinkStore implements EntityStore {
   }
   async remove(): Promise<boolean> {
     return true;
+  }
+  async removeIf(): Promise<ConditionalRemove> {
+    return { kind: "removed" };
+  }
+  async getLocked(): Promise<EntityRecord | null> {
+    return { id: "p1" };
   }
   async listLinks(): Promise<ReadonlyArray<{ leftId: string; rightId: string }>> {
     return [{ leftId: "tag-1", rightId: "p1" }];

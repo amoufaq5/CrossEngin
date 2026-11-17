@@ -10,10 +10,14 @@ import {
   criticalPathMinutes,
   fitsBudget,
   FAST_CI_BUDGET_MINUTES,
-  measuredSuiteSeconds,
+  CI_AUDIT_EXCEPTIONS,
+  CI_MEASURED_STEP_SECONDS,
+  measuredJobSeconds,
 } from "./ci.js";
 import {
   auditCiWorkflow,
+  auditExceptionDisagreements,
+  readAuditExceptionInputs,
   CI_JOB_YAML_KEYS,
   CI_MAIN_BRANCH,
   CI_TRIGGER_YAML_KEY,
@@ -164,16 +168,45 @@ describe("the shipped workflow", () => {
     expect(steps.filter((s) => s.includes("operate-web"))).toEqual([]);
   });
 
-  it("mounts no lint step, because lint is a hard red and not a vacuous green", () => {
-    // Measured: 90 workspace members, exactly one `lint` script (`operate-web -> next lint`), and
-    // that app has no eslint config file and no eslint dependency at all — so `next lint` prompts
-    // interactively and the non-TTY read cancels it. A lint step would fail every run.
-    const steps = (parsed.jobs[0]?.steps ?? []).map((s) => s.rendered);
-    expect(steps.filter((s) => s.includes("lint"))).toEqual([]);
+  it("lints in its own job, after a build, through the root config and not `next lint`", () => {
+    // This test used to assert the opposite — no lint step — because `pnpm lint` then exited 1 on
+    // `next lint`'s interactive prompt in the one app that had a lint script. It is rewritten rather
+    // than deleted: `pnpm lint` is `eslint .` over the root flat config now, and what this pins is
+    // that it runs in a job that built first, since type-aware rules read `dist/*.d.ts`.
+    const lint = parsed.jobs.find((j) => j.id === "lint");
+    expect(lint).toBeDefined();
+    const steps = (lint?.steps ?? []).map((s) => s.rendered);
+    expect(steps.indexOf("run pnpm lint")).toBeGreaterThan(steps.indexOf("run pnpm -r build"));
+    expect(steps.indexOf("run pnpm -r build")).toBeGreaterThanOrEqual(0);
+    const root = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as {
+      readonly scripts?: Readonly<Record<string, string>>;
+    };
+    expect(root.scripts?.lint).toBe("eslint .");
     const web = JSON.parse(
       readFileSync(join(REPO_ROOT, "apps", "operate-web", "package.json"), "utf8"),
-    ) as { readonly devDependencies?: Readonly<Record<string, string>> };
-    expect(Object.keys(web.devDependencies ?? {}).filter((d) => d.includes("eslint"))).toEqual([]);
+    ) as { readonly scripts?: Readonly<Record<string, string>> };
+    expect(web.scripts?.lint).toBeUndefined();
+  });
+
+  it("audits the shipped dependency closure right after install and before anything slow", () => {
+    const steps = (parsed.jobs.find((j) => j.id === "verify")?.steps ?? []).map((s) => s.rendered);
+    const install = steps.indexOf("run pnpm install --frozen-lockfile");
+    const audit = steps.indexOf("run pnpm audit --audit-level=high --prod");
+    expect(install).toBeGreaterThanOrEqual(0);
+    expect(audit).toBe(install + 1);
+  });
+
+  it("boots the deployment in a job of its own, through the script the workflow names", () => {
+    const smoke = parsed.jobs.find((j) => j.id === "deploy-smoke");
+    expect((smoke?.steps ?? []).map((s) => s.rendered)).toEqual([
+      "uses actions/checkout@v4",
+      "run bash deploy/ci-smoke.sh",
+    ]);
+    const script = readFileSync(join(REPO_ROOT, "deploy", "ci-smoke.sh"), "utf8");
+    // The script brings the real stack up and waits on the real healthchecks, and tears it down.
+    expect(script).toContain("up -d --wait");
+    expect(script).toContain("down -v");
+    expect(script).toContain("restore check passed");
   });
 });
 
@@ -183,7 +216,9 @@ describe("the declared pipeline", () => {
     // compared with the literal it was typed from, since a one-job pipeline's critical path *is*
     // `targetMinutes`. `ci.test.ts` owns the both-ways fence between the measurement and the steps;
     // this asserts the arithmetic that turns it into a budget.
-    expect(criticalPathMinutes(CI_PIPELINE)).toBe(Math.ceil(measuredSuiteSeconds() / 60));
+    expect(criticalPathMinutes(CI_PIPELINE)).toBe(
+      Math.max(...CI_PIPELINE.jobs.map((j) => Math.ceil(measuredJobSeconds(j.steps) / 60))),
+    );
     expect(CI_PIPELINE.pullRequestTargetMinutes).toBe(FAST_CI_BUDGET_MINUTES);
     expect(fitsBudget(CI_PIPELINE, "pull_request")).toBe(true);
   });
@@ -194,14 +229,18 @@ describe("the declared pipeline", () => {
     // which quotes every one of those patterns and is therefore the sole match for each of them if
     // the grep is re-run naively. Widening this list needs a measurement, which is why it is
     // asserted exactly rather than as a superset.
-    expect(CI_PIPELINE.jobs.map((j) => j.runs)).toEqual([["unit"]]);
+    // Plus `integration` for `deploy-smoke`, which drives a real Postgres and real containers, and
+    // nothing for `lint`, which runs no test.
+    expect(CI_PIPELINE.jobs.map((j) => j.runs)).toEqual([["unit"], [], ["integration"]]);
   });
 
   it("claims no services, which is why the workflow needs no Postgres", () => {
     // Empty is the claim (ADR-0331): measured, `new Pool`/`new Client`/`from "pg"` occurs in 0 of
     // the 771 test files other than this one, so nothing in the sweep needs a database.
-    expect(CI_PIPELINE.jobs.map((j) => j.requiresServices)).toEqual([[]]);
-    expect(CI_PIPELINE.jobs.map((j) => j.parallelism)).toEqual([1]);
+    // `deploy-smoke` runs Postgres as one of the stack's own containers, so no job needs the
+    // runner's `services:` block, which the fence would report as an undeclared job key.
+    expect(CI_PIPELINE.jobs.map((j) => j.requiresServices)).toEqual([[], [], []]);
+    expect(CI_PIPELINE.jobs.map((j) => j.parallelism)).toEqual([1, 1, 1]);
   });
 
   it("cannot be emptied and stay a pipeline", () => {
@@ -369,12 +408,15 @@ describe("the audit compares in both directions", () => {
   });
 
   it("reports a changed action input, naming the input and both values", () => {
-    const added = addedFindings(mutate("          node-version: 20\n", "          node-version: 18\n"));
+    // `String.replace` with a string pattern changes the first occurrence only, which is `verify`'s
+    // — the line is in `lint` too, and the finding is expected once, for the job that changed.
+    const added = addedFindings(mutate("          node-version: 22\n", "          node-version: 18\n"));
     expect(added.map((f) => f.kind)).toEqual(["action_input_differs"]);
     // The subject and the detail are what make the finding actionable rather than merely true: a
     // reader has to be told which input of which action, and what each side holds.
     expect(added[0]?.subject).toContain("actions/setup-node@v4 with.node-version");
-    expect(added[0]?.detail).toContain('declared "20"');
+    expect(added[0]?.subject).toContain("verify:");
+    expect(added[0]?.detail).toContain('declared "22"');
     expect(added[0]?.detail).toContain('workflow has "18"');
   });
 
@@ -449,13 +491,17 @@ describe("the pins agree with the repository", () => {
   });
 
   it("pins the Node major the engines floor and the deployment image agree on", () => {
-    // 20 and not the 22 a developer may be running: `engines.node` is the version the repository
-    // promises, and `deploy/Dockerfile` is `FROM node:20-bookworm-slim`, so 20 is the only major
-    // anything deploys. Testing the floor tests the promise.
-    expect(root.engines?.node).toBe(">=20");
+    // 22: `engines.node` is the version the repository promises, and `deploy/Dockerfile` pins
+    // `node:22.<minor>.<patch>-bookworm-slim`, so 22 is the only major anything deploys. This was
+    // 20 on the same argument while the image was 20; the three move together or this fails.
+    expect(root.engines?.node).toBe(">=22");
     const dockerfile = readFileSync(join(REPO_ROOT, "deploy", "Dockerfile"), "utf8");
-    expect(dockerfile).toContain("FROM node:20-");
-    expect(inputs("actions/setup-node@v4").get("node-version")).toBe("20");
+    expect(dockerfile).toMatch(/^ARG NODE_IMAGE=node:22\.\d+\.\d+-bookworm-slim$/m);
+    for (const job of readCiWorkflow().jobs) {
+      const setup = job.steps.find((st) => st.rendered === "uses actions/setup-node@v4");
+      if (setup !== undefined) expect(setup.inputs.get("node-version"), job.id).toBe("22");
+    }
+    expect(inputs("actions/setup-node@v4").get("node-version")).toBe("22");
   });
 });
 
@@ -566,4 +612,61 @@ describe("the hook is in the same state as the workflow, and fenced the same way
       readonly scripts?: Readonly<Record<string, string>>;
     };
   }
+});
+
+describe("the dependency audit's exceptions", () => {
+  it("agree with what pnpm audit ignores, in both directions, and their premise holds", () => {
+    expect(auditExceptionDisagreements()).toEqual([]);
+  });
+
+  it("were really read, so the agreement above is not vacuous", () => {
+    const inputs = readAuditExceptionInputs();
+    expect(inputs.ignoredAdvisories?.length).toBe(CI_AUDIT_EXCEPTIONS.length);
+    expect(inputs.members.length).toBeGreaterThanOrEqual(80);
+    expect(CI_AUDIT_EXCEPTIONS.length).toBeGreaterThanOrEqual(1);
+    expect(CI_MEASURED_STEP_SECONDS["pnpm audit --audit-level=high --prod"]).toBeGreaterThan(0);
+  });
+
+  it("fires on an ignore nobody justified and on a justification nothing applies", () => {
+    const inputs = readAuditExceptionInputs();
+    const extra = { ...inputs, ignoredAdvisories: [...(inputs.ignoredAdvisories ?? []), "GHSA-xxxx-yyyy-zzzz"] };
+    expect(auditExceptionDisagreements(CI_AUDIT_EXCEPTIONS, extra)).toEqual([
+      "package.json ignores GHSA-xxxx-yyyy-zzzz, which no CI_AUDIT_EXCEPTIONS entry justifies",
+    ]);
+    const missing = { ...inputs, ignoredAdvisories: (inputs.ignoredAdvisories ?? []).slice(1) };
+    expect(auditExceptionDisagreements(CI_AUDIT_EXCEPTIONS, missing)).toHaveLength(1);
+    expect(auditExceptionDisagreements(CI_AUDIT_EXCEPTIONS, { ...inputs, ignoredAdvisories: null })).toEqual([
+      "package.json has no pnpm.auditConfig.ignoreGhsas, so no declared exception is applied",
+    ]);
+  });
+
+  it("refuses dev_tooling_not_shipped the moment a member depends on the tooling at run time", () => {
+    const inputs = readAuditExceptionInputs();
+    const leaked = {
+      ...inputs,
+      members: inputs.members.map((m) =>
+        m.name === "@crossengin/operate-server"
+          ? { ...m, dependencies: [...m.dependencies, "@crossengin/testing"] }
+          : m,
+      ),
+    };
+    const findings = auditExceptionDisagreements(CI_AUDIT_EXCEPTIONS, leaked);
+    expect(findings.length).toBe(
+      CI_AUDIT_EXCEPTIONS.filter((e) => e.via === "@crossengin/testing").length,
+    );
+    expect(findings.every((f) => f.includes("@crossengin/operate-server lists in its dependencies"))).toBe(
+      true,
+    );
+  });
+
+  it("refuses a dev_tooling_not_shipped entry naming no member", () => {
+    const first = CI_AUDIT_EXCEPTIONS.find((e) => e.reason === "dev_tooling_not_shipped");
+    expect(first).toBeDefined();
+    if (first === undefined) return;
+    const bad = [{ ...first, via: "@crossengin/nonexistent" }];
+    const inputs = { ...readAuditExceptionInputs(), ignoredAdvisories: [first.advisory] };
+    expect(auditExceptionDisagreements(bad, inputs)).toEqual([
+      `${first.advisory} is dev_tooling_not_shipped through @crossengin/nonexistent, which is not a workspace member`,
+    ]);
+  });
 });

@@ -33,6 +33,8 @@ import {
   isEd25519PrivateSeedBase64,
 } from "@crossengin/crypto";
 
+import { trustedChainKeys } from "@crossengin/forensics";
+
 import { AuditChainConfigSchema, type AuditChainConfig } from "./audit-chain.js";
 
 /**
@@ -280,4 +282,63 @@ export function formatAuditChain(resolution: AuditChainResolution): string {
 
 function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Public keys the chain verifier trusts **beside** the one derived from the signing key — the
+ * halves of keys this deployment rotated away from, or, for an auditor running `verify-chain`
+ * without the seed, the deployment's own public key.
+ *
+ * Public material, so the environment is a route and not a disclosure. Comma- or whitespace-
+ * separated, because a compose `environment:` block takes a multi-line value and a `.env` file
+ * does not, and neither character occurs in base64.
+ */
+export const AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS_VAR = "AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS";
+
+export interface ChainTrust {
+  /** fingerprint → public key, the current key first. Empty only when nothing was configured. */
+  readonly keys: ReadonlyMap<string, string>;
+  /** How many came from `AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS` rather than the signing key. */
+  readonly declared: number;
+}
+
+/**
+ * The deployment's chain trust set: the signing key's public half, when there is one, and every key
+ * the variable declares. A malformed declared key **throws**, naming its position and the variable
+ * and not its value — a trust set silently one key short refuses every entry that key signed, so
+ * an operator who declared one must learn at boot that it did not take.
+ */
+export function chainTrustFromEnv(
+  env: Readonly<Record<string, string | undefined>>,
+  signingPublicKeyBase64: string | null,
+): ChainTrust {
+  const declared = (env[AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS_VAR] ?? "")
+    .split(/[\s,]+/)
+    .filter((k) => k !== "");
+  let keys: ReadonlyMap<string, string>;
+  try {
+    keys = trustedChainKeys([
+      ...(signingPublicKeyBase64 === null ? [] : [signingPublicKeyBase64]),
+      ...declared,
+    ]);
+  } catch (err) {
+    throw new Error(`${AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS_VAR}: ${errMessage(err)}`);
+  }
+  return { keys, declared: declared.length };
+}
+
+/** The boot line: which keys a chain entry or a checkpoint may be signed by, by fingerprint. */
+export function formatChainTrust(trust: ChainTrust): string {
+  if (trust.keys.size === 0) {
+    return (
+      `chain trust: unpinned — no signing key and no ${AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS_VAR}, so` +
+      " signatures resolve through the key registry, where any registered key verifies"
+    );
+  }
+  const fingerprints = [...trust.keys.keys()].map((f) => f.slice(0, 16)).join(", ");
+  return (
+    `chain trust: pinned to ${trust.keys.size.toString()} key(s) [${fingerprints}]` +
+    (trust.declared > 0 ? ` (${trust.declared.toString()} from ${AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS_VAR})` : "") +
+    " — an entry or checkpoint signed by any other key is a finding, whatever the registry holds"
+  );
 }

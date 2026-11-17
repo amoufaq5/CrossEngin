@@ -10,6 +10,8 @@ import {
   TAX_RULE_ENTITY,
 } from "./entities-accounting.js";
 import { JOURNAL_LINE_ENTITY } from "./entities-finance.js";
+import { ERP_EXT_PERMISSIONS } from "./permissions-ext.js";
+import { FISCAL_PERIOD_LIFECYCLE } from "./workflows-ext.js";
 
 describe("accounting-depth entities", () => {
   it("all nine parse against EntitySchema and are auditable", () => {
@@ -38,6 +40,28 @@ describe("accounting-depth entities", () => {
     const f = FISCAL_PERIOD_ENTITY.fields.find((f) => f.name === "status");
     if (f?.type.kind !== "enum") throw new Error("not an enum");
     expect(f.type.values).toEqual(["open", "closing", "closed", "locked"]);
+    // The title was a claim about the enum alone until a workflow drove it: with no lifecycle the
+    // status was an ordinary field, and a `PATCH {"status":"open"}` reopened a closed book.
+    if (FISCAL_PERIOD_LIFECYCLE.kind !== "entityLifecycle") throw new Error("not a lifecycle");
+    expect(FISCAL_PERIOD_LIFECYCLE.stateField).toBe("status");
+    expect(FISCAL_PERIOD_LIFECYCLE.states.map((s) => s.name)).toEqual(f.type.values);
+  });
+
+  it("reopens a closed period only through a named transition, and nothing leaves locked", () => {
+    if (FISCAL_PERIOD_LIFECYCLE.kind !== "entityLifecycle") throw new Error("not a lifecycle");
+    const edges = FISCAL_PERIOD_LIFECYCLE.transitions.map((t) => [t.name, t.from, t.to]);
+    expect(edges).toEqual([
+      ["start_close", "open", "closing"],
+      ["close", ["open", "closing"], "closed"],
+      ["reopen", "closed", "open"],
+      ["lock", "closed", "locked"],
+    ]);
+    const leavesLocked = FISCAL_PERIOD_LIFECYCLE.transitions.filter((t) =>
+      (Array.isArray(t.from) ? t.from : [t.from]).includes("locked"),
+    );
+    expect(leavesLocked).toEqual([]);
+    expect(FISCAL_PERIOD_LIFECYCLE.states.find((s) => s.name === "locked")?.category).toBe("terminal");
+    expect(ERP_EXT_PERMISSIONS["FiscalPeriod"]?.transitions?.["reopen"]?.roles).toEqual(["erp_admin", "controller"]);
   });
 
   it("TaxRule carries effective dating + rate categories + reverse charge", () => {

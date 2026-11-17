@@ -7,6 +7,8 @@ import {
 } from "@crossengin/kernel/bootstrap";
 
 import { MigrationApplier, formatApplyReport } from "../src/applier.js";
+import type { ParsedFlags } from "../src/cli-flags.js";
+import { type MigrationBounds, parseCrossenginPgArgs } from "../src/crossengin-pg-args.js";
 import {
   type PgConnection,
   looksLikeProductionDatabase,
@@ -14,7 +16,14 @@ import {
 } from "../src/connection.js";
 import { diffSchema, expressionRequestsFor, formatSchemaDiff } from "../src/diff.js";
 import { renderExpressions } from "../src/expression-render.js";
-import { formatReconciliationPlan, planLiveReconciliation } from "../src/reconcile.js";
+import {
+  applierStatementsFor,
+  applyExitCode,
+  driftExitCode,
+  formatReconciliationPlan,
+  formatUncomparedApplyOutcome,
+  planLiveReconciliation,
+} from "../src/reconcile.js";
 import {
   COLUMN_ENCRYPTION_KEY_ENV,
   DEFAULT_COLUMN_KEY_REF,
@@ -31,39 +40,13 @@ import { createNodePgConnection } from "../src/node-pg.js";
 
 const CLI_VERSION = "0.0.0";
 
-type Command = "apply" | "drift" | "inspect" | "encrypt" | "version" | "help";
-
-function flagValue(argv: readonly string[], name: string): string | null {
-  const prefix = `--${name}=`;
-  for (const arg of argv.slice(2)) {
-    if (arg.startsWith(prefix)) return arg.slice(prefix.length);
-  }
-  return null;
-}
-
-function parseCommand(argv: readonly string[]): { command: Command; flags: ReadonlySet<string> } {
-  const positional = argv.slice(2).filter((arg) => !arg.startsWith("--"));
-  const flags = new Set(argv.slice(2).filter((arg) => arg.startsWith("--") && !arg.includes("=")));
-  const first = positional[0];
-  if (first === undefined || first === "help" || flags.has("--help")) {
-    return { command: "help", flags };
-  }
-  if (
-    first === "apply" ||
-    first === "drift" ||
-    first === "inspect" ||
-    first === "encrypt" ||
-    first === "version"
-  ) {
-    return { command: first, flags };
-  }
-  return { command: "help", flags };
-}
-
 function printHelp(): void {
   process.stdout.write(
     [
       "Usage: crossengin-pg <command> [flags]",
+      "",
+      "An unknown command or flag is refused (exit 2). A value flag takes --x=v or --x v; a boolean",
+      "flag is bare or =true / =false.",
       "",
       "Commands:",
       "  apply                Reconcile the meta-schema with the database",
@@ -81,7 +64,8 @@ function printHelp(): void {
       "Flags:",
       "  --dry-run            With apply, emit SQL without executing",
       "  --confirm            Required when PGDATABASE looks like production",
-      "  --exit-zero-on-drift With drift, do not exit non-zero when drift exists",
+      "  --exit-zero-on-drift With drift, exit 0 even when drift exists or an expression could not",
+      "                       be compared (both otherwise exit 1)",
       "  --json               With drift/inspect, emit JSON instead of human form",
       "  --schema=<name>      With encrypt, the schema to operate on (default: meta)",
       "  --key-ref=<sql>      With encrypt --plan/--apply, the SQL key reference",
@@ -90,6 +74,13 @@ function printHelp(): void {
       "                       form yields NULL when unset and pgp_sym_encrypt(x, NULL) is NULL,",
       "                       which would store NULL over every PHI value and report success.",
       "  --provision          With encrypt --apply, CREATE EXTENSION pgcrypto first",
+      "  --lock-timeout-ms <n>  With apply/drift, how long a statement or expression probe waits",
+      "                       for a lock before giving up (default 5000; 0 waits indefinitely). A",
+      "                       statement that waits forever holds its place in the table's lock queue",
+      "                       and every query behind it waits too.",
+      "  --lock-retries <n>   With apply, retries after a lock timeout (default 2)",
+      "  --statement-timeout-ms <n>  With apply, how long a transactional statement may run",
+      "                       holding its lock (default 600000; 0 disables)",
       "  --verify|--plan|--apply  encrypt action (default: --plan)",
       "",
       "Environment:",
@@ -103,15 +94,15 @@ function printHelp(): void {
   );
 }
 
-async function runApply(flags: ReadonlySet<string>): Promise<number> {
-  if (flags.has("--dry-run")) {
+async function runApply(flags: ParsedFlags, bounds: MigrationBounds): Promise<number> {
+  if (flags.booleans.has("dry-run")) {
     const statements = emitMetaBootstrapSql();
     for (const s of statements) process.stdout.write(s + "\n");
     process.stdout.write(`-- ${statements.length} statement(s)\n`);
     return 0;
   }
   const config = parsePgEnvConfig();
-  if (looksLikeProductionDatabase(config.database) && !flags.has("--confirm")) {
+  if (looksLikeProductionDatabase(config.database) && !flags.booleans.has("confirm")) {
     process.stderr.write(
       `Refusing to apply against production-looking database '${config.database}' without --confirm.\n`,
     );
@@ -128,11 +119,12 @@ async function runApply(flags: ReadonlySet<string>): Promise<number> {
     // drop them but by hand. It reaches **foreign keys only** — not a column, table, index, policy
     // or CHECK — because dropping a foreign key is the one loosening that cannot fail against
     // existing rows, which is what keeps ADR-0290's "every step is expected to succeed" true.
-    const allowLoosening = flags.has("--allow-loosening");
+    const allowLoosening = flags.booleans.has("allow-loosening");
     const plan = await planLiveReconciliation(conn, META_SCHEMA_NAME, META_TABLES, {
       ...(allowLoosening ? { allowLoosening: true } : {}),
+      ...(bounds.lockTimeoutMs === undefined ? {} : { probeLockTimeoutMs: bounds.lockTimeoutMs }),
     });
-    if (allowLoosening && !flags.has("--plan")) {
+    if (allowLoosening && !flags.booleans.has("plan")) {
       // Said out loud before anything runs, because this is the one invocation that *removes* a
       // constraint the database is currently enforcing, and the plan it prints afterwards is the
       // only other place it would be visible.
@@ -140,7 +132,7 @@ async function runApply(flags: ReadonlySet<string>): Promise<number> {
         "--allow-loosening: undeclared foreign keys will be DROPPED rather than reported.\n",
       );
     }
-    if (flags.has("--plan")) {
+    if (flags.booleans.has("plan")) {
       process.stdout.write(formatReconciliationPlan(plan) + "\n");
       return 0;
     }
@@ -155,14 +147,18 @@ async function runApply(flags: ReadonlySet<string>): Promise<number> {
       // plan is empty, so the applier ran exactly that one idempotent statement and printed
       // `total: 1, executed: 1` — "one change was made" where nothing had changed, which is the
       // confusion ADR-0331 added the re-plan to remove.
-      statements: [...plan.statements],
+      statements: applierStatementsFor(plan),
       skipApplied: false,
+      ...bounds,
     });
     const report = await applier.apply();
     process.stdout.write(formatApplyReport(report) + "\n");
-    if (plan.unreconciled.length > 0) {
+    const uncompared = plan.uncompared ?? [];
+    if (plan.unreconciled.length > 0 || uncompared.length > 0) {
       process.stdout.write(formatReconciliationPlan(plan) + "\n");
     }
+    const uncomparedOutcome = formatUncomparedApplyOutcome(uncompared);
+    if (uncomparedOutcome !== null) process.stdout.write(uncomparedOutcome + "\n");
     // An `unreconciled` item is **reported and exits 0**, and ADR-0363 is where that was weighed
     // rather than inherited. `constraint_violated_by_existing_rows` is the first reason here that no
     // re-run can clear, so "exit 1 for a difference that will never converge" is a real argument —
@@ -170,16 +166,16 @@ async function runApply(flags: ReadonlySet<string>): Promise<number> {
     // `migrate` with `condition: service_completed_successfully`, so a non-zero exit takes the whole
     // stack down. A narrowing CHECK on one table is not a reason the API must not serve, and the
     // machine-readable convergence claim ADR-0331 added (`remaining.statements.length === 0` on the
-    // JSON payload) is what a caller that does care should read. Exit 1 stays for the two conditions
-    // that mean *nothing was applied* or *a statement failed*.
-    if (!report.preconditions.ok || report.failed > 0) return 1;
-    return 0;
+    // JSON payload) is what a caller that does care should read. Exit 1 stays for the conditions
+    // that mean *nothing was applied*, *a statement failed*, or *a declared expression was not
+    // compared* — the last because its change may have been skipped, and a re-run clears it.
+    return applyExitCode(report, uncompared);
   } finally {
     await conn.close();
   }
 }
 
-async function runDrift(flags: ReadonlySet<string>): Promise<number> {
+async function runDrift(flags: ParsedFlags, bounds: MigrationBounds): Promise<number> {
   const config = parsePgEnvConfig();
   const conn = createNodePgConnection(config);
   try {
@@ -191,26 +187,38 @@ async function runDrift(flags: ReadonlySet<string>): Promise<number> {
       conn,
       META_SCHEMA_NAME,
       META_TABLES.filter((t) => liveNames.has(t.name)).flatMap((t) => expressionRequestsFor(t)),
+      bounds.lockTimeoutMs === undefined ? {} : { lockTimeoutMs: bounds.lockTimeoutMs },
     );
     const diff = diffSchema(META_TABLES, live, rendered);
-    if (flags.has("--json")) {
-      process.stdout.write(JSON.stringify(diff, null, 2) + "\n");
+    // An expression the probe could not run (a busy table, a missing privilege) is neither drift nor
+    // agreement, so it is said beside the diff rather than folded into it.
+    const uncompared = rendered.uncompared ?? [];
+    if (flags.booleans.has("json")) {
+      process.stdout.write(JSON.stringify({ ...diff, uncompared }, null, 2) + "\n");
     } else {
       process.stdout.write(formatSchemaDiff(diff) + "\n");
+      if (uncompared.length > 0) {
+        process.stdout.write(
+          `NOT VERIFIED — ${String(uncompared.length)} declared expression(s) not compared, so the ` +
+            "report above covers only what was; the probe could not run:\n",
+        );
+        for (const u of uncompared) {
+          process.stdout.write(`  ${u.table} [${u.sqlstate ?? "no sqlstate"}] ${u.reason}\n`);
+        }
+      }
     }
-    if (diff.hasDrift && !flags.has("--exit-zero-on-drift")) return 1;
-    return 0;
+    return driftExitCode(diff.hasDrift, uncompared, flags.booleans.has("exit-zero-on-drift"));
   } finally {
     await conn.close();
   }
 }
 
-async function runInspect(flags: ReadonlySet<string>): Promise<number> {
+async function runInspect(flags: ParsedFlags): Promise<number> {
   const config = parsePgEnvConfig();
   const conn = createNodePgConnection(config);
   try {
     const live = await introspectSchema(conn, META_SCHEMA_NAME);
-    if (flags.has("--json")) {
+    if (flags.booleans.has("json")) {
       process.stdout.write(JSON.stringify(live, null, 2) + "\n");
     } else {
       process.stdout.write(`Live schema "${live.schema}": ${live.tables.length} table(s)\n`);
@@ -226,25 +234,22 @@ async function runInspect(flags: ReadonlySet<string>): Promise<number> {
   }
 }
 
-async function runEncrypt(
-  flags: ReadonlySet<string>,
-  argv: readonly string[],
-): Promise<number> {
-  const schema = flagValue(argv, "schema") ?? META_SCHEMA_NAME;
-  const keyRef = flagValue(argv, "key-ref") ?? DEFAULT_COLUMN_KEY_REF;
+async function runEncrypt(flags: ParsedFlags): Promise<number> {
+  const schema = flags.values.get("schema") ?? META_SCHEMA_NAME;
+  const keyRef = flags.values.get("key-ref") ?? DEFAULT_COLUMN_KEY_REF;
   const key = resolveColumnEncryptionKey(keyRef, process.env);
 
   // Before the connection is opened, let alone the first statement. The migration runs one
   // transaction per column, so raising on statement 1 of N leaves the schema half converted with
   // nothing recording which half; and `--verify` / `--plan` neither set the key nor need it, so the
   // refusal is scoped to `--apply`.
-  if (flags.has("--apply") && key.refusal !== null) {
+  if (flags.booleans.has("apply") && key.refusal !== null) {
     process.stderr.write(
       `Refusing to run the encryption migration: ${key.refusal.reason}\n${key.refusal.message}\n`,
     );
     return 2;
   }
-  if (!flags.has("--apply") && !flags.has("--verify") && key.refusal !== null) {
+  if (!flags.booleans.has("apply") && !flags.booleans.has("verify") && key.refusal !== null) {
     // A plan is SQL an operator pastes, so the defect travels with it. Said, not refused: printing
     // the plan is how an operator discovers what the migration would do before arranging a key.
     process.stderr.write(`Warning: ${key.refusal.reason}: ${key.refusal.message}\n`);
@@ -253,25 +258,25 @@ async function runEncrypt(
   const config = parsePgEnvConfig();
   const conn = createNodePgConnection(config);
   try {
-    if (flags.has("--verify")) {
+    if (flags.booleans.has("verify")) {
       const report = await new EncryptionApplier(conn).coverage(schema);
-      if (flags.has("--json")) {
+      if (flags.booleans.has("json")) {
         process.stdout.write(JSON.stringify(report, null, 2) + "\n");
       } else {
         process.stdout.write(formatEncryptionCoverage(report) + "\n");
       }
-      return report.issues.length > 0 && !flags.has("--exit-zero-on-drift") ? 1 : 0;
+      return report.issues.length > 0 && !flags.booleans.has("exit-zero-on-drift") ? 1 : 0;
     }
 
     const migrator = new EncryptionMigrator(conn, { sessionSettings: key.sessionSettings });
-    if (flags.has("--apply")) {
-      if (looksLikeProductionDatabase(config.database) && !flags.has("--confirm")) {
+    if (flags.booleans.has("apply")) {
+      if (looksLikeProductionDatabase(config.database) && !flags.booleans.has("confirm")) {
         process.stderr.write(
           `Refusing to migrate against production-looking database '${config.database}' without --confirm.\n`,
         );
         return 2;
       }
-      if (flags.has("--provision")) {
+      if (flags.booleans.has("provision")) {
         await new EncryptionApplier(conn).ensureProvisioned();
       }
       const plans = await migrator.migrateSchema(schema, keyRef);
@@ -300,20 +305,25 @@ function runVersion(): number {
 }
 
 async function main(): Promise<void> {
-  const { command, flags } = parseCommand(process.argv);
+  const parsed = parseCrossenginPgArgs(process.argv);
+  if (!parsed.ok) {
+    process.stderr.write(`crossengin-pg: ${parsed.error}\nRun 'crossengin-pg help' for usage.\n`);
+    process.exit(2);
+  }
+  const { command, flags, bounds } = parsed;
   let exitCode = 0;
   switch (command) {
     case "apply":
-      exitCode = await runApply(flags);
+      exitCode = await runApply(flags, bounds);
       break;
     case "drift":
-      exitCode = await runDrift(flags);
+      exitCode = await runDrift(flags, bounds);
       break;
     case "inspect":
       exitCode = await runInspect(flags);
       break;
     case "encrypt":
-      exitCode = await runEncrypt(flags, process.argv);
+      exitCode = await runEncrypt(flags);
       break;
     case "version":
       exitCode = runVersion();

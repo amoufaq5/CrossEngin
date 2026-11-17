@@ -10,6 +10,7 @@ import {
   APPROVE_CLASS_QUALIFIED_TRANSITIONS,
   APPROVE_CLASS_TRANSITION_NAMES,
   MAKER_CHECKER_ERRORS,
+  approvalContentFromManifest,
   approveClassTransitions,
   formatSegregationOfDuties,
   isApproveClassTransition,
@@ -145,11 +146,19 @@ describe("the write surface over resolved erp-core", () => {
 
   it("derives the effect-stamped fields from the effects compile wires, and nothing else", () => {
     // Measured, not chosen: three fields across two documents, each one an `input.store.update` an
-    // effect issues against the document that triggered it.
+    // effect issues against the document that triggered it — and one a goods receipt advances on
+    // the order line it receives, which both the receipt and the three-way match read back.
     const stamps = defaultEffectStamps(CORE)
       .map((s) => `${s.entity}.${s.field}`)
       .sort();
-    expect(stamps).toEqual(["Bill.booking_rate", "Bill.paid_at", "Invoice.booking_rate", "Invoice.paid_at", "Invoice.withholding_total"]);
+    expect(stamps).toEqual([
+      "Bill.booking_rate",
+      "Bill.paid_at",
+      "Invoice.booking_rate",
+      "Invoice.paid_at",
+      "Invoice.withholding_total",
+      "PurchaseOrderLine.received_quantity",
+    ]);
   });
 
   it("answers both operations for every class, admitting only the two import paths on create", () => {
@@ -499,6 +508,108 @@ describe("segregation of duties", () => {
     expect(on).toContain(MAKER_CHECKER_ERRORS.same_person);
     expect(on).toContain(MAKER_CHECKER_ERRORS.unverifiable);
     expect(on).not.toContain("--segregation-of-duties");
+  });
+
+  it("refuses the last editor of a bill approving it, though somebody else created it", async () => {
+    const r = rig({ segregationOfDuties: true });
+    const id = await bill(r, bob);
+    const edit = await r.invoke(op("Bill", "update"), { caller: alice, params: { id }, body: { due_date: "2026-08-01" } });
+    expect(edit.status).toBe(200);
+    expect((await r.store.get(TENANT, "Bill", id))?.["updated_by"]).toBe(ALICE);
+    const out = await r.invoke(transition("Bill", "approve"), { caller: alice, params: { id } });
+    expect(out.status).toBe(422);
+    expect(body(out)["error"]).toBe(MAKER_CHECKER_ERRORS.same_person);
+    expect(String(body(out)["detail"])).toContain("last edited");
+    expect((await r.store.get(TENANT, "Bill", id))?.["state"]).toBe("draft");
+  });
+
+  it("admits a third person after another's edit: the editor rule names the editor, not every editor", async () => {
+    const r = rig({ segregationOfDuties: true });
+    const id = await bill(r, bob);
+    await r.invoke(op("Bill", "update"), { caller: alice, params: { id }, body: { due_date: "2026-08-01" } });
+    const carol: Caller = { id: "33333333-3333-4333-8333-333333333333", kind: "user" };
+    expect((await r.invoke(transition("Bill", "approve"), { caller: carol, params: { id } })).status).toBe(200);
+  });
+
+  it("refuses the author of a line approving the document that owns it", async () => {
+    const r = rig({ segregationOfDuties: true });
+    const id = await bill(r, bob);
+    const line = await r.invoke(op("BillLine", "create"), {
+      caller: alice,
+      body: { bill_id: id, description: "widgets", quantity: 1, unit_price: "100000.00", amount: "100000.00" },
+    });
+    expect(line.status).toBe(201);
+    const out = await r.invoke(transition("Bill", "approve"), { caller: alice, params: { id } });
+    expect(out.status).toBe(422);
+    expect(body(out)["error"]).toBe(MAKER_CHECKER_ERRORS.same_person);
+    expect(String(body(out)["detail"])).toContain("BillLine");
+    const carol: Caller = { id: "33333333-3333-4333-8333-333333333333", kind: "user" };
+    expect((await r.invoke(transition("Bill", "approve"), { caller: carol, params: { id } })).status).toBe(200);
+  });
+
+  it("refuses an unstamped line as unverifiable rather than passing it", async () => {
+    const r = rig({ segregationOfDuties: true });
+    const id = await bill(r, bob);
+    await r.store.create(TENANT, "BillLine", {
+      id: "bl_unstamped",
+      bill_id: id,
+      description: "legacy",
+      quantity: 1,
+      unit_price: "1.00",
+      amount: "1.00",
+    });
+    const out = await r.invoke(transition("Bill", "approve"), { caller: alice, params: { id } });
+    expect(body(out)["error"]).toBe(MAKER_CHECKER_ERRORS.unverifiable);
+  });
+
+  it("keeps the two-person expense flow: the approver may reimburse what they approved", async () => {
+    const r = rig({ segregationOfDuties: true });
+    const created = await r.store.create(TENANT, "Expense", {
+      id: "exp_twoperson",
+      expense_number: "EXP-1",
+      employee_id: "emp_1",
+      category: "travel",
+      amount: "10.00",
+      currency: "USD",
+      state: "submitted",
+      incurred_on: "2026-06-01",
+      created_by: ALICE,
+      updated_by: ALICE,
+    });
+    const id = created["id"] as string;
+    expect((await r.invoke(transition("Expense", "approve"), { caller: alice, params: { id } })).status).toBe(422);
+    expect((await r.invoke(transition("Expense", "approve"), { caller: bob, params: { id } })).status).toBe(200);
+    expect((await r.store.get(TENANT, "Expense", id))?.["updated_by"]).toBe(BOB);
+    expect((await r.invoke(transition("Expense", "reimburse"), { caller: bob, params: { id } })).status).toBe(200);
+  });
+
+  it("derives what the rule reads from erp-core rather than listing it", () => {
+    const c = approvalContentFromManifest(CORE);
+    expect([...(c.editorAttributable.get("Bill.approve") ?? [])]).toEqual(["draft"]);
+    expect([...(c.editorAttributable.get("JournalEntry.post") ?? [])]).toEqual(["draft"]);
+    expect([...(c.editorAttributable.get("Expense.approve") ?? [])]).toEqual([]);
+    expect(c.editorUnread).toEqual([
+      "Bill.mark_paid",
+      "Expense.approve",
+      "Expense.reimburse",
+      "Invoice.mark_paid",
+      "LeaveRequest.approve",
+      "Payment.complete",
+      "PurchaseOrder.approve",
+      "TaxReturn.mark_paid",
+      "Timesheet.approve",
+    ]);
+    const owned = Object.fromEntries([...c.children].map(([k, v]) => [k, v.map((x) => `${x.entity}.${x.parentField}`)]));
+    expect(owned["Bill"]).toEqual(["BillLine.bill_id"]);
+    expect(owned["JournalEntry"]).toEqual(["JournalLine.journal_entry_id"]);
+    expect(Object.keys(owned).every((k) => approveClassTransitions(CORE).some((t) => t.startsWith(`${k}.`)))).toBe(true);
+  });
+
+  it("says at boot which approvals still admit their last editor", () => {
+    const on = formatSegregationOfDuties(CORE, true);
+    expect(on).toContain("last editor");
+    expect(on).toContain("Expense.reimburse");
+    expect(on).not.toContain("Bill.approve, Bill.mark_paid)");
   });
 
   it("compares ids case-insensitively", () => {

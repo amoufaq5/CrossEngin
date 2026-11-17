@@ -3,6 +3,11 @@ import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gat
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
 import { z } from "zod";
 
+import {
+  LINEAGE_UNRESOLVED_WARNING_CODE,
+  type DiffBaseline,
+} from "./manifest-diff.js";
+
 export type ReviewStatusLike = "not_required" | "pending" | "approved" | "rejected";
 
 const REVIEW_STATUS_VALUES: readonly ReviewStatusLike[] = [
@@ -29,6 +34,8 @@ export interface DesignReviewRecordLike {
   readonly reviewedAt: string | null;
   readonly reviewNotes: string | null;
   readonly providerLabel: string | null;
+  /** The principal that requested the design; `null` for a proposal stored before this was recorded. */
+  readonly designedBy: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -58,11 +65,93 @@ export interface DesignReviewDecisionInput {
   readonly notes?: string | null;
 }
 
+/**
+ * Whether the principal that requested a design may approve it (H-28's four-eyes).
+ *
+ * A total pair rather than a boolean so every reader names the case it is in. `refused` is the
+ * default and what a review means: the shipped compose grants `platform_admin` both
+ * `--ai-design-role` and `--design-review-role`, so without it one principal could design, approve
+ * and activate a manifest with nobody else having looked. `permitted` exists for a deployment run by
+ * one person, where refusing would make every design that person requests unactivatable — that
+ * worked before this, so turning it off without a hatch would break a deployment that serves
+ * correctly (ADR-0338's rule). It is a degraded review rather than the opposite of one, which is
+ * why it earns a hatch where an unevaluated ABAC obligation did not (ADR-0340).
+ */
+export const SELF_APPROVAL_POLICIES = ["refused", "permitted"] as const;
+export type SelfApprovalPolicy = (typeof SELF_APPROVAL_POLICIES)[number];
+
+export interface DesignApprovalInput extends DesignReviewDecisionInput {
+  readonly selfApproval: SelfApprovalPolicy;
+}
+
+/**
+ * Raised by a store whose own check refuses an approval by the proposal's designer. The route
+ * refuses first; this is the second layer, inside the transaction that writes the decision, so a
+ * store reached by some other caller cannot be talked past the rule.
+ */
+export class DesignerCannotApproveError extends Error {
+  readonly proposalId: string;
+  constructor(proposalId: string) {
+    super(`the principal that requested design ${proposalId} cannot approve it`);
+    this.name = "DesignerCannotApproveError";
+    this.proposalId = proposalId;
+  }
+}
+
+/**
+ * How the two principals of an approval relate, carried on the 200 so the record of a decision
+ * says whether four eyes were in fact two people.
+ *
+ * `designer_unrecorded` is not folded into `distinct_principals`: a proposal stored before the
+ * designer was recorded names nobody, and "these were two people" would be a claim nobody can
+ * support (ADR-0331). Such a proposal stays approvable, since refusing it would strand every
+ * pending design on an upgraded deployment for want of a fact that was never written.
+ */
+export const FOUR_EYES_OUTCOMES = ["distinct_principals", "designer_unrecorded", "self_approved"] as const;
+export type FourEyesOutcome = (typeof FOUR_EYES_OUTCOMES)[number];
+
+/**
+ * The 403's sentence names both remedies, because the reader is a platform reviewer and the second
+ * one is theirs: a deployment run by one person cannot find "another reviewer", and a refusal whose
+ * only remedy cannot be followed is worse than none (ADR-0334).
+ */
+export const DESIGNER_CANNOT_APPROVE_DETAIL =
+  "the principal that requested this design cannot approve it: another reviewer must, or a " +
+  "deployment run by one operator starts the server with --allow-design-self-approval";
+
+export function fourEyesOutcome(designedBy: string | null, reviewedBy: string): FourEyesOutcome {
+  if (designedBy === null) return "designer_unrecorded";
+  return designedBy === reviewedBy ? "self_approved" : "distinct_principals";
+}
+
+/**
+ * The boot line, said either way: a reviewer who believes designs are checked by a second person
+ * should be able to confirm it from the log, and an operator who turned it off should read that
+ * they did. A bare api-key resolves to one shared placeholder principal (ADR-0331), so two such keys
+ * are one principal here — refused, which is the conservative reading of an identity that cannot
+ * tell two people apart.
+ */
+export function formatFourEyesLine(policy: SelfApprovalPolicy): { level: "info" | "warn"; line: string } {
+  return policy === "refused"
+    ? {
+        level: "info",
+        line:
+          "[design-review] four-eyes: the principal that requested a design cannot approve it (403 designer_cannot_approve); " +
+          "a proposal stored before designers were recorded names none and stays approvable",
+      }
+    : {
+        level: "warn",
+        line:
+          "[design-review] four-eyes OFF: --allow-design-self-approval lets the principal that requested a design approve it; " +
+          "an approval that does is recorded as self_approved",
+      };
+}
+
 export interface DesignReviewStoreLike {
   list(query?: DesignReviewListQueryLike): Promise<DesignReviewListPageLike>;
   getById(id: string): Promise<DesignReviewRecordLike | null>;
   counts(): Promise<DesignReviewCountsLike>;
-  approve(id: string, input: DesignReviewDecisionInput): Promise<DesignReviewRecordLike | null>;
+  approve(id: string, input: DesignApprovalInput): Promise<DesignReviewRecordLike | null>;
   reject(id: string, input: DesignReviewDecisionInput): Promise<DesignReviewRecordLike | null>;
 }
 
@@ -188,6 +277,19 @@ export interface ManifestDiffViewLike {
   readonly rolesAdded: readonly string[];
   readonly rolesRemoved: readonly string[];
   readonly lifecycleChanges: readonly { readonly entity: string; readonly detail: string }[];
+  readonly roleChanges: readonly {
+    readonly role: string;
+    readonly inheritsGained: readonly string[];
+    readonly inheritsLost: readonly string[];
+  }[];
+  readonly obligationChanges: readonly {
+    readonly entity: string;
+    readonly operation: string;
+    readonly from: string | null;
+    readonly to: string | null;
+  }[];
+  /** What the diff compared against; see `DIFF_BASELINES`. */
+  readonly baseline: DiffBaseline;
   /**
    * **Required**, and that is the fence rather than a shape choice. ADR-0388 added this field to
    * the differ's own view and to the web mirror and left this one untouched — so the route's type
@@ -243,6 +345,12 @@ export interface ActiveManifestSourceLike {
   activeManifestFor(tenantId: string): Promise<Record<string, unknown> | null>;
 }
 
+/** Structural mirror of `DiffLineage` in `manifest-diff.ts`; see there for why it exists. */
+export interface DiffLineageLike {
+  readonly deploymentManifest: Record<string, unknown>;
+  resolve(manifest: Record<string, unknown>): Promise<Record<string, unknown>>;
+}
+
 /**
  * Structural mirror of the decision notice the notification builder consumes. Declared here
  * rather than imported so the route layer stays decoupled from the builder + dispatch store —
@@ -272,6 +380,10 @@ export interface DesignReviewContext {
   /** Optional: with `activeManifests`, the detail response also carries what would change. */
   readonly diffManifests?: ManifestDiffer;
   readonly activeManifests?: ActiveManifestSourceLike;
+  /** Optional: with the two above, the diff compares what the tenant is served, lineage composed. */
+  readonly diffLineage?: DiffLineageLike;
+  /** Whether a design's requester may approve it. Required: see `SelfApprovalPolicy`. */
+  readonly selfApproval: SelfApprovalPolicy;
   /** Optional: when wired, an approve/reject also tells the owning tenant about the decision. */
   readonly notifyDecision?: DesignDecisionNotifier;
   readonly onNotifyError?: (err: unknown, proposalId: string) => void;
@@ -285,23 +397,99 @@ export function schemaFragment(
   return projectSchema === undefined ? {} : { schema: projectSchema(manifest) };
 }
 
-/** Spreads to nothing unless BOTH halves of the diff seam are wired, so the key is never undefined. */
+function withLineageWarning(view: ManifestDiffViewLike, message: string): ManifestDiffViewLike {
+  const warning = {
+    code: LINEAGE_UNRESOLVED_WARNING_CODE,
+    impact: "breaking" as const,
+    message,
+    entities: [],
+  };
+  return {
+    ...view,
+    impact: "breaking",
+    warnings: [warning, ...view.warnings],
+    counts: { ...view.counts, warnings: view.counts.warnings + 1 },
+  };
+}
+
+/**
+ * Spreads to nothing unless BOTH halves of the diff seam are wired, so the key is never undefined.
+ *
+ * With `lineage` wired the diff compares what the tenant is **served** before and after, rather than
+ * what was stored: both sides are lineage-composed the way the gateway cache composes them, and a
+ * tenant with no active manifest is compared against the deployment's own, which is what it is
+ * served today. Without it the old behaviour stands and a first activation reads `baseline: none`.
+ *
+ * A read of the live manifest that fails is `unreadable`, not "no live system": this used to
+ * degrade to `null`, so the page told a reviewer "This is the first system for this tenant" for a
+ * tenant that has one and hid whatever the real diff said.
+ */
 export async function diffFragment(
   diffManifests: ManifestDiffer | undefined,
   activeManifests: ActiveManifestSourceLike | undefined,
   tenantId: string,
   next: Record<string, unknown>,
+  lineage?: DiffLineageLike,
 ): Promise<{ diff?: ManifestDiffViewLike }> {
   if (diffManifests === undefined || activeManifests === undefined) return {};
-  let active: Record<string, unknown> | null = null;
+  let active: Record<string, unknown> | null;
   try {
     active = await activeManifests.activeManifestFor(tenantId);
   } catch {
-    // The diff is an aid, not the payload: a failure reading the tenant's live manifest degrades
-    // to the not-comparable view rather than 500ing the whole proposal page.
-    active = null;
+    // The diff is an aid, not the payload, so a failed read must not 500 the proposal page — but
+    // it must not claim the tenant has no live system either.
+    return { diff: { ...diffManifests(null, next), baseline: "unreadable" } };
   }
-  return { diff: diffManifests(active, next) };
+  if (lineage === undefined) return { diff: diffManifests(active, next) };
+
+  // Both sides are compared at the same level of composition or not at all: a stored manifest
+  // against a composed one reads every inherited entity, relation and grant as added or removed
+  // (measured on erp-core: 51 entities and 377 grant warnings that no activation would cause).
+  const activeComposed = active === null ? null : await composeOrReason(lineage, active);
+  const nextComposed = await composeOrReason(lineage, next);
+
+  if (nextComposed.ok) {
+    if (active === null) {
+      return {
+        diff: { ...diffManifests(lineage.deploymentManifest, nextComposed.manifest), baseline: "deployment_manifest" },
+      };
+    }
+    if (activeComposed !== null && activeComposed.ok) {
+      return { diff: { ...diffManifests(activeComposed.manifest, nextComposed.manifest), baseline: "active_manifest" } };
+    }
+    return {
+      diff: withLineageWarning(
+        { ...diffManifests(active, next), baseline: "active_manifest" },
+        `This tenant's live manifest cannot be composed by this deployment now (${activeComposed?.reason ?? ""}), so the comparison below is between the two manifests as stored, and inherited sections are not compared.`,
+      ),
+    };
+  }
+  const refused = `This proposal's lineage cannot be composed by this deployment, so activating it will be refused rather than served (${nextComposed.reason}).`;
+  if (active === null) {
+    return {
+      diff: withLineageWarning(
+        { ...diffManifests(lineage.deploymentManifest, next), baseline: "deployment_manifest" },
+        `${refused} The comparison below is against the proposal as stored, so a removal it lists is not one an activation would make.`,
+      ),
+    };
+  }
+  return {
+    diff: withLineageWarning(
+      { ...diffManifests(active, next), baseline: "active_manifest" },
+      `${refused} The comparison below is between the two manifests as stored.`,
+    ),
+  };
+}
+
+async function composeOrReason(
+  lineage: DiffLineageLike,
+  manifest: Record<string, unknown>,
+): Promise<{ ok: true; manifest: Record<string, unknown> } | { ok: false; reason: string }> {
+  try {
+    return { ok: true, manifest: await lineage.resolve(manifest) };
+  } catch (err) {
+    return { ok: false, reason: (err instanceof Error ? err.message : String(err)).slice(0, 300) };
+  }
 }
 
 export const ReviewDecisionInputSchema = z.object({
@@ -409,6 +597,7 @@ function buildGetHandler(ctx: DesignReviewContext): Handler {
       ctx.activeManifests,
       review.tenantId,
       review.manifest,
+      ctx.diffLineage,
     );
     return json(200, {
       review,
@@ -439,14 +628,35 @@ function buildDecisionHandler(ctx: DesignReviewContext, target: "approved" | "re
         detail: `${current.reviewStatus} -> ${target}`,
       });
     }
+    const reviewedBy = principal?.principalId ?? "";
+    const fourEyes = fourEyesOutcome(current.designedBy, reviewedBy);
+    // Only an approval is gated: a designer withdrawing their own design by rejecting it withholds
+    // nothing and needs no second person.
+    if (target === "approved" && fourEyes === "self_approved" && ctx.selfApproval === "refused") {
+      return json(403, {
+        error: "designer_cannot_approve",
+        detail: DESIGNER_CANNOT_APPROVE_DETAIL,
+      });
+    }
     const decision: DesignReviewDecisionInput = {
-      reviewedBy: principal?.principalId ?? "",
+      reviewedBy,
       notes: parsed.data.notes ?? null,
     };
-    const review =
-      target === "approved"
-        ? await ctx.store.approve(id, decision)
-        : await ctx.store.reject(id, decision);
+    let review: DesignReviewRecordLike | null;
+    try {
+      review =
+        target === "approved"
+          ? await ctx.store.approve(id, { ...decision, selfApproval: ctx.selfApproval })
+          : await ctx.store.reject(id, decision);
+    } catch (err) {
+      if (err instanceof DesignerCannotApproveError) {
+        return json(403, {
+          error: "designer_cannot_approve",
+          detail: DESIGNER_CANNOT_APPROVE_DETAIL,
+        });
+      }
+      throw err;
+    }
     if (review === null) return json(404, { error: "review_not_found", detail: id });
     if (ctx.notifyDecision !== undefined) {
       try {
@@ -464,7 +674,7 @@ function buildDecisionHandler(ctx: DesignReviewContext, target: "approved" | "re
         ctx.onNotifyError?.(err, review.id);
       }
     }
-    return json(200, { review });
+    return json(200, target === "approved" ? { review, fourEyes } : { review });
   };
 }
 

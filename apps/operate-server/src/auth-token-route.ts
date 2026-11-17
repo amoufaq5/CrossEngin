@@ -163,7 +163,21 @@ export type LoginOutcome =
       readonly refusal: LoginRefusal;
       readonly userId: string | null;
       readonly detail: string;
+      /**
+       * Set on a counted wrong password, and only there: the attempt against a real account in a
+       * real tenant that the audit trail records. The figures are the reservation's own, so the
+       * record and the lockout cannot disagree about how many attempts there were.
+       */
+      readonly countedAttempt?: CountedLoginAttempt;
     };
+
+/** What the trail records about a wrong password. Never the password, never the hash. */
+export interface CountedLoginAttempt {
+  readonly tenantId: string;
+  readonly failedAttempts: number;
+  /** Non-null exactly when this attempt is the one that locked the account. */
+  readonly lockedUntil: string | null;
+}
 
 /* ------------------------------------------------------------------- lockout */
 
@@ -368,6 +382,11 @@ export async function verifyLogin(input: VerifyLoginInput): Promise<LoginOutcome
       ok: false,
       refusal: "password_mismatch",
       userId: record.userId,
+      countedAttempt: {
+        tenantId: tenant.tenantId,
+        failedAttempts: reservation.failedAttempts,
+        lockedUntil: reservation.lockedUntil,
+      },
       detail:
         reservation.lockedUntil === null
           ? `password did not match (${reservation.failedAttempts.toString()} consecutive)`
@@ -465,6 +484,19 @@ export interface MintedToken {
   readonly expiresAt: string;
 }
 
+/**
+ * Where sign-ins are recorded. Two arms because the two are recorded under different rules — see
+ * {@link AuthTokenRouteContext.audit}. Neither receives the password, the hash or the token.
+ */
+export interface LoginAuditRecorder {
+  succeeded(input: {
+    readonly userId: string;
+    readonly tenantId: string;
+    readonly roles: readonly string[];
+  }): Promise<void>;
+  failed(input: { readonly userId: string; readonly attempt: CountedLoginAttempt }): Promise<void>;
+}
+
 export interface AuthTokenRouteContext {
   readonly verify: (request: AuthTokenRequest) => Promise<LoginOutcome>;
   readonly mint: (outcome: Extract<LoginOutcome, { ok: true }>) => MintedToken;
@@ -484,6 +516,20 @@ export interface AuthTokenRouteContext {
   readonly admission: LoginAdmission;
   /** Told each time a request is shed. Never receives the email or the password. */
   readonly onShed?: (refusal: LoginAdmissionRefusal) => void;
+  /**
+   * The audit trail's record of a sign-in. **Required, and `null` is the claim** that this deployment
+   * has no audit table (`--store memory`): an optional recorder defaulting to silence would make
+   * "logins are audited" unfalsifiable from the wiring (ADR-0364's rule).
+   *
+   * A success is recorded **before** the token is returned and a failure to record it refuses the
+   * login with the same 503 an unreachable directory gets — a session nobody can account for is
+   * the login-side form of a write reported as done without its record. A counted wrong password is
+   * recorded **after** the response, not awaited, and a failure is only reported: awaiting it would
+   * make a wrong password for a real account measurably slower than one for an unknown email, which
+   * is the enumeration oracle every refusal arm here is equalised against, and a 503 in its place
+   * would be the same oracle louder.
+   */
+  readonly audit: LoginAuditRecorder | null;
   /** The deployment's own record. Must never receive the password or the minted token. */
   readonly onRefusal?: (info: { readonly refusal: LoginRefusal; readonly detail: string }) => void;
   readonly onError?: (err: unknown) => void;
@@ -601,6 +647,15 @@ export function buildAuthTokenInterceptor(
 
     if (!outcome.ok) {
       ctx.onRefusal?.({ refusal: outcome.refusal, detail: outcome.detail });
+      const attempt = outcome.countedAttempt;
+      if (ctx.audit !== null && attempt !== undefined && outcome.userId !== null) {
+        const userId = outcome.userId;
+        const audit = ctx.audit;
+        // Scheduled behind the response and never awaited here; see `audit` for why.
+        setImmediate(() => {
+          audit.failed({ userId, attempt }).catch((err: unknown) => ctx.onError?.(err));
+        });
+      }
       return json(401, LOGIN_REFUSED_PROBLEM);
     }
 
@@ -625,6 +680,25 @@ export function buildAuthTokenInterceptor(
         status: 503,
         detail: "The session token could not be minted. Retry shortly.",
       });
+    }
+    if (ctx.audit !== null) {
+      try {
+        await ctx.audit.succeeded({
+          userId: outcome.userId,
+          tenantId: outcome.tenantId,
+          roles: [outcome.roles.primaryRole, ...dedupedSessionRoles(outcome.roles).secondaryRoles],
+        });
+      } catch (err) {
+        // The token was minted and is discarded unreturned: a stateless token nobody holds is no
+        // session. The attempt counter is not cleared, which is `onSuccess`'s own residual below.
+        ctx.onError?.(err);
+        return json(503, {
+          type: "https://crossengin.io/errors/login-unavailable",
+          title: "Login unavailable",
+          status: 503,
+          detail: "The sign-in could not be recorded. Retry shortly.",
+        });
+      }
     }
     try {
       await ctx.onSuccess(outcome.userId, outcome.rehashTo);

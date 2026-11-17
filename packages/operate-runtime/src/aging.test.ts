@@ -65,3 +65,54 @@ describe("computeAging", () => {
     expect(r.totalOpen).toBe(20);
   });
 });
+
+describe("computeAging — withholding and credit notes", () => {
+  const asOf = "2026-06-15";
+  const cn = { typeField: "document_type", typeValue: "credit_note", refField: "credit_note_of" };
+  const original = { id: "i1", invoice_number: "INV-1", total: 110, due_date: "2026-05-01", state: "void" };
+
+  it("does not count withheld tax as open", () => {
+    const r = computeAging({
+      documents: [{ id: "i1", total: 100, withholding_total: 5 }],
+      appliedByDocument: new Map([["i1", 90]]),
+      asOf,
+      withholdingField: "withholding_total",
+    });
+    expect(r.totalOpen).toBe(5);
+    const settled = computeAging({
+      documents: [{ id: "i1", total: 100, withholding_total: 5 }],
+      appliedByDocument: new Map([["i1", 95]]),
+      asOf,
+      withholdingField: "withholding_total",
+    });
+    expect(settled.documents).toEqual([]);
+  });
+
+  it("drops a fully credited pair and keeps a partially credited one, aged by the original's due date", () => {
+    const full = computeAging({
+      documents: [original, { id: "c1", invoice_number: "INV-1-CN", total: 110, document_type: "credit_note", credit_note_of: "i1", due_date: asOf }],
+      appliedByDocument: new Map(),
+      asOf,
+      creditNote: cn,
+    });
+    expect(full.documents).toEqual([]);
+    const partial = computeAging({
+      documents: [original, { id: "c1", invoice_number: "INV-1-CN", total: 55, document_type: "credit_note", credit_note_of: "i1", due_date: asOf }],
+      appliedByDocument: new Map(),
+      asOf,
+      numberField: "invoice_number",
+      creditNote: cn,
+    });
+    expect(partial.totalOpen).toBe(55);
+    expect(partial.documents.map((d) => [d.number, d.open, d.dueDate])).toEqual([
+      ["INV-1", 110, "2026-05-01"],
+      ["INV-1-CN", -55, "2026-05-01"],
+    ]);
+  });
+
+  it("reports an unpaired credit note as a negative balance, and without the shape as an ordinary document", () => {
+    const doc = { id: "c9", invoice_number: "CN-9", total: 30, document_type: "credit_note", due_date: asOf };
+    expect(computeAging({ documents: [doc], appliedByDocument: new Map(), asOf, creditNote: cn }).totalOpen).toBe(-30);
+    expect(computeAging({ documents: [doc], appliedByDocument: new Map(), asOf }).totalOpen).toBe(30);
+  });
+});

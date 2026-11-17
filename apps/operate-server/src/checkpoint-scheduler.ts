@@ -1,8 +1,11 @@
 import { readFile } from "node:fs/promises";
 
 import { z } from "zod";
-import type { PostgresKeyRegistry } from "@crossengin/crypto-pg";
-import type { ChainCheckpoint, CheckpointProvenance } from "@crossengin/forensics";
+import {
+  signCheckpoint,
+  type ChainCheckpoint,
+  type CheckpointProvenance,
+} from "@crossengin/forensics";
 import {
   PostgresChainCheckpointStore,
   PostgresChainLogStore,
@@ -16,7 +19,12 @@ import {
   auditAnchors,
   type AnchorAuditReport,
 } from "./anchor-audit.js";
-import { verifyChainFromCheckpoint, type ChainVerificationReport } from "./chain-verify.js";
+import {
+  isPinned,
+  verifyChainFromCheckpoint,
+  type ChainKeySource,
+  type ChainVerificationReport,
+} from "./chain-verify.js";
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
@@ -207,6 +215,18 @@ export interface CheckpointSchedulerOptions {
    * would again be one that nothing checked, for every caller that omitted the argument.
    */
   readonly verify: (scope: string | null) => Promise<ChainVerificationReport>;
+  /**
+   * The key every recorded checkpoint is signed with (H-18), or `null` to record it unsigned.
+   * Required rather than optional so no construction site can drop signing by omission; only the
+   * tests about something else pass `null`. Signed **after** every other field is fixed, so the
+   * signature covers exactly the bytes a verifier rebuilds from the stored row.
+   */
+  readonly signer: ChainSigner | null;
+  /**
+   * The keys the anchor audit accepts a checkpoint signature from, or `null` when the pass is
+   * unpinned and the signature axis is not asked.
+   */
+  readonly trustedKeys: ReadonlyMap<string, string> | null;
   readonly scopes: CheckpointScopeSource;
   readonly intervalMs: number;
   readonly checkpointedBy: string;
@@ -351,7 +371,7 @@ export class CheckpointScheduler {
         // whole-chain load per pass to duplicate a correspondence the integrity proof already
         // computes from a chain it has in hand. So the correspondence is that pass's and the set-wide
         // refusal reading — which needs no chain — is this one's.
-        anchorAudit = await auditAnchors(scope, this.opts.checkpointStore, null);
+        anchorAudit = await auditAnchors(scope, this.opts.checkpointStore, null, this.opts.trustedKeys);
         // Fired here rather than once the scope's pass has resolved, because the audit's finding is
         // independent of everything after it: deferring it would lose the finding entirely on a
         // scope whose verification throws, and that is the scope most likely to have one. Inside the
@@ -419,13 +439,17 @@ export class CheckpointScheduler {
         // refusal imposes — at a measured ~152 microseconds of Ed25519 verify per entry (ADR-0371),
         // 15.2 s of signature CPU per pass at 100k entries. Refusing there would spend the most CPU
         // on the deployment with the least to spare in order to re-report a gap already reported.
-        const checkpoint = checkpointFromTail(tail, {
+        const unsigned = checkpointFromTail(tail, {
           checkpointedBy: this.opts.checkpointedBy,
           // Resolved per scope rather than once per pass, so a long pass does not stamp its last
           // scope's anchor with the time its first scope was read.
           checkpointedAt: (this.opts.now ?? (() => new Date()))().toISOString(),
           provenance: PROVENANCE_FOR_VERIFICATION_MODE[verification.mode],
         });
+        const checkpoint =
+          this.opts.signer === null
+            ? unsigned
+            : await signCheckpoint(scope, unsigned, this.opts.signer);
         await this.opts.checkpointStore.record(scope, checkpoint);
         recorded = { checkpoint, verification };
       } catch (err) {
@@ -460,7 +484,12 @@ export class CheckpointScheduler {
 }
 
 export interface CheckpointLifecycleOptions {
-  /** Signs nothing on the checkpoint path (this scheduler only reads), but the log store requires one. */
+  /**
+   * Signs every checkpoint this lifecycle records (H-18); the log store requires it too. Under a
+   * pinned `registry` its key must be one the pin trusts, which `buildCheckpointLifecycle` refuses
+   * otherwise — a scheduler signing with a key its own audit does not trust would mark every anchor
+   * it writes `untrusted_key`, which is a page per scope per pass.
+   */
   readonly signer: ChainSigner;
   /**
    * Resolves each entry's signing fingerprint to its registered public key for the verification.
@@ -472,7 +501,7 @@ export interface CheckpointLifecycleOptions {
    * pass, and two spellings of one thing can disagree. The scheduler keeps the seam, which is where
    * a test wants it.
    */
-  readonly registry: PostgresKeyRegistry;
+  readonly registry: ChainKeySource;
   readonly scheduler?: IntervalScheduler;
   /** Overrides the config's static tenant list with a live source when present (may include `null`). */
   readonly tenants?: CheckpointScopeSource;
@@ -514,6 +543,12 @@ export function buildCheckpointLifecycle(
   config: CheckpointConfig,
   opts: CheckpointLifecycleOptions,
 ): CheckpointLifecycle {
+  if (isPinned(opts.registry) && !opts.registry.keys.has(opts.signer.fingerprint)) {
+    throw new Error(
+      `the checkpoint signer's key ${opts.signer.fingerprint} is not in the pinned chain trust set` +
+        " — every checkpoint it signed would read untrusted_key",
+    );
+  }
   const logStore = new PostgresChainLogStore(conn, opts.signer, { schema: config.schema });
   const checkpointStore = new PostgresChainCheckpointStore(conn, { schema: config.schema });
   const scopes: CheckpointScopeSource = opts.tenants ?? (() => configScopes(config));
@@ -521,6 +556,8 @@ export function buildCheckpointLifecycle(
   const scheduler = new CheckpointScheduler({
     logStore,
     checkpointStore,
+    signer: opts.signer,
+    trustedKeys: isPinned(opts.registry) ? opts.registry.keys : null,
     // `verifyChainFromCheckpoint` and not `verifyChainFull`, because it falls back to a full fold
     // whenever the latest checkpoint cannot anchor a bounded proof — there is none yet, or there is
     // one written before provenance existed. A chain that has only ever been anchored this way is

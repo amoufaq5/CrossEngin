@@ -1479,18 +1479,17 @@ describe("compileOperateServer — a posted document is locked", () => {
     const deleted = await callOperation(compiled, "bill.delete", { id }, null);
     expect(deleted.status).toBe(422);
     expect(deleted.body["error"]).toBe("bill_locked");
-    // The remedy names a declared transition and says what it does not do: voiding a bill posts no
-    // reversal (no effect in compile.ts reverses one), so its journal entry has to be reversed too.
+    // The remedy names a declared transition and says what it does: voiding an approved bill
+    // reverses its posting (`postingReversalEffect`), so there is nothing else to reverse by hand.
     expect(deleted.body["detail"]).toBe(
-      "an approved bill cannot be deleted; void it instead — voiding a bill posts no reversal, so" +
-        " reverse its journal entry as well",
+      "an approved bill cannot be deleted; void it instead, which reverses its posting",
     );
     expect(await store.get(COVERAGE_TENANT, "Bill", id)).not.toBeNull();
     expect(await journalEntryCount(store)).toBe(1);
   });
 
   it("keeps a voided bill locked, so it cannot be deleted and recreated either", async () => {
-    // Void posts no reversal, so the approved bill's posting is still in the ledger once it is void.
+    // A void bill's posting has been reversed, and the record is the evidence the pair belongs to.
     const { store, compiled } = coverageServer();
     const created = await callOperation(compiled, "bill.create", {}, { ...BILL_BODY, bill_number: "B-VOID" });
     const id = String(created.body["id"]);
@@ -1500,7 +1499,8 @@ describe("compileOperateServer — a posted document is locked", () => {
     expect(deleted.body["error"]).toBe("bill_locked");
     // No declared transition leaves `void`, so the refusal names no remedy rather than an impossible one.
     expect(deleted.body["detail"]).toBe("a void bill cannot be deleted");
-    expect(await journalEntryCount(store)).toBe(1);
+    // Recognition and its reversal.
+    expect(await journalEntryCount(store)).toBe(2);
   });
 
   it("locks an approved bill's lines, including moving one out", async () => {
@@ -1544,8 +1544,10 @@ describe("compileOperateServer — a posted document is locked", () => {
     expect((await callOperation(compiled, "payment.complete", { id: payId }, null)).status).toBe(200);
     expect((await store.get(COVERAGE_TENANT, "Bill", billId))?.["state"]).toBe("paid");
     expect((await callOperation(compiled, "payment.refund", { id: payId }, null)).status).toBe(200);
-    // Recognition and settlement: one entry each, and nothing posted twice along the way.
-    expect(await journalEntryCount(store)).toBe(2);
+    // Recognition, settlement and the refund's reversal of the settlement — and the refund re-opens
+    // the bill, since nothing is applied to it any more.
+    expect(await journalEntryCount(store)).toBe(3);
+    expect((await store.get(COVERAGE_TENANT, "Bill", billId))?.["state"]).toBe("approved");
   });
 
   it("locks a completed payment, whose settlement has posted", async () => {
@@ -1556,8 +1558,7 @@ describe("compileOperateServer — a posted document is locked", () => {
     expect(edited.status).toBe(422);
     expect(edited.body["error"]).toBe("payment_locked");
     expect(edited.body["detail"]).toBe(
-      "a completed payment cannot be edited; refund it if the money was returned — a refund posts no" +
-        " reversal, so reverse its journal entry as well",
+      "a completed payment cannot be edited; refund it if the money was returned, which reverses its settlement",
     );
     const deleted = await callOperation(compiled, "payment.delete", { id }, null);
     expect(deleted.body["error"]).toBe("payment_locked");

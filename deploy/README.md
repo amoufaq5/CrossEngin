@@ -46,8 +46,13 @@ When `migrate` has exited successfully and `caddy` has obtained certificates
 - **UI:** `https://erp.example.com` — the admin console; tenant management is at `/platform`
 - **API:** `https://api.erp.example.com`
 
-> The `migrate` job is idempotent (hash-tracked in `_meta_migrations`), so it is safe
-> to run on every `up`. It applies the full meta-schema before the API starts.
+> The `migrate` job runs on every `up` and is safe to: it compares the live schema with the
+> catalog and applies only the difference, so on a converged database it changes nothing. That is
+> where its idempotency comes from — not from `_meta_migrations`, which records what ran and is
+> deliberately not consulted to skip anything (a statement whose object was later dropped is still
+> recorded as run). On a fresh volume the difference is the whole meta-schema, applied before the
+> API starts. What it does when the schema *has* changed is in
+> [Before an upgrade that changes the schema](#before-an-upgrade-that-changes-the-schema).
 
 ### If `extensions` exits 2
 
@@ -686,7 +691,9 @@ What the flag buys is the limit being *yours* and every decision being on the re
 ## Day-2 operations
 
 - **Update to a new version:** `git pull && docker compose up -d --build`
-  (the `migrate` job re-applies any new schema before the API restarts). After the upgrade
+  (the `migrate` job re-applies any new schema before the API restarts). Read
+  [Before an upgrade that changes the schema](#before-an-upgrade-that-changes-the-schema) first —
+  it is where the backup goes. After the upgrade
   that landed the user registry, read
   [Clearing the foreign-key drift](#clearing-the-foreign-key-drift-after-an-upgrade) once —
   until you do, `migrate` reports the same 29 findings on every `up`. The upgrade that split the
@@ -724,7 +731,9 @@ What the flag buys is the limit being *yours* and every decision being on the re
   [ORACLE.md § 13 Back up](./ORACLE.md#13-back-up); it is the same stack. That script hardcodes the
   role, which is right there and wrong here: it is a file you author once for one VM, where the
   paths are hardcoded anyway, and it is not expanded by your interactive shell.
-- **Logs:** `docker compose logs -f api` / `web` / `caddy`.
+- **Logs:** `docker compose logs -f api` / `web` / `caddy` / `backup`. Every service writes
+  through the `json-file` driver capped at 5 files of 10 MB each, so `api`'s log cannot fill the
+  disk the database lives on; older lines are rotated away rather than kept for ever.
 - **Stop / start:** `docker compose down` (keeps volumes) / `docker compose up -d`.
 - **Scale the API:** the **request path** is stateless — run several `api` replicas behind Caddy and
   they share Postgres safely there (idempotency, advisory locks, RLS all hold). The **schedulers are
@@ -750,6 +759,108 @@ What the flag buys is the limit being *yours* and every decision being on the re
   fires for `tenant_id IS NULL` (ADR-0371), so those rows grow linearly in replica count and the
   serving role cannot reclaim them. So scale the API for request throughput, and expect one
   replica's worth of scheduled work to become N replicas' worth of duplicated scheduled work.
+
+### Backups
+
+The stack ships a `backup` service. When the container starts and then every `BACKUP_INTERVAL_SECONDS`
+(86400, a day) it dumps the database in Postgres's custom format, **restores the dump into a
+scratch database** (`<POSTGRES_DB>_restore_check`), compares the table count with the source, drops
+the scratch copy, and only then moves the dump into place and deletes dumps older than
+`BACKUP_RETENTION_DAYS` (14). A run that fails anywhere leaves the previous dumps untouched, logs
+`[backup] FAILED`, retries after `BACKUP_RETRY_SECONDS` (600), and leaves the service
+**unhealthy** in `docker compose ps` within three health-check intervals and until a run succeeds:
+the check fails while the latest run's failure marker (`/backups/.last-failed`) exists, and also
+once the newest verified dump is two intervals old.
+
+```sh
+docker compose ps backup                       # healthy = a verified dump younger than two days
+docker compose logs backup | tail -5           # "[backup] restore check passed: N tables"
+docker compose exec backup ls -l /backups      # crossengin-<UTC timestamp>.dump
+```
+
+It connects as the **owner**, not the app role: a dump taken as a role the RLS policies confine
+silently leaves out every tenant's rows (see [The database roles](#the-database-roles)). The
+restore check doubles the database's read load for the duration of a run and needs free space
+for one more copy of the database; on a database too large for that, set
+`BACKUP_RESTORE_CHECK=0` and the service keeps only the `pg_restore --list` check, which proves
+the archive is readable and not that it restores.
+
+**The dumps are on this host's disk.** A lost or corrupted disk takes the database and every
+dump with it, so a copy has to leave the host. Two ways that need nothing else from this repo:
+set `BACKUP_DIR` in `.env` to a host path that is itself a mount of remote storage (it must be
+owned by uid 999, the container's `postgres` user), or copy the volume's newest file off-host on
+your own schedule. Restore one into a fresh stack with:
+
+```sh
+docker compose cp backup:/backups/crossengin-<timestamp>.dump ./restore.dump
+docker compose exec -T db pg_restore --clean --if-exists --no-owner \
+  -U "$(grep '^POSTGRES_USER=' .env | cut -d= -f2-)" \
+  -d "$(grep '^POSTGRES_DB=' .env | cut -d= -f2-)" < ./restore.dump
+rm ./restore.dump    # it is inside the Docker build context; do not leave it there
+```
+
+### The image and the services' limits
+
+The application image (`deploy/Dockerfile`) is two stages. The runtime stage holds only the
+production dependencies of the three shipped apps — no TypeScript, no test runner, no linter, no
+pnpm — and runs as the image's unprivileged `node` user with the code owned by root, so a
+compromised process cannot rewrite what it runs; Next's cache directory is the one writable path.
+`web` starts Next directly with `node`, and its health check (`GET /login`) is what Caddy waits on
+along with the API's.
+
+Every long-running service has a memory limit, and every service rotates its log at 5 × 10 MB.
+The limits are about ten times what each was measured using idle after light load on `erp-core`
+(api 101 MiB, web 106 MiB, db 80 MiB) for the API, and five times for the rest:
+
+| Service | Default | Override in `.env` |
+| --- | --- | --- |
+| `db` | `1g` | `DB_MEMORY_LIMIT` |
+| `api` | `1g` | `API_MEMORY_LIMIT` |
+| `web` | `512m` | `WEB_MEMORY_LIMIT` |
+| `backup` | `512m` | `BACKUP_MEMORY_LIMIT` |
+| `caddy` | `256m` | `CADDY_MEMORY_LIMIT` |
+
+Raise `API_MEMORY_LIMIT` before anything else on a deployment with a long audit chain: the hourly
+integrity proof loads a scope's whole chain into memory, and Node sizes its heap from this limit
+(measured: 524 MiB under the `1g` default). A service that exceeds its limit is killed and
+restarted by `restart: unless-stopped`, which `docker compose ps` shows as a restart count.
+
+### Before an upgrade that changes the schema
+
+- **Take a dump, because there is no down-migration.** That is a property of how `migrate` works
+  rather than a missing feature: it does not replay numbered migration files, it compares the live
+  schema with the catalog the new binary carries and applies the difference (ADR-0290). The plan is
+  computed at run time from what the database holds, so there is no stored step whose inverse could
+  be written, and the one rollback that is always correct is the database as it was before. Run the
+  ad-hoc dump above **before** `up -d --build`, check it finished
+  (`tail -5 <file> | grep -q 'PostgreSQL database dump complete' && echo complete` — not `tail -1`,
+  which on PG 16.15 is a blank line under a `\unrestrict` line), and keep it until the new
+  version has served for a while. Rolling back is: the previous checkout, the dump restored into an
+  empty `db-data` volume, `up -d --build`.
+- **See the plan first.** `docker compose build migrate && docker compose run --rm migrate node
+  apps/architect-cli/dist/bin/crossengin.js apply --plan` prints what the new version would run and
+  runs none of it. It is safe beside live traffic: it reads the catalog, and the probe that asks
+  Postgres how it renders a declared expression works on a session-private copy of each table, so it
+  takes no lock a writer or a reader waits behind. (Before this, every plan and every `drift` added
+  a `NOT VALID` constraint to the real table, which takes the strongest lock there is — measured on
+  PG 16, a plain `SELECT` on `meta.audit_log` waited 6 s behind a plan.)
+- **It runs beside the API that is still serving.** Each schema statement waits at most **5 s** for
+  its table's lock, is retried twice after 1 s and 2 s, and may then run for at most **10 minutes**
+  holding it. Without the first bound a statement queued behind one long-running read holds its
+  place in that table's lock queue and every query arriving after it waits too — measured, the same
+  6 s. A statement that gives up changed nothing; `migrate` then exits 1 naming the table, and
+  compose does not start the new `api`. Run `docker compose up -d` again when that table is quieter.
+  `--lock-timeout-ms 0` restores waiting indefinitely and `--statement-timeout-ms 0` removes the run
+  cap; both go on the `migrate` command, and neither is a default because each trades a failed
+  upgrade for an outage.
+- **An index added to a table that holds rows is built `CONCURRENTLY`**, outside any transaction,
+  so writes continue while it builds. If such a build fails it leaves an invalid index Postgres uses
+  for nothing; the next `migrate` drops and rebuilds it, concurrently too. An index whose
+  *definition* changed is still replaced in one transaction, which blocks writes to that table for
+  the length of the build — bounded by the statement timeout, and named in the plan as
+  `replace_index`. The `document-indexes` step is separate and builds its indexes non-concurrently
+  on purpose — `ensureDocumentUniqueIndexes` in `operate-runtime-pg` says why: `IF NOT EXISTS`
+  would accept a failed concurrent build's invalid index as present.
 
 ### If a credential was committed
 
@@ -951,6 +1062,15 @@ A design is not live until **you** approve it. The compose passes
 4. You open **Platform → Design Reviews**, read the diff, and approve or reject. Only
    then does their Activate succeed.
 
+**The person who requested a design cannot approve it.** The approval answers
+**403 `designer_cannot_approve`**, and the boot log says so in a `[design-review] four-eyes`
+line. If you run the deployment alone — one person holding both `erp_admin` and
+`platform_admin`, which is what the documented bootstrap grants — every design you
+request is one you cannot approve. Add `--allow-design-self-approval` to the `api`
+command; the boot line then warns that four-eyes is off, and each approval you make of
+your own design is answered `fourEyes: "self_approved"`. A design stored before this
+check existed names no designer and stays approvable (`designer_unrecorded`).
+
 Three things to know before the first one arrives.
 
 **Approval is the only gate, so read the diff rather than the summary.** Five of the
@@ -1105,8 +1225,9 @@ never came up and nothing in the output pointed at the architecture.
 It now installs `postgresql-$PG_MAJOR-pg-uuidv7` from the PGDG apt repository, which
 publishes amd64 and arm64 and which the official `postgres` image already leaves
 configured. No architecture is named anywhere, so the same Dockerfile builds on your
-laptop and on the A1. The other three images (`node:20-bookworm-slim`, `caddy:2`,
-`postgres:16-bookworm`) are already multi-arch.
+laptop and on the A1. The other three images (`node:22.23.5-bookworm-slim`, `caddy:2.11.9`,
+`postgres:16.16-bookworm`) are already multi-arch, and each is pinned to an exact release, so a
+rebuild on the A1 next month is the image this repository tested.
 
 ### Step by step
 
@@ -1205,11 +1326,12 @@ docker compose exec -T db pg_dump \
 **For the scheduled one, follow [ORACLE.md § 13 Back up](./ORACLE.md#13-back-up) rather
 than this section.** This walkthrough is an abridgement of that runbook, and what the
 abridgement dropped is exactly the part that makes a dump a recovery point: the script,
-the crontab line, the retention sweep and the verification. Until this repository ships a
-backup scheduler of its own, that script is the deployment's real recovery point — and
-this section pointing at it, rather than holding a second copy of it, is deliberate: the
-sentence it used to end with named a cron line that four paragraphs of abridgement had
-already removed.
+the crontab line, the retention sweep and the verification — and this section pointing at
+it, rather than holding a second copy of it, is deliberate: the sentence it used to end with
+named a cron line that four paragraphs of abridgement had already removed. The stack's own
+scheduler is the `backup` service under [Backups](#backups), which writes a
+restored-and-verified dump every day into a volume on this host; keep the cron script or a
+volume snapshot as the copy that leaves the disk.
 
 ### Should the UI go on Vercel instead?
 

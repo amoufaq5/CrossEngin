@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Badge } from "@/components/Badge";
 import { ColumnChooser } from "@/components/ColumnChooser";
@@ -34,12 +34,13 @@ function cellKind(field: UiFieldSchema | undefined): string | undefined {
   return undefined;
 }
 
-export default function EntityListPage({ params }: { params: { slug: string } }) {
+export default function EntityListPage({ params }: { params: Promise<{ slug: string }> }) {
+  const { slug } = use(params);
   const { schema, loading } = useSchema();
-  const entity = entityBySlug(schema, params.slug);
+  const entity = entityBySlug(schema, slug);
 
   if (loading) return <Shell title="Loading…" />;
-  if (entity === undefined) return <Shell title="Unknown entity" note={`No entity for "/e/${params.slug}".`} />;
+  if (entity === undefined) return <Shell title="Unknown entity" note={`No entity for "/e/${slug}".`} />;
   return <EntityList key={entity.slug} entity={entity} />;
 }
 

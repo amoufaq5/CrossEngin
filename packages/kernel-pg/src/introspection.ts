@@ -25,6 +25,12 @@ export interface LiveIndex {
    * how the catalog declares the object.
    */
   readonly constraintBacked: boolean;
+  /**
+   * `indisvalid AND indisready`. False for the index a failed `CREATE INDEX CONCURRENTLY` leaves
+   * behind: it carries the declared name and the declared definition, so a comparison of name and
+   * shape alone reads it as present while no query uses it.
+   */
+  readonly valid: boolean;
 }
 
 /** Postgres's `confdeltype` codes, spelled the way DDL spells them. */
@@ -327,6 +333,7 @@ export const INDEX_QUERY = `
          EXISTS (
            SELECT 1 FROM pg_constraint k WHERE k.conindid = x.indexrelid
          ) AS constraint_backed,
+         (x.indisvalid AND x.indisready) AS is_valid,
          ARRAY(
            SELECT pg_get_indexdef(x.indexrelid, k + 1, true)
              FROM generate_subscripts(x.indkey, 1) AS k
@@ -462,6 +469,7 @@ export interface IndexRow {
   readonly method: string;
   readonly predicate: string | null;
   readonly constraint_backed: boolean;
+  readonly is_valid: boolean;
   readonly columns: readonly string[];
 }
 
@@ -549,6 +557,9 @@ export function parseLiveSchema(
       method: row.method ?? "btree",
       predicate: row.predicate ?? null,
       constraintBacked: row.constraint_backed === true,
+      // Only an explicit `false` is invalid. Reading a missing value as invalid would plan a drop and
+      // rebuild of a working index, which is the expensive direction to be wrong in.
+      valid: row.is_valid !== false,
     };
     if (existing === undefined) {
       indexesByTable.set(row.table_name, [index]);

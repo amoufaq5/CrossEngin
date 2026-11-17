@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { use, useCallback, useEffect, useRef, useState } from "react";
 
 import { Badge } from "@/components/Badge";
 import { FieldInput } from "@/components/FieldInput";
@@ -50,9 +50,10 @@ function focusFirstInvalid(container: HTMLElement | null): void {
   });
 }
 
-export default function RecordPage({ params }: { params: { slug: string; id: string } }) {
+export default function RecordPage({ params }: { params: Promise<{ slug: string; id: string }> }) {
+  const { slug, id } = use(params);
   const { schema, loading } = useSchema();
-  const entity = entityBySlug(schema, params.slug);
+  const entity = entityBySlug(schema, slug);
 
   if (loading) {
     return (
@@ -66,11 +67,11 @@ export default function RecordPage({ params }: { params: { slug: string; id: str
     return (
       <>
         <Topbar title="Unknown entity" />
-        <div className="px-8 py-6 text-sm text-ink-muted">No entity for &quot;/e/{params.slug}&quot;.</div>
+        <div className="px-8 py-6 text-sm text-ink-muted">No entity for &quot;/e/{slug}&quot;.</div>
       </>
     );
   }
-  return <RecordDetail entity={entity} id={params.id} />;
+  return <RecordDetail entity={entity} id={id} />;
 }
 
 function RecordDetail({ entity, id }: { entity: UiEntitySchema; id: string }) {

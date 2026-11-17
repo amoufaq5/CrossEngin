@@ -193,7 +193,7 @@ function harness(designer: ProgressingDesignerLike, opts: { budget?: boolean; bu
   };
 }
 
-const INPUT = { description: "A CRM for plumbers", name: "Plumber CRM" };
+const INPUT = { description: "A CRM for plumbers", name: "Plumber CRM", designedBy: "u_designer" };
 
 describe("design-runner — constants", () => {
   it("caps design retries at three attempts", () => {
@@ -230,6 +230,9 @@ describe("design-runner — happy path", () => {
           manifestHash: "sha256:abc123",
           source: "ai",
           providerLabel: "anthropic/claude-sonnet-4-6",
+          // The principal that requested the job, carried across the async boundary so a review of
+          // the resulting proposal can refuse that principal's own approval.
+          designedBy: "u_designer",
         },
       },
     ]);

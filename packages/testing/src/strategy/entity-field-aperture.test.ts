@@ -623,13 +623,16 @@ describe("the real workspace", () => {
     }
   });
 
-  it("ranks the three open failures, and each says whether it is live", () => {
+  it("ranks the two open failures, and each says whether it is live", () => {
     const open = openFailures(ENTITY_FIELD_APERTURE);
-    expect(open.length).toBe(3);
+    // Three until H-28, which took the design review's classification layer onto the kernel's
+    // trait-resolving reader — the rule reported that declaration `overtaken`, which is the fence
+    // working, and it was deleted rather than weakened.
+    expect(open.length).toBe(2);
     for (const member of open) {
       expect(member.consequence, readerSubjectOf(member)).toBeDefined();
-      // Every `fails_open` member states its liveness, because two of the three are latent — their
-      // own callers do not exist — and a reader deciding what to fix first needs that in the note.
+      // Every `fails_open` member states its liveness — neither harms a shipped deployment, for two
+      // different reasons — and a reader deciding what to fix first needs that in the note.
       expect(member.note, readerSubjectOf(member)).toMatch(/\b(?:[Ll]ive|[Ll]atent)\b/);
     }
     expect(open.map(readerSubjectOf)).toContain(

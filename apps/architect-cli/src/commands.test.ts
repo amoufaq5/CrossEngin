@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -434,6 +434,48 @@ describe("runChat", () => {
     );
     expect(code).toBe(0);
     expect(out()).toContain("ack");
+  });
+
+  it("announces the file root the file tools are confined to, and that writes are unreviewed under auto-approval", async () => {
+    const provider = new StubProvider([
+      { kind: "text", text: "ack" },
+      { kind: "usage_final", usage: { inputTokens: 1, outputTokens: 1, cost: 0 } },
+    ]);
+    const { ctx, err } = buffers({ env: { ANTHROPIC_API_KEY: "sk-test" }, providerOverride: provider });
+    const root = await realpath(await mkdtemp(join(tmpdir(), "file-root-")));
+    const code = await runChat(
+      parsed("chat", "--prompt=hi", "--allow-file-read", "--allow-file-write", "--auto-approve-writes", `--file-root=${root}`),
+      ctx,
+    );
+    expect(code).toBe(0);
+    expect(err()).toContain(`[tools] file root: ${root} (read_file; propose_manifest_edit, writes auto-approved with no review)`);
+  });
+
+  it("refuses --file-root=/ before any provider call, since the filesystem root confines nothing (H-29)", async () => {
+    const provider = new StubProvider([]);
+    const { ctx, err } = buffers({ env: { ANTHROPIC_API_KEY: "sk-test" }, providerOverride: provider });
+    const code = await runChat(parsed("chat", "--prompt=hi", "--allow-file-read", "--file-root=/"), ctx);
+    expect(code).toBe(2);
+    expect(err()).toContain("is the filesystem root");
+  });
+
+  it("refuses a bare or empty --file-root rather than falling back to the working directory", async () => {
+    for (const flag of [["--file-root"], ["--file-root="]]) {
+      const provider = new StubProvider([]);
+      const { ctx, err } = buffers({ env: { ANTHROPIC_API_KEY: "sk-test" }, providerOverride: provider });
+      expect(await runChat(parsed("chat", "--prompt=hi", "--allow-file-read", ...flag), ctx), flag.join("")).toBe(2);
+      expect(err()).toContain("--file-root needs a directory");
+    }
+  });
+
+  it("says nothing about a file root when no file tool is enabled", async () => {
+    const provider = new StubProvider([
+      { kind: "text", text: "ack" },
+      { kind: "usage_final", usage: { inputTokens: 1, outputTokens: 1, cost: 0 } },
+    ]);
+    const { ctx, err } = buffers({ env: { ANTHROPIC_API_KEY: "sk-test" }, providerOverride: provider });
+    expect(await runChat(parsed("chat", "--prompt=hi", "--file-root=/"), ctx)).toBe(0);
+    expect(err()).not.toContain("file root");
   });
 
   it("threads transcriptOverride through to the chat loop", async () => {

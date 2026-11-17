@@ -8,6 +8,10 @@ import type {
   ProviderPricing,
   Region,
 } from "@crossengin/ai-providers";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { ArchitectGuardRuntime } from "@crossengin/ai-architect-runtime";
 import { describe, expect, it } from "vitest";
 
@@ -169,6 +173,17 @@ describe("runChatTurn", () => {
     );
     expect(result.record.assistantText).toBe("Hello there");
     expect(out()).toBe("Hello there");
+  });
+
+  it("prints the model's text and tool names with terminal controls made visible (H-29)", () => {
+    // Text streamed before a tool call shares the terminal with the approval prompt: SGR 8 conceals
+    // everything after it, so a diff printed next would be invisible to the person approving it.
+    const { io, out } = buffers();
+    const r = plainTextRenderer(io);
+    r.onText("ok\u001b[8m");
+    r.onToolCallStart("t1", "x\u009b2J");
+    expect(out()).toBe("ok\\u{1b}[8m\n[tool_call:x\\u{9b}2J]");
+    expect(out()).not.toMatch(/[\u001b\u009b]/);
   });
 
   it("captures usage_final into the record", async () => {
@@ -681,8 +696,52 @@ describe("lineReaderFromIterable + interactiveApprover", () => {
         isNew: true,
         newHash: "h",
         diffSummary: { entitiesAdded: 1, entitiesRemoved: 0, entitiesModified: 0 },
+        details: [],
+        unifiedDiff: [],
       }),
     ).toBe(true);
+  });
+
+  it("interactiveApprover prints every detail line before asking", async () => {
+    // It printed the three counts and nothing else, so `y` approved changes nobody had been shown.
+    const { io, out } = buffers();
+    const reader = lineReaderFromIterable(asyncIter(["n"]));
+    const approver = interactiveApprover({ io, reader });
+    await approver.approve({
+      path: "/x",
+      isNew: false,
+      newHash: "h",
+      diffSummary: { entitiesAdded: 0, entitiesRemoved: 0, entitiesModified: 1 },
+      details: ["! classification Patient.email pii → phi (between sensitive)", "  section entities: ~Patient"],
+      unifiedDiff: [],
+    });
+    const printed = out();
+    expect(printed).toContain("    ! classification Patient.email pii → phi (between sensitive)\n");
+    expect(printed.indexOf("section entities")).toBeLessThan(printed.indexOf("Apply? [y/N]"));
+  });
+
+  it("interactiveApprover prints the unified diff before asking, with terminal controls made visible", async () => {
+    // The tool told the model a person "is shown the diff" while the prompt printed counts (H-29).
+    const { io, out } = buffers();
+    const reader = lineReaderFromIterable(asyncIter(["n"]));
+    const approver = interactiveApprover({ io, reader });
+    expect(approver.showsDiffToPerson).toBe(true);
+    await approver.approve({
+      path: "/x/m\u001b[1A.json",
+      isNew: false,
+      newHash: "h",
+      diffSummary: { entitiesAdded: 0, entitiesRemoved: 0, entitiesModified: 0 },
+      details: ["  section meta: ~name\u001b[2K"],
+      unifiedDiff: ["--- a/m.json", "+++ b/m.json", "@@ -1,1 +1,1 @@", '-  "name": "A"', '+  "name": "B"\u009b2K'],
+    });
+    const printed = out();
+    // Escaped here as well as where the diff is built, so no producer of a request can reach the terminal raw.
+    expect(printed).toContain('-  "name": "A"\n+  "name": "B"\\u{9b}2K\n');
+    expect(printed).toContain("UPDATE /x/m\\u{1b}[1A.json");
+    expect(printed).not.toContain("\u009b");
+    expect(printed.indexOf('+  "name": "B"')).toBeLessThan(printed.indexOf("Apply? [y/N]"));
+    expect(printed).toContain("~name\\u{1b}[2K");
+    expect(printed).not.toContain("\u001b");
   });
 
   it("interactiveApprover approves on 'yes'", async () => {
@@ -695,6 +754,8 @@ describe("lineReaderFromIterable + interactiveApprover", () => {
         isNew: false,
         newHash: "h",
         diffSummary: { entitiesAdded: 0, entitiesRemoved: 0, entitiesModified: 0 },
+        details: [],
+        unifiedDiff: [],
       }),
     ).toBe(true);
   });
@@ -711,6 +772,8 @@ describe("lineReaderFromIterable + interactiveApprover", () => {
           isNew: true,
           newHash: "h",
           diffSummary: { entitiesAdded: 0, entitiesRemoved: 0, entitiesModified: 0 },
+          details: [],
+          unifiedDiff: [],
         }),
       ).toBe(false);
     }
@@ -726,6 +789,8 @@ describe("lineReaderFromIterable + interactiveApprover", () => {
         isNew: true,
         newHash: "h",
         diffSummary: { entitiesAdded: 0, entitiesRemoved: 0, entitiesModified: 0 },
+        details: [],
+        unifiedDiff: [],
       }),
     ).toBe(false);
   });
@@ -739,6 +804,8 @@ describe("lineReaderFromIterable + interactiveApprover", () => {
       isNew: true,
       newHash: "deadbeef",
       diffSummary: { entitiesAdded: 3, entitiesRemoved: 1, entitiesModified: 0 },
+      details: [],
+      unifiedDiff: [],
     });
     expect(out()).toContain("/tmp/m.json");
     expect(out()).toContain("deadbeef");
@@ -992,7 +1059,7 @@ describe("runChatExchange — transcript wiring", () => {
             kind: "tool_call_arg_delta",
             id: "tu_1",
             delta: JSON.stringify({
-              path: "/tmp/test-output-not-written.json",
+              path: "test-output-not-written.json",
               new_manifest_json: validJson,
             }),
           },
@@ -1011,6 +1078,7 @@ describe("runChatExchange — transcript wiring", () => {
     const tools = buildToolCatalog({
       allowFileWrite: true,
       approver: { async approve() { return false; } },
+      fileRootDir: await mkdtemp(join(tmpdir(), "chat-proposal-")),
     });
     await runChatExchange({
       provider,
@@ -1035,7 +1103,8 @@ describe("runChatExchange — transcript wiring", () => {
     };
     expect(payload.decision).toBe("interactive_denied");
     expect(payload.applied).toBe(false);
-    expect(payload.targetPath).toBe("/tmp/test-output-not-written.json");
+    // Root-relative: the absolute path on this machine is not the model's business (H-29).
+    expect(payload.targetPath).toBe("test-output-not-written.json");
   });
 });
 

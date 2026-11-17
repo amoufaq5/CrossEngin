@@ -134,6 +134,21 @@ describe("parseServeArgs", () => {
     expect(bare.requireDesignReview).toBe(false);
   });
 
+  it("--allow-design-self-approval is off by default and refused without the review routes", () => {
+    const off = parseServeArgs(["--pack", "erp-core", "--store", "pg", "--ai-design", "--require-design-review"]);
+    expect(off.allowDesignSelfApproval).toBe(false);
+    const on = parseServeArgs([
+      "--pack", "erp-core", "--store", "pg", "--ai-design", "--require-design-review",
+      "--allow-design-self-approval",
+    ]);
+    expect(on.allowDesignSelfApproval).toBe(true);
+    // Without the review routes nothing enforces four-eyes, so the hatch would read as a decision
+    // and change nothing.
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--ai-design", "--allow-design-self-approval"]),
+    ).toThrow(/--allow-design-self-approval requires --design-review/);
+  });
+
   it("refuses a review gate that would be silently inert", () => {
     // No Postgres: `reviewStore` is never built, so nothing enrols a proposal and `reviewGate` is
     // never passed — the activation handler skips the check and every proposal activates unreviewed.
@@ -2350,6 +2365,21 @@ describe("--mtls-client and --trusted-edge-client-cert", () => {
   });
 });
 
+describe("--job-actor-role", () => {
+  it("defaults to erp_admin, which every shipped pack declares and grants the jobs' writes", () => {
+    expect(parseServeArgs(["--pack", "erp-core"]).jobActorRoles).toEqual(["erp_admin"]);
+  });
+
+  it("is repeatable, primary first, and replaces the default", () => {
+    const opts = parseServeArgs(["--pack", "erp-core", "--job-actor-role", "controller", "--job-actor-role=erp_admin"]);
+    expect(opts.jobActorRoles).toEqual(["controller", "erp_admin"]);
+  });
+
+  it("refuses a missing value", () => {
+    expect(() => parseServeArgs(["--pack", "erp-core", "--job-actor-role"])).toThrow(CliUsageError);
+  });
+});
+
 describe("--admin-role", () => {
   it("defaults to erp_admin, so declaring nothing changes nothing", () => {
     // `compileOperateServer`'s own `?? DEFAULT_ADMIN_ROLES` has always been `["erp_admin"]`, and
@@ -2683,5 +2713,36 @@ describe("parseServeArgs --allow-dangling-references", () => {
         parseServeArgs(["--pack", "erp-core", "--store", store, "--allow-dangling-references"]),
       ).toThrow(/--allow-dangling-references applies to --store pg only/);
     }
+  });
+});
+
+describe("--integrity-proof-full-every (H-18)", () => {
+  const base = ["--pack", "erp-core", "--store", "pg"];
+
+  it("is null unless given, so the config's default decides", () => {
+    expect(parseServeArgs([...base, "--integrity-proof"]).integrityProofFullEvery).toBeNull();
+  });
+
+  it("takes a non-negative integer, 0 meaning never", () => {
+    expect(
+      parseServeArgs([...base, "--integrity-proof", "--integrity-proof-full-every", "6"]).integrityProofFullEvery,
+    ).toBe(6);
+    expect(
+      parseServeArgs([...base, "--integrity-proof", "--integrity-proof-full-every=0"]).integrityProofFullEvery,
+    ).toBe(0);
+    for (const bad of ["-1", "1.5", "x"]) {
+      expect(() =>
+        parseServeArgs([...base, "--integrity-proof", "--integrity-proof-full-every", bad]),
+      ).toThrow(/invalid --integrity-proof-full-every/);
+    }
+  });
+
+  it("refuses to be inert: it needs --integrity-proof, and the file route states it in the file", () => {
+    expect(() => parseServeArgs([...base, "--integrity-proof-full-every", "6"])).toThrow(
+      /needs --integrity-proof/,
+    );
+    expect(() =>
+      parseServeArgs([...base, "--integrity-proof-config", "p.json", "--integrity-proof-full-every", "6"]),
+    ).toThrow(/set fullFoldEveryPasses in the file/);
   });
 });

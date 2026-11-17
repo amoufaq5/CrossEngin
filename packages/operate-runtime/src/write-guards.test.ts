@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { InMemoryEntityStore, type ListPage, type ListQuery } from "./store.js";
 import {
+  amountOwed,
   APPLIED_PAYMENT_EPSILON,
   childParentRefs,
   journalPostingGuard,
@@ -18,6 +19,7 @@ import {
   settlementCoverageGuard,
   settlementIsCovered,
   type WriteGuardInput,
+  type WriteGuardResult,
 } from "./write-guards.js";
 
 const TENANT = "11111111-1111-1111-1111-111111111111";
@@ -187,19 +189,111 @@ describe("journalPostingGuard", () => {
 
   it("admits a multi-currency entry that balances in each currency and in functional amounts", async () => {
     // The trading-account form: each currency balances through a clearing line in that currency.
+    // The EUR lines carry their rate: they used to omit it, and a functional 110 against an amount
+    // of 100 at the column's default rate of 1 is exactly the line the conversion check refuses.
     const store = new InMemoryEntityStore();
     const entryId = await seedWith(store, []);
-    for (const [currency, debit, credit, fd, fc] of [
-      ["EUR", 100, 0, 110, 0],
-      ["EUR", 0, 100, 0, 110],
-      ["USD", 110, 0, 110, 0],
-      ["USD", 0, 110, 0, 110],
+    for (const [currency, debit, credit, fd, fc, rate] of [
+      ["EUR", 100, 0, 110, 0, "1.1"],
+      ["EUR", 0, 100, 0, 110, "1.1"],
+      ["USD", 110, 0, 110, 0, "1"],
+      ["USD", 0, 110, 0, 110, "1"],
     ] as const) {
       await store.create(TENANT, "JournalLine", {
-        journal_entry_id: entryId, currency, debit, credit, functional_debit: fd, functional_credit: fc,
+        journal_entry_id: entryId, currency, debit, credit, functional_debit: fd, functional_credit: fc, fx_rate: rate,
       });
     }
     expect(await guard(postInput(store, entryId, { fiscal_period_id: "p_open" }))).toBeNull();
+  });
+
+  describe("functional amount = amount × fx_rate", () => {
+    async function twoLines(
+      lines: readonly [debit: string, credit: string, fd: string, fc: string, rate: string | null][],
+    ): Promise<WriteGuardResult> {
+      const store = new InMemoryEntityStore();
+      const entryId = await seedWith(store, []);
+      for (const [debit, credit, fd, fc, rate] of lines) {
+        await store.create(TENANT, "JournalLine", {
+          journal_entry_id: entryId, currency: "AED", debit, credit, functional_debit: fd, functional_credit: fc,
+          ...(rate === null ? {} : { fx_rate: rate }),
+        });
+      }
+      return guard(postInput(store, entryId, { fiscal_period_id: "p_open" }));
+    }
+
+    it("refuses a stated functional amount that is not the line's amount at its rate", async () => {
+      // Balanced in AED and balanced in functional amounts, so it posted before: the functional legs
+      // agreed with each other and with nothing else.
+      expect(
+        await twoLines([
+          ["100.00", "0.00", "7.00", "0.00", "3.6725"],
+          ["0.00", "100.00", "0.00", "7.00", "3.6725"],
+        ]),
+      ).toEqual({
+        status: 422,
+        error: "functional_amount_mismatch",
+        detail:
+          "a line's functional amount 7.00 is not its amount 100.00 at its fx_rate 3.6725 " +
+          "(367.250000, to two places) (and 1 more line amount(s) like it)",
+      });
+    });
+
+    it("admits either rounding of the exact product, and nothing further", async () => {
+      // 10.01 × 0.3333333333 = 3.336666666333…: 3.33 and 3.34 are the two figures NUMERIC(16,2) can
+      // hold for it, and a preparer balancing rounded legs needs both.
+      for (const fd of ["3.33", "3.34"]) {
+        expect(
+          await twoLines([
+            ["10.01", "0.00", fd, "0.00", "0.3333333333"],
+            ["0.00", "10.01", "0.00", fd, "0.3333333333"],
+          ]),
+        ).toBeNull();
+      }
+      expect(
+        (
+          await twoLines([
+            ["10.01", "0.00", "3.35", "0.00", "0.3333333333"],
+            ["0.00", "10.01", "0.00", "3.35", "0.3333333333"],
+          ])
+        )?.error,
+      ).toBe("functional_amount_mismatch");
+    });
+
+    it("reads an absent rate as the column's default of 1", async () => {
+      expect(
+        await twoLines([
+          ["50.00", "0.00", "50.00", "0.00", null],
+          ["0.00", "50.00", "0.00", "50.00", null],
+        ]),
+      ).toBeNull();
+      expect(
+        (
+          await twoLines([
+            ["50.00", "0.00", "55.00", "0.00", null],
+            ["0.00", "50.00", "0.00", "55.00", null],
+          ])
+        )?.error,
+      ).toBe("functional_amount_mismatch");
+    });
+
+    it("exempts a line that states no functional amount, as the depreciation job writes them", async () => {
+      // Both legs at the column default of 0: refusing these would refuse every posting the job makes.
+      expect(
+        await twoLines([
+          ["120.00", "0.00", "0", "0", "3.6725"],
+          ["0.00", "120.00", "0", "0", "3.6725"],
+        ]),
+      ).toBeNull();
+    });
+
+    it("refuses a stated functional amount beside a rate that is not a decimal", async () => {
+      const r = await twoLines([
+        ["100.00", "0.00", "100.00", "0.00", "n/a"],
+        ["0.00", "100.00", "0.00", "100.00", "1"],
+      ]);
+      expect(r?.error).toBe("unverifiable_journal_entry");
+      expect(r?.detail).not.toContain("n/a");
+    });
   });
 
   it("refuses a line amount that is not a decimal rather than reading it as zero", async () => {
@@ -910,6 +1004,33 @@ describe("settlementCoverageGuard", () => {
     expect(r).toBeNull();
   });
 
+  it("blocks lowering the withholding of a settled document, which raises what it owes", async () => {
+    // What a payer owes is total less withholding, so dropping the withholding raises the debt as
+    // surely as raising the total does — and the total-only comparison saw no change at all.
+    const wht = settlementCoverageGuard({ entity: "Invoice", refField: "invoice_id", withholdingField: "withholding_total" });
+    const store = new InMemoryEntityStore();
+    await payment(store, { amount: 95, invoice_id: DOC });
+    const settled = { state: "paid", total: 100 };
+    const lowered = await wht(
+      coverageInput(store, {
+        operation: "update",
+        before: { ...settled, withholding_total: 5 },
+        after: { ...settled, withholding_total: 0 },
+      }),
+    );
+    expect(lowered?.error).toBe("uncovered_settlement");
+    expect(lowered?.detail).toContain("5.00 of 100.00");
+    // Control: the same write with the withholding unchanged is the stamp-or-note case.
+    const unchanged = await wht(
+      coverageInput(store, {
+        operation: "update",
+        before: { ...settled, withholding_total: 5 },
+        after: { ...settled, withholding_total: 5, notes: "x" },
+      }),
+    );
+    expect(unchanged).toBeNull();
+  });
+
   it("refuses a total it cannot read rather than treating it as nothing owed", async () => {
     // `num` collapses a non-numeric value to 0, so without this the `total <= 0` arm allowed the
     // write: a document whose stored total is `"n/a"` was marked paid, read `paid`, and was dropped
@@ -1052,5 +1173,14 @@ describe("SETTLEMENT_COVERAGE_DOCUMENTS", () => {
 
   it("settles on the state the guard and the survey both read", async () => {
     expect(SETTLED_DOCUMENT_STATE).toBe("paid");
+  });
+});
+
+describe("amountOwed", () => {
+  it("is the total less withholding, and the total when none is declared or withheld", () => {
+    expect(amountOwed({ total: 100, withholding_total: 5 }, "total", "withholding_total")).toBe(95);
+    expect(amountOwed({ total: 100 }, "total", "withholding_total")).toBe(100);
+    expect(amountOwed({ total: 100, withholding_total: 5 }, "total", undefined)).toBe(100);
+    expect(amountOwed({ total: 0.3, withholding_total: 0.1 }, "total", "withholding_total")).toBe(0.2);
   });
 });

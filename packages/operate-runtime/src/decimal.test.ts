@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   addDecimal,
+  multiplyDecimal,
+  withinOneUnitAtScale,
   DECIMAL_ZERO,
   DECIMAL_REFUSALS,
   MAX_EXACT_DOUBLE_DIGITS,
@@ -274,5 +276,35 @@ describe("addDecimal", () => {
     expect(
       compareDecimal(addDecimal(DECIMAL_ZERO, d("99999999999999.99")), d("99999999999999.98")),
     ).toBe(1);
+  });
+});
+
+describe("multiplyDecimal and withinOneUnitAtScale", () => {
+  const p = (v: string) => parseDecimal(v)!;
+  it("multiplies exactly at the sum of the scales, with the sign of the product", () => {
+    expect(renderDecimal(multiplyDecimal(p("100.00"), p("3.6725")))).toBe("367.250000");
+    expect(renderDecimal(multiplyDecimal(p("-2.5"), p("4")))).toBe("-10.0");
+    expect(multiplyDecimal(p("-2.5"), p("0")).negative).toBe(false);
+  });
+
+  it("admits the floor and the ceiling at the scale, and nothing beyond", () => {
+    const exact = multiplyDecimal(p("10.01"), p("0.3333333333"));
+    expect(withinOneUnitAtScale(p("3.33"), exact, 2)).toBe(true);
+    expect(withinOneUnitAtScale(p("3.34"), exact, 2)).toBe(true);
+    expect(withinOneUnitAtScale(p("3.35"), exact, 2)).toBe(false);
+    expect(withinOneUnitAtScale(p("3.32"), exact, 2)).toBe(false);
+  });
+
+  it("admits only the exact figure when the product already fits the scale", () => {
+    expect(withinOneUnitAtScale(p("367.25"), p("367.250000"), 2)).toBe(true);
+    expect(withinOneUnitAtScale(p("367.26"), p("367.250000"), 2)).toBe(false);
+    expect(withinOneUnitAtScale(p("12"), p("12.0"), 2)).toBe(true);
+  });
+
+  it("brackets a negative product the same way", () => {
+    const exact = multiplyDecimal(p("-10.01"), p("0.3333333333"));
+    expect(withinOneUnitAtScale(p("-3.33"), exact, 2)).toBe(true);
+    expect(withinOneUnitAtScale(p("-3.34"), exact, 2)).toBe(true);
+    expect(withinOneUnitAtScale(p("3.34"), exact, 2)).toBe(false);
   });
 });

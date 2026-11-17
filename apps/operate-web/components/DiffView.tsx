@@ -37,6 +37,26 @@ export interface LifecycleChangeView {
   readonly detail: string;
 }
 
+export interface RoleChangeView {
+  readonly role: string;
+  readonly inheritsGained: ReadonlyArray<string>;
+  readonly inheritsLost: ReadonlyArray<string>;
+}
+
+export interface ObligationChangeView {
+  readonly entity: string;
+  readonly operation: string;
+  readonly from: string | null;
+  readonly to: string | null;
+}
+
+/**
+ * What the left-hand side of the comparison was. `deployment_manifest` is a tenant's first
+ * activation compared against what it is served today; `unreadable` is a live system that could not
+ * be read, which this page used to call "the first system for this tenant".
+ */
+export type DiffBaselineView = "active_manifest" | "deployment_manifest" | "unreadable" | "none";
+
 export interface DiffCountsView {
   readonly added: number;
   readonly removed: number;
@@ -99,6 +119,10 @@ export interface ManifestDiffView {
   readonly counts: DiffCountsView;
   /** Absent from a server that predates the section census; an absent field reads as today's page. */
   readonly sectionChanges?: ReadonlyArray<SectionChangeView>;
+  /** The three below are absent from a server that predates them, and then nothing is rendered. */
+  readonly roleChanges?: ReadonlyArray<RoleChangeView>;
+  readonly obligationChanges?: ReadonlyArray<ObligationChangeView>;
+  readonly baseline?: DiffBaselineView;
 }
 
 /**
@@ -138,17 +162,47 @@ function humanize(token: string): string {
   return token.replace(/_/g, " ");
 }
 
+/**
+ * An incomparable diff is three different facts, and only one of them is "first system". The
+ * first-system sentence is said only when the server says there was no live manifest; a server that
+ * predates `baseline` gets the sentence that is true of every case, rather than the one that was
+ * false whenever the live system could not be read.
+ */
+const INCOMPARABLE_SENTENCE: Readonly<Record<DiffBaselineView, { title: string; body: string }>> = {
+  none: {
+    title: "This is the first system for this tenant",
+    body: "There is nothing to compare against. Everything in the schema below is new.",
+  },
+  unreadable: {
+    title: "The live system could not be read",
+    body: "This tenant may already be serving a system. Nothing below is compared against it — do not read this as a first activation.",
+  },
+  active_manifest: {
+    title: "The live system could not be compared",
+    body: "This tenant serves a system whose manifest, or this proposal's, could not be parsed for comparison.",
+  },
+  deployment_manifest: {
+    title: "No comparison against the deployment's system",
+    body: "The deployment's own manifest could not be compared with this proposal.",
+  },
+};
+
 export function DiffView({ diff }: { diff: ManifestDiffView }) {
   if (!diff.comparable) {
+    const sentence =
+      diff.baseline === undefined
+        ? { title: "No comparison available", body: "The server sent no comparison for this proposal." }
+        : INCOMPARABLE_SENTENCE[diff.baseline];
     return (
       <div className="rounded-xl border border-line bg-surface-soft px-4 py-3">
-        <p className="text-sm font-semibold text-ink">This is the first system for this tenant</p>
-        <p className="mt-1 text-sm text-ink-muted">
-          There is nothing to compare against. Everything in the schema below is new.
-        </p>
+        <p className="text-sm font-semibold text-ink">{sentence.title}</p>
+        <p className="mt-1 text-sm text-ink-muted">{sentence.body}</p>
       </div>
     );
   }
+
+  const roleChanges = diff.roleChanges ?? [];
+  const obligationChanges = diff.obligationChanges ?? [];
 
   const sectionChanges = diff.sectionChanges ?? [];
 
@@ -184,6 +238,15 @@ export function DiffView({ diff }: { diff: ManifestDiffView }) {
 
   return (
     <div className="space-y-5">
+      {diff.baseline === "deployment_manifest" && (
+        <div className="rounded-xl border border-line bg-surface-soft px-4 py-3">
+          <p className="text-sm font-semibold text-ink">First activation for this tenant</p>
+          <p className="mt-1 text-sm text-ink-muted">
+            Compared against the deployment&apos;s own system, which this tenant is served today. A
+            removal below is something the tenant has now and will lose.
+          </p>
+        </div>
+      )}
       <div
         className={`rounded-xl px-4 py-3 ${
           breaking ? "bg-brand-50 ring-1 ring-brand-200" : "bg-emerald-50 ring-1 ring-emerald-200"
@@ -255,6 +318,10 @@ export function DiffView({ diff }: { diff: ManifestDiffView }) {
           </div>
         </div>
       )}
+
+      {roleChanges.length > 0 && <RoleInheritanceChanges changes={roleChanges} />}
+
+      {obligationChanges.length > 0 && <ObligationChanges changes={obligationChanges} />}
 
       {diff.lifecycleChanges.length > 0 && <LifecycleChanges changes={diff.lifecycleChanges} />}
 
@@ -535,6 +602,42 @@ function RelationChanges({ changes }: { changes: ReadonlyArray<RelationChangeVie
             </li>
           );
         })}
+      </ul>
+    </div>
+  );
+}
+
+function RoleInheritanceChanges({ changes }: { changes: ReadonlyArray<RoleChangeView> }) {
+  return (
+    <div>
+      <div className="label">Role inheritance</div>
+      <div className="space-y-2 rounded-xl border border-line bg-white px-4 py-3">
+        {changes.map((c) => (
+          <div key={c.role} className="space-y-1">
+            <span className="font-mono text-xs font-semibold text-ink">{c.role}</span>
+            <ChipRow label="Inherits" names={c.inheritsGained} tone="danger" />
+            <ChipRow label="No longer" names={c.inheritsLost} tone="danger" />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ObligationChanges({ changes }: { changes: ReadonlyArray<ObligationChangeView> }) {
+  return (
+    <div>
+      <div className="label">ABAC obligations</div>
+      <ul className="divide-y divide-line rounded-xl border border-line">
+        {changes.map((c, i) => (
+          <li key={`${c.entity}-${c.operation}-${i}`} className="flex flex-wrap items-baseline gap-2 px-4 py-2">
+            <span className="font-mono text-xs font-semibold text-ink">{c.entity}</span>
+            <span className="text-[11px] font-bold uppercase tracking-wide text-ink-muted">{c.operation}</span>
+            <span className="text-xs text-brand-700">
+              {c.from ?? "none"} → {c.to ?? "none — the grant becomes unconditional"}
+            </span>
+          </li>
+        ))}
       </ul>
     </div>
   );

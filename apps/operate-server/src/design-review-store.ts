@@ -2,6 +2,8 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 import { setTenantContextWithin, withTenantContext } from "@crossengin/operate-runtime-pg";
 import { z } from "zod";
 
+import { DesignerCannotApproveError, type SelfApprovalPolicy } from "./design-review-routes.js";
+
 const REVIEW_STATUSES = ["not_required", "pending", "approved", "rejected"] as const;
 
 const ReviewStatusSchema = z.enum(REVIEW_STATUSES);
@@ -20,6 +22,7 @@ const DesignReviewRecordSchema = z
     reviewedAt: z.string().datetime({ offset: true }).nullable(),
     reviewNotes: z.string().nullable(),
     providerLabel: z.string().nullable(),
+    designedBy: z.string().min(1).nullable(),
     createdAt: z.string().datetime({ offset: true }),
     updatedAt: z.string().datetime({ offset: true }),
   })
@@ -38,6 +41,7 @@ export interface DesignReviewRecord {
   readonly reviewedAt: string | null;
   readonly reviewNotes: string | null;
   readonly providerLabel: string | null;
+  readonly designedBy: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -64,7 +68,7 @@ export interface DesignReviewCounts {
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 const SELECT_COLUMNS =
-  "id, tenant_id, name, description, manifest, manifest_hash, status, review_status, reviewed_by, reviewed_at, review_notes, provider_label, created_at, updated_at";
+  "id, tenant_id, name, description, manifest, manifest_hash, status, review_status, reviewed_by, reviewed_at, review_notes, provider_label, designed_by, created_at, updated_at";
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -208,6 +212,7 @@ export class PostgresDesignReviewStore {
       reviewedAt: row["reviewed_at"] == null ? null : isoOf(row["reviewed_at"]),
       reviewNotes: row["review_notes"] == null ? null : String(row["review_notes"]),
       providerLabel: row["provider_label"] == null ? null : String(row["provider_label"]),
+      designedBy: row["designed_by"] == null ? null : String(row["designed_by"]),
       createdAt: isoOf(row["created_at"]),
       updatedAt: isoOf(row["updated_at"]),
     });
@@ -279,16 +284,17 @@ export class PostgresDesignReviewStore {
 
   async approve(
     id: string,
-    input: { reviewedBy: string; notes?: string | null },
+    input: { reviewedBy: string; notes?: string | null; selfApproval: SelfApprovalPolicy },
   ): Promise<DesignReviewRecord | null> {
-    return this.decide(id, "approved", input);
+    return this.decide(id, "approved", input, input.selfApproval);
   }
 
+  /** A rejection is not gated on the designer: withdrawing one's own design withholds nothing. */
   async reject(
     id: string,
     input: { reviewedBy: string; notes?: string | null },
   ): Promise<DesignReviewRecord | null> {
-    return this.decide(id, "rejected", input);
+    return this.decide(id, "rejected", input, "permitted");
   }
 
   /**
@@ -310,18 +316,35 @@ export class PostgresDesignReviewStore {
    * `tenant_id` is bound into the predicate as well, which is `scopeFilter`'s rule (ADR-0333): a
    * statement that names its own scope says what it means, where one relying on the session setting
    * alone matches zero rows in silence if the setting is ever absent.
+   *
+   * The designer is read in the same statement as the tenant and refused here as well as in the
+   * route (H-28): the route's check is the one a caller meets, and this one is what stops a store
+   * reached some other way being talked past the rule. `designed_by` is written once at insert and
+   * never updated, so reading it inside the transaction is not racing a writer.
    */
   private async decide(
     id: string,
     reviewStatus: "approved" | "rejected",
     input: { reviewedBy: string; notes?: string | null },
+    selfApproval: SelfApprovalPolicy,
   ): Promise<DesignReviewRecord | null> {
     return withPlatformReview(this.conn, async (tx) => {
-      const found = await tx.query(`SELECT tenant_id FROM ${this.table} WHERE id = $1`, [id]);
+      const found = await tx.query(
+        `SELECT tenant_id, designed_by FROM ${this.table} WHERE id = $1`,
+        [id],
+      );
       const owner = found.rows[0];
       // No row with that id in any tenant — the review arm admits every tenant's rows, so this is
       // conclusive rather than a scope miss, and the route answers 404 for it as it always has.
       if (owner === undefined) return null;
+      if (
+        reviewStatus === "approved" &&
+        selfApproval === "refused" &&
+        owner["designed_by"] != null &&
+        String(owner["designed_by"]) === input.reviewedBy
+      ) {
+        throw new DesignerCannotApproveError(id);
+      }
       const tenantId = String(owner["tenant_id"] ?? "");
       await setTenantContextWithin(tx, tenantId);
       const result = await tx.query(

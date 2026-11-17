@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
-import { verifyChainIntegrity } from "@crossengin/forensics";
+import { buildChainEntry, GENESIS_HASH, verifyChainIntegrity } from "@crossengin/forensics";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import {
   FixedClock,
@@ -43,6 +43,24 @@ function chainEntry(seq: number, prior: string, hash: string) {
     signingKeyFingerprint: "e".repeat(64),
     signature: "sig",
   };
+}
+
+/** A chain whose hashes are the ones its content commits to, as the real writer builds it. */
+async function realChain(count: number) {
+  const entries = [];
+  let prior = GENESIS_HASH;
+  for (let seq = 0; seq < count; seq += 1) {
+    const sealed = await buildChainEntry({
+      sequenceNumber: seq,
+      priorEntryHash: prior,
+      entry: { kind: "audit_event", recordedAt: AT, actorReference: "svc", payloadBytes: `p${seq.toString()}` },
+      signingKeyFingerprint: "e".repeat(64),
+      sign: async () => "sig",
+    });
+    entries.push(sealed.entry);
+    prior = sealed.entry.entryHash;
+  }
+  return entries;
 }
 
 const AT = "2026-06-01T00:00:00.000Z";
@@ -183,32 +201,37 @@ describe("evidence sources", () => {
   });
 
   it("forensicChainSource verifies an intact chain from genesis", async () => {
-    const h1 = "1".repeat(64);
-    const h2 = "2".repeat(64);
-    const src = forensicChainSource({
-      loadChain: async () => ({
-        entries: [chainEntry(0, G, h1), chainEntry(1, h1, h2)],
-        unreadable: [],
-      }),
-    });
+    const entries = await realChain(2);
+    const src = forensicChainSource({ loadChain: async () => ({ entries, unreadable: [] }) });
     const [ev] = await src.collect("soc2_type2", AT);
     expect(ev?.sourceKind).toBe("forensic_chain");
     expect(ev?.satisfied).toBe(true);
   });
 
   it("forensicChainSource flags a broken chain", async () => {
-    const h1 = "1".repeat(64);
-    const h2 = "2".repeat(64);
+    const [e0, e1] = await realChain(2);
     const src = forensicChainSource({
       // entry 1 claims a wrong priorEntryHash → chain broken at 1
       loadChain: async () => ({
-        entries: [chainEntry(0, G, h1), chainEntry(1, "9".repeat(64), h2)],
+        entries: [e0!, { ...e1!, priorEntryHash: "9".repeat(64) }],
         unreadable: [],
       }),
     });
     const [ev] = await src.collect("soc2_type2", AT);
     expect(ev?.satisfied).toBe(false);
     expect(ev?.findings[0]).toContain("1");
+  });
+
+  it("forensicChainSource does not certify a chain whose links agree and whose hashes are not its content (H-18)", async () => {
+    // These two entries used to be this file's *intact* fixture: the links fold, and nothing the
+    // control asked recomputed a hash. An `entry_hash` rewritten at a tail looks exactly like this.
+    const h1 = "1".repeat(64);
+    const h2 = "2".repeat(64);
+    const entries = [chainEntry(0, G, h1), chainEntry(1, h1, h2)];
+    expect(verifyChainIntegrity(entries).valid).toBe(true);
+    const src = forensicChainSource({ loadChain: async () => ({ entries, unreadable: [] }) });
+    const [ev] = await src.collect("soc2_type2", AT);
+    expect(ev?.satisfied).toBe(false);
   });
 
   it("forensicChainSource takes the refused row over a fold that would have passed", async () => {

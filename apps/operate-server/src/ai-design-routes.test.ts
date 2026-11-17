@@ -54,6 +54,7 @@ class FakeStore implements AiManifestStore {
       status: "draft",
       source: input.source,
       providerLabel: input.providerLabel ?? null,
+      designedBy: input.designedBy,
       createdAt: at,
       updatedAt: at,
       activatedAt: null,
@@ -443,8 +444,11 @@ describe("ai-design-routes — design", () => {
       manifestHash: "sha256:abc123",
       source: "ai",
       providerLabel: "anthropic/claude-sonnet-4-6",
+      designedBy: USER,
     });
     const proposal = out.body["proposal"] as AiManifestRecordLike;
+    // The requesting principal is recorded, so a review can refuse that principal's approval.
+    expect(proposal.designedBy).toBe(USER);
     expect(proposal.status).toBe("draft");
     expect(proposal.source).toBe("ai");
     expect(out.body["summary"]).toEqual({ keys: ["entities", "meta"] });
@@ -463,7 +467,7 @@ describe("ai-design-routes — list", () => {
     const ctx = makeCtx();
     await draftId(ctx);
     await ctx.store.create(OTHER_TENANT, {
-      name: "Other", description: "x", manifest: {}, manifestHash: "sha256:z", source: "manual",
+      name: "Other", description: "x", manifest: {}, manifestHash: "sha256:z", source: "manual", designedBy: null,
     });
     const out = (await findHandler(ctx, "ai.manifests.list")(input("tenant_admin"))) as JsonOut;
     expect(out.status).toBe(200);
@@ -556,7 +560,7 @@ describe("ai-design-routes — get", () => {
   it("404s another tenant's proposal", async () => {
     const ctx = makeCtx();
     const other = await ctx.store.create(OTHER_TENANT, {
-      name: "Other", description: "x", manifest: {}, manifestHash: "sha256:z", source: "manual",
+      name: "Other", description: "x", manifest: {}, manifestHash: "sha256:z", source: "manual", designedBy: null,
     });
     const out = (await findHandler(ctx, "ai.manifests.get")(
       input("tenant_admin", { params: { id: other.id } }),
@@ -603,7 +607,7 @@ describe("ai-design-routes — activate", () => {
   it("404s activating another tenant's proposal", async () => {
     const ctx = makeCtx();
     const other = await ctx.store.create(OTHER_TENANT, {
-      name: "Other", description: "x", manifest: {}, manifestHash: "sha256:z", source: "manual",
+      name: "Other", description: "x", manifest: {}, manifestHash: "sha256:z", source: "manual", designedBy: null,
     });
     const out = (await findHandler(ctx, "ai.manifests.activate")(
       input("tenant_admin", { params: { id: other.id } }),
@@ -857,7 +861,11 @@ describe("ai-design-routes — async job create", () => {
       },
     ]);
     expect(started).toEqual([
-      { tenantId: TENANT, jobId: job.id, input: { description: "A CRM for plumbers", name: "Plumber CRM" } },
+      {
+        tenantId: TENANT,
+        jobId: job.id,
+        input: { description: "A CRM for plumbers", name: "Plumber CRM", designedBy: USER },
+      },
     ]);
   });
 
@@ -1186,6 +1194,9 @@ const STUB_DIFF: ManifestDiffViewLike = {
   rolesAdded: [],
   rolesRemoved: [],
   lifecycleChanges: [],
+  roleChanges: [],
+  obligationChanges: [],
+  baseline: "active_manifest",
   // Required on the mirror since ADR-0388's addendum, which is what found this stub: a differ that
   // omitted the section census used to typecheck, so the route's own tests served a response the
   // route's type did not describe.
@@ -1276,7 +1287,7 @@ describe("ai-design-routes — activation diff", () => {
     const base = makeCtx();
     const ctx = { ...base, diffManifests: differ.diff, activeManifests: active.source };
     const created = await base.store.create(OTHER_TENANT, {
-      name: "Other", description: "x", manifest: OK_MANIFEST, manifestHash: "sha256:z", source: "manual",
+      name: "Other", description: "x", manifest: OK_MANIFEST, manifestHash: "sha256:z", source: "manual", designedBy: null,
     });
     const out = (await findHandler(ctx, "ai.manifests.get")(
       input("tenant_admin", { params: { id: created.id }, tenantId: OTHER_TENANT }),
@@ -1306,8 +1317,30 @@ describe("ai-design-routes — activation diff", () => {
       input("tenant_admin", { params: { id } }),
     )) as JsonOut;
     expect(out.status).toBe(200);
-    expect(out.body["diff"]).toBe(STUB_DIFF);
+    // Rewritten: the read failure used to pass through as an ordinary null-active diff, which the
+    // page renders as "the first system for this tenant".
+    expect(out.body["diff"]).toEqual({ ...STUB_DIFF, baseline: "unreadable" });
     expect(differ.calls).toEqual([{ active: null, next: OK_MANIFEST }]);
+  });
+
+  it("compares a first activation against the deployment's manifest when lineage is wired", async () => {
+    const differ = recordingDiffer();
+    const deployment: Record<string, unknown> = { meta: { slug: "operate-erp/core" }, entities: [] };
+    const ctx = {
+      ...makeCtx(),
+      diffManifests: differ.diff,
+      activeManifests: recordingActiveSource(null).source,
+      diffLineage: {
+        deploymentManifest: deployment,
+        resolve: async (m: Record<string, unknown>) => m,
+      },
+    };
+    const id = await draftId(ctx);
+    const out = (await findHandler(ctx, "ai.manifests.get")(
+      input("tenant_admin", { params: { id } }),
+    )) as JsonOut;
+    expect(differ.calls).toEqual([{ active: deployment, next: OK_MANIFEST }]);
+    expect((out.body["diff"] as { baseline: string }).baseline).toBe("deployment_manifest");
   });
 
   it("omits the diff key when either half of the seam is missing", async () => {

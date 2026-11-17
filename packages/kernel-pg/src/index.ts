@@ -16,3 +16,5 @@ export * from "./preconditions.js";
 export * from "./read-rows.js";
 export * from "./scoped-write.js";
 export * from "./statement-hash.js";
+export * from "./cli-flags.js";
+export * from "./crossengin-pg-args.js";

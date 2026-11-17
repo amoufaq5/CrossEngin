@@ -138,8 +138,26 @@ export const ChainCheckpointSchema = z
      * gap, and `checkpointAnchorsBoundedProof` answers `false` for it.
      */
     provenance: z.enum(CHECKPOINT_PROVENANCES).optional(),
+    /**
+     * The chain signer's Ed25519 signature over `canonicalCheckpointBytes` and the fingerprint of the
+     * key that made it — both or neither. Optional with no default for `provenance`'s reason: every
+     * checkpoint written before the columns existed carries neither, and absent is a gap rather than
+     * a claim. A row carrying one without the other cannot have come from the writer, which sets
+     * them together, so it is refused here rather than read as half-signed.
+     */
+    signature: z.string().min(1).optional(),
+    signingKeyFingerprint: z.string().regex(SHA256_REGEX).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((cp, ctx) => {
+    if ((cp.signature === undefined) !== (cp.signingKeyFingerprint === undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [cp.signature === undefined ? "signature" : "signingKeyFingerprint"],
+        message: "a checkpoint signature and its key fingerprint are recorded together or not at all",
+      });
+    }
+  });
 export type ChainCheckpoint = z.infer<typeof ChainCheckpointSchema>;
 
 export function verifyChainIntegrity(
@@ -158,6 +176,36 @@ export function verifyChainIntegrity(
     priorHash = e.entryHash;
   }
   return { valid: true, brokenAt: null };
+}
+
+export interface ChainFoldVerdict {
+  readonly valid: boolean;
+  readonly brokenAt: number | null;
+  readonly reason?: string;
+}
+
+/**
+ * The verdict that breaks earliest, or the first valid one when none breaks.
+ *
+ * The link fold and the content-hash check each stop at their own first failure, and the honest
+ * answer is the earlier **position**, since that is the row an operator goes and looks at. A
+ * verdict whose break has no position (`brokenAt: null`) sorts last among the broken ones: it names
+ * no row, so any verdict that does is the more actionable of the two.
+ */
+export function earliestChainBreak(
+  first: ChainFoldVerdict,
+  ...rest: readonly ChainFoldVerdict[]
+): ChainFoldVerdict {
+  let best = first;
+  for (const v of rest) {
+    if (v.valid) continue;
+    if (best.valid) {
+      best = v;
+      continue;
+    }
+    if (v.brokenAt !== null && (best.brokenAt === null || v.brokenAt < best.brokenAt)) best = v;
+  }
+  return best;
 }
 
 export function lastEntryHash(entries: readonly ChainedLogEntry[]): string {

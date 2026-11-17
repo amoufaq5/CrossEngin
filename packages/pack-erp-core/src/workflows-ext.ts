@@ -212,6 +212,26 @@ export const TAX_RETURN_LIFECYCLE = lifecycle(
   ],
 );
 
+/**
+ * A period's status moves only through these, so reopening a closed book is a named, permission-
+ * gated transition with its own audit row rather than a `PATCH {"status":"open"}` any GL writer
+ * could send. `locked` is the end of the line: nothing leaves it, which is what makes it different
+ * from `closed`.
+ */
+export const FISCAL_PERIOD_LIFECYCLE = lifecycle(
+  "FiscalPeriod",
+  "status",
+  "open",
+  ["open", "closing", "closed", "locked"],
+  ["locked"],
+  [
+    { name: "start_close", from: "open", to: "closing" },
+    { name: "close", from: ["open", "closing"], to: "closed" },
+    { name: "reopen", from: "closed", to: "open" },
+    { name: "lock", from: "closed", to: "locked" },
+  ],
+);
+
 export const ERP_EXT_WORKFLOWS: Readonly<Record<string, Workflow>> = {
   lead_lifecycle: LEAD_LIFECYCLE,
   opportunity_lifecycle: OPPORTUNITY_LIFECYCLE,
@@ -225,6 +245,7 @@ export const ERP_EXT_WORKFLOWS: Readonly<Record<string, Workflow>> = {
   fixed_asset_lifecycle: FIXED_ASSET_LIFECYCLE,
   maintenance_order_lifecycle: MAINTENANCE_ORDER_LIFECYCLE,
   tax_return_lifecycle: TAX_RETURN_LIFECYCLE,
+  fiscal_period_lifecycle: FISCAL_PERIOD_LIFECYCLE,
 };
 
 /** Transition names per entity, so the permission sets can grant them. */
@@ -241,4 +262,5 @@ export const ERP_EXT_TRANSITIONS: Readonly<Record<string, readonly string[]>> = 
   FixedAsset: ["send_to_maintenance", "return_to_service", "retire", "dispose"],
   MaintenanceOrder: ["schedule", "start", "complete", "cancel"],
   TaxReturn: ["mark_ready", "file", "mark_paid", "amend", "refile"],
+  FiscalPeriod: ["start_close", "close", "reopen", "lock"],
 };

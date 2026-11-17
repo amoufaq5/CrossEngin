@@ -1,21 +1,25 @@
 import { PostgresKeyRegistry } from "@crossengin/crypto-pg";
 import {
   checkpointAnchorsBoundedProof,
-  verifyChainIntegrity,
+  checkpointSignatureStanding,
   type ChainCheckpoint,
   type ChainedLogEntry,
 } from "@crossengin/forensics";
 import {
   CheckpointRowUnreadable,
+  foldSuffixWithContent,
+  foldWithContent,
+  pinnedKeyResolver,
   unreadableEntryVerdict,
   verifyChainSignatures,
-  verifyChainSuffix,
   verifyStoredChainSignatures,
   type ChainSignatureVerdict,
   type PostgresChainCheckpointStore,
   type PostgresChainLogReader,
   type PublicKeyResolver,
 } from "@crossengin/forensics-pg";
+
+import { AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS_VAR } from "./audit-chain-env.js";
 
 /**
  * A forensics-pg `PublicKeyResolver` backed by the crypto-pg key registry: it resolves a chain entry's
@@ -38,6 +42,55 @@ export function keyRegistryResolver(
     resolveByFingerprint: async (fingerprint) =>
       (await registry.getByFingerprint(fingerprint, tenantId))?.publicKeyBase64 ?? null,
   };
+}
+
+/**
+ * The deployment's own chain keys, keyed by fingerprint — the only keys a pinned verification
+ * accepts a chain entry or a checkpoint from.
+ *
+ * The registry is not a trust root, measured (H-18): `getByFingerprint` resolves a tenant's chain
+ * against that tenant's keys **and** the platform's, with no purpose or status pin, so a session
+ * able to register a key in its own scope could re-sign a rewritten entry and have it verify. A
+ * pinned set is built from public keys the deployment itself configured (`chainTrustFromEnv`), so
+ * a key is trusted because this process was told it is the chain's, never because a row says so.
+ *
+ * A class and not a bare map so `ChainKeySource` discriminates by `instanceof`, and so an empty set
+ * — which would refuse every entry — cannot be formed.
+ */
+export class PinnedChainKeys {
+  constructor(readonly keys: ReadonlyMap<string, string>) {
+    if (keys.size === 0) throw new Error("a pinned chain key set must hold at least one key");
+  }
+}
+
+/**
+ * Where a verification resolves signing keys from. `PostgresKeyRegistry` is the **unpinned** form,
+ * kept for the by-hand auditor that holds no configured key; every scheduled pass is pinned.
+ */
+export type ChainKeySource = PostgresKeyRegistry | PinnedChainKeys;
+
+/**
+ * The pin a scheduled pass runs under, where its absence is a wiring defect rather than a mode.
+ *
+ * Both lifecycles in `node.ts` mount only once a chain key has resolved, and resolving one is what
+ * builds the pin — so a `null` here is unreachable, and the registry fallback it used to read as
+ * (`chainTrust ?? new PostgresKeyRegistry(conn)`) was a permissive arm no deployment could take and
+ * the next edit to the wiring could. Thrown rather than defaulted, because an unpinned scheduled
+ * pass verifies against any key a database writer registered, which is H-18 restated.
+ */
+export function requirePinnedChainKeys(trust: PinnedChainKeys | null): PinnedChainKeys {
+  if (trust === null) {
+    throw new Error("a scheduled chain pass was wired without the deployment's pinned chain keys");
+  }
+  return trust;
+}
+
+export function isPinned(source: ChainKeySource): source is PinnedChainKeys {
+  return source instanceof PinnedChainKeys;
+}
+
+export function resolverFor(source: ChainKeySource, tenantId: string | null): PublicKeyResolver {
+  return isPinned(source) ? pinnedKeyResolver(source.keys) : keyRegistryResolver(source, tenantId);
 }
 
 /**
@@ -100,6 +153,9 @@ export const CHAIN_FULL_REASONS = [
   "anchor_unverified",
   "anchor_provenance_absent",
   "anchor_unreadable",
+  "anchor_unsigned",
+  "anchor_signature_invalid",
+  "periodic",
 ] as const;
 export type ChainFullReason = (typeof CHAIN_FULL_REASONS)[number];
 
@@ -116,6 +172,9 @@ export const CHAIN_FULL_REASON_PHRASES: Record<ChainFullReason, string> = {
   anchor_unverified: "anchor records no verified prefix",
   anchor_provenance_absent: "anchor predates provenance",
   anchor_unreadable: "anchor is stored in a shape the contract refuses",
+  anchor_unsigned: "anchor carries no chain-key signature",
+  anchor_signature_invalid: "anchor's signature is not the chain key's",
+  periodic: "periodic full re-fold",
 };
 
 // `CHAIN_FULL_REASON_BLOCKS_ANCHORING` and its one reader `anchoringWouldBury` stood here, and
@@ -193,7 +252,7 @@ export interface ChainVerificationWithEntries {
  */
 async function foldFromGenesis(
   reader: PostgresChainLogReader,
-  registry: PostgresKeyRegistry,
+  registry: ChainKeySource,
   tenantId: string | null,
   fullBecause: ChainFullReason,
 ): Promise<ChainVerificationWithEntries> {
@@ -208,10 +267,12 @@ async function foldFromGenesis(
   // so a refused row has failed that binding in the one way this check cannot examine. `ok` then
   // carries it to `integrityVerdictFor`, which answers `compromised` off `!chain.ok` with no change
   // of its own — which is what makes the hourly `sev1` fire where it used to log and skip.
-  const integrity = unreadableEntryVerdict(read.unreadable) ?? verifyChainIntegrity(read.entries);
+  // `foldWithContent` and not the bare link fold: the links compare stored column against stored
+  // column, so an `entry_hash` rewritten at the tail passed them and every signature (H-18, measured).
+  const integrity = unreadableEntryVerdict(read.unreadable) ?? foldWithContent(read.entries);
   const signatures = await verifyChainSignatures(
     read.entries,
-    keyRegistryResolver(registry, tenantId),
+    resolverFor(registry, tenantId),
     read.unreadable,
   );
   return {
@@ -241,10 +302,11 @@ async function foldFromGenesis(
  */
 export async function verifyChainFull(
   reader: PostgresChainLogReader,
-  registry: PostgresKeyRegistry,
+  registry: ChainKeySource,
   tenantId: string | null,
+  fullBecause: Extract<ChainFullReason, "requested" | "periodic"> = "requested",
 ): Promise<ChainVerificationReport> {
-  return (await foldFromGenesis(reader, registry, tenantId, "requested")).report;
+  return (await foldFromGenesis(reader, registry, tenantId, fullBecause)).report;
 }
 
 /**
@@ -272,7 +334,7 @@ export async function verifyChainFull(
  */
 export async function verifyChainForAudit(
   reader: PostgresChainLogReader,
-  registry: PostgresKeyRegistry,
+  registry: ChainKeySource,
   checkpoints: PostgresChainCheckpointStore,
   tenantId: string | null,
   fromCheckpoint: boolean,
@@ -299,7 +361,7 @@ export async function verifyChainForAudit(
  */
 export async function verifyChainFromCheckpoint(
   reader: PostgresChainLogReader,
-  registry: PostgresKeyRegistry,
+  registry: ChainKeySource,
   checkpoints: PostgresChainCheckpointStore,
   tenantId: string | null,
 ): Promise<ChainVerificationReport> {
@@ -310,7 +372,7 @@ export async function verifyChainFromCheckpoint(
 /** `verifyChainFromCheckpoint`'s body, keeping the entries where a fallback fold read them. */
 async function verifyChainFromCheckpointWithEntries(
   reader: PostgresChainLogReader,
-  registry: PostgresKeyRegistry,
+  registry: ChainKeySource,
   checkpoints: PostgresChainCheckpointStore,
   tenantId: string | null,
 ): Promise<ChainVerificationWithEntries> {
@@ -362,14 +424,33 @@ async function verifyChainFromCheckpointWithEntries(
       checkpoint.provenance === undefined ? "anchor_provenance_absent" : "anchor_unverified",
     );
   }
+  // A pinned pass takes a prefix on trust only from an anchor the chain key signed. Provenance is a
+  // column like any other, so without this a row edited to `verified_full` at a forged root hash
+  // was an anchor the bounded fold believed (H-18). An unsigned row is a gap — every checkpoint
+  // written before signing landed — and folds from genesis exactly as an absent provenance does,
+  // which heals on the next scheduler pass; a row signed by any other key, or whose signature does
+  // not cover its stored fields, cannot have come from this deployment's writer. The anchor audit
+  // reports both; this only decides whether the prefix may be skipped. An unpinned source has no
+  // key to ask, so it keeps the provenance-only admission and its callers say they are unpinned.
+  if (isPinned(registry)) {
+    const standing = checkpointSignatureStanding(tenantId, checkpoint, registry.keys);
+    if (standing !== "signed") {
+      return foldFromGenesis(
+        reader,
+        registry,
+        tenantId,
+        standing === "unsigned" ? "anchor_unsigned" : "anchor_signature_invalid",
+      );
+    }
+  }
   const fromSequence = checkpoint.sequenceNumber + 1;
   const suffix = await reader.loadFrom(tenantId, fromSequence);
   const integrity =
     unreadableEntryVerdict(suffix.unreadable) ??
-    verifyChainSuffix(suffix.entries, { fromSequence, priorRootHash: checkpoint.rootHash });
+    foldSuffixWithContent(suffix.entries, { fromSequence, priorRootHash: checkpoint.rootHash });
   const signatures = await verifyChainSignatures(
     suffix.entries,
-    keyRegistryResolver(registry, tenantId),
+    resolverFor(registry, tenantId),
     suffix.unreadable,
   );
   return {
@@ -428,6 +509,15 @@ export function formatChainVerification(report: ChainVerificationReport): string
   }
   if (report.signatures.unresolvedFingerprints.length > 0) {
     lines.push(`    unresolved keys: ${report.signatures.unresolvedFingerprints.length.toString()}`);
+  }
+  // Said because the remedy differs by cause and an operator cannot tell them apart from the reason
+  // alone: an entry signed by a key this deployment rotated away from is honest history, while one
+  // signed by any other key is a row this deployment's writer did not produce.
+  if (bad.some((r) => r.reason === "untrusted_key")) {
+    lines.push(
+      `    untrusted_key: signed by a key that is not this deployment's chain key — if it is a key` +
+        ` you rotated away from, add its public half to ${AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS_VAR}`,
+    );
   }
   return lines.join("\n");
 }

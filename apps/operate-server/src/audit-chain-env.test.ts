@@ -12,9 +12,12 @@ import {
   AUDIT_CHAIN_KEY_SOURCES,
   AUDIT_CHAIN_REFUSALS,
   AUDIT_CHAIN_SIGNING_KEY_VAR,
+  AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS_VAR,
   AuditChainFileSchema,
   KEY_SOURCE_EXPOSES_A_LAYER,
+  chainTrustFromEnv,
   formatAuditChain,
+  formatChainTrust,
   loadAuditChainFile,
   resolveAuditChain,
   type AuditChainResolution,
@@ -334,3 +337,52 @@ describe("loadAuditChainFile", () => {
 // on the variable merely being *mentioned in prose*, so the weaker of two fences over one fact was
 // the one in the module that owns the variable. A fence belongs where its subject is, and `deploy/`
 // is that file's subject.
+
+describe("chainTrustFromEnv (H-18)", () => {
+  const fp = (k: string) => ed25519PublicKeyFingerprint(k);
+
+  it("pins the signing key's own half, and nothing else when nothing is declared", () => {
+    const trust = chainTrustFromEnv({}, A.publicKeyBase64);
+    expect([...trust.keys.keys()]).toEqual([fp(A.publicKeyBase64)]);
+    expect(trust.declared).toBe(0);
+    expect(formatChainTrust(trust)).toContain("pinned to 1 key(s)");
+  });
+
+  it("adds every declared key, comma- or whitespace-separated", () => {
+    const trust = chainTrustFromEnv(
+      { [AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS_VAR]: ` ${B.publicKeyBase64},\n${A.publicKeyBase64} ` },
+      A.publicKeyBase64,
+    );
+    expect(new Set(trust.keys.keys())).toEqual(new Set([fp(A.publicKeyBase64), fp(B.publicKeyBase64)]));
+    expect(trust.declared).toBe(2);
+    expect(formatChainTrust(trust)).toContain(`2 from ${AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS_VAR}`);
+  });
+
+  it("pins an auditor's declared key with no seed in hand", () => {
+    const trust = chainTrustFromEnv({ [AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS_VAR]: B.publicKeyBase64 }, null);
+    expect([...trust.keys.keys()]).toEqual([fp(B.publicKeyBase64)]);
+  });
+
+  it("refuses a malformed declared key by position and variable, never by value", () => {
+    const bad = "not-a-key";
+    expect(() =>
+      chainTrustFromEnv({ [AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS_VAR]: `${B.publicKeyBase64},${bad}` }, A.publicKeyBase64),
+    ).toThrow(new RegExp(`${AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS_VAR}: trusted chain key #3`));
+    const message = (() => {
+      try {
+        chainTrustFromEnv({ [AUDIT_CHAIN_TRUSTED_PUBLIC_KEYS_VAR]: bad }, null);
+        return "";
+      } catch (err) {
+        return String(err);
+      }
+    })();
+    expect(message).toContain("#1");
+    expect(message).not.toContain(bad);
+  });
+
+  it("says unpinned when there is nothing to pin to", () => {
+    const trust = chainTrustFromEnv({}, null);
+    expect(trust.keys.size).toBe(0);
+    expect(formatChainTrust(trust)).toContain("unpinned");
+  });
+});

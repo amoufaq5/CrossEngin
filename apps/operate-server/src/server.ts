@@ -7,6 +7,7 @@ import type {
 } from "@crossengin/auth";
 import type {
   CursorSealer,
+  EntityWriteAuditor,
   OpenApiCoverageGap,
   UiUserIdentityResolver,
 } from "@crossengin/operate-runtime";
@@ -38,6 +39,7 @@ import {
   type OperateServer,
   type SequenceAllocator,
   type SettingsStore,
+  type SystemEntityAccess,
   type WriteEffect,
   type WriteMaskMode,
 } from "@crossengin/operate-runtime";
@@ -147,6 +149,16 @@ export class OperateHttpServer {
     this.idGenerator = opts.idGenerator ?? defaultRequestId;
     this.now = opts.now ?? (() => new Date());
     this.onExecution = opts.onExecution ?? null;
+  }
+
+  /**
+   * In-process work's way into this server's entity layer, through the same handlers a request is
+   * served by. Exposed so a background job for a tenant serving its **own** activated
+   * manifest writes through that tenant's gateway — its guards, its grants, its schema — and not
+   * through the deployment's.
+   */
+  get systemEntityAccess(): SystemEntityAccess {
+    return this.gateway.systemEntityAccess;
   }
 
   async dispatch(raw: RawHttpRequest, body: Uint8Array | null): Promise<RawHttpResponse> {
@@ -275,6 +287,13 @@ export interface BuildOperateHttpServerOptions {
    * See `--segregation-of-duties`.
    */
   readonly segregationOfDuties?: boolean;
+  /**
+   * Where every entity write's record goes — one `meta.audit_log` row per create, update, delete,
+   * transition, link and unlink, written in the write's own transaction. Absent, nothing is
+   * recorded (`--store memory`, which has no audit table); present, a write whose record cannot be
+   * made is refused with a 503 rather than reported as done.
+   */
+  readonly entityAudit?: EntityWriteAuditor;
   /** Allocates document numbers for sequence-defaulted fields on create. */
   readonly allocator?: SequenceAllocator;
   /**
@@ -626,6 +645,7 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     ...(options.segregationOfDuties !== undefined
       ? { segregationOfDuties: options.segregationOfDuties }
       : {}),
+    ...(options.entityAudit !== undefined ? { entityAudit: options.entityAudit } : {}),
     ...(options.abac !== undefined ? { abacEvaluator: options.abac.evaluator } : {}),
     ...(options.abac?.evaluateBatch !== undefined
       ? { abacBatchEvaluator: options.abac.evaluateBatch }

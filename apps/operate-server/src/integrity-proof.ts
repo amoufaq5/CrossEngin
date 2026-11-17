@@ -1,7 +1,6 @@
 import { readFile } from "node:fs/promises";
 
 import { z } from "zod";
-import type { PostgresKeyRegistry } from "@crossengin/crypto-pg";
 import {
   PostgresChainCheckpointStore,
   PostgresChainLogStore,
@@ -21,8 +20,10 @@ import { verifyAuditAnchors, type AuditAnchorReport } from "./audit-anchor.js";
 import { IntegrityEscalationConfigSchema } from "./integrity-escalation-config.js";
 import { PostgresAuditEmitter } from "./audit-log-store.js";
 import {
+  isPinned,
   verifyChainFromCheckpoint,
   verifyChainFull,
+  type ChainKeySource,
   type ChainVerificationReport,
 } from "./chain-verify.js";
 import {
@@ -78,6 +79,18 @@ export const IntegrityProofConfigSchema = z
      * On by default so the cost of a pass stays bounded as a chain grows (ADR-0252/0255).
      */
     fromCheckpoint: z.boolean().default(true),
+    /**
+     * Fold the whole chain on every Nth pass per scope even when a signed anchor would let the pass
+     * stay bounded, and on the first pass after boot. `0` never does.
+     *
+     * A bounded pass re-examines only the suffix, so an entry below the anchor is checked once and
+     * never again: an edit there that left the anchor's root hash intact — a column the signature
+     * does not cover, or a row inserted under the chain's advisory lock by a writer who holds no key
+     * — reads `verified` for ever. 24 is a day at the default hourly interval, which bounds that to
+     * a day at the cost of one full fold per scope per day (152 µs of signature CPU per entry,
+     * ADR-0371's figure) rather than per hour.
+     */
+    fullFoldEveryPasses: z.number().int().nonnegative().default(24),
     /**
      * Append the verdict to the chain as a `security_event`. On by default: a verdict that lives
      * only in a log line is lost, and one in an ordinary table could be deleted by the same
@@ -246,6 +259,8 @@ export function noAnchorFindings(scope: string | null = null): AnchorAuditReport
     disagreeing: [],
     disagreeingCount: 0,
     witnessSequence: null,
+    readableWitnessSequence: null,
+    signatures: { signed: 0, unsigned: 0, missigned: [], missignedCount: 0 },
   };
 }
 
@@ -299,10 +314,16 @@ export async function proveScopeIntegrity(
   deps: {
     readonly logStore: PostgresChainLogStore;
     readonly checkpoints: PostgresChainCheckpointStore;
-    readonly registry: PostgresKeyRegistry;
+    readonly registry: ChainKeySource;
     readonly audit: PostgresAuditEmitter;
     readonly auditRowLimit: number;
     readonly fromCheckpoint: boolean;
+    /**
+     * This pass is a scheduled full re-fold (`fullFoldEveryPasses`). Absent is `false`, which is the
+     * behaviour every direct caller had; the report's `fullBecause: "periodic"` is what makes it
+     * observable when it does happen.
+     */
+    readonly periodicFullFold?: boolean;
     readonly now: () => Date;
     /**
      * What a prior verdict attested about this scope, for the one axis that is about history.
@@ -325,7 +346,9 @@ export async function proveScopeIntegrity(
   // parenthetical named, which were precisely the two the rule does *not* turn on. The predicate is
   // "compared" and not "read": this function reads a **fifth** table, `meta.crypto_keys`, through
   // `deps.registry` → `keyRegistryResolver` → `getByFingerprint`, once per entry inside
-  // `verifyChainSignatures` — and that one is **not** append-only (`scanWorkspaceSql()` gives it
+  // `verifyChainSignatures`, on an **unpinned** pass (a pinned one, which every lifecycle in
+  // `node.ts` is since H-18, resolves from configuration and reads no table for keys at all)
+  // — and that one is **not** append-only (`scanWorkspaceSql()` gives it
   // `insert` 1, `conflict_update` 1, `update` 1). Its read is compared against no other read here,
   // so the directional rule's soundness is untouched; what the fifth table refutes is the
   // *universal*, which an earlier version of this comment asserted over "every table read here"
@@ -413,9 +436,15 @@ export async function proveScopeIntegrity(
   // ordering the code does not have, in the one function whose subject is read ordering.
   const audit = await deps.audit.listAnchoredForScope(scope, { limit: deps.auditRowLimit });
 
-  const chain = deps.fromCheckpoint
-    ? await verifyChainFromCheckpoint(deps.logStore, deps.registry, deps.checkpoints, scope)
-    : await verifyChainFull(deps.logStore, deps.registry, scope);
+  const chain =
+    deps.fromCheckpoint && deps.periodicFullFold !== true
+      ? await verifyChainFromCheckpoint(deps.logStore, deps.registry, deps.checkpoints, scope)
+      : await verifyChainFull(
+          deps.logStore,
+          deps.registry,
+          scope,
+          deps.fromCheckpoint ? "periodic" : "requested",
+        );
 
   // The anchor check needs the entries the rows point at, which a checkpoint-bounded suffix may not
   // contain, so it always reads the whole chain. The chain *half* stays bounded — which is why this
@@ -469,7 +498,12 @@ export async function proveScopeIntegrity(
   // above the refused one; now they have to fix it) and is left open for the reason it always was:
   // the other ordering — readable first, refused second — is the one that matters and already
   // answers `compromised`, since this report is what the verdict reads.
-  const anchorAudit = await auditAnchors(scope, deps.checkpoints, correspondenceChain);
+  const anchorAudit = await auditAnchors(
+    scope,
+    deps.checkpoints,
+    correspondenceChain,
+    isPinned(deps.registry) ? deps.registry.keys : null,
+  );
 
   // After the audit, so the witness is read before the tail it is compared against — the order
   // `latest()` and `tail()` were in. This is the third comparison in the rule at the top of this
@@ -509,7 +543,9 @@ export async function proveScopeIntegrity(
   // same inversion forges `witness_regressed` as well, which that ADR did not name.
   const witnessMemory = compareWitnessMemory({
     read: priorVerdict,
-    current: truncation,
+    // The unfiltered witness, not the signed-only one the truncation check uses: see
+    // `readableWitnessSequence` for why the two consumers want different figures.
+    current: { ...truncation, checkpointSequence: anchorAudit.readableWitnessSequence },
     chain: correspondenceChain,
     currentScanComplete: anchorAudit.complete,
   });
@@ -627,6 +663,10 @@ export const COMPROMISE_CAUSES = [
   "chain_row_refused",
   "checkpoint_row_refused",
   "checkpoint_disagrees_with_chain",
+  // A checkpoint the chain key did not sign (H-18). Beside its two siblings because an operator
+  // meeting any of the three goes to the same table; inserting in the middle cannot change
+  // `causes[0]` for evidence the others describe, because `compromiseCauses` filters.
+  "checkpoint_signature_invalid",
   "audit_row_tampered",
   "audit_row_refused",
   // The two memory causes come **last**, and the precedence is the whole reason to care: a genuine
@@ -692,6 +732,8 @@ const COMPROMISE_CAUSE_HOLDS: Record<CompromiseCause, (evidence: CompromiseEvide
   checkpoint_row_refused: (e) => e.anchorAudit.refusedCount > 0,
   checkpoint_disagrees_with_chain: (e) =>
     e.anchorAudit.disagreeing !== null && e.anchorAudit.disagreeing.length > 0,
+  checkpoint_signature_invalid: (e) =>
+    e.anchorAudit.signatures !== null && e.anchorAudit.signatures.missignedCount > 0,
   audit_row_tampered: (e) => e.anchors !== null && e.anchors.tampered.length > 0,
   audit_row_refused: (e) => e.anchors !== null && e.anchors.unreadable.length > 0,
   // Two causes for one axis, because the two findings send an operator to different rows: a
@@ -1269,9 +1311,27 @@ export function formatIntegrityProof(report: IntegrityProofReport): string {
   return lines.join("\n");
 }
 
+/**
+ * Whether this pass over a scope is a scheduled full re-fold: the first after boot and every Nth
+ * after it, `0` never. Each call is one pass.
+ *
+ * Per scope, because scopes join and leave the set between passes and a global counter would give
+ * a scope that joins late its first full fold at whatever phase the others are in. Passes over one
+ * scope are serial by the scheduler's overlap guard (ADR-0406), so a plain map needs no lock.
+ */
+export function periodicFullFoldSchedule(everyPasses: number): (scope: string | null) => boolean {
+  const passesByScope = new Map<string | null, number>();
+  return (scope) => {
+    const n = passesByScope.get(scope) ?? 0;
+    passesByScope.set(scope, n + 1);
+    return everyPasses > 0 && n % everyPasses === 0;
+  };
+}
+
 export interface IntegrityProofLifecycleOptions {
   readonly signer: ChainSigner;
-  readonly registry: PostgresKeyRegistry;
+  /** A `PinnedChainKeys` in every deployment that signs; the registry form is unpinned. */
+  readonly registry: ChainKeySource;
   readonly scheduler?: IntervalScheduler;
   /** Overrides the config's static tenant list with a live source (may include `null`). */
   readonly tenants?: IntegrityScopeSource;
@@ -1316,6 +1376,7 @@ export function buildIntegrityProofLifecycle(
     : null;
   const scopes: IntegrityScopeSource = opts.tenants ?? (() => integrityConfigScopes(config));
   const now = opts.now ?? ((): Date => new Date());
+  const periodicFullFold = periodicFullFoldSchedule(config.fullFoldEveryPasses);
 
   const scheduler = new IntegrityProofScheduler({
     prove: (scope) =>
@@ -1326,6 +1387,7 @@ export function buildIntegrityProofLifecycle(
         audit,
         auditRowLimit: config.auditRowLimit,
         fromCheckpoint: config.fromCheckpoint,
+        periodicFullFold: periodicFullFold(scope),
         now,
         // Supplied exactly when the store exists, which is `recordVerdict` — so the reader and the
         // writer of this memory are turned on by one flag and a deployment cannot hold one without
